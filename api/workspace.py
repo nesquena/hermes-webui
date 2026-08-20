@@ -101,8 +101,11 @@ def _expanduser_path(path: str | Path) -> Path:
     return Path(raw)
 
 
-def _resolve_path(path: str | Path) -> Path:
-    """Resolve *path* after env-aware home expansion, without raising."""
+def _resolve_path(path: str | Path, profile: str | Path | None = None) -> Path:
+    """Resolve *path* after env-aware home expansion, preserving remote POSIX paths without raising."""
+    remote_candidate = _remote_terminal_workspace_candidate(path, profile=profile)
+    if remote_candidate is not None:
+        return remote_candidate
     return _safe_resolve(_expanduser_path(path))
 
 
@@ -148,12 +151,22 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
     return backend not in ('', 'local')
 
 
-def _remote_terminal_cwd() -> str | None:
-    """Return target-side terminal cwd for remote profiles, without local stat()."""
+def _remote_terminal_cwd(profile: str | Path | None = None) -> str | None:
+    """Return target-side terminal cwd for a remote profile, without local stat()."""
     try:
-        from api.config import get_config
+        from api.config import get_config, get_config_for_profile_home
+        from api.profiles import get_active_profile_name, get_hermes_home_for_profile
 
-        terminal_cfg = get_config().get('terminal', {})
+        active_profile = get_active_profile_name()
+        if profile is not None and str(profile).strip() and str(profile) != active_profile:
+            if isinstance(profile, Path):
+                profile_home = profile
+            else:
+                profile_home = get_hermes_home_for_profile(str(profile))
+            terminal_cfg = get_config_for_profile_home(profile_home).get('terminal', {})
+        else:
+            terminal_cfg = get_config().get('terminal', {})
+
         if not _is_remote_terminal_backend(terminal_cfg):
             return None
         cwd = str(terminal_cfg.get('cwd') or '').strip()
@@ -165,8 +178,8 @@ def _remote_terminal_cwd() -> str | None:
         return None
 
 
-def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
-    """Return a non-stat'ed target-side Path when it is under terminal.cwd.
+def _remote_terminal_workspace_candidate(path: str | Path, profile: str | Path | None = None) -> Path | None:
+    """Return a non-stat'ed target-side Path when it is under terminal.cwd for the given profile.
 
     Remote workspace paths live on the target host (e.g., remote SSH/Docker
     backend). For valid target-side POSIX paths under ``terminal.cwd``, the
@@ -174,7 +187,7 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
     local host-filesystem resolution (avoiding host-specific firmlink rewriting
     such as macOS synthetic ``/home`` -> ``/System/Volumes/Data/home``).
     """
-    cwd = _remote_terminal_cwd()
+    cwd = _remote_terminal_cwd(profile=profile)
     if not cwd:
         return None
     raw = _strip_surrounding_quotes(str(path)).strip()
@@ -192,8 +205,8 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
         if posix_candidate == posix_base or _posix_is_within(posix_candidate, posix_base):
             return Path(normalized_raw)
         return None
-    candidate = _resolve_path(raw)
-    base = _resolve_path(cwd)
+    candidate = _safe_resolve(_expanduser_path(raw))
+    base = _safe_resolve(_expanduser_path(cwd))
     if _is_blocked_workspace_path(candidate, raw) or _is_blocked_workspace_path(base, cwd):
         return None
     if candidate == base or _is_within(candidate, base):
@@ -251,7 +264,7 @@ def _profile_default_workspace() -> str:
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
-def _clean_workspace_list(workspaces: list) -> list:
+def _clean_workspace_list(workspaces: list, profile: str | Path | None = None) -> list:
     """Sanitize a workspace list:
     - Preserve target-side remote terminal workspace paths (SSH/Docker) without
       resolving them against the local WebUI host filesystem.
@@ -270,7 +283,7 @@ def _clean_workspace_list(workspaces: list) -> list:
         name = w.get('name', '')
         if not path:
             continue
-        remote_cand = _remote_terminal_workspace_candidate(path)
+        remote_cand = _remote_terminal_workspace_candidate(path, profile=profile)
         if remote_cand is not None:
             p = remote_cand
         else:
@@ -815,7 +828,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     return suggestions[:limit]
 
 
-def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
+def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Path | None = None) -> Path:
     """Resolve and validate a workspace path.
 
     A path is trusted if it satisfies at least one of:
@@ -837,12 +850,12 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     trusted (it was validated at server startup).
     """
     if path in (None, ""):
-        return _resolve_path(_BOOT_DEFAULT_WORKSPACE)
+        return _resolve_path(_BOOT_DEFAULT_WORKSPACE, profile) if profile is not None else _resolve_path(_BOOT_DEFAULT_WORKSPACE)
 
-    candidate = _resolve_path(path)
+    candidate = _resolve_path(path, profile) if profile is not None else _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
-    remote_candidate = _remote_terminal_workspace_candidate(path)
+    remote_candidate = _remote_terminal_workspace_candidate(path, profile=profile)
     if access_error:
         # For remote terminal profiles, workspace paths belong to the target
         # machine. Allow paths under terminal.cwd so session switching can
@@ -957,7 +970,7 @@ def _strip_surrounding_quotes(path: str) -> str:
     return s
 
 
-def validate_workspace_to_add(path: str) -> Path:
+def validate_workspace_to_add(path: str, profile: str | Path | None = None) -> Path:
     """Validate a path for *adding* to the workspace list (less restrictive than resolve_trusted_workspace).
 
     When a user explicitly adds a new workspace path, we trust their intent — they
@@ -972,10 +985,10 @@ def validate_workspace_to_add(path: str) -> Path:
     and users routinely paste those into the Add Space input.
     """
     path = _strip_surrounding_quotes(path)
-    candidate = _resolve_path(path)
+    candidate = _resolve_path(path, profile) if profile is not None else _resolve_path(path)
 
     access_error = _workspace_access_error(candidate)
-    remote_candidate = _remote_terminal_workspace_candidate(path)
+    remote_candidate = _remote_terminal_workspace_candidate(path, profile=profile)
     if access_error:
         # Remote terminal profiles validate workspace existence on the target
         # machine, not on the WebUI server. Permit target-side paths under

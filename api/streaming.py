@@ -2480,7 +2480,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
 from api.models import get_session, title_from
-from api.workspace import set_last_workspace
+from api.workspace import set_last_workspace, _resolve_path
 
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
@@ -3280,7 +3280,7 @@ def _resolve_image_input_mode(cfg: dict, active_provider: str = "", active_model
     return "native"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = ""):
+def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = "", profile: str | Path | None = None):
     """Build native multimodal content parts for current-turn image uploads.
 
     WebUI uploads files into the active workspace. For image files, pass the
@@ -3300,7 +3300,7 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
-    workspace_root = Path(workspace).expanduser().resolve()
+    workspace_root = _resolve_path(workspace, profile=profile)
     # Stage-361 maintainer fix (Opus SHOULD-FIX): chat uploads from #2319 now
     # land in ~/.hermes/webui/attachments/<sid>/ (outside workspace_root by
     # design). The pre-existing `path.relative_to(workspace_root)` guard would
@@ -9153,7 +9153,7 @@ def _run_agent_streaming(
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
-        s.workspace = str(Path(workspace).expanduser().resolve())
+        s.workspace = str(_resolve_path(workspace, profile=getattr(s, 'profile', None)))
         _last_persisted_model = None
         _last_persisted_provider = None
         _turn_owns_persisted_model = False
@@ -10681,7 +10681,7 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""))
+            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=_profile_home)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             _run_conversation_kwargs = _build_run_conversation_kwargs(
                 agent.run_conversation,
@@ -10734,6 +10734,7 @@ def _run_agent_streaming(
                     active_provider=(resolved_provider or ""),
                     active_model=(resolved_model or ""),
                     requested_provider=(_session_requested_provider or ""),
+                    profile=_profile_home,
                 )
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)

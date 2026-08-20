@@ -155,7 +155,7 @@ def test_remote_terminal_linux_home_preserves_path_without_macos_synthetic_resol
         lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/home/developer"}),
     )
 
-    real_resolve = workspace._resolve_path
+    real_resolve = workspace._safe_resolve
 
     def fake_resolve(p):
         p_str = str(p)
@@ -163,12 +163,95 @@ def test_remote_terminal_linux_home_preserves_path_without_macos_synthetic_resol
             return Path(f"/System/Volumes/Data{p_str}")
         return real_resolve(p)
 
-    monkeypatch.setattr(workspace, "_resolve_path", fake_resolve)
+    monkeypatch.setattr(workspace, "_safe_resolve", fake_resolve)
 
     assert workspace.validate_workspace_to_add("/home/developer") == Path("/home/developer")
     assert workspace.resolve_trusted_workspace("/home/developer") == Path("/home/developer")
     assert workspace.get_profile_default_workspace() == "/home/developer"
+    assert workspace._resolve_path("/home/developer") == Path("/home/developer")
     assert workspace._clean_workspace_list([{"path": "/home/developer", "name": "Dev"}]) == [
         {"path": "/home/developer", "name": "Dev"}
     ]
+
+
+def test_session_init_and_created_workspace_preserve_remote_posix_path(monkeypatch):
+    """Session initialization must not corrupt remote POSIX paths to macOS synthetic firmlinks."""
+    monkeypatch.setattr(
+        api_config,
+        "get_config",
+        lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/home/rootson"}),
+    )
+
+    from api.models import Session
+
+    s = Session(workspace="/home/rootson", created_workspace="/home/rootson")
+    assert s.workspace == "/home/rootson"
+    assert s.created_workspace == "/home/rootson"
+
+
+def test_named_profile_remote_terminal_workspace_candidate_isolated(monkeypatch, tmp_path):
+    """Remote paths must resolve per profile: remote for named remote profile, not for active local profile."""
+    # Active profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
+
+    # Named profile 'optiplex' under base home
+    profiles_dir = tmp_path / "profiles" / "optiplex"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text(
+        "terminal:\n  backend: ssh\n  cwd: /home/rootson\n", encoding="utf-8"
+    )
+
+    from api import profiles
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # Scoped to named remote profile: candidate is recognized as remote
+    cand_optiplex = workspace._remote_terminal_workspace_candidate(
+        "/home/rootson/projects/app", profile="optiplex"
+    )
+    assert cand_optiplex == Path("/home/rootson/projects/app")
+
+    # Scoped to active local profile: candidate is NOT recognized as remote (prevents cross-profile bypass)
+    cand_local = workspace._remote_terminal_workspace_candidate(
+        "/home/rootson/projects/app", profile=None
+    )
+    assert cand_local is None
+
+    # Local validation fails on nonexistent path when active profile is local
+    with pytest.raises(ValueError, match="Path does not exist"):
+        workspace.validate_workspace_to_add("/home/rootson/projects/app", profile=None)
+
+    # Remote validation succeeds when profile is optiplex
+    assert workspace.validate_workspace_to_add(
+        "/home/rootson/projects/app", profile="optiplex"
+    ) == Path("/home/rootson/projects/app")
+
+
+def test_build_native_multimodal_message_preserves_remote_workspace(monkeypatch, tmp_path):
+    """Multimodal message builder must scope workspace resolution to the session profile."""
+    # Active ambient profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
+
+    profiles_dir = tmp_path / "profiles" / "optiplex"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text(
+        "terminal:\n  backend: ssh\n  cwd: /home/rootson\n", encoding="utf-8"
+    )
+
+    from api import profiles, streaming
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # Attachments are checked against remote workspace root without firmlink corruption
+    msg = streaming._build_native_multimodal_message(
+        "[Workspace::v1: /home/rootson]\n",
+        "hello",
+        attachments=[],
+        workspace="/home/rootson",
+        profile="optiplex",
+    )
+    assert "[Workspace::v1: /home/rootson]" in msg
+
+
+
 

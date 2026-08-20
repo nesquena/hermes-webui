@@ -15152,7 +15152,7 @@ def handle_post(handler, parsed) -> bool:
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace), profile=getattr(s, "profile", None)))
         except ValueError as e:
             return bad(handler, str(e))
         with _get_session_agent_lock(body["session_id"]):
@@ -18396,7 +18396,7 @@ def _handle_terminal_start(handler, body):
                 },
                 status=400,
             )
-        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "")
+        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "", profile=getattr(session, "profile", None))
         from api.terminal import start_terminal
         term = start_terminal(
             sid,
@@ -21391,7 +21391,7 @@ def _memory_project_context_workspace(parsed) -> Path | None:
     if not raw_workspace:
         return None
     try:
-        return Path(resolve_trusted_workspace(raw_workspace)).expanduser().resolve()
+        return resolve_trusted_workspace(raw_workspace)
     except Exception:
         logger.debug("Skipping project context for untrusted workspace %s", raw_workspace, exc_info=True)
         return None
@@ -23217,7 +23217,7 @@ def _handle_goal_command(handler, body):
     previous_goal_state = None
     if will_kickoff:
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -23286,7 +23286,7 @@ def _handle_goal_command(handler, body):
     if kickoff_prompt:
         if workspace is None:
             try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
             except ValueError as e:
                 return bad(handler, str(e))
         if model is None:
@@ -23738,7 +23738,7 @@ def _handle_chat_sync(handler, body):
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
     try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, profile=getattr(s, "profile", None)))
     except ValueError as e:
         return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
@@ -25101,31 +25101,36 @@ def _handle_workspace_add(handler, body):
     # macOS) so pytest's tmp_path_factory paths and other legit user-tmp dirs
     # still register cleanly.
     try:
-        candidate = Path(path_str).expanduser().resolve()
+        from api.workspace import _remote_terminal_workspace_candidate, _resolve_path
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        remote_candidate = _remote_terminal_workspace_candidate(path_str, profile=active_profile)
+        candidate = _resolve_path(path_str, profile=active_profile)
     except (ValueError, OSError, RuntimeError) as e:
         # Invalid path (e.g. embedded null byte) — fail closed with a clean 400
         # instead of letting .resolve() raise an uncaught 500.
         return bad(handler, f"Invalid path: {_sanitize_error(e)}")
-    if _is_blocked_system_path(candidate):
-        # Home-directory carve-out, mirroring the validators
-        # (resolve_trusted_workspace / validate_workspace_to_add): a workspace
-        # at or under the active user's home must stay allowed even when that
-        # home lives under an otherwise-blocked root (e.g. systemd-homed
-        # /var/home/<user>/...). Without this the route rejects valid
-        # /var/home workspaces before validate_workspace_to_add()'s carve-out
-        # can run.
-        _home = _home_path()
-        if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
-            return bad(handler, f"Path points to a system directory: {candidate}")
-    # Now safe to create the directory if requested
-    if auto_create:
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-        except (OSError, PermissionError) as e:
-            return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
+    if remote_candidate is None:
+        if _is_blocked_system_path(candidate):
+            # Home-directory carve-out, mirroring the validators
+            # (resolve_trusted_workspace / validate_workspace_to_add): a workspace
+            # at or under the active user's home must stay allowed even when that
+            # home lives under an otherwise-blocked root (e.g. systemd-homed
+            # /var/home/<user>/...). Without this the route rejects valid
+            # /var/home workspaces before validate_workspace_to_add()'s carve-out
+            # can run.
+            _home = _home_path()
+            if not (_home != Path("/") and (candidate == _home or _is_within(candidate, _home))):
+                return bad(handler, f"Path points to a system directory: {candidate}")
+        # Now safe to create the directory if requested
+        if auto_create:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+            except (OSError, PermissionError) as e:
+                return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
     # Full validation (exists, is_dir) — should pass now that dir exists
     try:
-        p = validate_workspace_to_add(path_str)
+        p = validate_workspace_to_add(path_str, profile=active_profile)
     except ValueError as e:
         return bad(handler, str(e))
     wss = load_workspaces()
