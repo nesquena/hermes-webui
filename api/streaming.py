@@ -2639,14 +2639,14 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
 
 
 def _bare_model_id(model_id) -> str:
-    """Strip routing hints and vendor prefixes so two model ids can be compared.
+    """Strip a routing hint without discarding identity-bearing model data.
 
     The requested model is often carried with a WebUI routing hint
     (``@openai-codex:gpt-5.6-sol``, or ``@custom:<slug>:model`` with two colons)
     while the served model is stamped bare from ``agent.model``. Comparing the
     raw strings would report a "switch" for what is the same model written two
-    different ways. A vendor path prefix (``anthropic/claude-opus-5``) is dropped
-    for the same reason. Returns '' for empty/None input so callers fail closed.
+    different ways. Slash namespaces and colon tags after the hint are part of
+    the model identity. Returns '' for empty/None input so callers fail closed.
     """
     from api.config import _parse_provider_qualified_model_id
 
@@ -2658,7 +2658,7 @@ def _bare_model_id(model_id) -> str:
         # The shared parser identifies the complete routing prefix. Keep the
         # complete bare model: later colons are model tags (for example ``:8b``).
         model = qualified[0]
-    return model.rsplit("/", 1)[-1].strip()
+    return model.strip()
 
 
 def _local_model_switch(requested_model, used_model) -> bool:
@@ -2675,7 +2675,16 @@ def _local_model_switch(requested_model, used_model) -> bool:
     used = _bare_model_id(used_model).lower()
     if not requested or not used:
         return False
-    return requested != used
+    if requested == used:
+        return False
+    # Runtime resolution may preserve a provider-qualified model id or reduce it
+    # to its bare form depending on the endpoint. When only one side still has a
+    # slash, a shared basename is therefore notation-only and cannot prove a
+    # switch. When both sides are namespaced, compare the complete identities so
+    # distinct models such as openai/gpt-4 and my-local/gpt-4 do not collapse.
+    if "/" not in requested or "/" not in used:
+        return requested.rsplit("/", 1)[-1] != used.rsplit("/", 1)[-1]
+    return True
 
 
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:

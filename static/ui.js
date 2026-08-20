@@ -5154,7 +5154,7 @@ function _formatReasoningEffortLabel(effort){
 function _bareModelId(modelId, providerId){
   // Mirror of api/streaming.py::_bare_model_id — remove only the routing prefix
   // identified by the adjacent provider field, then keep the complete bare model
-  // (including Ollama-style tags such as ':8b').
+  // (including slash namespaces and Ollama-style tags such as ':8b').
   let m=String(modelId||'').trim();
   if(!m)return'';
   const provider=String(providerId||'').trim();
@@ -5166,8 +5166,7 @@ function _bareModelId(modelId, providerId){
     // for older messages that predate the persisted provider provenance fields.
     m=m.slice(m.indexOf(':')+1);
   }
-  const parts=m.split('/');
-  return parts[parts.length-1].trim();
+  return m.trim();
 }
 function _localModelSwitchText(msg, requestedModel){
   // Notice for a LOCAL fallback switch: the configured provider failed and
@@ -5180,7 +5179,15 @@ function _localModelSwitchText(msg, requestedModel){
   const used=String(msg._usedModel||'').trim();
   const requested=String(requestedModel||msg._requestedModel||'').trim();
   if(!used||!requested)return'';
-  if(_bareModelId(used,msg._usedProvider).toLowerCase()===_bareModelId(requested,msg._requestedProvider).toLowerCase())return'';
+  const usedId=_bareModelId(used,msg._usedProvider).toLowerCase();
+  const requestedId=_bareModelId(requested,msg._requestedProvider).toLowerCase();
+  if(!usedId||!requestedId)return'';
+  if(usedId===requestedId)return'';
+  // Runtime resolution can leave one side provider-qualified and the other bare.
+  // A shared basename is inconclusive in that one-namespaced case, but two full
+  // slash namespaces remain identity-bearing and must be compared in full.
+  if((!usedId.includes('/')||!requestedId.includes('/'))&&
+      usedId.split('/').pop()===requestedId.split('/').pop())return'';
   return`${t('model_switched')||'Model switched'}: ${getModelLabel(requested)} → ${getModelLabel(used)}`;
 }
 function _reasoningEffortContext(){

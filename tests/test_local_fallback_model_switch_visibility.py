@@ -102,6 +102,18 @@ const cases = {{
   customColonTaggedSwitch: _localModelSwitchText(
     {{ _usedModel: '@custom:local:qwen2.5:8b', _usedProvider: 'custom:local', _requestedProvider: 'custom:local' }},
     '@custom:local:llama3:8b'),
+  slashQualifiedSwitch: _localModelSwitchText(
+    {{ _usedModel: 'my-local/gpt-4' }}, 'openai/gpt-4'),
+  slashHintedSwitch: _localModelSwitchText(
+    {{ _usedModel: '@ollama:my-local/gpt-4' }}, '@ollama:openai/gpt-4'),
+  slashHintedSame: _localModelSwitchText(
+    {{ _usedModel: 'openai/gpt-4' }}, '@ollama:openai/gpt-4'),
+  slashHintedSameReverse: _localModelSwitchText(
+    {{ _usedModel: '@ollama:openai/gpt-4' }}, 'openai/gpt-4'),
+  providerQualifiedRequestedSame: _localModelSwitchText(
+    {{ _usedModel: 'claude-opus-5' }}, 'anthropic/claude-opus-5'),
+  providerQualifiedUsedSame: _localModelSwitchText(
+    {{ _usedModel: 'anthropic/claude-opus-5' }}, 'claude-opus-5'),
   identical: _localModelSwitchText({{ _usedModel: 'gpt-5.6-sol' }}, 'gpt-5.6-sol'),
   caseInsensitive: _localModelSwitchText(
     {{ _usedModel: 'GPT-5.6-Sol' }}, '@openai-codex:gpt-5.6-sol'),
@@ -126,7 +138,6 @@ def test_bare_model_id_strips_routing_hints():
     assert _bare_model_id("@openai-codex:gpt-5.6-sol") == "gpt-5.6-sol"
     assert _bare_model_id("@custom:kimi-coding:k3-256k") == "k3-256k"
     assert _bare_model_id("gpt-5.6-sol") == "gpt-5.6-sol"
-    assert _bare_model_id("anthropic/claude-opus-5") == "claude-opus-5"
     assert _bare_model_id("") == ""
     assert _bare_model_id(None) == ""
 
@@ -141,6 +152,30 @@ def test_bare_model_id_preserves_colon_tag_after_the_routing_prefix():
     assert _local_model_switch("@ollama:llama3:8b", "@ollama:qwen2.5:8b") is True
     assert _local_model_switch("@custom:local:llama3:8b", "@custom:local:qwen2.5:8b") is True
     assert _local_model_switch("@ollama:llama3:8b", "llama3:8b") is False
+
+
+def test_slash_namespace_is_preserved_without_breaking_bare_provider_notation():
+    """Two namespaced IDs differ, while one namespaced/bare pair is notation-only."""
+    from api.streaming import _bare_model_id, _local_model_switch
+
+    assert _bare_model_id("@ollama:openai/gpt-4") == "openai/gpt-4"
+    assert _bare_model_id("@ollama:my-local/gpt-4") == "my-local/gpt-4"
+    assert _bare_model_id("anthropic/claude-opus-5") == "anthropic/claude-opus-5"
+
+    # Distinct slash namespaces sharing a basename are distinct model identities,
+    # with or without WebUI routing hints.
+    assert _local_model_switch("openai/gpt-4", "my-local/gpt-4") is True
+    assert _local_model_switch("@ollama:openai/gpt-4", "@ollama:my-local/gpt-4") is True
+
+    # A routing hint does not change the namespaced model identity.
+    assert _local_model_switch("@ollama:openai/gpt-4", "openai/gpt-4") is False
+    assert _local_model_switch("openai/gpt-4", "@ollama:openai/gpt-4") is False
+
+    # Runtime resolution can preserve or remove a redundant first-party provider
+    # prefix depending on the endpoint. Keep the legacy equivalence in either
+    # direction when only one side is namespaced.
+    assert _local_model_switch("anthropic/claude-opus-5", "claude-opus-5") is False
+    assert _local_model_switch("claude-opus-5", "anthropic/claude-opus-5") is False
 
 
 def test_requested_model_is_captured_before_the_run_mutates_agent_model():
@@ -209,8 +244,16 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["colonTaggedSame"] == ""
     assert "llama3:8b" in cases["customColonTaggedSwitch"]
     assert "qwen2.5:8b" in cases["customColonTaggedSwitch"]
+    assert "openai/gpt-4" in cases["slashQualifiedSwitch"]
+    assert "my-local/gpt-4" in cases["slashQualifiedSwitch"]
+    assert "openai/gpt-4" in cases["slashHintedSwitch"]
+    assert "my-local/gpt-4" in cases["slashHintedSwitch"]
 
     # Everything else must stay silent.
+    assert cases["slashHintedSame"] == ""
+    assert cases["slashHintedSameReverse"] == ""
+    assert cases["providerQualifiedRequestedSame"] == ""
+    assert cases["providerQualifiedUsedSame"] == ""
     assert cases["notationOnly"] == ""
     assert cases["notationOnlyCustom"] == ""
     assert cases["identical"] == ""
