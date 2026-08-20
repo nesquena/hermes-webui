@@ -58,6 +58,7 @@ SOURCE_LABELS = {
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
+    'desktop': 'Desktop',
     'discord': 'Discord',
     'email': 'Email',
     'kanban': 'Kanban',
@@ -85,12 +86,12 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw in {'acp', 'cli', 'tui'}:
-        # 'acp' (Agent Client Protocol adapter — Zed, external device bridges)
-        # is a local interactive agent client like the CLI/TUI: its sessions
-        # live only in state.db, so classifying it 'other' would leave them
-        # invisible in both sidebar buckets (webui skips the state.db
-        # projection; cli keeps only CLI-classified rows).
+    elif raw in {'acp', 'cli', 'desktop', 'tui'}:
+        # ACP adapters and Hermes Desktop are interactive clients like the
+        # CLI/TUI. Their sessions live only in state.db, so classifying them
+        # as 'other' would leave them invisible in both sidebar buckets
+        # (webui skips the state.db projection; cli keeps only interactive
+        # rows).
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -242,10 +243,10 @@ def is_cli_session_row(row: dict) -> bool:
     if source in {"external_agent", "external-agent"}:
         return True
     if (
-        source_tag in {"acp", "cli", "tui"}
-        or raw_source in {"acp", "cli", "tui"}
-        or source_name in {"acp", "cli", "tui"}
-        or source_label in {"acp", "cli", "tui"}
+        source_tag in {"acp", "cli", "desktop", "tui"}
+        or raw_source in {"acp", "cli", "desktop", "tui"}
+        or source_name in {"acp", "cli", "desktop", "tui"}
+        or source_label in {"acp", "cli", "desktop", "tui"}
     ):
         return True
 
@@ -289,11 +290,11 @@ def is_cli_session_row_visible(row: dict) -> bool:
     }
     if "tui" in interactive_sources:
         return True
-    if "acp" in interactive_sources:
-        # Like TUI rows, user-driven ACP sessions stay visible even when
-        # ended/untitled. Unlike TUI, an ACP connection can record only
-        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
-        # require at least one user turn before surfacing the row.
+    if {"acp", "desktop"} & interactive_sources:
+        # Like TUI rows, user-driven ACP/Desktop sessions stay visible even
+        # when ended/untitled. Unlike TUI, these clients can leave connection
+        # records containing only assistant/tool/system rows, so require at
+        # least one user turn before surfacing the row.
         return _count_user_turns(row) > 0
 
     if _has_cli_lineage(row):
@@ -630,7 +631,13 @@ def read_importable_agent_session_rows(
             if 'role' in message_cols:
                 user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
             else:
-                user_message_count_expr = f"COUNT(m.{count_col})"
+                # Without role metadata we cannot prove a Desktop connection
+                # record contains a user turn. Fail closed for Desktop only;
+                # preserve the legacy count fallback for every existing source.
+                user_message_count_expr = (
+                    "CASE WHEN LOWER(COALESCE(s.source, '')) = 'desktop' THEN 0 "
+                    f"ELSE COUNT(m.{count_col}) END"
+                )
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
             group_by_clause = "GROUP BY s.id"
@@ -638,7 +645,10 @@ def read_importable_agent_session_rows(
             # No usable messages table: use the denormalized per-session counts
             # and ``started_at`` so the rows still surface in the sidebar.
             actual_count_expr = "s.message_count"
-            user_message_count_expr = "s.message_count"
+            user_message_count_expr = (
+                "CASE WHEN LOWER(COALESCE(s.source, '')) = 'desktop' THEN 0 "
+                "ELSE s.message_count END"
+            )
             last_activity_expr = "NULL"
             join_clause = ""
             group_by_clause = ""
