@@ -24,6 +24,38 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+
+// Session navigation authority is recorded at request time, before metadata
+// changes S.session.  Async work which might refresh a session later (for
+// example squash completion) captures the current generation and may act only
+// while that exact authority is still current.  This preserves a newer user
+// choice even while its metadata request is pending or after it fails.
+function _beginSessionNavigationRequest(sessionId){
+  const sid=String(sessionId||'');
+  const generation=++_loadSessionGeneration;
+  _loadingSessionId=sid;
+  return generation;
+}
+
+function _sessionNavigationRequestIsCurrent(sessionId,generation){
+  return _loadingSessionId===String(sessionId||'')&&_loadSessionGeneration===generation;
+}
+
+function _captureSessionNavigationAuthority(sessionId){
+  return {
+    sessionId:String(sessionId||''),
+    generation:_loadSessionGeneration,
+  };
+}
+
+function _sessionNavigationAuthorityIsCurrent(authority){
+  if(!authority||!authority.sessionId) return false;
+  return !!(
+    _loadSessionGeneration===authority.generation&&
+    _loadingSessionId===null&&
+    S.session&&S.session.session_id===authority.sessionId
+  );
+}
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -1738,15 +1770,14 @@ async function loadSession(sid){
   }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
-  const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
-  _loadingSessionId = sid;
+  const _loadGeneration = _beginSessionNavigationRequest(sid);
+  const _isCurrentLoad = () => _sessionNavigationRequestIsCurrent(sid,_loadGeneration);
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // #6704 P1: the 'squash-running' pulse lives on SHARED desktop/mobile
   // controls; re-sync it against the session being displayed so a job running
   // on another conversation doesn't leak its indicator here (and re-asserts
   // when navigating back to the owner). Same pattern as the upload bar above.
-  if(currentSid!==sid&&typeof _squashSyncRunningIndicatorForSession==='function')_squashSyncRunningIndicatorForSession(sid);
+  if(typeof _squashSyncRunningIndicatorForSession==='function')_squashSyncRunningIndicatorForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.

@@ -367,20 +367,15 @@ def test_squash_job_recheck_refuses_ownership_registered_after_admission(tmp_pat
 
 
 def test_squash_completion_reload_is_conditional_on_current_session():
-    """Focused regression (#6704 P1): switching conversations while the squash
-    job runs must not force-navigate the browser back to the squashed sid —
-    completion may only reload when the user is still viewing it."""
+    """The squash flow must use captured requested-navigation authority."""
     repo = Path(__file__).resolve().parent.parent
     js = (repo / "static" / "panels.js").read_text(encoding="utf-8")
     fn_start = js.index("async function squashConversation")
     fn_end = js.index("function _pollSquashJob")
     body = js[fn_start:fn_end]
-    assert "if(S.session && S.session.session_id === sid) await loadSession(sid, {force: true});" in body
-    # Every completion reload of the squashed sid must be guarded — no
-    # unconditional loadSession(sid) may remain in the squash flow.
-    for line in body.splitlines():
-        if "loadSession(sid" in line:
-            assert "S.session.session_id === sid" in line, line
+    assert "const navigationAuthority = _captureSessionNavigationAuthority(sid);" in body
+    assert "if(_sessionNavigationAuthorityIsCurrent(navigationAuthority))" in body
+    assert "await loadSession(sid, {force: true});" in body
 
 
 def test_squash_running_indicator_is_owner_scoped_wiring():
@@ -488,3 +483,271 @@ def test_squash_running_indicator_does_not_leak_across_sessions_runtime():
     assert out["owner_reasserts"] == [True, True]
     assert out["settle_on_other_session_clean"] == [False, False]
     assert out["owner_clean_after_settle"] == [False, False]
+
+
+def test_squash_completion_obeys_requested_navigation_runtime():
+    """Run the real squash flow against the real navigation-authority helpers.
+
+    Metadata requests are controlled promises so the production race is exact:
+    session B has been requested, but ``S.session`` still points at A when A's
+    squash status settles.  The newer requested-navigation generation must own
+    the view even when B is pending or fails.  An explicit B -> A request also
+    owns A without a second completion reload.
+    """
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+
+    repo = Path(__file__).resolve().parent.parent
+    sessions = (repo / "static" / "sessions.js").read_text(encoding="utf-8")
+    panels = (repo / "static" / "panels.js").read_text(encoding="utf-8")
+    nav_start = sessions.index("let _loadingSessionId = null")
+    nav_end = sessions.index("// #3306:", nav_start)
+    navigation_authority = sessions[nav_start:nav_end]
+    load_start = sessions.index("async function loadSession(")
+    load_end = sessions.index("\n// ── Handoff hint logic", load_start)
+    load_body = sessions[load_start:load_end]
+    assert "const _loadGeneration = _beginSessionNavigationRequest(sid);" in load_body
+    assert "_sessionNavigationRequestIsCurrent(sid,_loadGeneration)" in load_body
+    assert "_squashSyncRunningIndicatorForSession(sid)" in load_body
+    assert "if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid))" in load_body
+    squash_start = panels.index("const _squashRunningSessions")
+    squash_end = panels.index("// ── Skills panel", squash_start)
+    squash_flow = panels[squash_start:squash_end]
+
+    harness = textwrap.dedent(
+        r"""
+        'use strict';
+        const vm = require('vm');
+
+        function deferred(){
+          let resolve, reject;
+          const promise = new Promise((res, rej)=>{ resolve=res; reject=rej; });
+          return {promise, resolve, reject};
+        }
+        const settle = async()=>{
+          await new Promise(resolve=>setImmediate(resolve));
+          await new Promise(resolve=>setImmediate(resolve));
+        };
+        function makeButton(){
+          const classes = new Set();
+          return {classList:{
+            toggle(name, force){ if(force) classes.add(name); else classes.delete(name); },
+            contains(name){ return classes.has(name); },
+          }};
+        }
+        function makeRuntime(){
+          const status = deferred();
+          const metadata = [];
+          const loads = [];
+          const loadErrors = [];
+          const toasts = [];
+          const desktop = makeButton();
+          const mobile = makeButton();
+          const ctx = {
+            S:{
+              session:{session_id:'sess-A'},
+              messages:[{role:'assistant',content:'A'}],
+              toolCalls:[], pendingFiles:[],
+            },
+            $:(id)=>id==='btnSquash'?desktop:(id==='composerMobileSquashBtn'?mobile:null),
+            t:(key)=>key,
+            showConfirmDialog:async()=>true,
+            showToast:(...args)=>toasts.push(args),
+            api:async(url, opts)=>{
+              if(url==='/api/session/squash') return {job:{job_id:'job-A'}};
+              if(url.startsWith('/api/session/squash/status')) return status.promise;
+              throw new Error('unexpected api '+url+' '+JSON.stringify(opts||{}));
+            },
+            _requestMetadata:(sid)=>{
+              const request=deferred();
+              metadata.push({sid, request});
+              return request.promise;
+            },
+            _loads:loads,
+            _loadErrors:loadErrors,
+            setTimeout,
+            clearTimeout,
+            console,
+          };
+          vm.createContext(ctx);
+          vm.runInContext(NAVIGATION_AUTHORITY_SRC, ctx);
+          vm.runInContext(SQUASH_FLOW_SRC, ctx);
+          // This small runtime adapter deliberately uses the SAME request/current
+          // helpers as production loadSession.  Controlled metadata promises keep
+          // S.session on A until the requested B response is explicitly released.
+          vm.runInContext(`
+            async function loadSession(sid, opts={}){
+              const currentSid=S.session&&S.session.session_id;
+              const forceReload=!!opts.force;
+              if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)) return;
+              const generation=_beginSessionNavigationRequest(sid);
+              _loads.push({sid, force:!!opts.force, generation});
+              if(typeof _squashSyncRunningIndicatorForSession==='function'){
+                _squashSyncRunningIndicatorForSession(sid);
+              }
+              try{
+                const data=await _requestMetadata(sid);
+                if(!_sessionNavigationRequestIsCurrent(sid,generation)) return;
+                S.session=data.session;
+                _loadingSessionId=null;
+              }catch(error){
+                _loadErrors.push({sid,message:String(error&&error.message||error)});
+                if(_sessionNavigationRequestIsCurrent(sid,generation)) _loadingSessionId=null;
+              }
+            }
+          `, ctx);
+          return {
+            ctx, status, metadata, loads, loadErrors, toasts, desktop, mobile,
+            buttons:()=>[desktop,mobile].map(btn=>btn.classList.contains('squash-running')),
+          };
+        }
+        const run=(rt, source)=>vm.runInContext(source, rt.ctx);
+        const done=(sessionId='sess-A')=>({job:{
+          job_id:'job-A', session_id:sessionId, status:'done',
+          result:{already_squashed:false,before:{message_count:4},after:{message_count:1}},
+        }});
+        const requestFor=(rt, sid, index=0)=>rt.metadata.filter(item=>item.sid===sid)[index];
+        function startSquash(rt){
+          return {promise:run(rt,'squashConversation()'), ready:settle()};
+        }
+
+        (async()=>{
+          const out={};
+
+          // B metadata is pending when A completes: B remains authoritative.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            const navB=run(rt,"loadSession('sess-B')");
+            await settle();
+            out.pending_b_buttons=rt.buttons();
+            rt.status.resolve(done());
+            await settle();
+            const unexpectedA=requestFor(rt,'sess-A');
+            if(unexpectedA) unexpectedA.request.resolve({session:{session_id:'sess-A'}});
+            requestFor(rt,'sess-B').request.resolve({session:{session_id:'sess-B'}});
+            await Promise.all([squash,navB]);
+            out.pending_b={
+              active:rt.ctx.S.session.session_id,
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              buttons:rt.buttons(),
+            };
+          }
+
+          // With no newer navigation, completion owns exactly one forced A refresh.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            out.owner_buttons=rt.buttons();
+            rt.status.resolve(done());
+            await settle();
+            requestFor(rt,'sess-A').request.resolve({session:{session_id:'sess-A'}});
+            await squash;
+            out.no_navigation={
+              active:rt.ctx.S.session.session_id,
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              buttons:rt.buttons(),
+            };
+          }
+
+          // B -> explicit A: the explicit A request wins; completion must not
+          // start a duplicate A load while that metadata request is pending.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            const navB=run(rt,"loadSession('sess-B')");
+            await settle();
+            const navA=run(rt,"loadSession('sess-A')");
+            await settle();
+            out.back_a_buttons=rt.buttons();
+            rt.status.resolve(done());
+            await settle();
+            requestFor(rt,'sess-A').request.resolve({session:{session_id:'sess-A'}});
+            requestFor(rt,'sess-B').request.resolve({session:{session_id:'sess-B'}});
+            await Promise.all([squash,navA,navB]);
+            out.back_a={
+              active:rt.ctx.S.session.session_id,
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              buttons:rt.buttons(),
+            };
+          }
+
+          // A failed B request remains a newer user choice.  Its error must not
+          // be erased by a late squash-completion navigation back to A.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            const navB=run(rt,"loadSession('sess-B')");
+            await settle();
+            requestFor(rt,'sess-B').request.reject(new Error('B metadata failed'));
+            await navB;
+            rt.status.resolve(done());
+            await settle();
+            const unexpectedA=requestFor(rt,'sess-A');
+            if(unexpectedA) unexpectedA.request.resolve({session:{session_id:'sess-A'}});
+            await squash;
+            out.failed_b={
+              active:rt.ctx.S.session.session_id,
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              errors:rt.loadErrors.map(x=>x.sid),
+            };
+          }
+
+          // Poll results are owner-scoped too: a B job can never complete A's
+          // progress owner or trigger A's reload.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            rt.status.resolve(done('sess-B'));
+            await squash;
+            out.wrong_owner={
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              buttons:rt.buttons(),
+              failed:rt.toasts.some(args=>String(args[0]).includes('squash_failed')),
+            };
+          }
+
+          console.log(JSON.stringify(out));
+        })().catch(error=>{
+          console.error(error&&error.stack||error);
+          process.exitCode=1;
+        });
+        """
+    ).replace("NAVIGATION_AUTHORITY_SRC", json.dumps(navigation_authority)).replace(
+        "SQUASH_FLOW_SRC", json.dumps(squash_flow)
+    )
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert out["pending_b_buttons"] == [False, False]
+    assert out["pending_b"] == {
+        "active": "sess-B", "loads": ["sess-B:false"], "buttons": [False, False],
+    }
+    assert out["owner_buttons"] == [True, True]
+    assert out["no_navigation"] == {
+        "active": "sess-A", "loads": ["sess-A:true"], "buttons": [False, False],
+    }
+    assert out["back_a_buttons"] == [True, True]
+    assert out["back_a"] == {
+        "active": "sess-A",
+        "loads": ["sess-B:false", "sess-A:false"],
+        "buttons": [False, False],
+    }
+    assert out["failed_b"] == {
+        "active": "sess-A", "loads": ["sess-B:false"], "errors": ["sess-B"],
+    }
+    assert out["wrong_owner"] == {
+        "loads": [], "buttons": [False, False], "failed": True,
+    }

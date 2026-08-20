@@ -92,6 +92,8 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+BEGIN_SESSION_NAVIGATION_REQUEST_SRC = _extract_function(SESSIONS_SRC, "_beginSessionNavigationRequest")
+SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC = _extract_function(SESSIONS_SRC, "_sessionNavigationRequestIsCurrent")
 
 
 def _normalise_ws(s: str) -> str:
@@ -100,14 +102,10 @@ def _normalise_ws(s: str) -> str:
 
 def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded():
     body = LOAD_SESSION_SRC
-    assert "_loadSessionGeneration" in body, (
-        "loadSession() must use a global generation counter so superseded loads "
-        "can be rejected by continuation ownership checks"
+    assert "const _loadGeneration = _beginSessionNavigationRequest(sid)" in body, (
+        "loadSession() must capture requested-navigation authority at the shared chokepoint"
     )
-    assert "const _loadGeneration = ++_loadSessionGeneration" in body, (
-        "loadSession() must increment and capture per-call generation"
-    )
-    assert "const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration" in body
+    assert "const _isCurrentLoad = () => _sessionNavigationRequestIsCurrent(sid,_loadGeneration)" in body
     assert "loadGeneration:_loadGeneration" in body, (
         "loadSession() must thread generation into _ensureMessagesLoaded()"
     )
@@ -350,6 +348,8 @@ let toastCalls = [];
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
+__BEGIN_SESSION_NAVIGATION_REQUEST_SRC__
+__SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC__
 __LOAD_SESSION_SRC__
 __ENSURE_MESSAGES_LOADED_SRC__
 
@@ -608,6 +608,8 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
+        .replace("__BEGIN_SESSION_NAVIGATION_REQUEST_SRC__", BEGIN_SESSION_NAVIGATION_REQUEST_SRC)
+        .replace("__SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC__", SESSION_NAVIGATION_REQUEST_IS_CURRENT_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )
