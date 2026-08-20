@@ -327,6 +327,34 @@ def test_concurrent_handoff_transfers_queued_reply_to_child_after_load():
         _close(pw, browser)
 
 
+def test_post_transfer_concurrent_submit_queues_on_child():
+    pw, browser, page = _page()
+    try:
+        result = page.evaluate("""async () => {
+          const calls=[]; let release; const gate=new Promise(r=>release=r);
+          const originalQueueSessionMessage=window.queueSessionMessage;
+          window.queueSessionMessage=(sid,payload)=>{calls.push(['queue',sid]); return originalQueueSessionMessage(sid,payload);};
+          window.setBusy=value=>{S.busy=!!value;}; window.uploadPendingFiles=async()=>[]; window.attachLiveStream=()=>{};
+          S.session={session_id:'cron-post-transfer-source',raw_source:'cron',read_only:true,model:'m',model_provider:'p'};
+          $('msg').value='first post-transfer reply';
+          window.api=async url=>{calls.push(url); if(url==='/api/session/branch')return {session_id:'child-post-transfer'}; if(url==='/api/session/draft')return {}; if(url==='/api/chat/start'){await gate;return {stream_id:'stream-post-transfer'};} throw new Error(url);};
+          window.loadSession=async sid=>{_loadSessionGeneration+=1;S.session={session_id:sid,read_only:false,model:'m',model_provider:'p',composer_draft:{text:'first post-transfer reply',files:[]}};_loadingSessionId=null;};
+          const first=send();
+          await new Promise(r=>setTimeout(r,30));
+          $('msg').value='second post-transfer reply';
+          await send();
+          release();
+          await first;
+          return {calls:calls.filter(url=>Array.isArray(url)||['/api/session/branch','/api/session/draft','/api/chat/start'].includes(url)),source:_getSessionQueue('cron-post-transfer-source',false).length,child:_getSessionQueue('child-post-transfer',false).map(entry=>entry.text),map:_readOnlyForkPayloads.size};
+        }""")
+        assert result == {
+            "calls":["/api/session/branch","/api/session/draft","/api/chat/start",["queue","child-post-transfer"],"/api/session/draft"],
+            "source":0,"child":["second post-transfer reply"],"map":0,
+        }
+    finally:
+        _close(pw, browser)
+
+
 def test_partial_batch_delete_cannot_block_later_cron_handoff():
     pw, browser, page = _page()
     try:

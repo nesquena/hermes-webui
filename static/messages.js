@@ -1468,22 +1468,26 @@ function _readOnlyForkHandoffOwnsPane(record, sid) {
 function _queueReadOnlyForkConcurrentSend(record, text, files) {
   if (!record || !record.sourceSid || typeof queueSessionMessage !== 'function') return false;
   const modelState = typeof _chatPayloadModelState === 'function' ? _chatPayloadModelState() : {};
-  queueSessionMessage(record.sourceSid, {
+  const queueSid = record.concurrentQueueTargetSid || record.sourceSid;
+  const payload = {
     text:String(text || ''), files:Array.isArray(files) ? [...files] : [],
     model:modelState.model, model_provider:modelState.model_provider,
-    profile:S.activeProfile || 'default', _readOnlyForkQueuedFor:record.sourceSid,
-  });
+    profile:S.activeProfile || 'default',
+  };
+  if (queueSid === record.sourceSid) payload._readOnlyForkQueuedFor = record.sourceSid;
+  queueSessionMessage(queueSid, payload);
   if ($('msg')) $('msg').value = '';
   S.pendingFiles = [];
   if (typeof autoResize === 'function') autoResize();
   if (typeof renderTray === 'function') renderTray();
-  if (typeof updateQueueBadge === 'function') updateQueueBadge(record.sourceSid);
+  if (typeof updateQueueBadge === 'function') updateQueueBadge(queueSid);
   if (typeof showToast === 'function') showToast(`Queued: "${String(text || '').slice(0,40)}${String(text || '').length>40?'…':''}"`,2000);
   return true;
 }
 
 function _transferReadOnlyForkConcurrentQueue(record) {
   if (!record || !record.childSid || typeof SESSION_QUEUES === 'undefined') return;
+  record.concurrentQueueTargetSid = record.childSid;
   const sourceQueue = SESSION_QUEUES[record.sourceSid];
   if (!Array.isArray(sourceQueue)) return;
   const handoffQueue = sourceQueue.filter(entry => entry && entry._readOnlyForkQueuedFor === record.sourceSid);
