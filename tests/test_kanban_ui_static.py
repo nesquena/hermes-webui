@@ -8,6 +8,7 @@ INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+UI = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 COMPACT_INDEX = re.sub(r"\s+", "", INDEX)
 COMPACT_PANELS = re.sub(r"\s+", "", PANELS)
 COMPACT_STYLE = re.sub(r"\s+", "", STYLE)
@@ -1530,8 +1531,10 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert "dropdownId: 'kanbanTaskModalModelDropdown'" in dropdown_src
     assert "selectId: 'kanbanTaskModalModel'" in dropdown_src
 
-    # submitKanbanTaskModal reads the model select + its data-provider and sends
-    # both back as model_override/provider_override (create + edit).
+    # submitKanbanTaskModal decodes the model select through the shared
+    # _modelStateForSelect() (which resolves the bare model + its data-provider,
+    # see test_kanban_submit_decodes_picker_provider_prefix_out_of_model_override)
+    # and sends both back as model_override/provider_override (create + edit).
     submit_match = re.search(
         r"function submitKanbanTaskModal\(\)\{(.*?)\n\}",
         PANELS, re.DOTALL,
@@ -1539,7 +1542,7 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert submit_match, "submitKanbanTaskModal() not found"
     submit_body = submit_match.group(1)
     assert "kanbanTaskModalModel" in submit_body
-    assert "selectedOptions[0]" in submit_body
+    assert "_modelStateForSelect" in submit_body
     assert "payload.model_override" in submit_body
     assert "payload.provider_override" in submit_body
 
@@ -1750,3 +1753,238 @@ def test_kanban_model_dispatch_keys_present_in_every_locale():
         # The old execution claim must be gone from every locale.
         for claim in _OLD_EXECUTION_CLAIMS:
             assert claim not in body, f"{code} locale still carries {claim!r}"
+
+
+# ── #6765 P1: the picker prefix must not leak into the persisted model_override ──
+#
+# `_ensureModelOptionInDropdown()` (static/ui.js) synthesizes an option for a
+# provider-scoped / custom model ID whose *value* is the picker's internal
+# `@<provider>:<model>` representation; the bare model survives only on
+# `option.dataset.model` and the provider on `option.dataset.provider`. Reading
+# `select.value` raw therefore persists `@provider:model` as the model override,
+# and the dispatcher hands that prefixed string to the backend as the model id.
+# `_modelStateForSelect()` is the composer's authoritative decoder for exactly
+# this (it also handles colon-bearing model ids, #6221), so the kanban submit
+# path must decode through it instead of trusting the raw value.
+
+
+def _run_kanban_submit_model_cases(cases):
+    """Run the REAL submitKanbanTaskModal() under node against a stubbed DOM,
+    with the REAL _modelStateForSelect()/_getOptionProviderId()/
+    _providerFromModelValue() from static/ui.js wired in — so the decode under
+    test is production code, not a test reimplementation.
+
+    Each case: {mode, editingId?, options: [{value, model?, provider?}],
+    selected: <select value>}. Returns the captured request payloads."""
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+
+    submit_src = extract_function(PANELS, "submitKanbanTaskModal", prefix="async function")
+    state_src = extract_function(UI, "_modelStateForSelect")
+    option_provider_src = extract_function(UI, "_getOptionProviderId")
+    value_provider_src = extract_function(UI, "_providerFromModelValue")
+
+    harness = (
+        "const CASES = " + json.dumps(cases) + ";\n"
+        # Minimal <option>/<select> stubs shaped like the real DOM surface the
+        # decoder touches: option.value + option.dataset, select.options and a
+        # live selectedOptions derived from select.value.
+        "function makeOption(spec) {\n"
+        "  const dataset = {};\n"
+        "  if (spec.model !== undefined) dataset.model = spec.model;\n"
+        # A real DOMStringMap reads back an ABSENT data-provider as undefined and
+        # an explicitly-emptied one as '' — mirror that distinction exactly.
+        "  if (spec.provider !== undefined) dataset.provider = spec.provider;\n"
+        "  const group = spec.groupProvider === undefined ? null\n"
+        "    : {tagName: 'OPTGROUP', dataset: {provider: spec.groupProvider}};\n"
+        "  return {value: spec.value, dataset, parentElement: group};\n"
+        "}\n"
+        "function makeSelect(specs, selected) {\n"
+        "  const options = specs.map(makeOption);\n"
+        "  return {\n"
+        "    id: 'kanbanTaskModalModel', value: selected, options,\n"
+        "    get selectedOptions() {\n"
+        "      const hit = options.find(o => String(o.value) === String(this.value));\n"
+        "      return hit ? [hit] : [];\n"
+        "    },\n"
+        "    focus() {},\n"
+        "  };\n"
+        "}\n"
+        "function field(value) { return {value, dataset: {}, focus() {}}; }\n"
+        "let elements = {};\n"
+        "global.document = {getElementById: (id) => elements[id] || null};\n"
+        "function t(k) { return k; }\n"
+        "let capturedPayload = null;\n"
+        "let capturedMethod = null;\n"
+        "async function api(url, opts) {\n"
+        "  capturedMethod = opts && opts.method;\n"
+        "  capturedPayload = opts ? JSON.parse(opts.body) : null;\n"
+        "  return {task: {id: 't_saved'}};\n"
+        "}\n"
+        "async function loadKanban() {}\n"
+        "async function loadKanbanTask() {}\n"
+        "function _kanbanBoardQuery() { return ''; }\n"
+        "function closeKanbanTaskModal() {}\n"
+        "let _kanbanTaskModalMode = 'create';\n"
+        "let _kanbanTaskModalEditingId = null;\n"
+        "let _kanbanTaskModalInitialDisplayedStatus = 'triage';\n"
+        + value_provider_src + "\n"
+        + option_provider_src + "\n"
+        + state_src + "\n"
+        + submit_src + "\n"
+        "(async () => {\n"
+        "  const out = [];\n"
+        "  for (const c of CASES) {\n"
+        "    capturedPayload = null; capturedMethod = null;\n"
+        "    _kanbanTaskModalMode = c.mode;\n"
+        "    _kanbanTaskModalEditingId = c.editingId || null;\n"
+        "    elements = {\n"
+        "      kanbanTaskModalTitleInput: field('Prefixed model task'),\n"
+        "      kanbanTaskModalBody: field(''),\n"
+        "      kanbanTaskModalStatus: field('triage'),\n"
+        "      kanbanTaskModalAssignee: field('agent1'),\n"
+        "      kanbanTaskModalTenant: field(''),\n"
+        "      kanbanTaskModalPriority: field('0'),\n"
+        "      kanbanTaskModalWorkspaceKind: field('scratch'),\n"
+        "      kanbanTaskModalWorkspacePath: field(''),\n"
+        "      kanbanTaskModalSkills: field(''),\n"
+        "      kanbanTaskModalMaxRuntimeSeconds: field(''),\n"
+        "      kanbanTaskModalParents: field(''),\n"
+        "      kanbanTaskModalModel: makeSelect(c.options, c.selected),\n"
+        "      kanbanTaskModalError: {textContent: '', dataset: {}},\n"
+        "      kanbanTaskModalSubmit: {disabled: false},\n"
+        "    };\n"
+        "    await submitKanbanTaskModal();\n"
+        "    out.push({payload: capturedPayload, method: capturedMethod,\n"
+        "              error: elements.kanbanTaskModalError.textContent});\n"
+        "  }\n"
+        "  console.log(JSON.stringify(out));\n"
+        "})().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });\n"
+    )
+    result = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, f"node -e failed: {result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_kanban_submit_decodes_picker_provider_prefix_out_of_model_override():
+    """#6765 P1: a provider-scoped selection whose option was SYNTHESIZED by
+    _ensureModelOptionInDropdown carries the internal '@provider:model' string as
+    its option value. submitKanbanTaskModal must persist the bare model id (and
+    the provider separately) — never the prefixed picker representation, which
+    the dispatcher would pass to the backend verbatim as `-m @provider:model`."""
+    synthesized = [
+        # Exactly what _ensureModelOptionInDropdown() appends: prefixed value,
+        # bare model on data-model, provider on data-provider.
+        {"value": "@custom:backup:model-a", "model": "model-a", "provider": "custom:backup"},
+    ]
+    # A colon-bearing model id under a colon-bearing provider — the #6221 shape
+    # that naive "split at the last colon" parsing mangles. The decoder must
+    # read data-model/data-provider, not re-parse the value.
+    colon_model = [
+        {"value": "@custom:backup:model-a:free", "model": "model-a:free", "provider": "custom:backup"},
+    ]
+    # A plain catalog option (bare value, provider on the option) — the path that
+    # already worked; it must keep working.
+    catalog = [{"value": "gpt-5.6-sol", "provider": "openai"}]
+
+    create, edit, create_colon, edit_colon, create_catalog, edit_catalog, \
+        create_cleared, edit_cleared = _run_kanban_submit_model_cases([
+            {"mode": "create", "options": synthesized, "selected": "@custom:backup:model-a"},
+            {"mode": "edit", "editingId": "t_1", "options": synthesized,
+             "selected": "@custom:backup:model-a"},
+            {"mode": "create", "options": colon_model, "selected": "@custom:backup:model-a:free"},
+            {"mode": "edit", "editingId": "t_1", "options": colon_model,
+             "selected": "@custom:backup:model-a:free"},
+            {"mode": "create", "options": catalog, "selected": "gpt-5.6-sol"},
+            {"mode": "edit", "editingId": "t_1", "options": catalog, "selected": "gpt-5.6-sol"},
+            {"mode": "create", "options": synthesized, "selected": ""},
+            {"mode": "edit", "editingId": "t_1", "options": synthesized, "selected": ""},
+        ])
+
+    # ── create: the prefix is decoded away before the POST ──
+    assert create["method"] == "POST", create
+    assert create["payload"]["model_override"] == "model-a", create["payload"]
+    assert create["payload"]["provider_override"] == "custom:backup", create["payload"]
+    assert not create["payload"]["model_override"].startswith("@"), (
+        "the picker's @provider: prefix leaked into the persisted model_override"
+    )
+
+    # ── edit: same decode, and both fields are always sent ──
+    assert edit["method"] == "PATCH", edit
+    assert edit["payload"]["model_override"] == "model-a", edit["payload"]
+    assert edit["payload"]["provider_override"] == "custom:backup", edit["payload"]
+    assert not edit["payload"]["model_override"].startswith("@"), edit["payload"]
+
+    # ── colon-bearing model id survives intact under a colon-bearing provider ──
+    for label, case in (("create", create_colon), ("edit", edit_colon)):
+        assert case["payload"]["model_override"] == "model-a:free", (label, case["payload"])
+        assert case["payload"]["provider_override"] == "custom:backup", (label, case["payload"])
+
+    # ── plain catalog pick unchanged (no prefix to strip, provider preserved) ──
+    for label, case in (("create", create_catalog), ("edit", edit_catalog)):
+        assert case["payload"]["model_override"] == "gpt-5.6-sol", (label, case["payload"])
+        assert case["payload"]["provider_override"] == "openai", (label, case["payload"])
+
+    # ── empty selection: create omits both keys, edit clears both to null ──
+    assert "model_override" not in create_cleared["payload"], create_cleared["payload"]
+    assert "provider_override" not in create_cleared["payload"], create_cleared["payload"]
+    assert edit_cleared["payload"]["model_override"] is None, edit_cleared["payload"]
+    assert edit_cleared["payload"]["provider_override"] is None, edit_cleared["payload"]
+
+
+def test_kanban_submit_uses_the_shared_model_decoder_not_a_raw_value_read():
+    """Source guard: the submit path must go through _modelStateForSelect (the
+    composer's single authoritative decoder) rather than re-reading
+    select.value / selectedOptions[0].dataset.provider directly, so the kanban
+    picker can never drift from the composer's resolution."""
+    submit_src = extract_function(PANELS, "submitKanbanTaskModal", prefix="async function")
+    assert "_modelStateForSelect" in submit_src, (
+        "submitKanbanTaskModal must decode the selection through _modelStateForSelect"
+    )
+    # The raw-value reads that caused #6765 P1 must be gone.
+    assert "modelEl.value.trim()" not in submit_src, (
+        "submitKanbanTaskModal still reads the picker's raw (possibly @provider:-"
+        "prefixed) value as the model override"
+    )
+
+
+def test_kanban_submit_still_does_not_repin_a_provider_the_task_never_had():
+    """Guard on the one place the shared resolver diverges from the old raw read
+    (5be181a0): _kanbanPopulateModelSelect clears the matched option's OWN
+    data-provider to '' to mean "this task has no persisted provider pin", but
+    the option still lives under a catalog <optgroup data-provider=...> whose
+    provider _getOptionProviderId() would happily inherit. Saving an unrelated
+    edit must keep provider_override cleared rather than pinning the catalog
+    provider onto a task that never had one."""
+    cleared_pin = [{
+        "value": "gpt-5.6-sol",
+        # Explicitly emptied own pin (a real DOMStringMap reads '' back, not undefined)...
+        "provider": "",
+        # ...while the enclosing catalog group still names a provider.
+        "groupProvider": "openai",
+    }]
+    # Sanity contrast: when the task DOES carry a persisted pin, it is preserved.
+    kept_pin = [{"value": "gpt-5.6-sol", "provider": "openai", "groupProvider": "openai"}]
+
+    edit_cleared, create_cleared, edit_kept = _run_kanban_submit_model_cases([
+        {"mode": "edit", "editingId": "t_1", "options": cleared_pin, "selected": "gpt-5.6-sol"},
+        {"mode": "create", "options": cleared_pin, "selected": "gpt-5.6-sol"},
+        {"mode": "edit", "editingId": "t_1", "options": kept_pin, "selected": "gpt-5.6-sol"},
+    ])
+
+    # The model is still sent; only the un-pinned provider stays un-pinned.
+    assert edit_cleared["payload"]["model_override"] == "gpt-5.6-sol", edit_cleared["payload"]
+    assert edit_cleared["payload"]["provider_override"] is None, (
+        "an unrelated edit re-pinned the catalog optgroup's provider onto a task "
+        "that has no persisted provider_override"
+    )
+    assert create_cleared["payload"]["model_override"] == "gpt-5.6-sol", create_cleared["payload"]
+    assert "provider_override" not in create_cleared["payload"], create_cleared["payload"]
+    assert edit_kept["payload"]["provider_override"] == "openai", edit_kept["payload"]

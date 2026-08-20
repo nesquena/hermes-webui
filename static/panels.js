@@ -3810,10 +3810,31 @@ async function submitKanbanTaskModal(){
   // Model chosen from the shared /api/models catalog dropdown; provider is
   // carried on the option (data-provider) so the model always resolves against
   // the right backend. Empty value = "Profile default" (no override, clears).
-  const modelRaw = modelEl ? modelEl.value.trim() : '';
-  const providerRaw = (modelEl && modelEl.selectedOptions && modelEl.selectedOptions[0])
-    ? String(modelEl.selectedOptions[0].dataset && modelEl.selectedOptions[0].dataset.provider || '').trim()
-    : '';
+  //
+  // Decode through _modelStateForSelect() — the composer's authoritative
+  // decoder — instead of reading the raw value: a provider-scoped or custom
+  // model ID that _ensureModelOptionInDropdown() had to synthesize carries the
+  // picker's INTERNAL '@<provider>:<model>' string as its option value, with
+  // the bare model on data-model. Persisting the raw value leaked that prefix
+  // into model_override, and the dispatcher passed it to the backend verbatim
+  // as the model id (#6765). The decoder also reads the provider off the
+  // option's data-provider rather than re-parsing at the last colon, so a
+  // colon-bearing model id (model-a:free) survives intact (#6221).
+  const selectedModelValue = modelEl ? String(modelEl.value || '').trim() : '';
+  const modelState = (modelEl && typeof _modelStateForSelect === 'function')
+    ? _modelStateForSelect(modelEl, selectedModelValue)
+    : {model: selectedModelValue, model_provider: null};
+  const modelRaw = String(modelState.model || '').trim();
+  // _kanbanPopulateModelSelect() signals "this task has no persisted provider
+  // pin" by clearing the matched option's OWN data-provider to '' (an ABSENT
+  // one reads back as undefined). Keep honouring that signal: the shared
+  // resolver would otherwise inherit the catalog optgroup's data-provider, so
+  // saving an unrelated edit would re-pin a provider the task never had
+  // (5be181a0). The model itself is still resolved solely by the decoder above.
+  const selectedOption = (modelEl && modelEl.selectedOptions) ? modelEl.selectedOptions[0] : null;
+  const providerPinCleared = !!selectedOption && !!selectedOption.dataset
+    && selectedOption.dataset.provider === '';
+  const providerRaw = providerPinCleared ? '' : String(modelState.model_provider || '').trim();
   if (isEdit) {
     payload.body = bodyVal;
     payload.assignee = assigneeVal || null;
