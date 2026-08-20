@@ -5,6 +5,8 @@
 
 ### Fixed
 
+- **Custom providers that share a model name are now routed by the provider you actually selected, so requests can't reach the wrong endpoint or use the wrong API key.** When two custom (OpenAI-compatible) providers exposed the same model id, resolution could pair one provider's endpoint with another's credential; provider slugs are now derived through a single canonical identity so overlaps are detected and each request resolves its endpoint and key from the same selected provider. Ambiguous configurations now fail closed with an actionable error instead of silently mis-routing. Thanks @rouVling. (#7107)
+
 - **Dragging several files or folders into the workspace at once no longer silently drops all but the first.** The OS-drop handler read the browser-owned drop entries lazily during async traversal, but the browser only keeps those entries valid during the synchronous drop event — so every root after the first became unreadable and was skipped. The handler now snapshots all dropped files and folder entries up front, then traverses the snapshot, so multi-root drops upload completely. Thanks @nightcityblade. (#7142)
 
 - **A message you sent at the moment a reply finished no longer shows up twice (out of order) after a reload.** The Hermes Agent stamps persisted messages with a `_row_id`, but the WebUI replay-merge only recognized its other row-id aliases, so the same stored row looked new and was appended again after the settled answer. Replay now recognizes the `_row_id` alias at the shared identity chokepoint, so the row is matched to its existing turn and kept in order. Thanks @ruizanthony. (#7133)
