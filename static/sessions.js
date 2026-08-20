@@ -221,6 +221,7 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
+  if (S.session && S.session.session_id === sid && _isReadOnlySession(S.session)) return;
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -265,6 +266,7 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   const opts = arguments[3] || {};
   if (!sid) return Promise.resolve(true);
+  if (S.session && S.session.session_id === sid && _isReadOnlySession(S.session)) return Promise.resolve(true);
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);

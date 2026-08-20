@@ -38,7 +38,10 @@ def test_issue6927_served_composer_automatically_continues_canonical_cron_reply(
           window.uploadPendingFiles = async () => [];
           window.attachLiveStream = noop;
           S.session = {session_id:'cron-source', raw_source:'cron', read_only:true,
-            model:'m', model_provider:'p', profile:'prof', workspace:'/w'};
+            model:'m', model_provider:'p', profile:'prof', workspace:'/w',
+            messages:[{role:'assistant', content:'completed'}], context:{lineage:'source'}};
+          const sourceSession = S.session;
+          const sourceBefore = JSON.stringify(sourceSession);
           S.messages = [{role:'assistant', content:'completed'}];
           $('msg').value = 'continue this';
           window.api = async (url, opts) => {
@@ -51,17 +54,29 @@ def test_issue6927_served_composer_automatically_continues_canonical_cron_reply(
           window.loadSession = async sid => {
             _loadSessionGeneration += 1;
             S.session = {session_id:sid, session_source:'fork', read_only:false,
-              model:'m', model_provider:'p', profile:'prof', workspace:'/w', composer_draft:{text:'continue this', files:[]}};
+              parent_session_id:'cron-source', model:'m', model_provider:'p', profile:'prof', workspace:'/w',
+              messages:[{role:'assistant', content:'completed'}], context:{lineage:'source'},
+              composer_draft:{text:'continue this', files:[]}};
             _loadingSessionId = null;
           };
           await send();
+          const startCall = calls.find(c => c.url === '/api/chat/start');
+          const startBody = JSON.parse(startCall.opts.body);
           return {urls:calls.map(c => c.url), child:S.session.session_id,
             start:calls.find(c => c.url === '/api/chat/start')?.opts,
-            text:$('msg').value};
+            startBody, branchBody:JSON.parse(calls.find(c => c.url === '/api/session/branch').opts.body),
+            sourceUnchanged:JSON.stringify(sourceSession) === sourceBefore,
+            userCount:S.messages.filter(m => m.role === 'user').length, text:$('msg').value};
         }""")
         assert result["urls"] == ["/api/session/branch", "/api/session/draft", "/api/chat/start", "/api/session/draft"]
         assert result["child"] == "child-6927"
         assert result["start"].get("retries") == 0
+        assert result["branchBody"] == {"session_id": "cron-source"}
+        assert result["startBody"]["session_id"] == "child-6927"
+        assert result["startBody"]["message"] == "continue this"
+        assert result["startBody"]["workspace"] == "/w"
+        assert result["sourceUnchanged"] is True
+        assert result["userCount"] == 1
         assert result["text"] == ""
     finally:
         _close(pw, browser)
@@ -219,6 +234,28 @@ def test_no_stream_id_keeps_child_recovery_and_does_not_clear_draft():
         _close(pw, browser)
 
 
+def test_branch_and_chat_start_are_each_attempted_once():
+    pw, browser, page = _page()
+    try:
+        result = page.evaluate("""async () => {
+          const attempts={branch:0,start:0}; const retries={branch:null,start:null};
+          S.session={session_id:'cron-once', raw_source:'cron', read_only:true}; $('msg').value='once';
+          window.api=async (url, opts) => {
+            if(url==='/api/session/branch'){attempts.branch++; retries.branch=opts.retries; return {session_id:'child-once'};}
+            if(url==='/api/session/draft')return {};
+            if(url==='/api/chat/start'){attempts.start++; retries.start=opts.retries; throw new TypeError('network');}
+            throw new Error(url);
+          };
+          window.loadSession=async sid=>{_loadSessionGeneration+=1; S.session={session_id:sid,read_only:false,composer_draft:{text:'once',files:[]}}; _loadingSessionId=null;};
+          await send();
+          const record=_readOnlyForkPayloads.get('child-once');
+          return {attempts,retries,state:record&&record.state};
+        }""")
+        assert result == {"attempts": {"branch": 1, "start": 1}, "retries": {"branch": 0, "start": 0}, "state": "recovery"}
+    finally:
+        _close(pw, browser)
+
+
 def test_handoff_start_failure_restores_payload_and_clears_busy_without_queue_drain():
     pw, browser, page = _page()
     try:
@@ -243,7 +280,7 @@ def test_handoff_start_failure_restores_payload_and_clears_busy_without_queue_dr
         _close(pw, browser)
 
 
-def test_concurrent_source_submit_preserves_newer_input_without_source_queue():
+def test_concurrent_served_handoff_preserves_newer_source_input_without_queue_write():
     pw, browser, page = _page()
     try:
         result = page.evaluate("""async () => {
@@ -251,12 +288,16 @@ def test_concurrent_source_submit_preserves_newer_input_without_source_queue():
           S.session={session_id:'cron-concurrent', raw_source:'cron', read_only:true}; $('msg').value='first reply';
           window.queueSessionMessage=()=>calls.push('queue');
           window.api=async url=>{calls.push(url); if(url==='/api/session/branch'){await gate;return {session_id:'child-concurrent'};} if(url==='/api/session/draft')return {}; throw new Error(url);};
-          const first=send(); await new Promise(r=>setTimeout(r,20)); $('msg').value='newer source input'; await send(); release(); await first;
-          return {calls:calls.filter(url => ['/api/session/branch','/api/session/draft','queue'].includes(url)), text:$('msg').value, map:_readOnlyForkPayloads.size};
+          const first=send(); await new Promise(r=>setTimeout(r,20)); $('msg').value='newer source input'; _loadingSessionId='other-pane'; await send(); release(); await first;
+          return {calls:calls.filter(url => ['/api/session/branch','/api/session/draft','queue'].includes(url)), text:$('msg').value, loading:_loadingSessionId, map:_readOnlyForkPayloads.size};
         }""")
-        assert result == {"calls":["/api/session/branch","/api/session/draft"], "text":"newer source input", "map":1}
+        assert result == {"calls":["/api/session/branch","/api/session/draft"], "text":"newer source input", "loading":"other-pane", "map":1}
     finally:
         _close(pw, browser)
+
+
+def test_concurrent_source_submit_preserves_newer_input_without_source_queue():
+    test_concurrent_served_handoff_preserves_newer_source_input_without_queue_write()
 
 
 def test_partial_batch_delete_cannot_block_later_cron_handoff():

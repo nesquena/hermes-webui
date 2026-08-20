@@ -1388,6 +1388,17 @@ function _restoreReadOnlyForkPayloadAfterLoad(sid) {
   return _restoreReadOnlyForkPayload(record, sid, _loadSessionGeneration);
 }
 
+function _readOnlyForkHandoffOwnsPane(record, sid) {
+  return _readOnlyForkPayloadVisible(record, sid, record && record.childGeneration);
+}
+
+function _deferReadOnlyForkHandoff(record) {
+  if (!record) return;
+  record.state = 'recovery';
+  _retainReadOnlyForkPayload(record, record.childSid || record.sourceSid);
+  if (typeof renderSessionList === 'function') void renderSessionList();
+}
+
 async function _prepareReadOnlyForkPayload(text, files) {
   const source = S.session;
   const record = {sourceSid:source.session_id, sourceGeneration:_loadSessionGeneration,
@@ -1783,16 +1794,26 @@ async function send(){
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
   catch(e){
     if (_readOnlyForkHandoff) {
-      _readOnlyForkHandoff.state='recovery';
-      _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
-      $('msg').value=_readOnlyForkHandoff.text;
-      S.pendingFiles=[..._readOnlyForkHandoff.files];
-      if(typeof autoResize==='function') autoResize();
-      if(typeof renderTray==='function') renderTray();
+      if (_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+        _readOnlyForkHandoff.state='recovery';
+        _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
+        $('msg').value=_readOnlyForkHandoff.text;
+        S.pendingFiles=[..._readOnlyForkHandoff.files];
+        if(typeof autoResize==='function') autoResize();
+        if(typeof renderTray==='function') renderTray();
+      } else {
+        _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+      }
       setComposerStatus(`Upload error: ${e.message}`);
       return;
     }
     if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}
+  }
+  if (_readOnlyForkHandoff &&
+      (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid) ||
+       String(($('msg') || {}).value || '').trim() || (S.pendingFiles || []).length)) {
+    _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+    return;
   }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
@@ -1825,6 +1846,10 @@ async function send(){
         msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
       }
     }
+  }
+  if (_readOnlyForkHandoff && !_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+    _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+    return;
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
@@ -1911,6 +1936,10 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
+    if (_readOnlyForkHandoff && !_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+      _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+      return;
+    }
     const _modelState=_readOnlyForkHandoff
       ? {model:_readOnlyForkHandoff.model, model_provider:_readOnlyForkHandoff.model_provider}
       : _chatPayloadModelState();
@@ -1965,25 +1994,30 @@ async function send(){
       await _clearComposerDraft(_readOnlyForkHandoff.childSid, _readOnlyForkHandoff.text, []);
       _readOnlyForkPayloads.delete(_readOnlyForkHandoff.childSid);
       _readOnlyForkHandoff.state = 'accepted';
+      if (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) return;
     }
   }catch(e){
     const errMsg=String((e&&e.message)||'');
     if (_readOnlyForkHandoff) {
-      delete INFLIGHT[activeSid];
-      if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      S.messages=S.messages.filter(message=>message!==userMsg);
-      _readOnlyForkHandoff.state='recovery';
-      _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
-      S.busy = false;
-      if (typeof updateSendBtn === 'function') updateSendBtn();
-      if (!$('msg').value && !(S.pendingFiles||[]).length) {
-        $('msg').value=_readOnlyForkHandoff.text;
-        S.pendingFiles=[..._readOnlyForkHandoff.files];
-        if(typeof autoResize==='function') autoResize();
-        if(typeof renderTray==='function') renderTray();
+      if (_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+        delete INFLIGHT[activeSid];
+        if(typeof clearInflightState==='function') clearInflightState(activeSid);
+        S.messages=S.messages.filter(message=>message!==userMsg);
+        _readOnlyForkHandoff.state='recovery';
+        _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
+        S.busy = false;
+        if (typeof updateSendBtn === 'function') updateSendBtn();
+        if (!$('msg').value && !(S.pendingFiles||[]).length) {
+          $('msg').value=_readOnlyForkHandoff.text;
+          S.pendingFiles=[..._readOnlyForkHandoff.files];
+          if(typeof autoResize==='function') autoResize();
+          if(typeof renderTray==='function') renderTray();
+        }
+        if(typeof renderMessages==='function') renderMessages();
+        setComposerStatus(`Error: ${errMsg}`);
+      } else {
+        _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
       }
-      if(typeof renderMessages==='function') renderMessages();
-      setComposerStatus(`Error: ${errMsg}`);
       return;
     }
     // If /api/chat/start returns 404, the session was deleted server-side
