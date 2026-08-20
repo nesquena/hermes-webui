@@ -185,16 +185,25 @@ def test_configured_named_provider_beats_numeric_model_shape():
     assert model == "8080:free"
 
 
-def test_configured_endpoint_beats_named_slug_for_same_shape():
-    """Same ID, opposite config: a real `http://gw:8080` endpoint wins instead."""
+def test_configured_named_provider_beats_endpoint_alias_for_same_shape():
+    """Same ID, same authority, opposite readings: the NAMED provider wins.
+
+    Deep-review 2026-08-18 (route-vs-display): the catalog emits every
+    configured row under its named ``provider_id``, so for
+    ``{name: \"gw\", base_url: \"http://gw:8080/v1\"}`` the row
+    ``@custom:gw:8080:free`` lives under provider ``custom:gw`` with model
+    ``8080:free``. Resolving it to the endpoint-derived alias ``custom:gw:8080``
+    would route the model to a provider the picker never showed (#5511/#6817
+    class). The endpoint reading applies only when NO named slug matches.
+    """
     model, provider, _ = _resolve_with_cfg(
         "@custom:gw:8080:free",
         provider="custom",
         base_url="http://gw:8080/v1",
         custom_providers=[{"name": "gw", "base_url": "http://gw:8080/v1"}],
     )
-    assert provider == "custom:gw:8080"
-    assert model == "free"
+    assert provider == "custom:gw"
+    assert model == "8080:free"
 
 
 # ── Hostile config: a malformed base_url must not break routing ──────────────
@@ -258,18 +267,57 @@ def test_malformed_active_model_base_url_does_not_break_qualified_id_parsing(bad
 
 
 def test_one_malformed_base_url_does_not_hide_its_valid_siblings():
-    """Degrade per-entry, not per-config: the good endpoint still wins the prefix
-    pass even when an unrelated provider carries an unparseable base_url."""
+    """Degrade per-entry, not per-config: the good endpoint's authority slug
+    still wins the endpoint tier even when an unrelated provider carries an
+    unparseable base_url. (Named slug ``custom:other`` is not a prefix of the
+    id, so the endpoint tier is the one being exercised.)"""
     model, provider, _ = _resolve_with_cfg(
-        "@custom:gw:8080:free",
-        base_url="http://gw:8080/v1",
+        "@custom:llm:8080:qwen3",
         custom_providers=[
             {"name": "broken", "base_url": "http://gw:notaport/v1"},
-            {"name": "gw", "base_url": "http://gw:8080/v1"},
+            {"name": "other", "base_url": "http://llm:8080/v1"},
         ],
     )
-    assert provider == "custom:gw:8080"
-    assert model == "free"
+    assert provider == "custom:llm:8080"
+    assert model == "qwen3"
+
+
+def test_catalog_row_resolves_to_the_provider_that_emitted_it():
+    """Route-vs-display round trip (deep-review 2026-08-18): for
+    ``{name: \"gw\", base_url: \"http://gw:8080/v1\", models: [\"8080:free\"]}``
+    the cold catalog emits ``@custom:gw:8080:free`` under provider_id
+    ``custom:gw``. The resolver must hand back the SAME boundary — provider
+    ``custom:gw``, model ``8080:free`` — never the endpoint-derived alias
+    ``custom:gw:8080`` the catalog does not emit."""
+    old_cfg = dict(config.cfg)
+    config.cfg.clear()
+    config.cfg["model"] = {"provider": "openai"}
+    config.cfg["custom_providers"] = [
+        {"name": "gw", "base_url": "http://gw:8080/v1", "models": ["8080:free"]},
+    ]
+    try:
+        catalog = config._static_models_catalog_without_live_probes()
+        groups = catalog.get("groups", [])
+        group = next((g for g in groups if g.get("provider_id") == "custom:gw"), None)
+        assert group is not None, "named custom:gw group missing from the cold catalog"
+        row = next(
+            (m for m in group.get("models", []) if m.get("id") == "@custom:gw:8080:free"),
+            None,
+        )
+        assert row is not None, (
+            f"expected emitted id @custom:gw:8080:free, got {group.get('models')!r}"
+        )
+        model, provider, _ = config.resolve_model_provider(row["id"])
+        assert provider == "custom:gw", (
+            "resolver must return the provider_id the catalog emitted the row "
+            f"under, got {provider!r}"
+        )
+        assert model == "8080:free", (
+            f"model boundary must match the catalog row, got {model!r}"
+        )
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
 
 
 # ── Frontend: getModelLabel() fallback mirrors the same grammar ──────────────
