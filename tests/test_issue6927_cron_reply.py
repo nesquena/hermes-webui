@@ -154,6 +154,31 @@ def test_child_draft_failure_keeps_complete_payload():
         _close(pw, browser)
 
 
+def test_failed_child_draft_transfers_concurrent_reply_to_child_queue():
+    pw, browser, page = _page()
+    try:
+        result = page.evaluate("""async () => {
+          const calls=[]; let release; const gate=new Promise(r=>release=r);
+          const originalQueueSessionMessage=window.queueSessionMessage;
+          window.queueSessionMessage=(sid,payload)=>{calls.push(['queue',sid]); return originalQueueSessionMessage(sid,payload);};
+          S.session={session_id:'cron-draft-queue',raw_source:'cron',read_only:true}; $('msg').value='first draft queue reply';
+          window.api=async url=>{calls.push(url); if(url==='/api/session/branch')return {session_id:'child-draft-queue'}; if(url==='/api/session/draft'){await gate;throw new Error('draft failed');} throw new Error(url);};
+          const first=send();
+          await new Promise(r=>setTimeout(r,30));
+          $('msg').value='second draft queue reply';
+          await send();
+          release();
+          await first;
+          return {calls,source:_getSessionQueue('cron-draft-queue',false).length,child:_getSessionQueue('child-draft-queue',false).map(entry=>entry.text),map:_readOnlyForkPayloads.size};
+        }""")
+        assert result == {
+            "calls":["/api/session/branch","/api/session/draft",["queue","cron-draft-queue"],["queue","child-draft-queue"]],
+            "source":0,"child":["second draft queue reply"],"map":0,
+        }
+    finally:
+        _close(pw, browser)
+
+
 def test_handoff_preserves_text_and_live_file_through_child_load():
     pw, browser, page = _page()
     try:

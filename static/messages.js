@@ -1486,8 +1486,9 @@ function _queueReadOnlyForkConcurrentSend(record, text, files) {
 }
 
 function _transferReadOnlyForkConcurrentQueue(record) {
-  if (!record || !record.childSid || typeof SESSION_QUEUES === 'undefined') return;
+  if (!record || !record.childSid) return;
   record.concurrentQueueTargetSid = record.childSid;
+  if (typeof SESSION_QUEUES === 'undefined') return;
   const sourceQueue = SESSION_QUEUES[record.sourceSid];
   if (!Array.isArray(sourceQueue)) return;
   const handoffQueue = sourceQueue.filter(entry => entry && entry._readOnlyForkQueuedFor === record.sourceSid);
@@ -1511,8 +1512,14 @@ function _transferReadOnlyForkConcurrentQueue(record) {
   }
 }
 
+function _recoverReadOnlyForkConcurrentQueue(record) {
+  if (!record || !record.childSid) return;
+  _transferReadOnlyForkConcurrentQueue(record);
+}
+
 function _deferReadOnlyForkHandoff(record) {
   if (!record) return;
+  _recoverReadOnlyForkConcurrentQueue(record);
   record.state = 'recovery';
   _retainReadOnlyForkPayload(record, record.childSid || record.sourceSid);
   if (typeof renderSessionList === 'function') void renderSessionList();
@@ -1542,6 +1549,7 @@ async function _prepareReadOnlyForkPayload(text, files) {
     record.state = 'child-draft-owned';
   } catch (error) {
     const recoverySid = record.state === 'drafting' ? record.sourceSid : (record.childSid || record.sourceSid);
+    _recoverReadOnlyForkConcurrentQueue(record);
     record.state = 'recovery';
     if (!_restoreReadOnlyForkPayload(record, recoverySid, record.sourceGeneration)) {
       _retainReadOnlyForkPayload(record, recoverySid);
@@ -1566,13 +1574,14 @@ async function _prepareReadOnlyForkPayload(text, files) {
   S.session = null;
   try { await loadSession(record.childSid, {preserveActiveInput:true}); }
   catch (error) {
-    S.session = sourceSession; record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid);
+    S.session = sourceSession; _recoverReadOnlyForkConcurrentQueue(record); record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid);
     if (typeof showToast === 'function' && _readOnlyForkHandoffOwnsPane(record, record.childSid)) {
       showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
     }
     return null;
   }
   if (_sessionLoadFailureGeneration > failureBeforeLoad && _sessionLoadFailureSid === record.childSid) {
+    _recoverReadOnlyForkConcurrentQueue(record);
     record.state = 'recovery';
     _retainReadOnlyForkPayload(record, record.childSid);
     if (typeof showToast === 'function' && _readOnlyForkHandoffOwnsPane(record, record.childSid)) {
@@ -1581,7 +1590,7 @@ async function _prepareReadOnlyForkPayload(text, files) {
     return null;
   }
   if (!S.session || S.session.session_id !== record.childSid || _loadingSessionId) {
-    record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
+    _recoverReadOnlyForkConcurrentQueue(record); record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
   }
   _transferReadOnlyForkConcurrentQueue(record);
   record.childGeneration = _loadSessionGeneration > generationBeforeLoad ? _loadSessionGeneration : null;
