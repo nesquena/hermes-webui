@@ -12275,6 +12275,24 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/login":
+        # When no authentication mechanism is configured, `/login` is not a
+        # login surface: continuing to the requested local path is the only
+        # useful action.  Keep the target subject to the usual open-redirect
+        # validation.
+        from api.auth import is_auth_enabled
+
+        if not is_auth_enabled():
+            next_path = _safe_login_redirect_path(
+                parse_qs(parsed.query or "").get("next", [""])[0]
+            )
+            handler.send_response(302)
+            handler.send_header("Location", next_path)
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Content-Length", "0")
+            _security_headers(handler)
+            handler.end_headers()
+            return True
+
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         _lang = _settings.get("language", "en")

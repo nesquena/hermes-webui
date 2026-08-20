@@ -11870,20 +11870,23 @@ function _syncPasswordlessButton(authStatus){
   btn.disabled=!can;
 }
 
+function _settingsAuthStatusDescriptor(authStatus){
+  if(authStatus.auth_enabled && authStatus.password_auth_enabled){
+    return {labelKey:'auth_status_password',cls:'detail-badge ok'};
+  }else if(authStatus.auth_enabled && authStatus.oidc_enabled){
+    return {labelKey:'auth_status_oidc_only',cls:'detail-badge ok'};
+  }else if(authStatus.auth_enabled && !authStatus.password_auth_enabled){
+    return {labelKey:'auth_status_passkey_only',cls:'detail-badge warn'};
+  }
+  return {labelKey:'auth_status_unauthenticated',cls:'detail-badge err'};
+}
 function _renderSettingsAuthStatus(authStatus){
   const el=$('settingsAuthStatus');
   if(!el) return;
   if(!authStatus) { el.style.display='none'; return; }
   el.style.display='block';
-  let label='',cls='detail-badge ok';
-  if(authStatus.auth_enabled && authStatus.password_auth_enabled){
-    label=t('auth_status_password'); cls='detail-badge ok';
-  }else if(authStatus.auth_enabled && !authStatus.password_auth_enabled){
-    label=t('auth_status_passkey_only'); cls='detail-badge warn';
-  }else{
-    label=t('auth_status_unauthenticated'); cls='detail-badge err';
-  }
-  el.innerHTML='<span class="'+cls+'" style="font-size:11px">'+label+'</span>';
+  const status=_settingsAuthStatusDescriptor(authStatus);
+  el.innerHTML='<span class="'+status.cls+'" style="font-size:11px">'+t(status.labelKey)+'</span>';
 }
 
 function _updateCurrentPasswordVisibility(){
