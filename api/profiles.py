@@ -2138,7 +2138,7 @@ def list_profiles_api() -> list:
             enabled_count, total_count = _get_profile_skills_stats(p.path)
             result.append({
                 'name': p.name,
-                'display_name': str(getattr(p, 'display_name', '') or '').strip()
+                'display_name': _normalize_display_name(getattr(p, 'display_name', ''))
                     or _profile_display_name_from_meta(p.path),
                 'path': str(p.path),
                 'is_default': p.is_default,
@@ -2192,7 +2192,21 @@ def _profile_display_name_from_meta(profile_path: Path) -> str:
     if not isinstance(data, dict):
         return ''
     display_name = data.get('display_name')
-    return str(display_name).strip() if display_name else ''
+    return _normalize_display_name(display_name)
+
+
+def _normalize_display_name(value) -> str:
+    """Return ``value.strip()`` when it is a real string, else ''.
+
+    A non-string ``display_name`` in profile.yaml (e.g. ``[friendly]``
+    parsed as a list, or an integer) must fall back to the canonical label
+    instead of being stringified as ``['friendly']`` / ``42`` (review
+    #7156). ``str(...)`` on a truthy non-string is exactly the bug this
+    guards against — only strings are valid presentation labels.
+    """
+    if not isinstance(value, str):
+        return ''
+    return value.strip()
 
 
 def _default_profile_dict() -> dict:

@@ -120,6 +120,36 @@ class TestApiPayload:
         assert result["malformed"]["display_name"] == ""
         assert result["empty"]["display_name"] == ""
 
+    def test_display_name_non_string_falls_back_to_canonical(self, monkeypatch, tmp_path):
+        """Review #7156: a non-string display_name (list / int / dict in
+        profile.yaml, or a non-string ProfileInfo attr) must render as the
+        bare canonical label — never stringified garbage like
+        '['friendly'] (default)' or '42 (default)'."""
+        cases = {}
+        for name, raw in (("list-name", "[friendly]"), ("int-name", "42"),
+                          ("dict-name", "{friendly: true}")):
+            pdir = tmp_path / "profiles" / name
+            pdir.mkdir(parents=True)
+            (pdir / "profile.yaml").write_text(
+                f"display_name: {raw}\n", encoding="utf-8")
+            cases[name] = pdir
+        rows = [_profile_row(n, d) for n, d in cases.items()]
+        result = {row["name"]: row for row in _call_list_profiles_api(monkeypatch, rows)}
+
+        for name in cases:
+            assert result[name]["display_name"] == "", (
+                f"non-string display_name in {name} must fall back to '' "
+                f"(got {result[name]['display_name']!r})")
+
+    def test_display_name_upstream_attr_non_string_falls_back(self, monkeypatch, tmp_path):
+        """Review #7156: same fallback when ProfileInfo.display_name is a
+        non-string (upstream attr path)."""
+        pdir = tmp_path / "profiles" / "int-attr"
+        pdir.mkdir(parents=True)
+        rows = [_profile_row("int-attr", pdir, display_name=42)]
+        result = {row["name"]: row for row in _call_list_profiles_api(monkeypatch, rows)}
+        assert result["int-attr"]["display_name"] == ""
+
     def test_default_profile_dict_includes_display_name_key(self, monkeypatch):
         import api.profiles as profiles
 
