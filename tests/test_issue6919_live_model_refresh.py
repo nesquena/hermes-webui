@@ -354,6 +354,85 @@ globalThis.eval({json.dumps(bundle)});
     assert kinds.index("live") < kinds.index("rebuild-start") < kinds.index("rebuild-end") < kinds.index("toast")
 
 
+def test_required_live_model_request_failure_uses_localized_translation_key():
+    source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    cache_key = _extract_js_function(source, "function _liveModelCacheKey(")
+    fetch_live = _extract_js_function(source, "async function _fetchLiveModels(")
+    bundle = (
+        "globalThis._liveModelCache={}; globalThis._liveModelCacheGen={}; "
+        "globalThis._liveModelFetchPending=new Set(); globalThis._modelDropdownRequestSeq=0; "
+        "globalThis.S={activeProfile:'default'}; "
+        "globalThis.document={baseURI:'http://localhost/'}; globalThis._redirectIfUnauth=()=>false; "
+        "globalThis._addLiveModelsToSelect=()=>0; globalThis.syncModelChip=()=>{}; "
+        + cache_key
+        + "\n"
+        + fetch_live
+        + "\nglobalThis.runFetch=_fetchLiveModels;"
+    )
+    script = f"""
+const requested = [];
+globalThis.t = key => {{ requested.push(key); return `localized:${{key}}`; }};
+globalThis.fetch = async () => ({{ok:false, json:async () => ({{}})}});
+globalThis.eval({json.dumps(bundle)});
+(async () => {{
+  try {{ await globalThis.runFetch('provider', null, null, {{required:true}}); }}
+  catch (error) {{ console.log(JSON.stringify({{requested, message:error.message}})); }}
+}})();
+"""
+    result = _run_node(script)
+    assert result == {
+        "requested": ["providers_live_models_request_failed"],
+        "message": "localized:providers_live_models_request_failed",
+    }
+
+
+def test_required_empty_live_models_uses_localized_translation_key():
+    source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    cache_key = _extract_js_function(source, "function _liveModelCacheKey(")
+    fetch_live = _extract_js_function(source, "async function _fetchLiveModels(")
+    bundle = (
+        "globalThis._liveModelCache={}; globalThis._liveModelCacheGen={}; "
+        "globalThis._liveModelFetchPending=new Set(); globalThis._modelDropdownRequestSeq=0; "
+        "globalThis.S={activeProfile:'default'}; "
+        "globalThis.document={baseURI:'http://localhost/'}; globalThis._redirectIfUnauth=()=>false; "
+        "globalThis._addLiveModelsToSelect=()=>0; globalThis.syncModelChip=()=>{}; "
+        + cache_key
+        + "\n"
+        + fetch_live
+        + "\nglobalThis.runFetch=_fetchLiveModels;"
+    )
+    script = f"""
+const requested = [];
+globalThis.t = key => {{ requested.push(key); return `localized:${{key}}`; }};
+globalThis.fetch = async () => ({{ok:true, json:async () => ({{models:[]}})}});
+globalThis.eval({json.dumps(bundle)});
+(async () => {{
+  try {{ await globalThis.runFetch('provider', null, null, {{required:true}}); }}
+  catch (error) {{ console.log(JSON.stringify({{requested, message:error.message}})); }}
+}})();
+"""
+    result = _run_node(script)
+    assert result == {
+        "requested": ["providers_live_models_empty"],
+        "message": "localized:providers_live_models_empty",
+    }
+
+
+def test_partial_locale_falls_back_to_english_provider_refresh_messages():
+    source_path = str(REPO / "static" / "i18n.js")
+    script = f"""
+const source = require('fs').readFileSync({json.dumps(source_path)}, 'utf8');
+const localeCheck = source + "\\nglobalThis.runLocaleCheck=()=>{{setLocale('es'); return {{request:t('providers_live_models_request_failed'), empty:t('providers_live_models_empty'), english:LOCALES.en}};}};";
+globalThis.localStorage = {{getItem: () => null, setItem: () => {{}}}};
+globalThis.document = {{documentElement: {{lang: ''}}, querySelectorAll: () => []}};
+globalThis.eval(localeCheck);
+console.log(JSON.stringify(globalThis.runLocaleCheck()));
+"""
+    result = _run_node(script)
+    assert result["request"] == result["english"]["providers_live_models_request_failed"]
+    assert result["empty"] == result["english"]["providers_live_models_empty"]
+
+
 def test_browser_refresh_fences_stale_live_lookup():
     source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
     cache_key = _extract_js_function(source, "function _liveModelCacheKey(")

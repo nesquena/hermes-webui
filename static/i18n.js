@@ -1275,6 +1275,8 @@ const LOCALES = {
     providers_refresh_models: 'Refresh models',
     providers_refreshing: 'Refreshing…',
     providers_models_refreshed: 'Models refreshed',
+    providers_live_models_request_failed: 'Couldn’t refresh this provider’s models. Try again.',
+    providers_live_models_empty: 'No fresh models were returned. Check the provider and try again.',
     providers_remove: 'Remove',
     providers_saving: 'Saving…',
     providers_removing: 'Removing…',

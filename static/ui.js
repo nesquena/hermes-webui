@@ -3752,11 +3752,11 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(_redirectIfUnauth(_liveRes)) return;
-    if(!_liveRes.ok) throw new Error('Live model request failed');
+    if(!_liveRes.ok) throw new Error(t('providers_live_models_request_failed'));
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(!data.models||!data.models.length){
-      if(required) throw new Error('Fresh live models were not returned');
+      if(required) throw new Error(t('providers_live_models_empty'));
       return;
     }
     if(generation!==(_liveModelCacheGen[cacheKey]||0)) return;
