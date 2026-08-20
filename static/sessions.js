@@ -260,8 +260,8 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 }
 
 // Immediate save used before session switches.
-function _saveComposerDraftNow(sid, text, files) {
-  if (!sid) return Promise.resolve();
+function _saveComposerDraftNow(sid, text, files, opts={}) {
+  if (!sid) return Promise.resolve(true);
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -275,14 +275,18 @@ function _saveComposerDraftNow(sid, text, files) {
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
       && !_composerDraftKnownPayloadSessions.has(sid)) {
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
   return api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+    return true;
+  }).catch((error) => {
+    if (opts && opts.throwOnError) throw error;
+    return false;
+  });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -2371,6 +2375,9 @@ async function loadSession(sid){
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+  }
+  if (typeof _restoreReadOnlyForkPayloadAfterLoad === 'function') {
+    _restoreReadOnlyForkPayloadAfterLoad(sid);
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).

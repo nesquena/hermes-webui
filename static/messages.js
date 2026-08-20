@@ -1347,6 +1347,99 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// Live File objects cannot cross the server draft boundary. This cache is
+// passive recovery only, keyed by exactly one source or child SID at a time.
+const _readOnlyForkPayloads = new Map();
+
+function _readOnlyForkPayloadVisible(record, sid, generation) {
+  return !!(record && S.session && S.session.session_id === sid &&
+    (!_loadingSessionId || _loadingSessionId === sid) &&
+    (!Number.isFinite(generation) || _loadSessionGeneration === generation));
+}
+
+function _retainReadOnlyForkPayload(record, sid) {
+  _readOnlyForkPayloads.delete(record.sourceSid);
+  if (record.childSid) _readOnlyForkPayloads.delete(record.childSid);
+  _readOnlyForkPayloads.set(sid, record);
+}
+
+function _restoreReadOnlyForkPayload(record, sid, generation) {
+  if (!_readOnlyForkPayloadVisible(record, sid, generation)) return false;
+  const input = $('msg');
+  if (!input || String(input.value || '').trim() || (S.pendingFiles || []).length) return false;
+  input.value = record.text;
+  S.pendingFiles = [...record.files];
+  if (typeof autoResize === 'function') autoResize();
+  if (typeof renderTray === 'function') renderTray();
+  _readOnlyForkPayloads.delete(sid);
+  return true;
+}
+
+function _restoreReadOnlyForkPayloadAfterLoad(sid) {
+  const record = _readOnlyForkPayloads.get(sid);
+  if (!record || record.state !== 'recovery') return false;
+  return _restoreReadOnlyForkPayload(record, sid, _loadSessionGeneration);
+}
+
+async function _prepareReadOnlyForkPayload(text, files) {
+  const source = S.session;
+  const record = {sourceSid:source.session_id, sourceGeneration:_loadSessionGeneration,
+    childSid:null, text:String(text || ''), files:Array.isArray(files) ? [...files] : [],
+    serializableFiles:typeof _composerDraftFilesForPersist === 'function' ? _composerDraftFilesForPersist(files) : [],
+    model:source.model || '', model_provider:source.model_provider || null,
+    explicitModelPick:typeof _readPendingSessionModel === 'function' ? _readPendingSessionModel(source.session_id) : null,
+    profile:S.activeProfile || source.profile || 'default', workspace:source.workspace || null,
+    state:'branching'};
+  _retainReadOnlyForkPayload(record, record.sourceSid);
+  $('msg').value = ''; S.pendingFiles = [];
+  if (typeof autoResize === 'function') autoResize();
+  if (typeof renderTray === 'function') renderTray();
+  try {
+    const branch = await api('/api/session/branch', {method:'POST', retries:0,
+      body:JSON.stringify({session_id:record.sourceSid})});
+    if (!branch || !branch.session_id) throw new Error('branch failure before child SID');
+    record.childSid = branch.session_id;
+    record.state = 'drafting';
+    _retainReadOnlyForkPayload(record, record.childSid);
+    await _saveComposerDraftNow(record.childSid, record.text, record.files, {throwOnError:true});
+    record.state = 'child-draft-owned';
+  } catch (error) {
+    const recoverySid = record.state === 'drafting' ? record.sourceSid : (record.childSid || record.sourceSid);
+    record.state = 'recovery';
+    if (!_restoreReadOnlyForkPayload(record, recoverySid, record.sourceGeneration)) {
+      _retainReadOnlyForkPayload(record, recoverySid);
+    }
+    if (typeof showToast === 'function') showToast(`Fork failed: ${error && error.message || error}`, 4000);
+    return null;
+  }
+  const sourceStillOwns = _readOnlyForkPayloadVisible(record, record.sourceSid, record.sourceGeneration);
+  const newerSourceInput = sourceStillOwns && (String(($('msg') || {}).value || '').trim() || (S.pendingFiles || []).length);
+  if (!sourceStillOwns || newerSourceInput) {
+    record.state = 'recovery';
+    _retainReadOnlyForkPayload(record, record.childSid);
+    if (typeof renderSessionList === 'function') void renderSessionList();
+    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_forked') : 'Fork created', 3000);
+    return null;
+  }
+  const sourceSession = S.session;
+  const generationBeforeLoad = _loadSessionGeneration;
+  S.session = null;
+  try { await loadSession(record.childSid); }
+  catch (error) {
+    S.session = sourceSession; record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
+  }
+  if (!S.session || S.session.session_id !== record.childSid || _loadingSessionId) {
+    record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
+  }
+  record.childGeneration = _loadSessionGeneration > generationBeforeLoad ? _loadSessionGeneration : null;
+  if ((String(($('msg') || {}).value || '').trim() && String(($('msg') || {}).value || '') !== record.text) || (S.pendingFiles || []).length) {
+    record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
+  }
+  _restoreReadOnlyForkPayload(record, record.childSid, record.childGeneration);
+  _retainReadOnlyForkPayload(record, record.childSid);
+  return record;
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1355,6 +1448,8 @@ async function send(){
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
+    if (S.session && (S.session.read_only || S.session.is_read_only) &&
+        typeof _isBranchableReadOnlySession === 'function' && _isBranchableReadOnlySession(S.session)) return;
     const _text=_composerTextWithPendingSelections().trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
@@ -1402,6 +1497,22 @@ async function send(){
   }
 
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  let _readOnlyForkHandoff = null;
+  if (S.session && (S.session.read_only || S.session.is_read_only)) {
+    const parsed = typeof parseCommand === 'function' ? parseCommand(text) : null;
+    const branchable = typeof _isBranchableReadOnlySession === 'function' && _isBranchableReadOnlySession(S.session);
+    if (branchable && !parsed && !(S.busy || compressionRunning)) {
+      _readOnlyForkHandoff = await _prepareReadOnlyForkPayload(text, S.pendingFiles);
+      if (!_readOnlyForkHandoff) return;
+      text = _readOnlyForkHandoff.text;
+    } else if (branchable && parsed && parsed.name === 'branch') {
+      const command = typeof COMMANDS !== 'undefined' && COMMANDS.find(c => c.name === 'branch');
+      if (command) { $('msg').value = ''; await command.fn(parsed.args); return; }
+    } else {
+      if (typeof showToast === 'function') showToast(parsed ? 'Read-only commands cannot be modified.' : 'Read-only sessions cannot be modified.', 3000);
+      return;
+    }
+  }
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
@@ -1462,10 +1573,6 @@ async function send(){
         showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
       }
     }
-    return;
-  }
-  if(S.session&&(S.session.read_only||S.session.is_read_only)){
-    if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
   let _slashDisplayTextOverride=null;
@@ -1644,12 +1751,24 @@ async function send(){
   // window is not clobbered by a delayed text:'' post. Keep the promise so the
   // #5472 failed-send restore can chain its re-persist after this clear resolves.
   let _composerDraftClearPromise=null;
-  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  if (activeSid && typeof _clearComposerDraft === 'function' && !_readOnlyForkHandoff) _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){
+    if (_readOnlyForkHandoff) {
+      _readOnlyForkHandoff.state='recovery';
+      _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
+      $('msg').value=_readOnlyForkHandoff.text;
+      S.pendingFiles=[..._readOnlyForkHandoff.files];
+      if(typeof autoResize==='function') autoResize();
+      if(typeof renderTray==='function') renderTray();
+      setComposerStatus(`Upload error: ${e.message}`);
+      return;
+    }
+    if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}
+  }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1767,11 +1886,13 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
-    const _modelState=_chatPayloadModelState();
+    const _modelState=_readOnlyForkHandoff
+      ? {model:_readOnlyForkHandoff.model, model_provider:_readOnlyForkHandoff.model_provider}
+      : _chatPayloadModelState();
     modelStateForPostStart=_modelState;
-    const _pendingPick=(typeof _readPendingSessionModel==='function')
-      ? _readPendingSessionModel(activeSid)
-      : null;
+    const _pendingPick=_readOnlyForkHandoff
+      ? _readOnlyForkHandoff.explicitModelPick
+      : (typeof _readPendingSessionModel==='function' ? _readPendingSessionModel(activeSid) : null);
     const _pendingPickMatch=_pendingPick
       && _pendingPick.model===_modelState.model
       && String(_pendingPick.model_provider||'')===String(_modelState.model_provider||'');
@@ -1797,21 +1918,44 @@ async function send(){
     // pick. (#3739/#3737, Codex catch)
     if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     explicitPickForPostStart=_explicitPick;
-    const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+    const startOptions={method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
+      model:_modelState.model,workspace:_readOnlyForkHandoff ? _readOnlyForkHandoff.workspace : S.session.workspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:_readOnlyForkHandoff ? _readOnlyForkHandoff.profile : S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
-    })});
+    })};
+    if (_readOnlyForkHandoff) startOptions.retries = 0;
+    const startData=await api('/api/chat/start',startOptions);
     _pendingMoaConfig=null;
     postStartData = startData;
+    if (_readOnlyForkHandoff) {
+      await _clearComposerDraft(_readOnlyForkHandoff.childSid, _readOnlyForkHandoff.text, []);
+      _readOnlyForkPayloads.delete(_readOnlyForkHandoff.childSid);
+      _readOnlyForkHandoff.state = 'accepted';
+    }
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    if (_readOnlyForkHandoff) {
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      S.messages=S.messages.filter(message=>message!==userMsg);
+      _readOnlyForkHandoff.state='recovery';
+      _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
+      if (!$('msg').value && !(S.pendingFiles||[]).length) {
+        $('msg').value=_readOnlyForkHandoff.text;
+        S.pendingFiles=[..._readOnlyForkHandoff.files];
+        if(typeof autoResize==='function') autoResize();
+        if(typeof renderTray==='function') renderTray();
+      }
+      if(typeof renderMessages==='function') renderMessages();
+      setComposerStatus(`Error: ${errMsg}`);
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not
