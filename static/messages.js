@@ -1395,6 +1395,19 @@ function _captureReadOnlyForkInputForSid(sid, text, files) {
   return true;
 }
 
+function _isReadOnlyForkOriginalInputForSid(sid, text, files) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  if (!record || record.childSid !== sid) return false;
+  const currentFiles = Array.isArray(files) ? files : [];
+  return String(text || '') === record.text && currentFiles.length === record.files.length &&
+    currentFiles.every((file, index) => file === record.files[index]);
+}
+
+function _isReadOnlyForkSendActiveForSid(sid) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  return !!(record && record.childSid === sid && record.sendActive);
+}
+
 function _retryReadOnlyForkDraftClear(record) {
   if (!record || !record.childSid) return;
   let attempts = 0;
@@ -1548,6 +1561,7 @@ async function send(){
     return;
   }
   _sendInProgress = true;
+  let _readOnlyForkHandoff = null;
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
@@ -1579,13 +1593,13 @@ async function send(){
   }
 
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
-  let _readOnlyForkHandoff = null;
   if (S.session && (S.session.read_only || S.session.is_read_only)) {
     const parsed = typeof parseCommand === 'function' ? parseCommand(text) : null;
     const branchable = typeof _isBranchableReadOnlySession === 'function' && _isBranchableReadOnlySession(S.session);
     if (branchable && !parsed && !(S.busy || compressionRunning)) {
       _readOnlyForkHandoff = await _prepareReadOnlyForkPayload(text, S.pendingFiles);
       if (!_readOnlyForkHandoff) return;
+      _readOnlyForkHandoff.sendActive = true;
       text = _readOnlyForkHandoff.text;
     } else if (branchable && parsed && parsed.name === 'branch') {
       const command = typeof COMMANDS !== 'undefined' && COMMANDS.find(c => c.name === 'branch');
@@ -2227,7 +2241,10 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    if (_readOnlyForkHandoff) _readOnlyForkHandoff.sendActive = false;
+    _sendInProgress=false; _sendInProgressSid=null;
+  }
 }
 
 async function startRegeneration(sessionId, regenerationRevision){

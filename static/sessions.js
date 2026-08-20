@@ -315,6 +315,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
+  const currentFiles = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
@@ -327,7 +328,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // composer is the authoritative in-progress draft; never replace non-empty
   // local input with an older server draft. Cross-session switches still restore
   // normally so the previous session's composer contents do not leak forward.
-  if (preserveActiveInput && current && current !== text) return;
+  if (preserveActiveInput && ((current && current !== text) || currentFiles.length)) return;
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
@@ -1786,14 +1787,18 @@ async function loadSession(sid){
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     const _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(currentSid);
-    const _currentDraftText = ($('msg') || {}).value || '';
-    const _currentDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
+  const _currentDraftText = ($('msg') || {}).value || '';
+  const _currentDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
     if (typeof _captureReadOnlyForkInputForSid === 'function') {
       _captureReadOnlyForkInputForSid(currentSid, _currentDraftText, _currentDraftFiles);
     }
-    if (_handoffChildPayload && (_currentDraftText || _currentDraftFiles.length) &&
-        typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(currentSid);
-    if (!_handoffChildPayload || _currentDraftText || _currentDraftFiles.length) {
+    const _handoffOriginalInput = _handoffChildPayload && typeof _isReadOnlyForkOriginalInputForSid === 'function' &&
+      _isReadOnlyForkOriginalInputForSid(currentSid, _currentDraftText, _currentDraftFiles);
+    const _handoffSendActive = _handoffChildPayload && typeof _isReadOnlyForkSendActiveForSid === 'function' &&
+      _isReadOnlyForkSendActiveForSid(currentSid);
+    const _handoffInputChanged = !_handoffOriginalInput && (_currentDraftText || _currentDraftFiles.length || !_handoffSendActive);
+    if (_handoffChildPayload && _handoffInputChanged && typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(currentSid);
+    if (!_handoffChildPayload || _handoffInputChanged) {
       await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
     }
     // The awaited draft save above yields the event loop. If another
