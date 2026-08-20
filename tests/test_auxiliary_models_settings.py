@@ -1092,3 +1092,38 @@ class TestAuxiliaryModelsBackend:
         assert saved.get("provider") == "auto", (
             f"ambiguous aux save must not persist, got {saved!r}"
         )
+
+    def test_aux_slot_parenthesized_name_collision_fails_closed(self, monkeypatch, tmp_path):
+        """Finding #1 on the aux persistence path: a parenthesized-name collision
+        that a looser slug key MISSED ('Foo (Bar)' vs 'foo-bar', both producing
+        custom:foo-bar) must also fail closed on save.
+
+        This is the case the earlier collision key got wrong: it normalized
+        'Foo (Bar)' to 'foo-(bar)' and never saw the collision, so the aux save
+        could persist endpoint A while the credential lookup later returned B.
+        """
+        import yaml
+
+        from api import config
+
+        shared_cfg = {
+            "auxiliary": {"vision": {"provider": "auto", "model": ""}},
+            "custom_providers": [
+                {"name": "Foo (Bar)", "base_url": "https://a.example/v1"},
+                {"name": "foo-bar", "base_url": "https://b.example/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.set_auxiliary_model("vision", "custom:foo-bar", "shared-model")
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved.get("provider") == "auto", (
+            f"ambiguous aux save must not persist, got {saved!r}"
+        )

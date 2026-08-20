@@ -520,6 +520,138 @@ def test_resolve_custom_provider_connection_collision_fails_closed(monkeypatch):
         config.resolve_custom_provider_connection('custom:foo-bar')
 
 
+# ── Finding #1: one canonical slug identity (_custom_provider_slug_from_name) ──
+# The collision key MUST match the slug PRODUCER. A parenthesized / punctuated
+# name is where a looser key diverged: 'Foo (Bar)' is produced as custom:foo-bar
+# but a naive lower+space/underscore key yields 'foo-(bar)' — so the collision
+# with a literal 'foo-bar' entry was MISSED, reintroducing the original bug
+# (endpoint A + credential B) for these names. These regressions collide two
+# names ONLY via the producer.
+
+def test_slug_key_matches_producer_for_parenthesized_name():
+    """The collision key derives from the SAME producer that mints the returned
+    slug, so genuinely-colliding names are seen as identical."""
+    assert config._custom_provider_slug_from_name('Foo (Bar)') == 'custom:foo-bar'
+    assert config._custom_provider_slug_from_name('foo-bar') == 'custom:foo-bar'
+    # Both map to the same bare collision key.
+    assert config._custom_provider_slug_key('Foo (Bar)') == config._custom_provider_slug_key('foo-bar')
+    assert config._custom_provider_slug_key('custom:foo-bar') == 'foo-bar'
+
+
+def _parenthesized_collision_providers():
+    # 'Foo (Bar)' and 'foo-bar' BOTH produce custom:foo-bar, but only collide
+    # under the producer's normalization (a looser key would miss them).
+    return [
+        {'name': 'Foo (Bar)', 'base_url': 'https://a.example/v1', 'api_key': 'key-A',
+         'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'api_key': 'key-B',
+         'models': ['shared-model']},
+    ]
+
+
+def test_parenthesized_name_collision_fails_closed_bare_resolution():
+    """Finding #1: bare resolution must fail closed on a producer-level collision
+    that a looser key missed ('Foo (Bar)' vs 'foo-bar')."""
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            base_url='https://b.example/v1',
+            custom_providers=_parenthesized_collision_providers(),
+        )
+
+
+def test_parenthesized_name_collision_fails_closed_qualified_hint():
+    """Finding #1: the @custom:<slug>:model qualified path must also catch the
+    parenthesized-name collision."""
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {'default': 'shared-model', 'provider': 'custom',
+                           'base_url': 'https://a.example/v1'}
+    config.cfg['custom_providers'] = _parenthesized_collision_providers()
+    try:
+        encoded = config.model_with_provider_context('shared-model', 'custom:foo-bar')
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.resolve_model_provider(encoded)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_parenthesized_name_collision_fails_closed_credential_boundary(monkeypatch):
+    """Finding #1: the credential lookup must fail closed on the parenthesized
+    collision so endpoint and key can never split."""
+    monkeypatch.setattr(
+        config, 'get_config',
+        lambda: {'custom_providers': _parenthesized_collision_providers()},
+    )
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        config.resolve_custom_provider_connection('custom:foo-bar')
+
+
+# ── Finding #2: the ambiguity check runs only at the point of return, so an
+# unrelated collision never blocks a request that resolves to a DIFFERENT
+# provider. With a colliding slug ACTIVE, unrelated lanes must still route.
+
+def _collision_plus_safe_lane_config():
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {
+        'default': 'shared-model',
+        'provider': 'custom:foo-bar',  # the ACTIVE provider is the colliding slug
+        'base_url': 'https://b.example/v1',
+    }
+    # 'Foo Bar' + 'foo-bar' collide under BOTH the old and new normalizers, so
+    # the PRE-FIX up-front check reproduces the over-block (every lane raises);
+    # the fix moves the check to the point of return so only the colliding lane
+    # fails. (Parenthesized-name collisions are covered by the finding #1 tests.)
+    config.cfg['custom_providers'] = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+        {'name': 'safe-provider', 'base_url': 'https://safe.example/v1',
+         'models': ['safe-model']},
+    ]
+    return old_cfg
+
+
+def test_unrelated_openrouter_lane_not_blocked_by_active_collision():
+    """Finding #2: an @openrouter hint must resolve even though the ACTIVE custom
+    slug (custom:foo-bar) is ambiguous — the check must not run up front."""
+    old_cfg = _collision_plus_safe_lane_config()
+    try:
+        model, provider, _base = config.resolve_model_provider('@openrouter:gpt-x')
+        assert provider == 'openrouter', provider
+        assert model == 'gpt-x', model
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_unrelated_custom_lane_not_blocked_by_active_collision():
+    """Finding #2: a DIFFERENT, non-colliding @custom:safe-provider hint must
+    resolve even though the active slug collides."""
+    old_cfg = _collision_plus_safe_lane_config()
+    try:
+        encoded = config.model_with_provider_context('safe-model', 'custom:safe-provider')
+        model, provider, base_url = config.resolve_model_provider(encoded)
+        assert provider == 'custom:safe-provider', provider
+        assert model == 'safe-model', model
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_active_collision_still_fails_closed_for_owned_model():
+    """Finding #2 counterpart: when the request DOES resolve to the colliding
+    active slug (its owned default model), it must still fail closed — the
+    point-of-return check fires exactly when the slug is consumed."""
+    old_cfg = _collision_plus_safe_lane_config()
+    try:
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.resolve_model_provider('shared-model')
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
 # ── #3872: bare ``custom`` provider is a vendor-routing proxy — preserve the
 #    full model id (the prefix is intrinsic). #433's redundant-prefix strip is
 #    scoped to real first-party providers (provider=openai + proxy base_url),

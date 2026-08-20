@@ -26229,6 +26229,16 @@ def _handle_handoff_summary(handler, body):
             "type": "agent_runtime_stale",
             "retryable": True,
         }, status=409)
+    except api_config.AmbiguousCustomProviderError as e:
+        # A custom-provider slug collision is a user-fixable misconfiguration,
+        # not a transient summary failure. Return 400 with the actionable rename
+        # message so the UI shows it, instead of degrading to a 200 local
+        # fallback that the client treats as success and that hides the fix.
+        logger.warning("Handoff summary blocked by ambiguous custom provider: %s", e.message)
+        return j(handler, {
+            "error": e.message,
+            "type": "custom_provider_ambiguous",
+        }, status=400)
     except Exception as e:
         logger.warning("Handoff summary generation failed: %s", e)
         summary_text = _fallback_handoff_summary(msgs)
