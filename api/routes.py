@@ -2624,30 +2624,62 @@ def _build_session_list_cache_payload(
     }
 
 
-def _server_tz_offset() -> str:
-    """Return the Hermes-configured timezone offset string (e.g. "+0800", "-0330").
+def _server_tz_info() -> dict:
+    """Return the Hermes-configured timezone as ``{"name": ..., "offset": ...}``.
 
-    The process/container zone (``time.strftime("%z")``) may be UTC while the
-    Hermes timezone (``HERMES_TIMEZONE`` env var or the ``timezone`` key in
-    config.yaml, resolved via ``hermes_time``) is configured to something else —
-    the WebUI must display server-side timestamps in the *Hermes* zone, not the
-    container's. Prefer ``hermes_time.now()`` and fall back to the process zone;
-    never return an empty string.
+    ``name`` is the IANA timezone name (e.g. ``America/New_York``) resolved
+    per-request from the mtime-aware WebUI config reader — NOT the Agent's
+    process-global cached ``hermes_time`` (which stays stale until
+    ``reset_cache()`` after a config change, review #7155). Resolution:
+    1. ``HERMES_TIMEZONE`` env var (highest priority);
+    2. ``timezone`` key in the active profile's config.yaml (read via the
+       cached/mtime-aware ``_load_yaml_config_file``);
+    3. fallback to the server-local zone name (``datetime.now().astimezone()``
+       ZoneInfo key), else empty string.
+
+    ``offset`` stays as the legacy numeric offset string (e.g. ``+0800``,
+    ``-0330``) so older consumers keep working; the browser prefers ``name``
+    and formats each instant with ``Intl.DateTimeFormat(..., {timeZone})``,
+    which resolves DST per-instant and renders configured-UTC as UTC.
     """
     try:
-        from hermes_time import now as _hermes_now
-        offset = _hermes_now().strftime("%z")
-        if offset:
-            return offset
+        name = os.getenv("HERMES_TIMEZONE", "").strip()
     except Exception:
-        pass
+        name = ""
+    if not name:
+        try:
+            cfg = _load_yaml_config_file(_get_config_path())
+            raw_tz = (cfg.get("timezone") or "") if isinstance(cfg, dict) else ""
+            name = str(raw_tz).strip()
+        except Exception:
+            name = ""
+    offset = ""
     try:
         offset = time.strftime("%z")
-        if offset:
-            return offset
     except Exception:
-        pass
-    return "+0000"
+        offset = ""
+    if not name:
+        try:
+            import datetime as _dt
+            local_tz = _dt.datetime.now().astimezone().tzinfo
+            name = getattr(local_tz, "key", "") or ""
+        except Exception:
+            name = ""
+    if not name:
+        # Some tzinfo objects (fixed offsets) have no IANA key — derive a
+        # stable Etc/GMT name from the numeric offset so the browser still
+        # gets a timeZone it can apply.
+        try:
+            _m = re.match(r"([+-])(\d{2})(\d{2})", offset)
+            if _m:
+                _sign = "-" if _m.group(1) == "+" else "+"
+                _hours = str(int(_m.group(2)))
+                name = f"Etc/GMT{_sign}{_hours}"
+        except Exception:
+            name = ""
+    if not offset:
+        offset = "+0000"
+    return {"server_tz_name": name, "server_tz": offset}
 
 
 def _session_list_payload_to_response(payload: dict) -> dict:
@@ -2686,7 +2718,9 @@ def _session_list_payload_to_response(payload: dict) -> dict:
         "active_profile": payload.get("active_profile"),
         "other_profile_count": int(payload.get("other_profile_count", 0)),
         "server_time": time.time(),
-        "server_tz": _server_tz_offset(),
+        # IANA name (browser Intl resolves DST per-instant) + legacy numeric
+        # offset fallback (review #7155).
+        **_server_tz_info(),
     }
     if "webui_session_count" in payload:
         response["webui_session_count"] = int(payload.get("webui_session_count", 0))
