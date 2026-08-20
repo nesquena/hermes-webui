@@ -73,6 +73,12 @@ from api.models import (
     reconciled_state_db_messages_for_session,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
+from api.routed_model_observability import (
+    begin_routed_model_capture,
+    provider_display_name,
+    reset_routed_model_capture,
+    snapshot_routed_model_capture,
+)
 from api.process_event_utils import (
     build_active_turn_token,
     claim_async_delegation_delivery,
@@ -234,7 +240,6 @@ def _cancel_event_payload(
         payload['session'] = session
         payload['session_id'] = session.get('session_id')
     return payload
-
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -2429,6 +2434,7 @@ _GATEWAY_ROUTING_TOP_LEVEL_KEYS = {
     'used_model',
     'requested_provider',
     'requested_model',
+    'source',
 }
 _GATEWAY_ROUTING_CONTAINER_KEYS = (
     'llm_gateway',
@@ -8284,6 +8290,7 @@ def _run_agent_streaming(
         STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
     agent = None
+    _routed_model_capture_token = None
     _live_prompt_estimate_tokens = [0]
     _live_prompt_exact_tokens = [0]
     _live_prompt_estimate_tool_delta_tokens = [0]
@@ -10186,6 +10193,19 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
+            _requested_provider_display = provider_display_name(
+                provider_context,
+                resolved_provider,
+                _cfg,
+            )
+            if not ephemeral and _routed_model_capture_token is None:
+                _routed_model_capture_token = begin_routed_model_capture(
+                    session_id=session_id,
+                    stream_id=stream_id,
+                    task_id=session_id,
+                    requested_model=resolved_model or model,
+                    requested_provider=_requested_provider_display,
+                )
             _run_conversation_kwargs = dict(
                 user_message=user_message,
                 system_message=workspace_system_msg,
@@ -10238,7 +10258,22 @@ def _run_agent_streaming(
                     requested_provider=(_session_requested_provider or ""),
                 )
                 _run_conversation_kwargs["user_message"] = user_message
-            result = agent.run_conversation(**_run_conversation_kwargs)
+            try:
+                result = agent.run_conversation(**_run_conversation_kwargs)
+            except Exception as _run_exc:
+                if (
+                    ephemeral
+                    or _classify_provider_error(str(_run_exc), _run_exc)['type'] != 'auth_mismatch'
+                ):
+                    raise
+                # Feed raised authentication failures into the existing terminal-result
+                # self-heal path below. A successful credential retry then continues
+                # through the common persistence and terminal done pipeline.
+                result = {
+                    'failed': True,
+                    'error': str(_run_exc),
+                    'messages': [],
+                }
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -11098,8 +11133,16 @@ def _run_agent_streaming(
                     agent,
                     result,
                     requested_model=resolved_model or model,
-                    requested_provider=resolved_provider,
+                    requested_provider=_requested_provider_display,
                 )
+                if not _gateway_routing:
+                    _observed_routing = snapshot_routed_model_capture()
+                    if _observed_routing:
+                        _gateway_routing = _normalize_gateway_routing_metadata(
+                            _observed_routing,
+                            requested_model=resolved_model or model,
+                            requested_provider=_requested_provider_display,
+                        )
                 # #6068: the served model must be read AFTER agent.run — the agent
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
@@ -12162,6 +12205,15 @@ def _run_agent_streaming(
                 and getattr(s, 'pending_user_message', None)):
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
+        if _routed_model_capture_token is not None:
+            try:
+                reset_routed_model_capture(_routed_model_capture_token)
+            except Exception:
+                logger.debug(
+                    "Failed to reset routed-model capture for stream %s",
+                    stream_id,
+                    exc_info=True,
+                )
         _clear_thread_env()  # TD1: always clear thread-local context
         if _streaming_cron_profile_home_token is not None:
             _STREAMING_CRON_PROFILE_HOME.reset(_streaming_cron_profile_home_token)

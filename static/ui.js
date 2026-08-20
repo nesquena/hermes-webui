@@ -7390,6 +7390,33 @@ function _gatewayProviderName(provider){
   if(!text)return'';
   return text.replace(/^custom:/,'').replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
 }
+function _routedModelObservationFields(routing){
+  if(!routing||routing.source!=='openai-compatible-sse')return[];
+  const requested=String(routing.requested_model||'').trim();
+  const routed=String(routing.used_model||'').trim();
+  const provider=_gatewayProviderName(routing.used_provider||routing.requested_provider);
+  if(!routed)return[];
+  // Footer labels render as Requested:, Routed:, and Provider:.
+  return[
+    {label:'Requested',value:requested},
+    {label:'Routed',value:routed},
+    {label:'Provider',value:provider},
+  ].filter(field=>field.value);
+}
+function _appendRoutedModelObservation(target,routing){
+  const fields=_routedModelObservationFields(routing);
+  if(!target||!fields.length)return false;
+  const group=document.createElement('span');
+  group.className='msg-routed-model-inline';
+  for(const field of fields){
+    const item=document.createElement('span');
+    item.className='msg-routed-model-field';
+    item.textContent=`${field.label}: ${field.value}`;
+    group.appendChild(item);
+  }
+  target.appendChild(group);
+  return true;
+}
 function _gatewayRoutingLabel(routing){
   if(!routing)return'';
   const provider=_gatewayProviderName(routing.used_provider||routing.provider);
@@ -17811,9 +17838,11 @@ function renderMessages(options){
       const msg=S.messages[mi]||{};
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
-      const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
+      const isSseObservation=!!routing&&routing.source==='openai-compatible-sse';
+      const gatewayText=isSseObservation?'':_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const modelWarningText=isSseObservation?'':_gatewayModelWarningText(routing);
+      const routedModelFields=_routedModelObservationFields(routing);
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -17821,12 +17850,12 @@ function renderMessages(options){
       const compactWorklogForMessage=isCompactWorklogMode()&&(toolCallAssistantIdxs.has(mi)||assistantThinking.has(mi));
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
-      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText&&!routedModelFields.length) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline,.msg-routed-model-inline')) continue;
       const fragments=[];
       if(modelWarningText){
         const warning=document.createElement('span');
@@ -17839,6 +17868,10 @@ function renderMessages(options){
         failover.className='gateway-failover-inline';
         failover.textContent=failoverText;
         fragments.push(failover);
+      }
+      if(routedModelFields.length){
+        const routedModelContainer=document.createElement('span');
+        if(_appendRoutedModelObservation(routedModelContainer,routing)) fragments.push(routedModelContainer.firstChild);
       }
       if(gatewayText){
         const gateway=document.createElement('span');

@@ -6164,6 +6164,31 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-foot-with-usage {
   justify-content: flex-start;
   gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.msg-routed-model-inline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+.msg-routed-model-field {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: .78;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .msg-routed-model-inline {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+  .msg-routed-model-field {
+    flex: 1 1 100%;
+  }
 }
 .msg-usage-inline,
 .msg-duration-inline,
