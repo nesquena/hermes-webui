@@ -277,3 +277,31 @@ def test_truncation_keys_are_nonempty(loc_key: str):
         val = _value_of(seg, k)
         assert val is not None, f"Locale {loc_key!r} is missing key {k!r}"
         assert val, f"Locale {loc_key!r} has empty value for key {k!r}"
+
+
+# ── Reviewed copy fixture (PR #6141 r15) ───────────────────────────────────────
+
+
+REVIEWED_COPY = {
+    "ko": {
+        "cron_output_truncated_hint": "출력이 큽니다. 제한된 미리보기(front-matter + 응답)만 표시합니다. 전체 파일은 디스크에 있습니다.",
+    },
+    "pl": {
+        "skill_file_truncated_hint": "Plik jest duży; pokazywanych jest tylko pierwszych 512 KiB.",
+    },
+}
+
+
+@pytest.mark.parametrize("loc_key", sorted(REVIEWED_COPY))
+def test_fable_reviewed_copy_exact(loc_key: str):
+    """The two r15 corrections from the gate's UX advisor are pinned byte-for-byte.
+
+    The all-locale parity tests above guard presence/non-emptiness/non-English;
+    this fixture pins the exact approved wording so a paraphrase or partial
+    revert of the reviewed copy fails CI. (#6141 r15)
+    """
+    seg = _i18n_locale_block(loc_key)
+    for k, expected in REVIEWED_COPY[loc_key].items():
+        assert _value_of(seg, k) == expected, (
+            f"Locale {loc_key!r} key {k!r} must carry the Fable-reviewed copy exactly"
+        )
