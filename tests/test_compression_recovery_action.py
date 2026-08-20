@@ -1,6 +1,10 @@
 import io
 import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from api import models, routes
 from api.compression_recovery import (
@@ -239,6 +243,296 @@ def test_chat_start_race_returns_canonical_retry_without_writing_parent_config(m
     assert tip.model_provider == "tip-provider"
     assert tip.pending_user_message is None
     assert stale_cleanup_calls == []
+
+
+def _install_noop_chat_start_workers(monkeypatch):
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(routes, "ensure_agent_runtime_current", lambda: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+    monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: None)
+    monkeypatch.setattr(routes.threading, "Thread", ImmediateThread)
+
+
+def test_chat_start_continuation_409_survives_legacy_adapter_and_retries(monkeypatch, tmp_path):
+    """Production /api/chat/start path: lock-time rotation 409 through the
+    legacy-journal adapter, then a retry on the returned session_id starts the tip.
+    """
+    _isolate_sessions(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "SESSION_DIR", models.SESSION_DIR)
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
+    parent = Session(
+        session_id="adapterraceparent",
+        title="Parent",
+        workspace=str(tmp_path / "parent"),
+        model="parent-model",
+        model_provider="parent-provider",
+        profile="default",
+        messages=[{"role": "user", "content": "start"}],
+    )
+    tip = Session(
+        session_id="adapterracetip",
+        title="Tip",
+        workspace=str(tmp_path / "tip"),
+        model="tip-model",
+        model_provider="tip-provider",
+        profile="default",
+        messages=[{"role": "assistant", "content": "compressed"}],
+        parent_session_id=parent.session_id,
+    )
+    for session in (parent, tip):
+        session.save()
+        models.SESSIONS[session.session_id] = session
+        routes.SESSIONS[session.session_id] = session
+
+    resolve_calls = []
+
+    def _resolve(session):
+        resolve_calls.append(session.session_id)
+        if len(resolve_calls) == 2 and session.session_id == parent.session_id:
+            return tip
+        return session
+
+    monkeypatch.setattr(routes, "_resolve_writable_compression_tip", _resolve)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda session, *_args, **_kwargs: session.workspace)
+    monkeypatch.setattr(routes, "_read_profile_model_config", lambda *_args, **_kwargs: (None, None, {}))
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda requested_model, requested_provider, **_kwargs: (
+            requested_model or "tip-model",
+            requested_provider or "tip-provider",
+            False,
+        ),
+    )
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _config: False)
+    _install_noop_chat_start_workers(monkeypatch)
+
+    first = _JSONHandler()
+    routes._handle_chat_start(first, {"session_id": parent.session_id, "message": "rank them"})
+    first_payload = _payload(first)
+
+    assert first.status == 409
+    assert first_payload["type"] == "session_continuation_changed"
+    assert first_payload["retryable"] is True
+    assert first_payload["session_id"] == tip.session_id
+    assert tip.pending_user_message is None
+    assert tip.active_stream_id in (None, "")
+
+    retry = _JSONHandler()
+    routes._handle_chat_start(
+        retry,
+        {"session_id": first_payload["session_id"], "message": "rank them"},
+    )
+    retry_payload = _payload(retry)
+
+    assert retry.status == 200
+    assert retry_payload["session_id"] == tip.session_id
+    assert retry_payload.get("stream_id")
+    try:
+        routes.STREAMS.pop(retry_payload["stream_id"], None)
+    except Exception:
+        pass
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required for send() retry/adopt behavior")
+def test_send_retries_session_continuation_changed_409_and_adopts_tip():
+    """send() must parse api()'s 409, retry the returned session_id, then adopt it."""
+    driver = r'''
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2] || process.argv[1], 'utf8');
+
+function extractFunction(source, name){
+  const marker = 'function ' + name + '(';
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error('not found: ' + name);
+  const brace = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('unterminated: ' + name);
+}
+
+function extractAdoptBlock(source){
+  const start = source.indexOf('const runSid=String((startData&&startData.session_id)||activeSid);');
+  const end = source.indexOf('attachLiveStream(runSid, streamId, uploadedNames);', start);
+  if (start < 0 || end < 0) throw new Error('adopt block not found');
+  return source.slice(start, end + 'attachLiveStream(runSid, streamId, uploadedNames);'.length);
+}
+
+eval(extractFunction(src, '_chatStartErrorPayload'));
+eval(extractFunction(src, '_continuationChangedSessionId'));
+const adoptBlock = extractAdoptBlock(src);
+
+function makeApi(script){
+  return async function api(path, opts){
+    const payload = JSON.parse(opts.body);
+    const step = script.calls.length;
+    script.calls.push({path, session_id: payload.session_id, message: payload.message});
+    const planned = script.responses[step];
+    if (!planned) throw new Error('unexpected extra /api/chat/start call');
+    if (planned.status && planned.status >= 400) {
+      const err = new Error(planned.body.error || 'http error');
+      err.status = planned.status;
+      err.statusText = 'Conflict';
+      err.body = JSON.stringify(planned.body);
+      throw err;
+    }
+    return planned.body;
+  };
+}
+
+async function runCase(script){
+  const storage = {};
+  const attached = [];
+  const optimisticMessages = [{role:'user',content:'rank them'}];
+  const uploadedNames = [];
+  const INFLIGHT = {parent: {messages:optimisticMessages, uploaded:uploadedNames, toolCalls:[]}};
+  const S = {session:{session_id:'parent', workspace:'/tmp/ws', profile:'default'}, messages:optimisticMessages.slice()};
+  const activeSid = 'parent';
+  const msgText = 'rank them';
+  const uploaded = [];
+  let modelStateForPostStart = {model:'gpt-4o', model_provider:'openai'};
+  let explicitPickForPostStart = false;
+  let _pendingMoaConfig = null;
+  let postStartData;
+  const api = makeApi(script);
+  try {
+    const startData = await api('/api/chat/start', {method:'POST', body:JSON.stringify({
+      session_id:activeSid, message:msgText,
+      model:modelStateForPostStart.model, workspace:S.session.workspace,
+      model_provider:modelStateForPostStart.model_provider,
+      profile:S.activeProfile||S.session.profile||'default',
+      explicit_model_pick:explicitPickForPostStart||undefined,
+      attachments:uploaded.length?uploaded:undefined,
+      moa_config:_pendingMoaConfig?true:undefined
+    })});
+    postStartData = startData;
+  } catch (e) {
+    const nextSid = _continuationChangedSessionId(e);
+    if (nextSid && nextSid !== String(activeSid || '')) {
+      try {
+        const retryData = await api('/api/chat/start', {method:'POST', body:JSON.stringify({
+          session_id:nextSid, message:msgText,
+          model:modelStateForPostStart.model, workspace:S.session && S.session.workspace,
+          model_provider:modelStateForPostStart.model_provider,
+          profile:S.activeProfile||(S.session&&S.session.profile)||'default',
+          explicit_model_pick:explicitPickForPostStart||undefined,
+          attachments:uploaded.length?uploaded:undefined,
+          moa_config:_pendingMoaConfig?true:undefined
+        })});
+        postStartData = retryData;
+      } catch (retryErr) {
+        e = retryErr;
+      }
+    }
+    if (!postStartData) {
+      return {ok:false, error:String((e && e.message) || ''), calls:script.calls, storage, attached, inflight:Object.keys(INFLIGHT), sessionId:S.session && S.session.session_id};
+    }
+  }
+  const startData = postStartData || {};
+  let streamId;
+  const localStorage = {setItem(k,v){ storage[k]=v; }};
+  function _setActiveSessionUrl(sid){ storage.url = sid; }
+  function stopApprovalPolling(){}
+  function startApprovalPolling(sid){ storage.approval = sid; }
+  function stopClarifyPolling(){}
+  function startClarifyPolling(sid){ storage.clarify = sid; }
+  function updateSendBtn(){}
+  function _runOptionalPostStartUiStep(_name, fn){ if (typeof fn === 'function') fn(); }
+  function applySessionTitleUpdate(){}
+  function _writePersistedModelState(){}
+  function _applyModelToDropdown(){}
+  function syncTopbar(){}
+  function syncModelChip(){}
+  function ensureLiveWorklogShell(){}
+  function showLiveRunStatus(){}
+  function upsertActiveSessionForLocalTurn(){}
+  function markInflight(){}
+  function saveInflightState(){}
+  function renderSessionList(){}
+  function $(id){ return id === 'modelSelect' ? null : null; }
+  function attachLiveStream(sid, liveStreamId){ attached.push({sid, streamId: liveStreamId}); }
+  eval(adoptBlock);
+  return {
+    ok:true,
+    calls:script.calls,
+    storage,
+    attached,
+    inflight:Object.keys(INFLIGHT),
+    sessionId:S.session.session_id,
+    runSid:String((startData && startData.session_id) || activeSid)
+  };
+}
+
+(async () => {
+  const continuation = await runCase({
+    calls: [],
+    responses: [
+      {status:409, body:{
+        error:'session rotated during chat start; retry on continuation',
+        type:'session_continuation_changed',
+        session_id:'tip',
+        retryable:true
+      }},
+      {body:{session_id:'tip', stream_id:'stream-tip'}}
+    ]
+  });
+  const hardConflict = await runCase({
+    calls: [],
+    responses: [
+      {status:409, body:{error:'session already has an active stream', active_stream_id:'live'}}
+    ]
+  });
+  const staleRuntime = await runCase({
+    calls: [],
+    responses: [
+      {status:409, body:{error:'agent runtime changed', type:'agent_runtime_stale', retryable:true}}
+    ]
+  });
+  console.log(JSON.stringify({continuation, hardConflict, staleRuntime}));
+})().catch((err) => {
+  console.error(err && err.stack || err);
+  process.exit(1);
+});
+'''
+    result = subprocess.run(
+        ["node", "-e", driver, str(ROOT / "static" / "messages.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    continuation = payload["continuation"]
+    assert continuation["ok"] is True
+    assert [call["session_id"] for call in continuation["calls"]] == ["parent", "tip"]
+    assert continuation["sessionId"] == "tip"
+    assert continuation["runSid"] == "tip"
+    assert continuation["storage"]["hermes-webui-session"] == "tip"
+    assert continuation["storage"]["url"] == "tip"
+    assert continuation["attached"] == [{"sid": "tip", "streamId": "stream-tip"}]
+    assert "tip" in continuation["inflight"]
+    assert "parent" not in continuation["inflight"]
+
+    assert payload["hardConflict"]["ok"] is False
+    assert [call["session_id"] for call in payload["hardConflict"]["calls"]] == ["parent"]
+    assert payload["staleRuntime"]["ok"] is False
+    assert [call["session_id"] for call in payload["staleRuntime"]["calls"]] == ["parent"]
 
 
 def test_chat_start_keeps_recovery_when_substantive_prompt_fails_validation(monkeypatch, tmp_path):

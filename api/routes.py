@@ -22605,6 +22605,8 @@ def _chat_start_response_from_run_start(result):
         "effective_model_provider",
         "error",
         "code",
+        "type",
+        "retryable",
         "active_stream_id",
         "_status",
     ):

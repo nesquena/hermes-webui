@@ -1347,6 +1347,20 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+function _chatStartErrorPayload(err){
+  if(!err) return null;
+  const raw=err.body;
+  if(raw && typeof raw==='object') return raw;
+  try{return JSON.parse(String(raw||''));}catch(_){return null;}
+}
+
+function _continuationChangedSessionId(err){
+  if(!err || Number(err.status)!==409) return '';
+  const body=_chatStartErrorPayload(err);
+  if(!body || body.type!=='session_continuation_changed' || body.retryable!==true) return '';
+  return String(body.session_id||'').trim();
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1811,6 +1825,26 @@ async function send(){
     _pendingMoaConfig=null;
     postStartData = startData;
   }catch(e){
+    const nextSid=_continuationChangedSessionId(e);
+    if(nextSid && nextSid!==String(activeSid||'')){
+      try{
+        const _retryModel=modelStateForPostStart||((typeof _chatPayloadModelState==='function')?_chatPayloadModelState():{});
+        const retryData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+          session_id:nextSid,message:msgText,
+          model:_retryModel.model,workspace:S.session&&S.session.workspace,
+          model_provider:_retryModel.model_provider,
+          profile:S.activeProfile||(S.session&&S.session.profile)||'default',
+          explicit_model_pick:explicitPickForPostStart||undefined,
+          attachments:uploaded.length?uploaded:undefined,
+          moa_config:_pendingMoaConfig?true:undefined
+        })});
+        _pendingMoaConfig=null;
+        postStartData=retryData;
+      }catch(retryErr){
+        e=retryErr;
+      }
+    }
+    if(!postStartData){
     const errMsg=String((e&&e.message)||'');
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
@@ -1876,6 +1910,7 @@ async function send(){
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
     return;
+    }
   }
 
   const startData = postStartData || {};
