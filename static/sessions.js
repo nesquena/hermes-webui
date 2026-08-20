@@ -221,12 +221,12 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
-  if (S.session && S.session.session_id === sid &&
-      typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
+  const _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  if (typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
       typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
   if (S.session && S.session.session_id === sid &&
       (_isReadOnlySession(S.session) ||
-       (typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid)))) return;
+       (_handoffChildPayload && !String(text || '') && !(Array.isArray(files) && files.length)))) return;
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -271,12 +271,11 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   const opts = arguments[3] || {};
   if (!sid) return Promise.resolve(true);
-  if (S.session && S.session.session_id === sid &&
-      typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
+  const _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  if (typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
       typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
   if (S.session && S.session.session_id === sid &&
-      (_isReadOnlySession(S.session) ||
-       (typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid)))) return Promise.resolve(true);
+      (_isReadOnlySession(S.session) || (_handoffChildPayload && !String(text || '') && !(Array.isArray(files) && files.length)))) return Promise.resolve(true);
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -353,7 +352,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 function _clearComposerDraft(sid, text, files) {
   const opts = arguments[3] || {};
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  if (!opts.preserveOtherDraftTimer) clearTimeout(_draftSaveTimer);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
@@ -1786,7 +1785,15 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    if (!(typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(currentSid))) {
+    const _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(currentSid);
+    const _currentDraftText = ($('msg') || {}).value || '';
+    const _currentDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
+    if (typeof _captureReadOnlyForkInputForSid === 'function') {
+      _captureReadOnlyForkInputForSid(currentSid, _currentDraftText, _currentDraftFiles);
+    }
+    if (_handoffChildPayload && (_currentDraftText || _currentDraftFiles.length) &&
+        typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(currentSid);
+    if (!_handoffChildPayload || _currentDraftText || _currentDraftFiles.length) {
       await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
     }
     // The awaited draft save above yields the event loop. If another

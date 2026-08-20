@@ -1370,12 +1370,29 @@ function _retireReadOnlyForkPayload(sid) {
 
 function _hasReadOnlyForkPayloadForSid(sid) {
   const record = sid ? _readOnlyForkPayloads.get(sid) : null;
-  return !!(record && record.state !== 'accepted' && record.state !== 'accepted-pending-clear');
+  return !!(record && record.childSid === sid && record.state !== 'accepted' && record.state !== 'accepted-pending-clear');
 }
 
 function _hasReadOnlyForkAcceptedPendingClear(sid) {
   const record = sid ? _readOnlyForkPayloads.get(sid) : null;
-  return !!(record && record.state === 'accepted-pending-clear');
+  return !!(record && record.childSid === sid && record.state === 'accepted-pending-clear');
+}
+
+function _readOnlyForkRecordForSid(sid) {
+  if (!sid) return null;
+  const direct = _readOnlyForkPayloads.get(sid);
+  if (direct) return direct;
+  for (const record of _readOnlyForkPayloads.values()) {
+    if (record && (record.sourceSid === sid || record.childSid === sid)) return record;
+  }
+  return null;
+}
+
+function _captureReadOnlyForkInputForSid(sid, text, files) {
+  const record = _readOnlyForkRecordForSid(sid);
+  if (!record || record.childSid === sid) return false;
+  record.deferredSourceInput = {text:String(text || ''), files:Array.isArray(files) ? [...files] : []};
+  return true;
 }
 
 function _retryReadOnlyForkDraftClear(record) {
@@ -1385,7 +1402,7 @@ function _retryReadOnlyForkDraftClear(record) {
     if (_readOnlyForkPayloads.get(record.childSid) !== record || record.state !== 'accepted-pending-clear') return;
     attempts += 1;
     try {
-      await _clearComposerDraft(record.childSid, record.text, [], {throwOnError:true});
+        await _clearComposerDraft(record.childSid, record.text, [], {throwOnError:true, preserveOtherDraftTimer:true});
       if (_readOnlyForkPayloads.get(record.childSid) === record) _readOnlyForkPayloads.delete(record.childSid);
     } catch (_) {
       if (attempts < 3) setTimeout(retry, attempts * 1000);
@@ -1394,25 +1411,30 @@ function _retryReadOnlyForkDraftClear(record) {
   setTimeout(retry, 1000);
 }
 
-function _restoreReadOnlyForkPayload(record, sid, generation) {
+function _restoreReadOnlyForkPayload(record, sid, generation, payload=record, consume=true) {
   if (!_readOnlyForkPayloadVisible(record, sid, generation)) return false;
   const input = $('msg');
   if (!input) return false;
   const currentText = String(input.value || '');
-  if (currentText.trim() && currentText !== record.text) return false;
+  if (currentText.trim() && currentText !== payload.text) return false;
   if ((S.pendingFiles || []).length) return false;
-  if (!currentText) input.value = record.text;
-  S.pendingFiles = [...record.files];
+  if (!currentText) input.value = payload.text;
+  S.pendingFiles = [...payload.files];
   if (typeof autoResize === 'function') autoResize();
   if (typeof renderTray === 'function') renderTray();
-  _readOnlyForkPayloads.delete(sid);
+  if (consume) {
+    _readOnlyForkPayloads.delete(sid);
+    if (record.sourceSid !== sid) _readOnlyForkPayloads.delete(record.sourceSid);
+    if (record.childSid && record.childSid !== sid) _readOnlyForkPayloads.delete(record.childSid);
+  }
   return true;
 }
 
 function _restoreReadOnlyForkPayloadAfterLoad(sid) {
-  const record = _readOnlyForkPayloads.get(sid);
+  const record = _readOnlyForkRecordForSid(sid);
   if (!record || record.state !== 'recovery') return false;
-  return _restoreReadOnlyForkPayload(record, sid, _loadSessionGeneration);
+  const deferred = record.sourceSid === sid ? record.deferredSourceInput : null;
+  return _restoreReadOnlyForkPayload(record, sid, _loadSessionGeneration, deferred || record, !deferred);
 }
 
 function _readOnlyForkHandoffOwnsPane(record, sid) {
@@ -2026,7 +2048,7 @@ async function send(){
     postStartData = startData;
     if (_readOnlyForkHandoff) {
       try {
-        await _clearComposerDraft(_readOnlyForkHandoff.childSid, _readOnlyForkHandoff.text, [], {throwOnError:true});
+        await _clearComposerDraft(_readOnlyForkHandoff.childSid, _readOnlyForkHandoff.text, [], {throwOnError:true, preserveOtherDraftTimer:true});
         _readOnlyForkPayloads.delete(_readOnlyForkHandoff.childSid);
         _readOnlyForkHandoff.state = 'accepted';
       } catch (clearError) {
