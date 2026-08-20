@@ -627,6 +627,11 @@ def test_state_db_reconcile_refreshes_cached_weight_and_enforces_budget(
     assert sibling.session_id not in SESSIONS
     assert cached._cache_resident_bytes == cached.path.stat().st_size
     assert models._session_matches_persisted_state(cached) is True
+    authority = models._session_persisted_authority(cached)
+    assert authority is not None
+    assert cached._cache_persisted_fingerprint == authority[0]
+    assert cached._sidecar_stat_sig == authority[1]
+    assert models._sidecar_signature_matches_path(cached.path, authority[1]) is True
 
 
 def test_state_db_reconcile_preserves_unsaved_metadata_and_skips_byte_eviction(
@@ -1625,3 +1630,266 @@ def test_cached_session_lags_disk_detects_clean_cache_stat_signature_mismatch(
     resolved = models.get_session(sid)
     assert resolved.title == "Modified on disk directly"
     assert resolved.composer_draft == {"text": "external draft"}
+
+
+def test_save_clears_authority_when_replaced_before_generation_capture(
+    isolated_session_env, monkeypatch,
+):
+    """A save must not pair its snapshot fingerprint with another writer's path stat."""
+    from api import models
+
+    original = _make_persisted_session(810)
+    writer = models.Session(
+        session_id=original.session_id,
+        title="writer payload",
+        composer_draft={"text": "writer draft"},
+        messages=list(original.messages),
+    )
+    replacement_data = json.loads(original.path.read_text(encoding="utf-8"))
+    replacement_data["title"] = "interposed replacement"
+    replacement_data["composer_draft"] = {"text": "interposed draft"}
+    replacement = original.path.with_suffix(".generation-race")
+    replacement.write_text(
+        json.dumps(replacement_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    real_replace = models._safe_replace
+    interposed = False
+
+    def install_then_replace(src, dst):
+        nonlocal interposed
+        real_replace(src, dst)
+        if Path(dst) == writer.path and not interposed:
+            interposed = True
+            os.replace(replacement, dst)
+
+    monkeypatch.setattr(models, "_safe_replace", install_then_replace)
+
+    writer.save(touch_updated_at=False, skip_index=True, enforce_cache_bounds=False)
+
+    assert interposed is True
+    assert writer._cache_persisted_authority is None
+    assert writer._cache_persisted_fingerprint is None
+    assert writer._sidecar_stat_sig is None
+    assert writer._cache_resident_bytes is None
+    persisted = json.loads(writer.path.read_text(encoding="utf-8"))
+    assert persisted["title"] == "interposed replacement"
+    assert persisted["composer_draft"] == {"text": "interposed draft"}
+
+
+def test_cold_load_retries_each_replacement_and_publishes_only_final_generation(
+    isolated_session_env, monkeypatch,
+):
+    """Cold cache insertion retries every stale candidate, including retry #2."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-cold-two-replacements"
+    v1 = models.Session(
+        session_id=sid,
+        title="generation one",
+        composer_draft={"text": "one"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v2 = models.Session(
+        session_id=sid,
+        title="generation two",
+        composer_draft={"text": "two"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v3 = models.Session(
+        session_id=sid,
+        title="generation three",
+        composer_draft={"text": "three"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v1.save(touch_updated_at=False, enforce_cache_bounds=False)
+
+    real_publish = models._publish_verified_session_cas
+    replacements = [v2, v3]
+    publish_calls = 0
+
+    def replace_before_publish(*args, **kwargs):
+        nonlocal publish_calls
+        if publish_calls < len(replacements):
+            replacements[publish_calls].save(
+                touch_updated_at=False,
+                skip_index=True,
+                enforce_cache_bounds=False,
+            )
+        publish_calls += 1
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_publish_verified_session_cas", replace_before_publish)
+
+    resolved = models.get_session(sid)
+
+    assert publish_calls == 3
+    assert resolved.title == "generation three"
+    assert resolved.composer_draft == {"text": "three"}
+    assert SESSIONS[sid] is resolved
+    assert models._session_matches_persisted_state(resolved) is True
+
+
+def test_cold_load_never_caches_missing_generation_after_bounded_exhaustion(
+    isolated_session_env, monkeypatch,
+):
+    """Missing generation tokens fail closed rather than entering SESSIONS."""
+    from api import models
+    from api.config import SESSIONS
+
+    sid = "sess-cold-missing-generation"
+    source = models.Session(
+        session_id=sid,
+        title="stable disk payload",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    source.save(touch_updated_at=False, enforce_cache_bounds=False)
+
+    real_load = models.Session.load
+    loads = 0
+
+    def load_without_generation(cls, session_id):
+        nonlocal loads
+        loaded = real_load(session_id)
+        if session_id == sid and loaded is not None:
+            loads += 1
+            models._set_session_persisted_authority(loaded, None, None)
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load_without_generation))
+
+    with pytest.raises(KeyError):
+        models.get_session(sid)
+
+    assert loads == models._SESSION_CACHE_PUBLICATION_RETRIES
+    assert sid not in SESSIONS
+
+
+def test_cache_hit_refresh_cas_preserves_newer_cache_publication(
+    isolated_session_env, monkeypatch,
+):
+    """A stale disk load cannot overwrite a cache entry published while it parsed."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "sess-cache-hit-cas"
+    old = models.Session(
+        session_id=sid,
+        title="old cache generation",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    old.save(touch_updated_at=False, enforce_cache_bounds=False)
+    disk = models.Session(
+        session_id=sid,
+        title="disk refresh generation",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    disk.save(touch_updated_at=False, enforce_cache_bounds=False)
+    # Deliberately retain the older clean generation in cache so the normal
+    # freshness path starts a full disk load.
+    with LOCK:
+        SESSIONS[sid] = old
+
+    winner = models.Session.load(sid)
+    assert winner is not None
+    winner.composer_draft = {"text": "newer cache publication"}
+    real_load = models.Session.load
+    interposed = False
+
+    def load_then_publish_winner(cls, session_id):
+        nonlocal interposed
+        loaded = real_load(session_id)
+        if session_id == sid and not interposed:
+            interposed = True
+            with LOCK:
+                SESSIONS[sid] = winner
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load_then_publish_winner))
+
+    resolved = models.get_session(sid)
+
+    assert interposed is True
+    assert resolved is winner
+    assert SESSIONS[sid] is winner
+    assert resolved.composer_draft == {"text": "newer cache publication"}
+
+
+def test_detached_save_cas_never_replaces_dirty_cached_generation(
+    isolated_session_env,
+):
+    """A detached writer cannot discard a cache object's unsaved metadata."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "sess-save-cas-dirty-cache"
+    v1 = models.Session(
+        session_id=sid,
+        title="generation one",
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    v1.save(touch_updated_at=False, enforce_cache_bounds=False)
+    dirty_cached = models.Session.load(sid)
+    assert dirty_cached is not None
+    dirty_cached.composer_draft = {"text": "unsaved cache draft"}
+    with LOCK:
+        SESSIONS[sid] = dirty_cached
+
+    detached_writer = models.Session(
+        session_id=sid,
+        title="generation two",
+        composer_draft={"text": "durable writer draft"},
+        messages=[{"role": "user", "content": "prompt", "timestamp": 1.0}],
+    )
+    detached_writer.save(touch_updated_at=False)
+
+    assert SESSIONS[sid] is dirty_cached
+    assert dirty_cached.composer_draft == {"text": "unsaved cache draft"}
+    persisted = json.loads(detached_writer.path.read_text(encoding="utf-8"))
+    assert persisted["composer_draft"] == {"text": "durable writer draft"}
+
+
+def test_stale_tail_cas_retries_after_observed_cache_entry_is_removed(
+    isolated_session_env, monkeypatch,
+):
+    """A stale-tail refresh retries as a cold publication if its cache CAS loses to removal."""
+    from api import models
+    from api.config import LOCK, SESSIONS
+
+    sid = "sess-stale-tail-cas-removal"
+    disk = models.Session(
+        session_id=sid,
+        title="durable assistant tail",
+        messages=[
+            {"role": "user", "content": "prompt", "timestamp": 1.0},
+            {"role": "assistant", "content": "durable answer", "timestamp": 2.0},
+        ],
+    )
+    disk.save(touch_updated_at=False, enforce_cache_bounds=False)
+    stale = models.Session.load(sid)
+    assert stale is not None
+    stale.messages[-1] = {"role": "user", "content": "prompt", "timestamp": 2.0}
+    with LOCK:
+        SESSIONS[sid] = stale
+
+    real_publish = models._publish_verified_session_cas
+    publish_calls = 0
+
+    def remove_observed_entry_once(*args, **kwargs):
+        nonlocal publish_calls
+        if publish_calls == 0:
+            with LOCK:
+                SESSIONS.pop(sid, None)
+        publish_calls += 1
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_publish_verified_session_cas", remove_observed_entry_once)
+
+    resolved = models.get_session(sid)
+
+    assert publish_calls == 2
+    assert resolved.messages[-1]["role"] == "assistant"
+    assert resolved.messages[-1]["content"] == "durable answer"
+    assert SESSIONS[sid] is resolved
