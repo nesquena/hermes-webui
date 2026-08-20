@@ -6279,6 +6279,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                 if(S.session&&Array.isArray(S.session.gateway_routing_history))S.session.gateway_routing_history.push(d.usage.gateway_routing);
                 else if(S.session)S.session.gateway_routing_history=[d.usage.gateway_routing];
               }
+              if(typeof d.usage.used_model==='string'&&d.usage.used_model){
+                lastAsst._usedModel=d.usage.used_model;
+              }
+              // Only sent when a LOCAL fallback served the turn with a different
+              // model (the backend already filtered notation-only differences),
+              // so the footer can surface it live rather than after a reload.
+              if(typeof d.usage.requested_model==='string'&&d.usage.requested_model){
+                lastAsst._requestedModel=d.usage.requested_model;
+              }
             }
           }
           _attachProjectedAnchorSceneToLastAssistant(S.messages);

@@ -8706,6 +8706,10 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_turnUsage",
     "_firstTokenMs",
     "_usedModel",
+    # Requested model, stamped only when a LOCAL fallback served the turn with a
+    # different model. Display-only, like the keys around it: must survive the
+    # sidecar/state.db merge or the footer notice would vanish on reload.
+    "_requestedModel",
     "_gatewayRouting",
     "_statusCard",
     "_anchor_stream_id",

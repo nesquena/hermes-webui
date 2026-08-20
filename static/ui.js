@@ -5151,6 +5151,34 @@ function _formatReasoningEffortLabel(effort){
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
+function _bareModelId(modelId){
+  // Mirror of api/streaming.py::_bare_model_id — strips a WebUI routing hint
+  // ('@provider:model', '@custom:<slug>:model') and a vendor path prefix so two
+  // ids can be compared. Without this, '@openai-codex:gpt-5.6-sol' and
+  // 'gpt-5.6-sol' look like a model switch when they are the same model.
+  let m=String(modelId||'').trim();
+  if(!m)return'';
+  if(m.charAt(0)==='@'){
+    m=m.indexOf(':')>=0?m.slice(m.indexOf(':')+1):m;
+    if(m.indexOf(':')>=0)m=m.slice(m.indexOf(':')+1);
+  }
+  const parts=m.split('/');
+  return parts[parts.length-1].trim();
+}
+function _localModelSwitchText(msg, requestedModel){
+  // Notice for a LOCAL fallback switch: the configured provider failed and
+  // fallback_providers served the turn with another model. Gateway turns own
+  // their own warning via _gatewayModelWarningText, so stay silent there to
+  // keep one notice per turn. Fails closed: renders nothing unless both sides
+  // are known and genuinely differ.
+  if(!msg)return'';
+  if(msg._gatewayRouting)return'';
+  const used=String(msg._usedModel||'').trim();
+  const requested=String(requestedModel||msg._requestedModel||'').trim();
+  if(!used||!requested)return'';
+  if(_bareModelId(used).toLowerCase()===_bareModelId(requested).toLowerCase())return'';
+  return`${t('model_switched')||'Model switched'}: ${getModelLabel(requested)} → ${getModelLabel(used)}`;
+}
 function _reasoningEffortContext(){
   const transition=_profileTransitionReasoningContext;
   const session=S&&S.session;
@@ -17854,7 +17882,7 @@ function renderMessages(options){
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const modelWarningText=_gatewayModelWarningText(routing)||_localModelSwitchText(msg);
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
