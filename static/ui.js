@@ -14960,11 +14960,12 @@ function _collectHandoffSummaryStates(messages){
 }
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
+  if(m._compressed_summary) return true;
   const text=msgContent(m)||String(m.content||'');
   return _isContextCompactionText(text);
 }
 function _isContextCompactionText(text){
-  return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
+  return /^\s*\[context compaction/i.test(String(text||''));
 }
 function _isPreservedCompressionTaskListMarkerText(text){
   return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));

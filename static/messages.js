@@ -1693,8 +1693,12 @@ async function send(){
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
+  let userTurnOwner=null;
   try{
     S.messages.push(userMsg);renderMessages();setBusy(true);
+    userTurnOwner=typeof resolveLocalTurnCountOwner==='function'
+      ? resolveLocalTurnCountOwner()
+      : null;
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
@@ -1702,7 +1706,7 @@ async function send(){
     // can save pending state on the server.
     _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
       if(typeof upsertActiveSessionForLocalTurn==='function'){
-        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),userTurnOwner});
       }
     });
     optimisticMessages=[...S.messages];
@@ -1733,12 +1737,12 @@ async function send(){
         if(typeof upsertActiveSessionForLocalTurn==='function'){
           // Second optimistic pass: carry the provisional title into the cached row
           // without re-fetching /api/sessions before pending state exists server-side.
-          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now(),userTurnOwner});
         }
       });
     } else if(typeof upsertActiveSessionForLocalTurn==='function'){
       _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
-        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),userTurnOwner});
       });
     } else {
       _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
@@ -1824,6 +1828,7 @@ async function send(){
         else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
       }catch(_){ }
       delete INFLIGHT[activeSid];
+      if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
       stopApprovalPolling();
       stopClarifyPolling();
@@ -1842,6 +1847,7 @@ async function send(){
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
+      if(typeof restoreLocalTurnCountOwner==='function') restoreLocalTurnCountOwner(activeSid);
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
       stopApprovalPolling();
       stopClarifyPolling();
@@ -1860,6 +1866,7 @@ async function send(){
     }
 
     delete INFLIGHT[activeSid];
+    if(typeof restoreLocalTurnCountOwner==='function') restoreLocalTurnCountOwner(activeSid);
     stopApprovalPolling();
     stopClarifyPolling();
     // Only hide approval card if it belongs to the session that just finished
@@ -1930,7 +1937,7 @@ async function send(){
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
       // against real active-stream metadata before the background refresh lands.
-      upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now(),userTurnOwner});
     }
     if(!INFLIGHT[activeSid]){
       INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
@@ -2455,6 +2462,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
+    if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
     _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _clearStreamNotificationBackground(activeSid, streamId);
     _flushReasoningToAnchor();
@@ -6162,6 +6170,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
         _clearOwnerInflightState();
+        if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
         }
@@ -6569,8 +6578,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
-      _clearOwnerInflightState();
-      _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
+    _clearOwnerInflightState();
+    if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
+    _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearStreamNotificationBackground(activeSid, streamId);
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
@@ -6830,6 +6840,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
+      if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearStreamNotificationBackground(activeSid, streamId);
       _clearApprovalForOwner();
@@ -6994,6 +7005,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       _clearOwnerInflightState();
+      if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup();
       _closeSource(source);
@@ -7091,6 +7103,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
+    if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
     _closeSource(source);
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
@@ -7160,6 +7173,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           replayOnly=true;
         }else if(!st.active){
           _clearOwnerInflightState();
+          if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(activeSid);
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');
           if(S.session&&S.session.session_id===activeSid){

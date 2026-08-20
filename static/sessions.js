@@ -5266,6 +5266,7 @@ function _shouldKeepLocalOnlyOptimisticSessionRow(local){
 
 function _dropStaleOptimisticSessionRow(sid){
   if(!sid) return;
+  if(typeof clearLocalTurnCountOwner==='function') clearLocalTurnCountOwner(sid);
   if(typeof _rememberSessionListSource==='function') _rememberSessionListSource(null, sid, false);
   if(INFLIGHT&&INFLIGHT[sid]){
     delete INFLIGHT[sid];
@@ -5281,24 +5282,64 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
   const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
   const bySid=new Map();
   merged.forEach((s,idx)=>{if(s&&s.session_id) bySid.set(s.session_id,idx);});
+  const owners=typeof _localTurnOwners!=='undefined'&&_localTurnOwners instanceof Map
+    ?_localTurnOwners:new Map();
+  const sendInProgress=typeof _sendInProgress!=='undefined'&&_sendInProgress;
+  for(const [sid,owner] of owners){
+    if(sendInProgress&&sid===_sendInProgressSid) continue;
+    const idx=bySid.has(sid)?bySid.get(sid):-1;
+    if(idx<0){
+      const local=(Array.isArray(_allSessions)?_allSessions:[]).find(s=>s&&s.session_id===sid);
+      if(!local||!_shouldKeepLocalOnlyOptimisticSessionRow(local)) clearLocalTurnCountOwner(sid);
+      continue;
+    }
+    const fetched=merged[idx]||{};
+    const fetchedDirect=Number(fetched.user_message_count);
+    const fetchedLineage=Number(fetched._lineage_user_message_count);
+    const directSatisfied=owner.directCount===null
+      ||(Number.isFinite(fetchedDirect)&&fetchedDirect>=owner.directCount);
+    const lineageSatisfied=owner.lineageCount===null
+      ||(Number.isFinite(fetchedLineage)&&fetchedLineage>=owner.lineageCount);
+    const ownerConfirmed=(owner.directCount!==null||owner.lineageCount!==null)
+      &&directSatisfied&&lineageSatisfied;
+    const locallyActive=S&&S.session&&S.session.session_id===sid&&S.busy;
+    const ownerHasKnownTarget=owner.directCount!==null||owner.lineageCount!==null;
+    if(ownerConfirmed||(!ownerHasKnownTarget&&_isServerIdleSessionRow(fetched)&&!locallyActive)){
+      clearLocalTurnCountOwner(sid);
+    }
+  }
   for(const local of Array.isArray(_allSessions)?_allSessions:[]){
     if(!_isOptimisticFirstTurnSessionRow(local)) continue;
     const sid=local.session_id;
     const idx=bySid.has(sid)?bySid.get(sid):-1;
+    const owner=owners.get(sid);
     if(idx>=0){
       const fetched=merged[idx]||{};
       const fetchedIsServerIdle=_isServerIdleSessionRow(fetched);
-      const keepLocalOptimistic=fetchedIsServerIdle?false:_shouldKeepLocalOnlyOptimisticSessionRow(local);
       const localCount=Number(local.message_count||0);
       const fetchedCount=Number(fetched.message_count||0);
+      const fetchedDirect=Number(fetched.user_message_count);
+      const fetchedLineage=Number(fetched._lineage_user_message_count);
+      const directSatisfied=!!owner&&(owner.directCount===null
+        ||(Number.isFinite(fetchedDirect)&&fetchedDirect>=owner.directCount));
+      const lineageSatisfied=!!owner&&(owner.lineageCount===null
+        ||(Number.isFinite(fetchedLineage)&&fetchedLineage>=owner.lineageCount));
+      const ownerConfirmed=!!owner
+        &&(owner.directCount!==null||owner.lineageCount!==null)
+        &&directSatisfied&&lineageSatisfied;
+      const keepOwned=!!owner&&!ownerConfirmed;
+      const keepLocalOptimistic=keepOwned||(!fetchedIsServerIdle&&_shouldKeepLocalOnlyOptimisticSessionRow(local));
       const localTs=Number(local.last_message_at||local.updated_at||0);
       const fetchedTs=Number(fetched.last_message_at||fetched.updated_at||0);
       if(!keepLocalOptimistic&&typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid);
+      if(ownerConfirmed) clearLocalTurnCountOwner(sid);
       merged[idx]={
         ...local,
         ...fetched,
         title:keepLocalOptimistic?(local.title||fetched.title):fetched.title,
         message_count:keepLocalOptimistic?Math.max(localCount,fetchedCount):fetchedCount,
+        user_message_count:keepOwned&&owner.directCount!==null?owner.directCount:fetched.user_message_count,
+        _lineage_user_message_count:keepOwned&&owner.lineageCount!==null?owner.lineageCount:fetched._lineage_user_message_count,
         last_message_at:keepLocalOptimistic?Math.max(localTs,fetchedTs):fetchedTs,
         updated_at:keepLocalOptimistic?Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs):Number(fetched.updated_at||fetchedTs||0),
         active_stream_id:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.active_stream_id||local.active_stream_id||null):null),
@@ -5306,13 +5347,14 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
         pending_started_at:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.pending_started_at||local.pending_started_at||null):null),
         is_streaming:fetchedIsServerIdle?false:Boolean(fetched.is_streaming||(keepLocalOptimistic&&(local.is_streaming||_isSessionLocallyStreaming(local)))),
       };
-    }else{
-      if(_shouldKeepLocalOnlyOptimisticSessionRow(local)){
-        merged.push({...local,is_streaming:true});
-        bySid.set(sid,merged.length-1);
       }else{
-        _dropStaleOptimisticSessionRow(sid);
-      }
+        if(_shouldKeepLocalOnlyOptimisticSessionRow(local)){
+          merged.push({...local,is_streaming:true});
+          bySid.set(sid,merged.length-1);
+        }else{
+          if(owner) clearLocalTurnCountOwner(sid);
+          _dropStaleOptimisticSessionRow(sid);
+        }
     }
   }
   return merged;
@@ -7221,6 +7263,17 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid){
   }
 }
 
+// The server-projected direct or stitched count is authoritative. Absent, null,
+// non-numeric, or negative means unknown, while 0 is a real count and still
+// renders. Collapsed lineage rows require the stitched count because segment
+// snapshots may replay ancestors and cannot be summed safely in the client.
+function _sidebarUserTurnCount(row){
+  if(!row) return null;
+  const usable=(value)=>(typeof value==='number'&&Number.isFinite(value)&&value>=0)?value:null;
+  const lineage=usable(row._lineage_user_message_count);
+  return lineage!==null?lineage:usable(row.user_message_count);
+}
+
 function _collapseSessionLineageForSidebar(sessions){
   const result=[];
   const sessionIdsInList=new Set((sessions||[]).map(s=>s.session_id));
@@ -7253,7 +7306,8 @@ function _collapseSessionLineageForSidebar(sessions){
       ? _authoritativeLineageTipId(item)
       : item&&(item._lineage_tip_id||item._parent_lineage_tip_id)||null).filter(Boolean));
     const chosen=sorted.find(item=>tipIds.has(item&&item.session_id))||sorted[0];
-    result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
+    const collapsed={...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted};
+    result.push(collapsed);
   }
   return result;
 }
@@ -7283,13 +7337,64 @@ function _activeSessionIdForSidebar(){
   return null;
 }
 
-function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now()}={}){
+const _localTurnOwners=new Map();
+
+function resolveLocalTurnCountOwner(){
+  const sid=S.session&&S.session.session_id;
+  if(!sid) return null;
+  const existing=_localTurnOwners.get(sid);
+  if(existing) return existing;
+  const row=(Array.isArray(_allSessions)?_allSessions:[]).find(s=>s&&s.session_id===sid)||S.session;
+  const valid=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:null;
+  const directCandidates=[valid(S.session.user_message_count),valid(row&&row.user_message_count)]
+    .filter(value=>value!==null);
+  const direct=directCandidates.length?Math.max(...directCandidates):null;
+  const logical=valid(row&&row._lineage_user_message_count);
+  const owner=Object.freeze({
+    token: `${sid}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    directCount:direct===null?null:direct+1,
+    lineageCount:logical===null?null:logical+1,
+    baseline:Object.freeze({
+      directCount:direct,
+      sessionDirectCount:valid(S.session.user_message_count),
+      rowDirectCount:valid(row&&row.user_message_count),
+      lineageCount:logical,
+      rowLineageCount:logical,
+    }),
+  });
+  _localTurnOwners.set(sid,owner);
+  return owner;
+}
+
+function clearLocalTurnCountOwner(sid){ _localTurnOwners.delete(sid||S.session&&S.session.session_id); }
+
+function restoreLocalTurnCountOwner(sid){
+  const owner=_localTurnOwners.get(sid||S.session&&S.session.session_id);
+  if(!owner) return;
+  const target=sid||S.session&&S.session.session_id;
+  if(S.session&&S.session.session_id===target){
+    if(owner.baseline.sessionDirectCount!==null) S.session.user_message_count=owner.baseline.sessionDirectCount;
+    else delete S.session.user_message_count;
+  }
+  const row=(Array.isArray(_allSessions)?_allSessions:[]).find(s=>s&&s.session_id===target);
+  if(row){
+    if(owner.baseline.rowDirectCount!==null) row.user_message_count=owner.baseline.rowDirectCount;
+    else delete row.user_message_count;
+    if(owner.baseline.rowLineageCount!==null) row._lineage_user_message_count=owner.baseline.rowLineageCount;
+    else delete row._lineage_user_message_count;
+  }
+  clearLocalTurnCountOwner(target);
+}
+
+function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now(), userTurnOwner=null}={}){
   if(!S.session||!S.session.session_id) return;
   const sid=S.session.session_id;
   const nowSec=Math.floor((Number(timestampMs)||Date.now())/1000);
   const localCount=Array.isArray(S.messages)?S.messages.length:0;
   const count=Math.max(Number(S.session.message_count||0),Number(messageCount||0),localCount,1);
   S.session.message_count=count;
+  const owner=userTurnOwner||_localTurnOwners.get(sid);
+  if(owner&&owner.directCount!==null) S.session.user_message_count=owner.directCount;
   S.session.last_message_at=nowSec;
   S.session.updated_at=nowSec;
   if((S.session.title==='Untitled'||!S.session.title)&&title){
@@ -7301,6 +7406,8 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
     session_id:sid,
     title:S.session.title||title||'New chat',
     message_count:count,
+    ...(owner&&owner.directCount!==null?{user_message_count:owner.directCount}:{}),
+    ...(owner&&owner.lineageCount!==null?{_lineage_user_message_count:owner.lineageCount}:{}),
     last_message_at:nowSec,
     updated_at:nowSec,
     profile:S.session.profile||S.activeProfile||'default',
@@ -8276,6 +8383,12 @@ function renderSessionListFromCache(){
         ? t('session_meta_messages', msgCount)
         : `${msgCount} msg${msgCount===1?'':'s'}`;
       metaBits.push(msgLabel);
+      const userTurns=_sidebarUserTurnCount(s);
+      if(userTurns!==null){
+        metaBits.push((typeof t==='function')
+          ? t('session_meta_user_turns', userTurns)
+          : `${userTurns} from you`);
+      }
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
       const modelMeta=_formatSessionModelWithGateway(s);
       if(modelMeta) metaBits.push(modelMeta);
