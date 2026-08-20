@@ -418,19 +418,21 @@ globalThis.eval({json.dumps(bundle)});
     }
 
 
-def test_partial_locale_falls_back_to_english_provider_refresh_messages():
+def test_provider_refresh_messages_use_locale_owned_values():
     source_path = str(REPO / "static" / "i18n.js")
     script = f"""
 const source = require('fs').readFileSync({json.dumps(source_path)}, 'utf8');
-const localeCheck = source + "\\nglobalThis.runLocaleCheck=()=>{{setLocale('es'); return {{request:t('providers_live_models_request_failed'), empty:t('providers_live_models_empty'), english:LOCALES.en}};}};";
+const localeCheck = source + "\\nglobalThis.runLocaleCheck=()=>{{setLocale('es'); return {{request:t('providers_live_models_request_failed'), empty:t('providers_live_models_empty'), spanish:LOCALES.es, english:LOCALES.en}};}};";
 globalThis.localStorage = {{getItem: () => null, setItem: () => {{}}}};
 globalThis.document = {{documentElement: {{lang: ''}}, querySelectorAll: () => []}};
 globalThis.eval(localeCheck);
 console.log(JSON.stringify(globalThis.runLocaleCheck()));
 """
     result = _run_node(script)
-    assert result["request"] == result["english"]["providers_live_models_request_failed"]
-    assert result["empty"] == result["english"]["providers_live_models_empty"]
+    assert result["request"] == result["spanish"]["providers_live_models_request_failed"]
+    assert result["empty"] == result["spanish"]["providers_live_models_empty"]
+    assert result["request"] != result["english"]["providers_live_models_request_failed"]
+    assert result["empty"] != result["english"]["providers_live_models_empty"]
 
 
 def test_browser_refresh_fences_stale_live_lookup():
