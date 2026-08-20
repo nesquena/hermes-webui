@@ -1393,6 +1393,15 @@ def _provider_error_probe_text(value) -> tuple[str, int | None]:
     return ' '.join(t for t in _texts if t).strip(), _status_code
 
 
+class _HealRetryTerminalFailure(Exception):
+    """Self-heal retry returned an in-band failure; emit the original error.
+
+    Raised inside the except-path retry block so the existing
+    ``except Exception`` handler routes control to the normal error
+    emission instead of persisting a failed retry as success.
+    """
+
+
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
@@ -10731,6 +10740,33 @@ def _run_agent_streaming(
                                 )
                                 _heal_ok = False
                             if _heal_ok and _heal_result is not None:
+                                # A retry that RETURNED is not yet a retry that
+                                # SUCCEEDED. ``_heal_ok`` only proves an assistant
+                                # row (or streamed token) exists — a retry that
+                                # came back with an explicit error, or with a
+                                # terminal failure and no answer for the current
+                                # turn, would still be persisted as success here
+                                # and the error emission below skipped. Gate on
+                                # the same signals the normal result path uses.
+                                _heal_explicit_error = bool(getattr(agent, '_last_error', None)) or (
+                                    'error' in _heal_result
+                                    and _heal_result.get('error') not in (None, '')
+                                )
+                                _heal_terminal = (
+                                    _agent_result_terminal_failure(_heal_result)
+                                    or _agent_result_tool_limit_reached(_heal_result)
+                                )
+                                _heal_has_answer = _assistant_reply_added_after_current_turn(
+                                    _heal_result.get('messages') or [],
+                                    _previous_context_messages,
+                                    msg_text,
+                                )
+                                if _heal_explicit_error or (_heal_terminal and not _heal_has_answer):
+                                    logger.info(
+                                        '[webui] self-heal: retry returned terminal failure; emitting error'
+                                    )
+                                    _heal_ok = False
+                            if _heal_ok and _heal_result is not None:
                                 # Retry succeeded — replace result and skip error
                                 result = _heal_result
                                 # Fall through past the error-emission block;
@@ -11973,6 +12009,31 @@ def _run_agent_streaming(
                             result=_heal_result,
                             agent=_heal_agent,
                         )
+                        # A retry that returned is not yet a retry that
+                        # succeeded: run_conversation reports many failures
+                        # in-band (result['error'], terminal status) rather
+                        # than by raising. Without this gate such a retry is
+                        # persisted as success and the error emission below
+                        # is skipped — the user sees a silently swallowed
+                        # failure. Same signals as the in-band heal path.
+                        _heal_explicit_error2 = bool(getattr(_heal_agent, '_last_error', None)) or (
+                            'error' in _heal_result
+                            and _heal_result.get('error') not in (None, '')
+                        )
+                        _heal_terminal2 = (
+                            _agent_result_terminal_failure(_heal_result)
+                            or _agent_result_tool_limit_reached(_heal_result)
+                        )
+                        _heal_has_answer2 = _assistant_reply_added_after_current_turn(
+                            _heal_result.get('messages') or [],
+                            _previous_context_messages,
+                            msg_text,
+                        )
+                        if _heal_explicit_error2 or (_heal_terminal2 and not _heal_has_answer2):
+                            logger.info(
+                                '[webui] self-heal (except path): retry returned terminal failure; emitting error'
+                            )
+                            raise _HealRetryTerminalFailure()
                         # Retry succeeded — persist the result normally
                         if s is not None:
                             if _checkpoint_stop is not None:
