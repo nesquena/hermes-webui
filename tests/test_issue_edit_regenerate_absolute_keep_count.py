@@ -28,10 +28,11 @@ def test_submit_edit_uses_absolute_keep_count():
     assert "keep_count: absoluteKeepCount" in body
 
 
-def test_regenerate_uses_absolute_keep_count():
+def test_regenerate_delegates_to_atomic_start_without_client_truncation():
     body = _function_body(UI_JS, "regenerateResponse")
-    assert re.search(r"absoluteKeepCount\s*=\s*_oldestIdx\s*\+\s*assistantIdx", body)
-    assert "keep_count: absoluteKeepCount" in body
+    assert "await startRegeneration(initialSid, S.session.regeneration_revision)" in body
+    assert "/api/session/truncate" not in body
+    assert "await send()" not in body
 
 
 def test_submit_edit_captures_absolute_before_await():
