@@ -35,6 +35,18 @@ NODE = shutil.which("node")
 UI_JS_PATH = REPO / "static" / "ui.js"
 
 
+@pytest.fixture(scope="module")
+def browser():
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    with playwright_api.sync_playwright() as playwright:
+        instance = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        yield instance
+        instance.close()
+
+
 def _run_node(source: str) -> str:
     result = subprocess.run(
         [str(NODE)],
@@ -75,12 +87,21 @@ eval(extractFunc('_localModelSwitchText'));
 const cases = {{
   // Genuine local fallback: configured model failed, another one served.
   realSwitch: _localModelSwitchText(
-    {{ _usedModel: 'deepseek-v4-flash-0731' }}, '@alibaba:qwen3.8-max'),
+    {{ _usedModel: 'deepseek-v4-flash-0731', _usedProvider: 'ollama', _requestedProvider: 'alibaba' }}, '@alibaba:qwen3.8-max'),
   // Same model, different notation -> must stay silent (869 real occurrences).
   notationOnly: _localModelSwitchText(
-    {{ _usedModel: 'gpt-5.6-sol' }}, '@openai-codex:gpt-5.6-sol'),
+    {{ _usedModel: 'gpt-5.6-sol', _usedProvider: 'openai-codex', _requestedProvider: 'openai-codex' }}, '@openai-codex:gpt-5.6-sol'),
   notationOnlyCustom: _localModelSwitchText(
-    {{ _usedModel: 'k3-256k' }}, '@custom:kimi-coding:k3-256k'),
+    {{ _usedModel: 'k3-256k', _usedProvider: 'custom:kimi-coding', _requestedProvider: 'custom:kimi-coding' }}, '@custom:kimi-coding:k3-256k'),
+  colonTaggedSwitch: _localModelSwitchText(
+    {{ _usedModel: '@ollama:qwen2.5:8b', _usedProvider: 'ollama', _requestedProvider: 'ollama' }},
+    '@ollama:llama3:8b'),
+  colonTaggedSame: _localModelSwitchText(
+    {{ _usedModel: 'llama3:8b', _usedProvider: 'ollama', _requestedProvider: 'ollama' }},
+    '@ollama:llama3:8b'),
+  customColonTaggedSwitch: _localModelSwitchText(
+    {{ _usedModel: '@custom:local:qwen2.5:8b', _usedProvider: 'custom:local', _requestedProvider: 'custom:local' }},
+    '@custom:local:llama3:8b'),
   identical: _localModelSwitchText({{ _usedModel: 'gpt-5.6-sol' }}, 'gpt-5.6-sol'),
   caseInsensitive: _localModelSwitchText(
     {{ _usedModel: 'GPT-5.6-Sol' }}, '@openai-codex:gpt-5.6-sol'),
@@ -108,6 +129,18 @@ def test_bare_model_id_strips_routing_hints():
     assert _bare_model_id("anthropic/claude-opus-5") == "claude-opus-5"
     assert _bare_model_id("") == ""
     assert _bare_model_id(None) == ""
+
+
+def test_bare_model_id_preserves_colon_tag_after_the_routing_prefix():
+    """Two local models sharing an Ollama tag must remain distinct identities."""
+    from api.streaming import _bare_model_id, _local_model_switch
+
+    assert _bare_model_id("@ollama:llama3:8b") == "llama3:8b"
+    assert _bare_model_id("@custom:local:llama3:8b") == "llama3:8b"
+    assert _bare_model_id("@custom:localhost:11434:llama3:8b") == "llama3:8b"
+    assert _local_model_switch("@ollama:llama3:8b", "@ollama:qwen2.5:8b") is True
+    assert _local_model_switch("@custom:local:llama3:8b", "@custom:local:qwen2.5:8b") is True
+    assert _local_model_switch("@ollama:llama3:8b", "llama3:8b") is False
 
 
 def test_requested_model_is_captured_before_the_run_mutates_agent_model():
@@ -171,6 +204,11 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["realSwitch"], "a genuine local fallback switch must be surfaced"
     assert "qwen3.8-max" in cases["realSwitch"]
     assert "deepseek-v4-flash-0731" in cases["realSwitch"]
+    assert "llama3:8b" in cases["colonTaggedSwitch"]
+    assert "qwen2.5:8b" in cases["colonTaggedSwitch"]
+    assert cases["colonTaggedSame"] == ""
+    assert "llama3:8b" in cases["customColonTaggedSwitch"]
+    assert "qwen2.5:8b" in cases["customColonTaggedSwitch"]
 
     # Everything else must stay silent.
     assert cases["notationOnly"] == ""
@@ -181,3 +219,94 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["noUsedModel"] == ""
     assert cases["noRequested"] == ""
     assert cases["nullMsg"] == ""
+
+
+@pytest.mark.parametrize(
+    ("name", "width", "height"),
+    [
+        ("desktop", 1280, 900),
+        ("narrow", 720, 900),
+        ("mobile", 390, 844),
+    ],
+)
+def test_real_footer_render_keeps_long_colon_tagged_switch_visible_and_contained(
+    browser, base_url, name, width, height
+):
+    """Exercise the real renderer and CSS at desktop, narrow, and phone widths."""
+    page = browser.new_page(viewport={"width": width, "height": height})
+    try:
+        page.goto(base_url, wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof renderMessages === 'function' && !!document.querySelector('#msgInner')",
+            timeout=15000,
+        )
+        rendered = page.evaluate(
+            """() => {
+              const translated = 'Das angeforderte Modell wurde automatisch auf ein anderes lokales Modell umgestellt';
+              const originalT = window.t;
+              window.t = (key, vars) => key === 'model_switched' ? translated : originalT(key, vars);
+              const requested = '@ollama:research/llama-super-instruct-with-an-extraordinarily-long-name:shared-quantization-tag';
+              const used = '@ollama:research/qwen-super-instruct-with-an-extraordinarily-long-name:shared-quantization-tag';
+              S.session = {
+                session_id: 'colon-tagged-render-proof',
+                model: requested,
+                model_provider: 'ollama',
+              };
+              S.messages = [
+                {role: 'user', content: 'render the fallback warning'},
+                {
+                  role: 'assistant',
+                  content: 'Rendered answer',
+                  _requestedModel: requested,
+                  _requestedProvider: 'ollama',
+                  _usedModel: used,
+                  _usedProvider: 'ollama',
+                  _modelSwitched: true,
+                },
+              ];
+              S.toolCalls = [];
+              S.busy = false;
+              renderMessages();
+              const warning = document.querySelector('.msg-model-warning-inline');
+              if (!warning) return {missing: true};
+              const foot = warning.closest('.msg-foot');
+              const rect = warning.getBoundingClientRect();
+              const footRect = foot.getBoundingClientRect();
+              const style = getComputedStyle(warning);
+              return {
+                missing: false,
+                text: warning.textContent,
+                display: style.display,
+                visibility: style.visibility,
+                opacity: Number(style.opacity),
+                rect: {left: rect.left, right: rect.right, width: rect.width, height: rect.height},
+                foot: {
+                  left: footRect.left,
+                  right: footRect.right,
+                  clientWidth: foot.clientWidth,
+                  scrollWidth: foot.scrollWidth,
+                },
+                viewportWidth: innerWidth,
+                documentClientWidth: document.documentElement.clientWidth,
+                documentScrollWidth: document.documentElement.scrollWidth,
+                translated,
+                requested,
+                used,
+              };
+            }"""
+        )
+        assert rendered["missing"] is False, f"{name}: fallback warning did not render"
+        assert rendered["translated"] in rendered["text"]
+        assert "Llama Super Instruct" in rendered["text"]
+        assert "Qwen Super Instruct" in rendered["text"]
+        assert rendered["text"].count("Shared Quantization TAG") == 2
+        assert "→" in rendered["text"]
+        assert rendered["display"] != "none"
+        assert rendered["visibility"] != "hidden"
+        assert rendered["opacity"] > 0
+        assert rendered["rect"]["width"] > 0 and rendered["rect"]["height"] > 0
+        assert rendered["rect"]["left"] >= rendered["foot"]["left"] - 1
+        assert rendered["rect"]["right"] <= rendered["foot"]["right"] + 1
+        assert rendered["foot"]["scrollWidth"] <= rendered["foot"]["clientWidth"] + 1
+    finally:
+        page.close()

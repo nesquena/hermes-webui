@@ -5151,16 +5151,20 @@ function _formatReasoningEffortLabel(effort){
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
-function _bareModelId(modelId){
-  // Mirror of api/streaming.py::_bare_model_id — strips a WebUI routing hint
-  // ('@provider:model', '@custom:<slug>:model') and a vendor path prefix so two
-  // ids can be compared. Without this, '@openai-codex:gpt-5.6-sol' and
-  // 'gpt-5.6-sol' look like a model switch when they are the same model.
+function _bareModelId(modelId, providerId){
+  // Mirror of api/streaming.py::_bare_model_id — remove only the routing prefix
+  // identified by the adjacent provider field, then keep the complete bare model
+  // (including Ollama-style tags such as ':8b').
   let m=String(modelId||'').trim();
   if(!m)return'';
-  if(m.charAt(0)==='@'){
-    m=m.indexOf(':')>=0?m.slice(m.indexOf(':')+1):m;
-    if(m.indexOf(':')>=0)m=m.slice(m.indexOf(':')+1);
+  const provider=String(providerId||'').trim();
+  const prefix=provider?`@${provider}:`:'';
+  if(prefix&&m.toLowerCase().startsWith(prefix.toLowerCase())){
+    m=m.slice(prefix.length);
+  }else if(m.charAt(0)==='@'&&m.indexOf(':')>=0&&!m.startsWith('@custom:')){
+    // A non-custom provider is one grammar segment. This compatibility path is
+    // for older messages that predate the persisted provider provenance fields.
+    m=m.slice(m.indexOf(':')+1);
   }
   const parts=m.split('/');
   return parts[parts.length-1].trim();
@@ -5176,7 +5180,7 @@ function _localModelSwitchText(msg, requestedModel){
   const used=String(msg._usedModel||'').trim();
   const requested=String(requestedModel||msg._requestedModel||'').trim();
   if(!used||!requested)return'';
-  if(_bareModelId(used).toLowerCase()===_bareModelId(requested).toLowerCase())return'';
+  if(_bareModelId(used,msg._usedProvider).toLowerCase()===_bareModelId(requested,msg._requestedProvider).toLowerCase())return'';
   return`${t('model_switched')||'Model switched'}: ${getModelLabel(requested)} → ${getModelLabel(used)}`;
 }
 function _reasoningEffortContext(){

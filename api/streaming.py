@@ -2648,16 +2648,16 @@ def _bare_model_id(model_id) -> str:
     different ways. A vendor path prefix (``anthropic/claude-opus-5``) is dropped
     for the same reason. Returns '' for empty/None input so callers fail closed.
     """
-    from api.config import _strip_provider_hint_for_reasoning
+    from api.config import _parse_provider_qualified_model_id
 
     model = str(model_id or "").strip()
     if not model:
         return ""
-    model = _strip_provider_hint_for_reasoning(model)
-    # ``@custom:<slug>:model`` only loses the ``@custom:`` segment above when the
-    # provider is not known here, leaving ``<slug>:model``. Drop what remains.
-    if ":" in model:
-        model = model.split(":", 1)[1]
+    qualified = _parse_provider_qualified_model_id(model)
+    if qualified:
+        # The shared parser identifies the complete routing prefix. Keep the
+        # complete bare model: later colons are model tags (for example ``:8b``).
+        model = qualified[0]
     return model.rsplit("/", 1)[-1].strip()
 
 
