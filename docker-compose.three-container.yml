@@ -83,7 +83,10 @@ services:
     container_name: hermes-dashboard
     command: dashboard --host 0.0.0.0 --insecure
     ports:
-      - "0.0.0.0:9119:9119"
+      # Expose on localhost only. Remove 127.0.0.1: to expose on all interfaces
+      # (the dashboard runs --insecure — put it behind auth / a reverse proxy
+      #  if exposing beyond loopback; see issue #6876).
+      - "127.0.0.1:9119:9119"
     volumes:
       - hermes-home:/home/hermes/.hermes
     environment:
