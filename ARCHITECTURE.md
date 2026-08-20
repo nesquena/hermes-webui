@@ -137,10 +137,13 @@ row, `defer` only for an unexpired peer lease, and replaces expired or legacy
 transient rows with a new token and lease. Every settlement checks that token,
 so a late page cannot release or deliver a replacement lease. Exact
 browser-owned displayed records are checked before leasing, while waiting, and
-before presentation; they outrank lease expiry. Owner-storage failure means
-coordination is unavailable, not that the notification displayed, so the
-existing registration-first presenter remains the fallback. Permission,
-visibility, and notification-enabled gates still run before this router.
+before presentation; they outrank lease expiry. Only a missing IndexedDB API or
+a synchronous `indexedDB.open()` throw proves that owner coordination is
+unavailable, so those cases use the existing registration-first presenter as a
+fallback. Async open errors, blocked or aborted upgrades, and transaction
+failures leave ownership uncertain and return `ambiguous` without presenting.
+Permission, visibility, and notification-enabled gates still run before this
+router.
 
 Presentation and settlement are separate browser boundaries. A successful
 presentation returns `shown` even when the terminal settlement write fails,

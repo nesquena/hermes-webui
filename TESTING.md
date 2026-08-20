@@ -120,6 +120,12 @@ durably settled. The worker suppresses only an exact event id in the browser's
 currently displayed records; all other eligible fallback displays use the
 registration-first presenter.
 
+The focused storage matrix distinguishes proven capability absence from
+uncertain ownership. Missing `indexedDB` and a synchronous `indexedDB.open()`
+throw use the registration-first fallback; async open errors, `blocked`,
+upgrade aborts, transaction errors, and transaction aborts return `ambiguous`
+without presenting.
+
 ```bash
 python tests/browser_issue6673_service_worker.py
 ```

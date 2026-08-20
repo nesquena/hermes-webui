@@ -138,11 +138,15 @@ def test_presenter_options_are_same_origin_and_in_scope_without_changing_click_r
 def test_page_and_worker_use_one_registration_first_presenter_with_page_owner_fallback():
     notification_region = MESSAGES_JS[MESSAGES_JS.index("function _notificationOptions"):MESSAGES_JS.index("// ── /btw ephemeral stream")]
     assert "indexedDB.open(" in MESSAGES_JS
-    assert "_claimPageNotification" in MESSAGES_JS
+    assert "_leasePageNotification" in MESSAGES_JS
+    assert "NOTIFICATION_OWNER_LEASE_MS" in MESSAGES_JS
+    assert "_markPageNotificationDisplaying" not in MESSAGES_JS
+    assert "BroadcastChannel" not in MESSAGES_JS
     assert "hermes-notifications" in MESSAGES_JS
     assert notification_region.count("new Notification(") == 1
     assert notification_region.count("reg.showNotification(") == 1
-    assert "_notificationOwnerStorageUnavailable)return 'ambiguous';\n    return _presentNotificationLocally(reg,title,opts).catch(()=> 'ambiguous');" in notification_region
+    assert "error&&error._notificationOwnerStorageUnavailable" in notification_region
+    assert "_presentWithoutPageLease(title,body,opts,identity,reg)" in notification_region
     assert "indexedDB.open(" not in SW_JS
     assert "hermes.notification.present" in MESSAGES_JS
     assert "hermes.notification.present" in SW_JS

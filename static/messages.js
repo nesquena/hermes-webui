@@ -9238,11 +9238,8 @@ function _openNotificationOwnerDb(){
       try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){reject(error);}
     };
     request.onsuccess=()=>resolve(request.result);
-    request.onerror=()=>reject(_notificationOwnerStorageUnavailable());
-    request.onblocked=()=>reject(_notificationOwnerStorageUnavailable());
-  }).catch(error=>{
-    if(error&&error._notificationOwnerStorageUnavailable)throw error;
-    throw _notificationOwnerStorageUnavailable();
+    request.onerror=()=>reject(request.error||new Error('notification owner storage failed'));
+    request.onblocked=()=>reject(new Error('notification owner storage blocked'));
   });
 }
 function _notificationOwnerToken(){
@@ -9260,7 +9257,7 @@ function _leasePageNotification(identity){
       tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
       const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
       const read=store.get(key);
-      read.onerror=()=>finish('unavailable');
+      read.onerror=()=>finish('ambiguous');
       read.onsuccess=()=>{
         const current=read.result;
         const now=Date.now();
@@ -9272,13 +9269,13 @@ function _leasePageNotification(identity){
         if(peerLease){finish('defer',{expiresAt});return;}
         lease={streamId:identity.streamId,lastEventId:identity.lastEventId,state:'pending',phase:'presenting',token,expiresAt:now+NOTIFICATION_OWNER_LEASE_MS};
         try{store.put(lease);}
-        catch(_error){finish('unavailable');}
+        catch(_error){finish('ambiguous');}
       };
       tx.oncomplete=()=>{if(lease&&!settled)finish('lease', {lease});};
-      tx.onerror=()=>finish('unavailable');
-      tx.onabort=()=>finish('unavailable');
-    }catch(_error){finish('unavailable');}
-  })).catch(()=>({status:'unavailable',token}));
+      tx.onerror=()=>finish('ambiguous');
+      tx.onabort=()=>finish('ambiguous');
+    }catch(_error){finish('ambiguous');}
+  })).catch(error=>({status:error&&error._notificationOwnerStorageUnavailable?'unavailable':'ambiguous',token}));
 }
 function _settlePageNotification(identity,token,state){
   const key=_notificationOwnerKey(identity);

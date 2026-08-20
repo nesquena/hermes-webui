@@ -115,9 +115,9 @@ def test_registration_first_presenter_covers_rows_one_through_thirty_four():
         {"name": "29-sender-denied", "sender": True, "permission": "denied", "expected": "blocked", "registration": 0, "direct": 0},
         {"name": "30-registration-present-missing-indexeddb", "worker": "invalid", "channel": False, "indexedDBAvailable": False, "constructorAvailable": False, "expected": "shown", "registration": 1, "direct": 0},
         {"name": "31-no-worker-no-indexeddb-boundary", "channel": False, "indexedDBAvailable": False, "registrationAvailable": False, "constructorAvailable": False, "ownerBoundary": "no-shared-owner", "expected": "ambiguous", "registration": 0, "direct": 1},
-        {"name": "32-owner-storage-request-error", "worker": "invalid", "indexedDBMode": "request-error", "expected": "shown", "registration": 1, "direct": 0},
-        {"name": "33-owner-storage-upgrade-abort", "worker": "invalid", "indexedDBMode": "upgrade-abort", "expected": "shown", "registration": 1, "direct": 0},
-        {"name": "34-owner-storage-blocked", "worker": "invalid", "indexedDBMode": "blocked", "expected": "shown", "registration": 1, "direct": 0},
+        {"name": "32-owner-storage-request-error", "worker": "invalid", "indexedDBMode": "request-error", "expected": "ambiguous", "registration": 0, "direct": 0},
+        {"name": "33-owner-storage-upgrade-abort", "worker": "invalid", "indexedDBMode": "upgrade-abort", "expected": "ambiguous", "registration": 0, "direct": 0},
+        {"name": "34-owner-storage-blocked", "worker": "invalid", "indexedDBMode": "blocked", "expected": "ambiguous", "registration": 0, "direct": 0},
     ]
     notification_region = _notification_region()
     driver = textwrap.dedent(
@@ -378,6 +378,7 @@ def _run_page_owner_matrix(cases):
                 },
                 put(value) {
                   if (config.storageMode === 'sync-put-error') throw new Error('put failed');
+                  if (config.storageMode === 'transaction-abort') { queueMicrotask(() => tx.onabort?.()); return; }
                   queueMicrotask(() => {
                     if (value.phase === 'delivered' && config.failDeliveredWrites > 0) {
                       config.failDeliveredWrites -= 1;
@@ -410,6 +411,7 @@ def _run_page_owner_matrix(cases):
               if (config.storageMode === 'sync-open-error') throw new Error('open failed');
               const request = {};
               queueMicrotask(() => {
+                if (config.storageMode === 'version-error') { request.error = new Error('VersionError'); request.onerror?.(); return; }
                 if (config.storageMode === 'request-error') { request.error = new Error('request failed'); request.onerror?.(); return; }
                 if (config.storageMode === 'blocked') { request.onblocked?.(); return; }
                 request.result = db;
@@ -563,21 +565,27 @@ def test_page_owner_lease_proof_matrix():
         assert worker["status"] == status and worker["ownerOpens"] == 0 and worker["registrationDisplays"] == 0, worker
 
 
-def test_page_owner_storage_failure_routes_through_presenter():
+def test_page_owner_storage_failure_classifies_proven_unavailable_only():
     cases = [
         {"name": "missing", "kind": "storage", "worker": "invalid", "storageMode": "missing"},
         {"name": "blocked", "kind": "storage", "worker": "invalid", "storageMode": "blocked"},
         {"name": "request-error", "kind": "storage", "worker": "invalid", "storageMode": "request-error"},
+        {"name": "version-error", "kind": "storage", "worker": "invalid", "storageMode": "version-error"},
         {"name": "upgrade-abort", "kind": "storage", "worker": "invalid", "storageMode": "upgrade-abort"},
         {"name": "async-error", "kind": "storage", "worker": "invalid", "storageMode": "async-error"},
         {"name": "sync-open-error", "kind": "storage", "worker": "invalid", "storageMode": "sync-open-error"},
         {"name": "transaction-error", "kind": "storage", "worker": "invalid", "storageMode": "transaction-error"},
+        {"name": "transaction-abort", "kind": "storage", "worker": "invalid", "storageMode": "transaction-abort"},
         {"name": "sync-put-error", "kind": "storage", "worker": "invalid", "storageMode": "sync-put-error"},
     ]
     results = _run_page_owner_matrix(cases)
     for observed in results:
-        assert observed["status"] == "shown", observed
-        assert observed["registrationDisplays"] == 1, observed
+        if observed["name"] in {"missing", "sync-open-error"}:
+            assert observed["status"] == "shown", observed
+            assert observed["registrationDisplays"] == 1, observed
+        else:
+            assert observed["status"] == "ambiguous", observed
+            assert observed["registrationDisplays"] == 0, observed
         assert observed.get("row") is None, observed
 
 
