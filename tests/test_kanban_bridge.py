@@ -28,6 +28,8 @@ class FakeTask:
     tenant: str | None = None
     priority: int = 0
     body: str | None = None
+    model_override: str | None = None
+    provider_override: str | None = None
 
 
 @dataclass
@@ -172,10 +174,27 @@ class FakeKanbanDB:
             kwargs.get("tenant"),
             int(kwargs.get("priority") or 0),
             kwargs.get("body"),
+            kwargs.get("model_override"),
+            kwargs.get("provider_override"),
         )
         self.tasks.append(task)
         self._event(task_id, "created", {"status": status})
         return task_id
+
+    def set_model_override(self, conn, task_id, model, provider=None):
+        task = self.get_task(conn, task_id)
+        if not task:
+            return False
+        model = (model or "").strip() or None
+        provider = (provider or "").strip() or None
+        if provider and not model:
+            raise ValueError("provider_override requires a model_override")
+        if not model:
+            provider = None
+        task.model_override = model
+        task.provider_override = provider
+        self._event(task_id, "model_override_set", {"model": model, "provider": provider})
+        return True
 
     def assign_task(self, conn, task_id, assignee):
         task = self.get_task(conn, task_id)
@@ -453,6 +472,52 @@ def test_kanban_patch_task_payload_updates_status_title_and_comment(monkeypatch)
     assert patched["task"]["status"] == "done"
     assert comment == {"ok": True, "comment_id": 1, "read_only": False}
     assert detail["comments"][0]["body"] == "Looks done"
+
+
+def test_kanban_create_task_payload_accepts_model_and_provider_override(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    data = bridge._create_task_payload({
+        "title": "Model-pinned task",
+        "model_override": "gpt-5.6-sol",
+        "provider_override": "openai",
+    })
+
+    assert data["task"]["model_override"] == "gpt-5.6-sol"
+    assert data["task"]["provider_override"] == "openai"
+
+
+def test_kanban_patch_task_payload_sets_and_clears_model_override(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    created = bridge._create_task_payload({"title": "Patch model target"})
+    task_id = created["task"]["id"]
+
+    # Set a model/provider override via PATCH.
+    set_res = bridge._patch_task_payload(task_id, {
+        "model_override": "gpt-5.6-mini",
+        "provider_override": "anthropic",
+    })
+    assert set_res["task"]["model_override"] == "gpt-5.6-mini"
+    assert set_res["task"]["provider_override"] == "anthropic"
+
+    # Clear both back to profile default by sending empty model.
+    cleared = bridge._patch_task_payload(task_id, {"model_override": ""})
+    assert cleared["task"]["model_override"] is None
+    assert cleared["task"]["provider_override"] is None
+
+
+def test_kanban_model_override_rejects_provider_without_model(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    created = bridge._create_task_payload({"title": "Bad provider"})
+    task_id = created["task"]["id"]
+
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        bridge._patch_task_payload(task_id, {"provider_override": "openai"})
+    with _pytest.raises(ValueError):
+        bridge._create_task_payload({"title": "Bad", "provider_override": "openai"})
 
 
 def test_kanban_link_payload_adds_parent_child_relationship(monkeypatch):
