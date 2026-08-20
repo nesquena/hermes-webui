@@ -1361,9 +1361,12 @@ def test_kanban_unassigned_lane_in_sidebar_meta():
     assert "t('kanban_unassigned')" in meta_body
 
 
-def test_kanban_card_exposes_execution_model_override():
-    """A task with a model_override must surface the model on the board card
-    and in the task meta, so the executing model is visible at a glance."""
+def test_kanban_card_exposes_next_dispatch_model_override():
+    """A task with a model_override must surface the model on the board card and
+    in the task meta, so the model the card's NEXT dispatch will use is visible
+    at a glance. (The override is a dispatch-time input, so it can never be
+    presented as the model an already-running worker is using -- see
+    test_kanban_running_card_model_badge_does_not_claim_the_active_run.)"""
     # _kanbanTaskMeta appends a 🧠 chip carrying the override (provider wins the
     # label when both are set, since it disambiguates the backend).
     meta_match = re.search(
@@ -1374,7 +1377,11 @@ def test_kanban_card_exposes_execution_model_override():
     assert meta_match, "_kanbanTaskMeta() not found"
     meta_body = meta_match.group(1)
     assert "task.model_override" in meta_body
-    assert "task.provider_override || task.model_override" in meta_body
+    # The chip names the MODEL, with the provider only as a qualifier -- the
+    # earlier `provider_override || model_override` form would have labelled a
+    # bare provider id as the "Model (next dispatch)".
+    assert "task.provider_override || task.model_override" not in meta_body
+    assert "${task.model_override} (${task.provider_override})" in meta_body
     assert "🧠" in meta_body
 
     # _kanbanCard renders a .kanban-badge.model chip in the card top line when
@@ -1405,6 +1412,8 @@ def test_kanban_card_exposes_execution_model_override():
     assert "kanban_provider:" in I18N
     assert "kanban_no_model_override:" in I18N
     assert "kanban_card_model_hint:" in I18N
+    assert "kanban_card_model_hint_running:" in I18N
+    assert "kanban_model_next_dispatch:" in I18N
 
 
 def test_kanban_model_badge_static_render_e2e():
@@ -1451,7 +1460,7 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     /api/models catalog via the same searchable renderModelDropdown() picker the
     composer + settings use (not free-text, not a bare native select), and the
     submit handler must route the chosen model + provider to the API so users can
-    configure the card's executing model from the WebUI."""
+    configure the model the card's next dispatch will use from the WebUI."""
     # The model field is a chip trigger + hidden full-catalog <select> + dropdown
     # shell (the renderModelDropdown pattern). No separate provider text field.
     assert 'id="kanbanTaskModalModelChip"' in INDEX
@@ -1533,3 +1542,199 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     for key in ("kanban_provider_placeholder", "kanban_provider_hint",
                 "kanban_provider_requires_model", "kanban_model_placeholder"):
         assert f"{key}:" not in I18N
+
+
+# ── #6765 blocker: the model badge describes the NEXT dispatch, not the live run ──
+#
+# `model_override`/`provider_override` are dispatch-time INPUTS in the agent core:
+# the dispatcher passes `-m <model> [--provider <provider>]` when it SPAWNS the
+# worker, and `kanban_db.set_model_override()` documents that a change "only takes
+# effect on the NEXT dispatch". There is no per-run model snapshot on `task_runs`,
+# so the WebUI cannot know what an already-spawned worker is actually using.
+#
+# Production ordering that used to produce a false claim:
+#   worker spawned with model A -> card edited to B -> _task_dict() returns B
+#   immediately -> the card presented B as "executes with model B" while the live
+#   worker was still A.
+#
+# Contract: the badge/field always describes the card's NEXT dispatch, and while
+# the card is 'running' the wording says so explicitly.
+
+_OLD_EXECUTION_CLAIMS = (
+    "Executes with model",
+    "Used for how this card executes",
+    "how this card executes",
+)
+
+
+def _en_i18n_value(key: str) -> str:
+    """Raw English value for a single-quoted i18n key (with \\uXXXX decoded)."""
+    en_body = _locale_blocks_with_body(I18N)[0][1]
+    m = re.search(rf"^\s*{re.escape(key)}: '(.*?)',$", en_body, re.M)
+    assert m, f"English i18n block has no {key}"
+    return m.group(1).encode("utf-8").decode("unicode_escape")
+
+
+def _render_kanban_card(task: dict) -> str:
+    """Run the real _kanbanCard() builder under node with the real English
+    i18n strings, so the assertions cover the rendered DOM (not just source)."""
+    import json
+    import subprocess
+
+    strings = {
+        key: _en_i18n_value(key)
+        for key in (
+            "kanban_card_model_hint",
+            "kanban_card_model_hint_running",
+            "kanban_model_next_dispatch",
+            "kanban_unassigned",
+            "kanban_card_complete",
+            "kanban_card_archive",
+        )
+    }
+    fn_source = extract_function(PANELS, "_kanbanCard")
+    script = (
+        "const fnSource = " + json.dumps(fn_source) + ";\n"
+        "const STRINGS = " + json.dumps(strings) + ";\n"
+        "const task = " + json.dumps(task) + ";\n"
+        # Faithful copy of i18n.js t(): {0}-style numbered placeholders.
+        "const t = (key, ...args) => {\n"
+        "  const val = STRINGS[key];\n"
+        "  if (val === undefined) return key;\n"
+        "  if (args.length) return String(val).replace(/\\{(\\d+)\\}/g, (m, i) => (\n"
+        "    Object.prototype.hasOwnProperty.call(args, Number(i)) ? String(args[Number(i)]) : m));\n"
+        "  return val;\n"
+        "};\n"
+        "const esc = (s) => String(s == null ? '' : s)\n"
+        "  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')\n"
+        "  .replace(/\\\"/g,'&quot;').replace(/'/g,'&#39;');\n"
+        "const _kanbanTaskAge = () => '';\n"
+        "const _kanbanTaskBody = (x) => x.body || '';\n"
+        "const _kanbanRenderMarkdown = (x) => String(x || '');\n"
+        "const _kanbanCardStalenessClass = () => '';\n"
+        "const _kanbanTaskTitle = (x) => x.title || x.id || '';\n"
+        "const _kanbanCardQuickActions = () => '';\n"
+        "const out = {};\n"
+        "new Function('out', fnSource + '; out.fn = _kanbanCard;')(out);\n"
+        "console.log(JSON.stringify({html: out.fn(task, task.status || 'ready')}));\n"
+    )
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, f"node -e failed: {result.stderr}"
+    return json.loads(result.stdout)["html"]
+
+
+def _model_badge_title(html: str) -> str:
+    m = re.search(r'<span class="kanban-badge model" title="(.*?)">', html)
+    assert m, f"no model badge found in rendered card: {html}"
+    return m.group(1)
+
+
+def test_kanban_running_card_model_badge_does_not_claim_the_active_run():
+    """Production ordering: a worker was spawned with model A, then the RUNNING
+    card's override was edited to B. The bridge returns B immediately, so the
+    card must present B as what the NEXT dispatch will use — never as the model
+    the active worker is executing with."""
+    html = _render_kanban_card({
+        "id": "t-run",
+        "title": "rate-limited task",
+        # 'running' is the real agent status literal (kanban_db.VALID_STATUSES)
+        # and the same value _kanbanCardStalenessClass()/_kanbanCardQuickActions()
+        # already branch on.
+        "status": "running",
+        "model_override": "gpt-5.6-sol",
+        "provider_override": "openai",
+    })
+    title = _model_badge_title(html)
+    # The badge still names the model...
+    assert "🧠 gpt-5.6-sol" in html
+    assert "gpt-5.6-sol" in title
+    # ...but scoped to the NEXT dispatch, with the active run called out.
+    assert "next dispatch" in title.lower(), title
+    assert title == _en_i18n_value("kanban_card_model_hint_running").replace(
+        "{0}", "gpt-5.6-sol"), title
+    # And it must NOT reassert the old execution claim.
+    for claim in _OLD_EXECUTION_CLAIMS:
+        assert claim not in title, f"running card tooltip still claims {claim!r}"
+
+
+def test_kanban_non_running_card_model_badge_is_next_dispatch_scoped():
+    """A ready/queued card has no live worker at all, so the tooltip is the plain
+    next-dispatch wording (still not an 'executes with' claim)."""
+    for status in ("ready", "todo", "triage", "blocked"):
+        html = _render_kanban_card({
+            "id": "t-ready",
+            "title": "queued task",
+            "status": status,
+            "model_override": "gpt-5.6-sol",
+        })
+        title = _model_badge_title(html)
+        assert title == _en_i18n_value("kanban_card_model_hint").replace(
+            "{0}", "gpt-5.6-sol"), (status, title)
+        assert "next dispatch" in title.lower(), (status, title)
+        for claim in _OLD_EXECUTION_CLAIMS:
+            assert claim not in title, (status, claim)
+        # The running-state wording must not leak onto a card with no live run.
+        assert "running with the model it was dispatched with" not in title, status
+
+
+def test_kanban_model_wording_is_dispatch_scoped_everywhere():
+    """Source-level guard for the three display sites + the picker scope note."""
+    # (a) English strings carry the dispatch-time semantics, not an execution claim.
+    card_hint = _en_i18n_value("kanban_card_model_hint")
+    running_hint = _en_i18n_value("kanban_card_model_hint_running")
+    modal_hint = _en_i18n_value("kanban_model_hint")
+    label = _en_i18n_value("kanban_model_next_dispatch")
+    assert "next dispatched" in card_hint or "next dispatch" in card_hint, card_hint
+    assert "{0}" in card_hint and "{0}" in running_hint
+    assert "next dispatch" in running_hint, running_hint
+    assert "next dispatch" in modal_hint, modal_hint
+    assert "next dispatch" in label.lower(), label
+    for value in (card_hint, running_hint, modal_hint, label):
+        for claim in _OLD_EXECUTION_CLAIMS:
+            assert claim not in value, f"{value!r} still carries {claim!r}"
+
+    # (b) No stale hard-coded English fallback in panels.js may re-introduce it.
+    for claim in _OLD_EXECUTION_CLAIMS:
+        assert claim not in PANELS, f"panels.js still hard-codes {claim!r}"
+
+    # (c) _kanbanCard picks the running-state tooltip off the real task status
+    #     field (task.status === 'running'), not an invented one.
+    card_src = extract_function(PANELS, "_kanbanCard")
+    assert "task.status === 'running'" in card_src
+    assert "kanban_card_model_hint_running" in card_src
+    assert "kanban_card_model_hint'" in card_src
+
+    # (d) meta bits + detail row are labelled as the next-dispatch model.
+    meta_src = extract_function(PANELS, "_kanbanTaskMeta")
+    assert "t('kanban_model_next_dispatch')" in meta_src
+    detail_src = extract_function(PANELS, "_kanbanRenderTaskDetail")
+    assert "t('kanban_model_next_dispatch')" in detail_src
+    assert "t('kanban_model')" not in detail_src, (
+        "the detail Model row must use the next-dispatch label, not the bare 'Model'"
+    )
+    # The detail row also carries the running-aware tooltip.
+    assert "kanban_card_model_hint_running" in detail_src
+
+    # (e) The picker scope note still comes from the (reworded) i18n key.
+    dropdown_src = extract_function(PANELS, "_kanbanOpenModelDropdown")
+    assert "t('kanban_model_hint')" in dropdown_src
+
+
+def test_kanban_model_dispatch_keys_present_in_every_locale():
+    """Locale parity: the reworded/new kanban model keys must exist in all 15
+    locale blocks (partial locales fall back per-key to English, but these are
+    correctness-critical wording, so keep them in parity)."""
+    blocks = _locale_blocks_with_body(I18N)
+    assert len(blocks) == 15, [code for code, _ in blocks]
+    required = (
+        "kanban_model_next_dispatch",
+        "kanban_card_model_hint",
+        "kanban_card_model_hint_running",
+        "kanban_model_hint",
+    )
+    for code, body in blocks:
+        for key in required:
+            assert re.search(rf"^\s*{key}: '", body, re.M), f"{code} locale missing {key}"
+        # The old execution claim must be gone from every locale.
+        for claim in _OLD_EXECUTION_CLAIMS:
+            assert claim not in body, f"{code} locale still carries {claim!r}"

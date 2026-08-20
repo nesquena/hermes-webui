@@ -2126,8 +2126,13 @@ function _kanbanTaskMeta(task){
   if (task.comment_count) bits.push('💬 ' + task.comment_count);
   if (task.link_counts && task.link_counts.children) bits.push('↳ ' + task.link_counts.children);
   if (task.model_override) {
-    const label = task.provider_override || task.model_override;
-    bits.push(`🧠 ${label}`);
+    // Dispatch-time input, not a live-run fact — label it as such. The value
+    // must be the MODEL (the provider only qualifies it); labelling a bare
+    // provider id as "Model" would be its own false claim.
+    const label = task.provider_override
+      ? `${task.model_override} (${task.provider_override})`
+      : task.model_override;
+    bits.push(`🧠 ${t('kanban_model_next_dispatch')}: ${label}`);
   }
   return bits;
 }
@@ -2588,8 +2593,16 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
+  // model_override/provider_override are DISPATCH-TIME inputs: the dispatcher
+  // passes `-m <model> [--provider <provider>]` when it SPAWNS the worker, and
+  // there is no per-run model snapshot on task_runs to read a live value from.
+  // So the badge can only honestly describe the card's NEXT dispatch. While the
+  // card is 'running' the worker was spawned from the EARLIER values, so say
+  // that outright instead of claiming this is what the active run uses.
+  const modelIsRunning = task.status === 'running';
+  const modelHintKey = modelIsRunning ? 'kanban_card_model_hint_running' : 'kanban_card_model_hint';
   const toplineModel = task.model_override
-    ? `<span class="kanban-badge model" title="${esc(t('kanban_card_model_hint', task.model_override))}">🧠 ${esc(task.model_override)}</span>`
+    ? `<span class="kanban-badge model" title="${esc(t(modelHintKey, task.model_override))}">🧠 ${esc(task.model_override)}</span>`
     : '';
   return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, ${jsArg(task.id)})" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, ${jsArg(task.id)})" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask(${jsArg(task.id)})}">
     <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}${toplineModel}</div>
@@ -3302,7 +3315,7 @@ function _kanbanOpenModelDropdown(){
     forceOpenKey: 'kanbanTaskModalModel',
     closeDropdown: _kanbanCloseModelDropdown,
     selectModel: _kanbanSelectModelFromDropdown,
-    scopeNoteText: t('kanban_model_hint') || 'Used for how this card executes; leave Profile default for the assigned profile.',
+    scopeNoteText: t('kanban_model_hint') || "Model used for this card's dispatches; leave Profile default to use the assigned profile's model. Changes take effect from the next dispatch.",
     autoFocusSearch: true,  // renderModelDropdown() already focuses the search input
   });
   dd.classList.add('open');
@@ -3977,9 +3990,11 @@ function _kanbanRenderTaskDetail(data){
     </div>
     <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
-    <div class="kanban-detail-model">${task.model_override
-      ? `${esc(t('kanban_model'))}: <strong>${esc(task.model_override)}</strong>${task.provider_override ? ` (${esc(t('kanban_provider'))}: ${esc(task.provider_override)})` : ''}`
-      : `${esc(t('kanban_model'))}: ${esc(t('kanban_no_model_override'))}`}</div>
+    <div class="kanban-detail-model"${task.model_override
+      ? ` title="${esc(t(task.status === 'running' ? 'kanban_card_model_hint_running' : 'kanban_card_model_hint', task.model_override))}"`
+      : ''}>${task.model_override
+      ? `${esc(t('kanban_model_next_dispatch'))}: <strong>${esc(task.model_override)}</strong>${task.provider_override ? ` (${esc(t('kanban_provider'))}: ${esc(task.provider_override)})` : ''}`
+      : `${esc(t('kanban_model_next_dispatch'))}: ${esc(t('kanban_no_model_override'))}`}</div>
     <div class="kanban-status-actions">${statusButtons}</div>
     <div class="kanban-detail-grid">
       ${_kanbanDetailSection('kanban-detail-comments', String(t('kanban_comments_count')).replace('{0}', comments.length), comments.map(_kanbanCommentHtml).join(''), 'kanban_no_comments')}
