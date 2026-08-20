@@ -2262,6 +2262,74 @@ def test_gateway_run_unavailable_keeps_live_successor():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+def test_gateway_run_unavailable_null_head_keeps_successor_rendered_during_fetch():
+    """#7091 (Greptile P1): a gateway-unavailable orphan must NOT be cleared when
+    a same-session successor B rendered (SSE) while the handler's pending-head
+    re-fetch was in flight and that re-fetch returns an empty snapshot. The
+    orphan-clear branch must verify the card STILL shows the captured owner —
+    not just the session id — or it deletes B's pending projection and hides its
+    live card.
+    """
+    messages_js = (pathlib.Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text()
+
+    def extract(name, end_marker):
+        start = messages_js.index(f"async function {name}(")
+        return messages_js[start:messages_js.index(end_marker, start)]
+
+    script = "\n".join([
+        "const calls=[]; let hideCount=0; let pendingClears=0; let controlReset=0; const toasts=[];",
+        "let S={session:{session_id:'session-a'}};",
+        "let _loadSessionGeneration=1; let _approvalSessionId='session-a'; let _approvalCurrentId='approval-a';",
+        "let _approvalResponding=null; let _approvalClearedOwner=null; let _yoloEnabled=false;",
+        "let _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-a',runId:'run-1',mirrorToken:'mirror-1'};",
+        "const _approvalPendingBySession=new Map([['session-a',{pending:{approval_id:'approval-a',run_id:'run-1',_gateway_mirror_token:'mirror-1'}}]]);",
+        # reconcile GET -> null; respond -> gateway_run_unavailable; the handler's
+        # re-fetch renders same-session successor B during the await, then returns null.
+        "let pendingCalls=0;",
+        "const api=async(path,opts={})=>{",
+        " calls.push(path);",
+        " if(path.startsWith('/api/approval/pending')){",
+        "  pendingCalls+=1;",
+        "  if(pendingCalls>=2){",
+        "   // SSE renders successor B while the handler's re-fetch is in flight.",
+        "   _approvalPendingBySession.set('session-a',{pending:{approval_id:'approval-b',command:'rm -rf /tmp/b',description:'b',pattern_key:'b',pattern_keys:['b'],run_id:'run-2',_gateway_mirror_token:'mirror-2'}});",
+        "   _approvalDisplayedOwner={sid:'session-a',approvalId:'approval-b',runId:'run-2',mirrorToken:'mirror-2'};",
+        "   _approvalCurrentId='approval-b';",
+        "  }",
+        "  return {pending:null};",
+        " }",
+        " return {ok:false,code:'gateway_run_unavailable',error:'Gateway approval could not be relayed because the active run is unavailable'};",
+        "};",
+        "const visible=()=>true;",
+        "const $=()=>({disabled:false,classList:{contains:visible,add(){},remove(){}}});",
+        "const t=k=>k; const showToast=msg=>toasts.push(msg); const setStatus=()=>{};",
+        "const _unmarkApprovalDismissed=()=>{};",
+        "const _clearApprovalPendingForSession=sid=>{pendingClears+=1;_approvalPendingBySession.delete(sid);};",
+        "const hideApprovalCard=()=>{hideCount+=1;};",
+        "const showApprovalForSession=()=>{};",
+        "const _setApprovalControlsDisabled=()=>{controlReset+=1;};",
+        "const _restoreFailedApprovalResponse=()=>{};",
+        "const _renderPendingApprovalForActiveSession=()=>{};",
+        "const _updateYoloPill=()=>{};",
+        _js_block(messages_js, "function _approvalMirrorOwnerFor(", "\nfunction _setApprovalControlsDisabled"),
+        _js_block(messages_js, "function _isGatewayUnavailableOrphan(", "\nfunction _applyApprovalYoloProjection"),
+        extract("respondApproval", "\nfunction startApprovalPolling"),
+        "(async()=>{",
+        " const ok=await respondApproval('once');",
+        " if(ok) throw new Error('gateway orphan respond should fail');",
+        " if(hideCount!==0) throw new Error('successor B rendered during fetch was hidden '+hideCount);",
+        " if(pendingClears!==0) throw new Error('successor B pending projection was cleared '+pendingClears);",
+        " if(toasts.length!==0) throw new Error('orphan toast fired while live successor B is pending '+JSON.stringify(toasts));",
+        " if(_approvalDisplayedOwner.approvalId!=='approval-b') throw new Error('successor B no longer owns the card '+JSON.stringify(_approvalDisplayedOwner));",
+        " if(!_approvalPendingBySession.has('session-a')) throw new Error('successor B was dropped from the pending map');",
+        " if(controlReset<1) throw new Error('controls were not re-enabled');",
+        "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+    ])
+    result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 def test_click_on_a_never_resolves_same_session_successor_b():
     """#7091 (developer review): a click captured on approval A must never
     resolve a same-session successor B that renders into the pending map while

@@ -173,6 +173,22 @@ def _card_visible(page) -> bool:
     )
 
 
+def _wait_card_visible(page, timeout: float = 5.0) -> bool:
+    """Poll until the approval card actually renders (bounded).
+
+    showApprovalForSession bails at the belongs-to-active-session guard unless
+    S.session matches the render target, and a fresh session can take a moment to
+    be durable client-side. Polling keeps the gate deterministic instead of
+    tripping on a transient not-yet-visible state.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _card_visible(page):
+            return True
+        time.sleep(0.1)
+    return _card_visible(page)
+
+
 def _card_command(page) -> str:
     return _eval(page, "() => (document.getElementById('approvalCmd') || {}).textContent || ''")
 
@@ -213,6 +229,30 @@ def _stop_approval_polling(page) -> None:
 
 def _start_approval_polling(page, sid: str) -> None:
     _eval(page, "({sid}) => { startApprovalPolling(sid); return true; }", {"sid": sid})
+
+
+def _fresh_active_session(page) -> str:
+    """Start a genuinely new conversation and return its active session id.
+
+    A prior scenario's poll wait can leave the active session empty/expired
+    (showApprovalForSession bails at the belongs-to-active-session guard), so a
+    scenario that must actually render a card establishes its own fresh session
+    and freezes the fallback poll so the stale-window stays deterministic.
+
+    We call `newSession()` directly rather than clicking `#btnNewChat`: the
+    button short-circuits to "just focus the composer" when the current session
+    is a reusable empty chat, which would return the SAME sid (and its prior
+    dismissal/approval state) instead of a genuinely fresh session.
+    """
+    page.evaluate("async () => { await newSession(); return true; }")
+    page.wait_for_function(
+        "() => typeof S !== 'undefined' && !!S.session && !!S.session.session_id",
+        timeout=10000,
+    )
+    sid = page.evaluate("S.session.session_id")
+    assert sid, "no session id after creating a fresh conversation"
+    _stop_approval_polling(page)
+    return sid
 
 
 # ── scenarios ────────────────────────────────────────────────────────────────
@@ -332,23 +372,24 @@ def _scenario_3_dismiss_syncs_to_authoritative_head(
 
 
 def _scenario_4_dismissed_successor_in_map_never_resolves(
-    page, base_url: str, sid: str, artifact_dir: Path
+    page, base_url: str, artifact_dir: Path
 ) -> None:
     """Dismissed successor B lands in the pending map but never renders (the
     cross-tab-dismissal path), leaving A as the visible card. A's click must
     not resolve B: the capture sources the RENDERED card, not the mutable map.
     """
     print("S4: dismissed successor in map + visible A -> A's click must not resolve B")
-    # The previous scenario leaves a client-dismissed B pending server-side;
-    # clear any leftover head so this scenario starts from a clean slate.
-    leftover = _pending_head(base_url, sid)
-    if leftover and leftover.get("approval_id"):
-        _respond(base_url, sid, leftover["approval_id"])
+    # A prior scenario's poll wait can leave the active session empty/expired, so
+    # establish a FRESH active session here (and freeze its poll) — otherwise
+    # showApprovalForSession bails at the belongs-to-active-session guard and A
+    # never renders, which makes the scenario vacuous for its own target path.
+    sid = _fresh_active_session(page)
+
     _inject_approval(base_url, sid, "rm -rf /tmp/approval-a", "dangerous_A")
     head_a = _pending_head(base_url, sid)
     assert head_a and head_a.get("approval_id")
     _render_card(page, sid, head_a)
-    assert _card_visible(page)
+    assert _wait_card_visible(page), "card must be visible after render on the fresh session"
     assert "approval-a" in _card_command(page), _card_command(page)
 
     # Advance the server head to B (queued), then resolve A server-side so B
@@ -358,6 +399,7 @@ def _scenario_4_dismissed_successor_in_map_never_resolves(
     assert resolved.get("ok") is True
     head_b = _pending_head(base_url, sid)
     assert head_b and "approval-b" in head_b.get("command", "")
+    approval_b_id = head_b["approval_id"]
 
     # Cross-tab-style: mark B dismissed, then render it. _rememberApprovalPending
     # stores B in the map, but the dismissed check suppresses the render, so A
@@ -365,13 +407,34 @@ def _scenario_4_dismissed_successor_in_map_never_resolves(
     _eval(
         page,
         "({sid, id, pending}) => { _markApprovalDismissed(sid, id); showApprovalForSession(sid, pending, 1); return true; }",
-        {"sid": sid, "id": head_b["approval_id"], "pending": head_b},
+        {"sid": sid, "id": approval_b_id, "pending": head_b},
     )
     assert _card_visible(page), "suppressed B must leave A visibly rendered"
     assert "approval-a" in _card_command(page), _card_command(page)
 
-    # Click Allow once on the visible A: must NOT resolve B.
+    # Capture the actual /api/approval/respond request payloads so the test
+    # asserts on the observable network behaviour (fail-closed), not just the
+    # server head afterwards: A's click must never POST approval-b's id.
+    respond_payloads: list[dict] = []
+
+    def _on_request(request) -> None:
+        if request.method == "POST" and request.url.endswith("/api/approval/respond"):
+            try:
+                respond_payloads.append(json.loads(request.post_data or "{}"))
+            except Exception:
+                respond_payloads.append({})
+
+    page.on("request", _on_request)
+
+    # Click Allow once on the visible A: must NOT resolve B, and must NOT POST
+    # approval-b's id (either no respond POST fires, or it carries A's id).
     _click_allow_once(page)
+    assert all(
+        payload.get("approval_id") != approval_b_id for payload in respond_payloads
+    ), (
+        "A's click must never POST approval-b's id; got "
+        + repr(respond_payloads)
+    )
     still = _pending_head(base_url, sid)
     assert still and "approval-b" in still.get("command", ""), (
         "A's click must not resolve the never-rendered successor B"
@@ -471,7 +534,7 @@ def main() -> int:
         _scenario_1_stale_transport_id_first_click_resolves(page, base_url, sid, artifact_dir)
         _scenario_2_queued_a_to_b_never_transfers_click(page, base_url, sid, artifact_dir)
         _scenario_3_dismiss_syncs_to_authoritative_head(page, base_url, sid, artifact_dir)
-        _scenario_4_dismissed_successor_in_map_never_resolves(page, base_url, sid, artifact_dir)
+        _scenario_4_dismissed_successor_in_map_never_resolves(page, base_url, artifact_dir)
 
         context.close()
         browser.close()

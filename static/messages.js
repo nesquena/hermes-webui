@@ -7791,7 +7791,16 @@ async function _handleGatewayUnavailable(owner, errMsg) {
   if (head) {
     // A successor (or the same head) is pending: keep the card actionable.
     showApprovalForSession(owner.sid, head, (data && data.pending_count) || 1);
-  } else if (!!(S.session && S.session.session_id === owner.sid)) {
+  } else if (
+    !!(S.session && S.session.session_id === owner.sid) &&
+    // True orphan: nothing pending, we are still on the owner's session, AND the
+    // card still shows the captured approval. If a same-session successor B
+    // rendered (SSE) while this re-fetch was in flight, `_approvalDisplayedOwner`
+    // no longer matches the captured owner — a live successor is pending and must
+    // not be cleared or hidden. Only a genuine orphan (same approval, nothing
+    // pending) is cleared.
+    _approvalOwnerIdentityMatches(_approvalDisplayedOwner, owner)
+  ) {
     // True orphan: nothing pending and we are still on the owner's session.
     _clearApprovalPendingForSession(owner.sid);
     hideApprovalCard(true);
