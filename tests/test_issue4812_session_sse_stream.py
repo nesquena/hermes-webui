@@ -860,3 +860,183 @@ def test_session_route_bounds_sent_event_id_deduplication(monkeypatch):
     body = handler.wfile.getvalue().decode("utf-8")
     assert body.count("id: run_active:1\n") == 2
     assert "id: run_active:4\n" in body
+
+
+def _bind_real_session_read(tmp_path):
+    """Bind the real read_session_run_events to a seeded tmp journal dir."""
+    from api.run_journal import read_session_run_events as _real_read
+
+    def _read(session_id, *, after_event_id=None):
+        return _real_read(session_id, after_event_id=after_event_id, session_dir=tmp_path)
+
+    return _read
+
+
+def test_session_route_replay_projects_pre_fix_base64_payloads(tmp_path, monkeypatch):
+    """Route-composed (#6316): a pre-fix journal with nested image args and
+    svg+xml preview/snippet replays through the projector before SSE emission —
+    no encoded image bytes in the emitted body, event IDs and safe content
+    preserved, stored journal entry untouched."""
+    import api.routes as routes
+
+    b64_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQ="
+    b64_svg = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
+    b64_icon = "data:image/x-icon;base64,AAABAAEAEBAAAAEAIABoBAAAFgAAACg="
+    append_run_event("session_1", "run_a", "token", {"text": "skip"}, session_dir=tmp_path, seq=1, created_at=100.0)
+    append_run_event(
+        "session_1",
+        "run_b",
+        "tool",
+        {
+            "event_type": "tool.started",
+            "name": "read_file",
+            "preview": b64_svg,
+            "args": {
+                "path": "/tmp/real.png",
+                "nested": {"image": b64_png},
+                "list": [b64_icon, "https://example.com/ok.png"],
+            },
+        },
+        session_dir=tmp_path,
+        seq=1,
+        created_at=200.0,
+    )
+    append_run_event(
+        "session_1",
+        "run_b",
+        "tool_complete",
+        {
+            "event_type": "tool.completed",
+            "name": "read_file",
+            "preview": "ok",
+            "snippet": b64_svg,
+            "args": {"image": b64_png},
+        },
+        session_dir=tmp_path,
+        seq=2,
+        created_at=201.0,
+    )
+    append_run_event("session_1", "run_b", "token", {"text": "safe text"}, session_dir=tmp_path, seq=3, created_at=202.0)
+
+    stop = _stop_after_first_heartbeat(monkeypatch)
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: SimpleNamespace(
+            session_id=sid, compact=lambda **_kwargs: {"session_id": sid, "title": "Session"}
+        ),
+    )
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes, "read_session_run_events", _bind_real_session_read(tmp_path))
+
+    handler = _FakeHandler()
+    routes._handle_session_sse_stream_for_session(
+        handler,
+        urlparse("/api/sessions/session_1/events?after_event_id=run_a:1"),
+        "session_1",
+    )
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    # Nenhum byte de imagem encoded no SSE emitido.
+    assert "base64," not in body
+    assert "data:image" not in body
+    # Event IDs preservados (tool, tool_complete, token).
+    assert "id: run_b:1\n" in body
+    assert "id: run_b:2\n" in body
+    assert "id: run_b:3\n" in body
+    # Conteúdo seguro preservado e projeção visível.
+    assert "event: token\n" in body
+    assert "safe text" in body
+    assert "[base64 image]" in body
+    assert "/tmp/real.png" in body
+    assert "https://example.com/ok.png" in body
+    assert stop["count"] == 1
+
+
+def test_session_route_reconciliation_projects_pre_fix_base64_payloads(tmp_path, monkeypatch):
+    """Route-composed (#6316): post-attach reconciliation replays the pre-fix
+    journal through the projector (events ≤ cutoff), and the live tail streams
+    after the cutoff without re-emitting projected events."""
+    import api.routes as routes
+
+    class _FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            self.q.put_nowait(("token", {"text": "six"}, "run_b:3"))
+            self.q.put_nowait(("stream_end", {"status": "done"}, "run_b:4"))
+            self.unsubscribed = 0
+
+        def subscribe_with_snapshot(self):
+            return self.q, {"last_event_id": "run_b:2"}
+
+        def unsubscribe(self, q):
+            self.unsubscribed += q is self.q
+
+    b64_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQ="
+    b64_svg = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="
+    append_run_event("session_1", "run_a", "token", {"text": "skip"}, session_dir=tmp_path, seq=1, created_at=100.0)
+    append_run_event(
+        "session_1",
+        "run_b",
+        "tool",
+        {
+            "event_type": "tool.started",
+            "name": "read_file",
+            "preview": b64_svg,
+            "args": {"path": "/tmp/real.png", "nested": {"image": b64_png}},
+        },
+        session_dir=tmp_path,
+        seq=1,
+        created_at=200.0,
+    )
+    append_run_event(
+        "session_1",
+        "run_b",
+        "tool_complete",
+        {
+            "event_type": "tool.completed",
+            "name": "read_file",
+            "preview": "ok",
+            "snippet": b64_svg,
+            "args": {"image": b64_png},
+        },
+        session_dir=tmp_path,
+        seq=2,
+        created_at=201.0,
+    )
+    append_run_event("session_1", "run_b", "token", {"text": "three"}, session_dir=tmp_path, seq=3, created_at=202.0)
+
+    stream = _FakeStream()
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: SimpleNamespace(
+            session_id=sid, compact=lambda **_kwargs: {"session_id": sid, "title": "Session"}
+        ),
+    )
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_a, **_k: "run_b")
+    monkeypatch.setattr(routes, "STREAMS", {"run_b": stream})
+    monkeypatch.setattr(routes, "read_session_run_events", _bind_real_session_read(tmp_path))
+
+    handler = _FakeHandler()
+    routes._handle_session_sse_stream_for_session(
+        handler,
+        urlparse("/api/sessions/session_1/events?after_event_id=run_a:1"),
+        "session_1",
+    )
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    # Nenhum byte de imagem encoded no SSE emitido.
+    assert "base64," not in body
+    assert "data:image" not in body
+    # Reconciliation replayou os eventos projetados (≤ cutoff) exatamente uma vez.
+    assert body.count("id: run_b:1\n") == 1
+    assert body.count("id: run_b:2\n") == 1
+    # Tail live após o cutoff ainda flui (dedup por cutoff, não re-emissão).
+    assert "id: run_b:3\n" in body
+    assert "event: stream_end\n" in body
+    assert "[base64 image]" in body
+    assert "/tmp/real.png" in body
+    assert stream.unsubscribed == 1
