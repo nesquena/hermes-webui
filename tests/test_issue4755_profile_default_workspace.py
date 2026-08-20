@@ -120,7 +120,11 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         function loadDir(){{return Promise.resolve();}}
         {new_session}
         newSession().then(()=>{{
-          process.stdout.write(JSON.stringify({{captured,switchWorkspace:S._profileSwitchWorkspace}}));
+          process.stdout.write(JSON.stringify({{
+            captured,
+            switchWorkspace:S._profileSwitchWorkspace,
+            profileDefaultWorkspace:S._profileDefaultWorkspace,
+          }}));
         }}).catch(err=>{{
           console.error(err && err.stack || err);
           process.exit(1);
@@ -166,6 +170,8 @@ def test_new_session_prefers_current_session_workspace_over_profile_default():
     assert payload["captured"]["path"] == "/api/session/new"
     assert payload["captured"]["body"]["workspace"] == "/current-workspace"
     assert payload["captured"]["body"]["prev_session_id"] == "previous-session"
+    assert payload["captured"]["body"]["workspace_inherited_from_prev_session"] is True
+    assert payload["profileDefaultWorkspace"] == "/profile-default"
 
 
 @node_test
@@ -182,6 +188,8 @@ def test_new_session_blank_page_falls_back_to_profile_default():
     payload = _run_node(driver)
 
     assert payload["captured"]["body"]["workspace"] == "/profile-default"
+    assert "workspace_inherited_from_prev_session" not in payload["captured"]["body"]
+    assert payload["profileDefaultWorkspace"] == "/profile-default"
 
 
 
@@ -194,7 +202,28 @@ def test_new_session_one_shot_switch_workspace_still_wins_and_clears():
     ))
 
     assert payload["captured"]["body"]["workspace"] == "/explicit-switch"
+    assert "workspace_inherited_from_prev_session" not in payload["captured"]["body"]
     assert payload["switchWorkspace"] is None
+    assert payload["profileDefaultWorkspace"] == "/profile-default"
+
+
+@node_test
+def test_parallel_conversations_each_inherit_their_own_workspace():
+    first = _run_node(_new_session_driver(
+        session_workspace="/workspace-a",
+        default_workspace="/shared-profile-pointer",
+        switch_workspace=None,
+    ))
+    second = _run_node(_new_session_driver(
+        session_workspace="/workspace-b",
+        default_workspace="/shared-profile-pointer",
+        switch_workspace=None,
+    ))
+
+    assert first["captured"]["body"]["workspace"] == "/workspace-a"
+    assert second["captured"]["body"]["workspace"] == "/workspace-b"
+    assert first["captured"]["body"]["workspace_inherited_from_prev_session"] is True
+    assert second["captured"]["body"]["workspace_inherited_from_prev_session"] is True
 
 
 @node_test

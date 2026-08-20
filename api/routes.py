@@ -14196,6 +14196,29 @@ def _validate_session_toolsets_shape(toolsets):
         raise ValueError("each toolset must be a non-empty string")
     return toolsets
 
+
+def _resolve_new_session_workspace(body, visible_prev_session_id):
+    """Resolve a new-session workspace, recovering only verified inheritance."""
+    candidate = body.get("workspace")
+    if not candidate:
+        return None
+    if (
+        body.get("workspace_inherited_from_prev_session") is not True
+        or not visible_prev_session_id
+    ):
+        return str(resolve_trusted_workspace(candidate))
+    try:
+        previous_session = get_session(visible_prev_session_id, metadata_only=True)
+    except KeyError:
+        return str(resolve_trusted_workspace(candidate))
+    if str(getattr(previous_session, "workspace", None) or "") != str(candidate):
+        return str(resolve_trusted_workspace(candidate))
+    workspace, _recovered = resolve_implicit_workspace_with_recovery(
+        candidate,
+        get_last_workspace,
+    )
+    return str(workspace)
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -14529,8 +14552,13 @@ def handle_post(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/session/new":
+        workspace_prev_session_id = body.get("prev_session_id")
+        if workspace_prev_session_id and not _session_id_visible_to_request_profile(
+            handler, workspace_prev_session_id, emit_error=False
+        ):
+            workspace_prev_session_id = None
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
+            workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
         worktree_info = None

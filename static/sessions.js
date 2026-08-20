@@ -1409,23 +1409,20 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // One-shot profile-switch workspace wins first; otherwise the CURRENT conversation's
-    // workspace wins, and only a blank page falls back to the profile-global default.
-    // Rationale: _profileDefaultWorkspace is global to the profile, so preferring it over
-    // S.session.workspace made a new chat opened from a given conversation land on the
-    // profile default instead of that conversation's own workspace. With several
-    // conversations running in parallel on different workspaces, that global pointer loses
-    // the context the user is actually in. It is also volatile: the server derives it from
-    // last_workspace.txt, which every conversation rewrites.
-    // The profile default remains the blank-page fallback (#804/#5169) and is never consumed (#823).
+    // Explicit profile switch wins, then the current conversation, then the profile default.
+    // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+    const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
+    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
-    if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
+    if(S.session&&S.session.session_id){
+      reqBody.prev_session_id=S.session.session_id;
+      if(sessionWs) reqBody.workspace_inherited_from_prev_session=true;
+    }
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level
     // `worktree:` default. Auto-bind paths pass worktree:false explicitly so a
@@ -1461,7 +1458,7 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      // Cold-start / picker-without-provider fallback: when the dropdown option's
+      // Cold-start / picker-without-provider fallback (#2518): when the dropdown option's
       // data-provider is empty/'default' or the persisted state predates provider
       // tracking, newModelState.model_provider is null. POST /api/session/new's
       // fast path in _resolve_compatible_session_model_state requires both model
