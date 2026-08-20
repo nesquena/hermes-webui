@@ -2665,15 +2665,19 @@ def _custom_slug_rest_is_endpoint_authority(rest: str) -> bool:
 
 
 def _known_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
-    """Authoritative custom-provider slugs, lowercased, for prefix matching.
+    """Custom-provider slug union (named + endpoint-derived), lowercased.
 
     Union of the name-derived slugs (``custom_providers[].name``) and the
     endpoint-derived authority slugs for every configured ``base_url`` plus the
-    active ``model.base_url``. ``_parse_provider_qualified_model_id`` prefers a
-    longest match from this set over the shape grammar, so config resolves the
-    one residual ambiguity the grammar cannot: for ``@custom:gw:8080:free`` a
-    configured ``custom:gw`` wins (model ``8080:free``) while a configured
-    ``http://gw:8080`` endpoint wins instead (model ``free``). #6657.
+    active ``model.base_url``. ``_parse_provider_qualified_model_id`` consults
+    this set in TWO tiers (deep-review 2026-08-18, route-vs-display): the
+    name-derived slugs FIRST — the catalog emits every configured row under
+    its named ``provider_id``, so a named slug is authoritative over any
+    endpoint-derived alias — and the endpoint-derived half second, only when
+    no named slug matches. That keeps ``@custom:gw:8080:free`` resolving to a
+    configured ``custom:gw`` (model ``8080:free``), while an endpoint-only
+    provider (no ``name``) at ``http://gw:8080`` still resolves through
+    ``custom:gw:8080`` (model ``free``). #6657.
     """
     source = config_obj if isinstance(config_obj, dict) else cfg
     slugs: set[str] = set(_named_custom_provider_slugs(source))
@@ -2706,10 +2710,17 @@ def _parse_provider_qualified_model_id(
 
     Resolution order for a ``custom:`` hint:
 
-    1. Longest prefix that is an authoritative configured provider slug
-       (``_known_custom_provider_slugs``). Config beats shape, so a purely
-       numeric model id under a named provider still parses correctly.
-    2. Otherwise the shape grammar above: rsplit at the last colon, then peel one
+    1. Longest prefix that is an authoritative NAMED provider slug
+       (``_named_custom_provider_slugs``). The catalog emits every configured
+       row under its named ``provider_id`` (``custom:<name>``), so a named
+       slug is authoritative over any longer endpoint-derived alias — the
+       resolver must not route to a provider the picker never showed
+       (#5511/#6817 route-hijack class, deep-review 2026-08-18).
+    2. Longest prefix that is an endpoint-derived authority slug
+       (``_known_custom_provider_slugs``), only when no named slug matched —
+       endpoint-only providers (no ``name``) keep routing through
+       ``custom:<host>:<port>``.
+    3. Otherwise the shape grammar above: rsplit at the last colon, then peel one
        segment back unless what remains after ``custom:`` is an endpoint
        authority.
 
@@ -2729,13 +2740,30 @@ def _parse_provider_qualified_model_id(
     # Only a hint with an extra colon beyond ``custom:<slug>:<model>`` is
     # ambiguous, so the config lookup is skipped (and stays free) otherwise.
     if inner.startswith("custom:") and inner.count(":") >= 3:
+        segments = inner.split(":")
+        # Longest provider prefix first; a provider must leave a model
+        # behind. ``cut >= 2`` skips the bare ``custom`` root, which prefixes
+        # every id here and so disambiguates nothing (it is never a member of
+        # the slug set either — every entry starts with ``custom:``).
+        #
+        # TWO TIERS, not one union (deep-review 2026-08-18, route-vs-display):
+        # named/catalog provider slugs are authoritative and are matched
+        # FIRST. The catalog emits every configured row under its named
+        # provider_id, so resolving the same id to a longer endpoint-derived
+        # alias would send the model to a provider the picker never showed
+        # (#5511/#6817 route-hijack class). Endpoint-derived aliases
+        # (``custom:<host>:<port>``) are consulted only when NO named slug
+        # matches, which keeps endpoint-only providers (no ``name``) routing
+        # through their endpoint authority.
+        named_slugs = _named_custom_provider_slugs(config_obj)
+        if named_slugs:
+            for cut in range(len(segments) - 1, 1, -1):
+                prefix = ":".join(segments[:cut])
+                bare = ":".join(segments[cut:])
+                if bare and prefix.lower() in named_slugs:
+                    return bare, prefix
         known_slugs = _known_custom_provider_slugs(config_obj)
         if known_slugs:
-            segments = inner.split(":")
-            # Longest provider prefix first; a provider must leave a model
-            # behind. ``cut >= 2`` skips the bare ``custom`` root, which prefixes
-            # every id here and so disambiguates nothing (it is never a member of
-            # the slug set either — every entry starts with ``custom:``).
             for cut in range(len(segments) - 1, 1, -1):
                 prefix = ":".join(segments[:cut])
                 bare = ":".join(segments[cut:])
