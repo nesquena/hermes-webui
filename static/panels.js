@@ -12690,7 +12690,13 @@ async function _applyAuxModels(){
     saved++;
    }catch(e){
     console.warn('[settings] failed to save aux task',task.task,e);
-    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
+    // Surface the server's actionable message (e.g. an ambiguous custom-provider
+    // slug collision: rename one provider so its slug is unique) instead of a
+    // generic failure, and abort the loop so the dirty selection is retained for
+    // the user to fix and retry — the reload that would clear it is skipped.
+    const _msg=(e&&e.message)?e.message:'';
+    const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';
+    if(typeof showToast==='function') showToast(_msg?(_base+': '+_msg):_base,6000,'error');
     return;
    }
   }
@@ -12804,11 +12810,17 @@ async function saveSettings(andClose){
       const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
-          await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
-          body.default_model=model;
-          body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+        body.default_model=model;
+        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
         }catch(_modelErr){
-          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
         }
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
@@ -12837,9 +12849,15 @@ async function saveSettings(andClose){
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
         body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
-      }catch(_modelErr){
-        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
-      }
+        }catch(_modelErr){
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
+        }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));

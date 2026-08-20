@@ -1425,16 +1425,22 @@ async function _collectFilesFromEntry(entry, relPrefix) {
 async function _collectOsDropUploads(dataTransfer) {
   const out = [];
   const items = dataTransfer.items ? [...dataTransfer.items] : [];
-  if (items.length && typeof items[0].webkitGetAsEntry === 'function') {
+  const files = dataTransfer.files ? [...dataTransfer.files] : [];
+  if (items.length) {
+    const entries = [];
     for (const item of items) {
       if (item.kind !== 'file') continue;
-      const entry = item.webkitGetAsEntry();
+      const getAsEntry = item.getAsEntry || item.webkitGetAsEntry;
+      const entry = typeof getAsEntry === 'function' ? getAsEntry.call(item) : null;
       if (!entry) continue;
+      entries.push(entry);
+    }
+    for (const entry of entries) {
       out.push(...await _collectFilesFromEntry(entry, ''));
     }
     if (out.length) return out;
   }
-  for (const file of dataTransfer.files) {
+  for (const file of files) {
     out.push({ file, relDir: '' });
   }
   return out;

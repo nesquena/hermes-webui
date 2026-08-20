@@ -2918,12 +2918,20 @@ async function _generateHandoffSummary(sid, rounds) {
   } catch (e) {
     console.warn('Handoff summary failed:', e);
     if (S.session && S.session.session_id === sid && typeof setHandoffUi === 'function') {
+      // A 400 carries an actionable, user-fixable message (e.g. an ambiguous
+      // custom-provider slug collision: rename one provider so its slug is
+      // unique). Surface it verbatim rather than degrading to the generic
+      // "try again" card — previously the server answered 200 with a warning
+      // that this handler ignored, hiding the fix from the user.
+      const errorText = (e && e.status === 400 && e.message)
+        ? e.message
+        : ('Summary generation failed: ' + (e && e.message ? e.message : 'unknown error'));
       setHandoffUi({
         sessionId: sid,
         phase: 'error',
         channel,
         rounds,
-        errorText: 'Summary generation failed: ' + e.message,
+        errorText,
       });
     }
   }

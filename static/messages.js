@@ -8605,7 +8605,7 @@ function _clarifyExpiryMs(pending) {
   if (Number.isFinite(expiresAt) && expiresAt > 0) return expiresAt * 1000;
   const requestedAt = Number(pending && pending.requested_at);
   const timeoutSeconds = Number(pending && pending.timeout_seconds);
-  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds)) {
+  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
     return (requestedAt + timeoutSeconds) * 1000;
   }
   return 0;

@@ -549,6 +549,7 @@ def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
+    profile_name: str | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Return provider/key/base_url overrides for ``custom:*`` endpoints.
 
@@ -557,11 +558,24 @@ def _resolve_custom_provider_runtime_overrides(
     without authentication, so a missing key should not fail before the first
     request; pass a harmless placeholder to the SDK and let the endpoint accept
     it or return its own auth error.
+
+    ``profile_name`` binds the SESSION's own profile while
+    ``resolve_custom_provider_connection`` reads the endpoint AND the credential.
+    That helper resolves both from ONE ``get_config()``/env snapshot, so binding
+    the profile here keeps them from splitting across profiles: on a detached
+    worker thread (which doesn't inherit the request-profile TLS/env) an unbound
+    call would read the DEFAULT profile and pair a named profile's endpoint with
+    the default profile's API key (finding #3). No-op for the default/root
+    profile; when ``profile_name`` is None the ambient scope (if any) is used.
     """
     if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
         return resolved_provider, resolved_api_key, resolved_base_url
 
-    _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+    from api import profiles as _profiles_api
+    with _profiles_api.profile_scope_for_detached_worker(
+        profile_name, "custom provider connection", logger_override=logger
+    ):
+        _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
     if not resolved_api_key and _cp_key:
         resolved_api_key = _cp_key
     if not resolved_base_url and _cp_base:
@@ -776,17 +790,82 @@ def _is_quota_error_text(err_text: str) -> bool:
     )
 
 
-def _clarify_timeout_seconds(default: int = 120) -> int:
-    """Resolve clarify timeout from config, with bounded fallback."""
+def _clarify_session_config(sid: str) -> dict | None:
+    """Config dict for the clarify session's profile, or None to use ambient.
+
+    The agent runs on a detached worker thread that does not inherit the
+    per-request TLS profile context, so the ambient ``get_config()`` would
+    resolve to the process-global profile (usually ``default``) even for a
+    session running under a named profile (issue #3294 pattern).  Resolve the
+    session's own profile home instead, mirroring how the rest of the run is
+    configured.
+    """
     try:
-        cfg = get_config()
-        raw = cfg.get("clarify", {}).get("timeout", default)
-        timeout_seconds = int(raw)
-        if timeout_seconds <= 0:
-            return default
-        return timeout_seconds
+        from api.models import _get_profile_home
+        from api.config import get_config_for_profile_home
+        session = get_session(sid)
+        if session is None:
+            return None
+        return get_config_for_profile_home(_get_profile_home(getattr(session, "profile", None)))
     except Exception:
-        return default
+        return None
+
+
+def _clarify_timeout_seconds(config: dict | None = None, default: int = 3600) -> int:
+    """Resolve the clarify timeout (seconds) for WebUI clarify prompts.
+
+    Uses the agent core's canonical resolver when available
+    (``tools.clarify_gateway.resolve_clarify_timeout`` — the same function the
+    CLI and messaging gateways use), falling back to an inline mirror of its
+    resolution order when the agent package is not importable.  Resolution:
+    legacy top-level ``clarify.timeout`` if explicitly set, else the canonical
+    ``agent.clarify_timeout``, else 3600.  ``<= 0`` is preserved verbatim and
+    means *unlimited*: the prompt waits until the user answers or the run is
+    cancelled — it is never auto-skipped.
+
+    ``config`` may be an explicit profile config dict (see
+    :func:`_clarify_session_config`); when None, the ambient ``get_config()``
+    is used.
+    """
+    cfg = config if config is not None else (get_config() or {})
+    try:
+        from tools.clarify_gateway import resolve_clarify_timeout
+        return int(resolve_clarify_timeout(cfg))
+    except Exception:
+        pass
+    try:
+        raw = (cfg.get("clarify") or {}).get("timeout")
+        if raw is None:
+            raw = (cfg.get("agent") or {}).get("clarify_timeout", 3600)
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def _await_clarify_response(entry, timeout, cancel_evt) -> tuple[str, bool]:
+    """Block until a clarify entry resolves, or (finite timeout only) expires.
+
+    ``timeout <= 0`` means *unlimited*: no deadline — the prompt waits until
+    the user answers or the run is cancelled.  Polls the entry's event in ~1s
+    slices so a cancelled run unblocks promptly, and still honours the
+    ``is_interrupted``-style cancel check each slice.
+
+    Returns ``(response, expired)``: ``expired`` is True when it returned
+    because of cancellation or a finite timeout without a user response (the
+    caller should clear pending and fall back), False when the user answered.
+    """
+    deadline = None if timeout <= 0 else time.monotonic() + timeout
+    while True:
+        if cancel_evt.is_set():
+            return "", True
+        wait_for = 1.0
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "", True
+            wait_for = min(1.0, remaining)
+        if entry.event.wait(timeout=wait_for):
+            return str(entry.result or "").strip(), False
 
 
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
@@ -6394,6 +6473,51 @@ def _save_streaming_checkpoint(session):
         session.save(skip_index=True)
 
 
+# A checkpoint rewrite re-serializes the whole session (messages included) while
+# holding the GIL, so its cost grows with transcript size: ~100 ms for a 1.8 MB
+# sidecar, ~300 ms for a 36 MB one. Because the HTTP server and the agent workers
+# share one interpreter, every one of those milliseconds is added latency for all
+# concurrent requests. Skip the rewrite when it would persist byte-identical state.
+_CHECKPOINT_IDLE_REFRESH_SECONDS = 300
+
+
+def _streaming_checkpoint_fingerprint(session):
+    """Return a cheap fingerprint of the state a streaming checkpoint persists.
+
+    The periodic checkpoint fires on tool completion, but a completed tool call
+    does not by itself mutate the session: ``run_conversation()`` works on an
+    internal copy of ``messages`` and the turn bookkeeping fields are written
+    once before the run starts. So the recurring rewrite normally re-persists
+    state that is already on disk.
+
+    This fingerprint covers every field the checkpoint can legitimately advance
+    mid-run — session identity (compression rotation), turn bookkeeping, and the
+    length of the persisted message projections — without serializing anything.
+    Comparing it lets the checkpoint thread skip redundant work while still
+    writing within one interval of any real change.
+
+    Fails closed: if a field cannot be read, return ``None`` so the caller keeps
+    the unconditional write.
+    """
+    try:
+        return (
+            getattr(session, 'session_id', None),
+            getattr(session, 'parent_session_id', None),
+            getattr(session, 'profile', None),
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_user_message', None),
+            getattr(session, 'pending_started_at', None),
+            getattr(session, 'pending_user_source', None),
+            len(getattr(session, 'pending_attachments', None) or ()),
+            len(getattr(session, 'messages', None) or ()),
+            len(getattr(session, 'context_messages', None) or ()),
+            getattr(session, 'compression_anchor_visible_idx', None),
+            bool(getattr(session, 'pre_compression_snapshot', None)),
+        )
+    except Exception:  # pragma: no cover - defensive: never block a checkpoint
+        return None
+
+
 def _normalize_fresh_chat_text(text):
     text = _strip_workspace_prefix(str(text or ''), include_legacy=True)
     text = re.sub(r"\s+", " ", text).strip().lower()
@@ -8845,7 +8969,7 @@ def _run_agent_streaming(
 
         def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
             """Bridge Hermes clarify prompts to the WebUI."""
-            timeout = _clarify_timeout_seconds()
+            timeout = _clarify_timeout_seconds(_clarify_session_config(sid))
             choices_list = [str(choice) for choice in (choices or [])]
             data = {
                 'question': str(question or ''),
@@ -8864,28 +8988,14 @@ def _run_agent_streaming(
                 )
 
             entry = _submit_clarify_pending(sid, data)
-            deadline = time.monotonic() + timeout
-            while True:
-                if cancel_evt.is_set():
-                    _clear_clarify_pending(sid)
-                    return (
-                        "The user did not provide a response within the time limit. "
-                        "Use your best judgement to make the choice and proceed."
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    _clear_clarify_pending(sid)
-                    return (
-                        "The user did not provide a response within the time limit. "
-                        "Use your best judgement to make the choice and proceed."
-                    )
-                if entry.event.wait(timeout=min(1.0, remaining)):
-                    response = str(entry.result or "").strip()
-                    return (
-                        response
-                        or "The user did not provide a response within the time limit. "
-                           "Use your best judgement to make the choice and proceed."
-                    )
+            response, expired = _await_clarify_response(entry, timeout, cancel_evt)
+            if expired:
+                _clear_clarify_pending(sid)
+            return (
+                response
+                or "The user did not provide a response within the time limit. "
+                   "Use your best judgement to make the choice and proceed."
+            )
 
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
@@ -9433,46 +9543,54 @@ def _run_agent_streaming(
             _sig_provider = getattr(s, "model_provider", None) or provider_context
             _current_sig = _mk_sig(_sig_model, _sig_provider)
             _explicitly_picked = bool(_picked_sig) and _picked_sig == _current_sig
+            # Resolve the endpoint AND the credential inside ONE profile scope so
+            # they always come from the same profile-owned snapshot. Previously
+            # only resolve_model_provider() ran under the scope; the runtime-key
+            # and custom-provider resolution below ran after it closed, so a
+            # detached worker for a NAMED profile paired that profile's endpoint
+            # with the DEFAULT profile's API key (finding #3). No-op for the
+            # default/root profile.
             with profiles_api.profile_scope_for_detached_worker(
-                _resolved_profile_name, "model resolution", logger_override=logger
+                _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
                 resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                     model_with_provider_context(model, provider_context),
                     explicitly_picked=_explicitly_picked,
                 )
-            configured_base_url = resolved_base_url
+                configured_base_url = resolved_base_url
 
-            # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-            # Pass the resolved provider so non-default providers get their own credentials.
-            resolved_api_key = None
-            try:
-                from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                    resolve_runtime_provider,
-                    requested=resolved_provider,
-                    target_model=resolved_model,
-                )
-                resolved_api_key = _rt.get("api_key")
-                if not resolved_provider:
-                    resolved_provider = _rt.get("provider")
-                resolved_base_url = _runtime_preferred_base_url(
-                    _rt, resolved_provider, configured_base_url
-                )
-            except Exception as _e:
-                print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                # Resolve API key via Hermes runtime provider (matches gateway behaviour).
+                # Pass the resolved provider so non-default providers get their own credentials.
+                resolved_api_key = None
+                try:
+                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                        resolve_runtime_provider,
+                        requested=resolved_provider,
+                        target_model=resolved_model,
+                    )
+                    resolved_api_key = _rt.get("api_key")
+                    if not resolved_provider:
+                        resolved_provider = _rt.get("provider")
+                    resolved_base_url = _runtime_preferred_base_url(
+                        _rt, resolved_provider, configured_base_url
+                    )
+                except Exception as _e:
+                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
-            # Named custom providers (custom:slug) may not be resolvable by
-            # hermes_cli.runtime_provider directly. Fall back to config.yaml
-            # custom_providers[] so WebUI can pass explicit creds/base_url.
-            # Preserve the pre-canonicalization identity so image routing can
-            # still select the exact custom_providers entry after the rewrite
-            # to "custom" below.
-            _session_requested_provider = resolved_provider
-            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                resolved_provider, resolved_api_key, resolved_base_url
-            )
+                # Named custom providers (custom:slug) may not be resolvable by
+                # hermes_cli.runtime_provider directly. Fall back to config.yaml
+                # custom_providers[] so WebUI can pass explicit creds/base_url.
+                # Preserve the pre-canonicalization identity so image routing can
+                # still select the exact custom_providers entry after the rewrite
+                # to "custom" below.
+                _session_requested_provider = resolved_provider
+                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                    resolved_provider, resolved_api_key, resolved_base_url,
+                    profile_name=_resolved_profile_name,
+                )
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
@@ -10015,12 +10133,33 @@ def _run_agent_streaming(
 
             def _periodic_checkpoint():
                 last_saved_activity = 0
+                last_fingerprint = None
+                last_write_at = 0.0
                 while not _checkpoint_stop.wait(15):
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
                             with _agent_lock:
-                                _save_streaming_checkpoint(s)
+                                fingerprint = _streaming_checkpoint_fingerprint(s)
+                                # A completed tool call is the trigger, but not
+                                # proof that anything the checkpoint persists
+                                # actually changed. Rewriting a multi-megabyte
+                                # sidecar to re-persist identical bytes stalls
+                                # every concurrent HTTP request behind the GIL,
+                                # so only write when the persisted state moved.
+                                # Fail closed: an unreadable fingerprint (None)
+                                # always writes, and a periodic refresh keeps
+                                # updated_at from going stale on a long turn.
+                                now = time.time()
+                                stale = (now - last_write_at) >= _CHECKPOINT_IDLE_REFRESH_SECONDS
+                                if (
+                                    fingerprint is None
+                                    or fingerprint != last_fingerprint
+                                    or stale
+                                ):
+                                    _save_streaming_checkpoint(s)
+                                    last_fingerprint = fingerprint
+                                    last_write_at = now
                             last_saved_activity = cur
                     except Exception as e:
                         logger.debug("Periodic checkpoint save failed: %s", e)
@@ -10508,10 +10647,18 @@ def _run_agent_streaming(
                         # Before emitting the error, try re-reading credentials
                         # and retrying once with a fresh agent.
                         _heal_result = None
-                        _heal_rt = _attempt_credential_self_heal(
-                            resolved_provider or '', session_id, _agent_lock,
-                            target_model=resolved_model,
-                        )
+                        # Bind the session's profile so the self-heal re-resolve
+                        # AND the custom-provider override below read one
+                        # profile-owned snapshot (finding #3): otherwise a named
+                        # profile's endpoint pairs with the default profile's key.
+                        from api import profiles as _profiles_api
+                        with _profiles_api.profile_scope_for_detached_worker(
+                            _resolved_profile_name, "credential self-heal", logger_override=logger
+                        ):
+                            _heal_rt = _attempt_credential_self_heal(
+                                resolved_provider or '', session_id, _agent_lock,
+                                target_model=resolved_model,
+                            )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
                             # Rebuild runtime variables from the refreshed resolve
@@ -10530,7 +10677,8 @@ def _run_agent_streaming(
                             if not _session_requested_provider:
                                 _session_requested_provider = resolved_provider
                             resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                                resolved_provider, resolved_api_key, resolved_base_url
+                                resolved_provider, resolved_api_key, resolved_base_url,
+                                profile_name=_resolved_profile_name,
                             )
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
@@ -11749,10 +11897,18 @@ def _run_agent_streaming(
         elif _exc_is_auth:
             if not _self_healed:
                 # ── Credential self-heal on 401 (#1401) ──
-                _heal_rt = _attempt_credential_self_heal(
-                    resolved_provider or '', session_id, _agent_lock,
-                    target_model=resolved_model,
-                )
+                # Bind the session's profile so the self-heal re-resolve AND the
+                # custom-provider override below read one profile-owned snapshot
+                # (finding #3): otherwise a named profile's endpoint pairs with
+                # the default profile's key.
+                from api import profiles as _profiles_api
+                with _profiles_api.profile_scope_for_detached_worker(
+                    _resolved_profile_name, "credential self-heal", logger_override=logger
+                ):
+                    _heal_rt = _attempt_credential_self_heal(
+                        resolved_provider or '', session_id, _agent_lock,
+                        target_model=resolved_model,
+                    )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
                     _self_healed = True
@@ -11771,7 +11927,8 @@ def _run_agent_streaming(
                     if not _session_requested_provider:
                         _session_requested_provider = resolved_provider
                     resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url
+                        resolved_provider, resolved_api_key, resolved_base_url,
+                        profile_name=_resolved_profile_name,
                     )
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}

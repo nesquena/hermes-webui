@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "api_content",
+    "_row_id",
     "_state_db_row_id",
     "_db_row_id",
     "state_db_row_id",
@@ -1194,7 +1195,7 @@ def strip_public_internal_fields(value, *, message_records: bool = False):
     """Deep-copy imported records through the shared schema scrubber.
 
     JSON import uses this before constructing or saving a ``Session``.  The
-    Four replay aliases belong to a message/content-part/tool-call/function
+    Five replay aliases belong to a message/content-part/tool-call/function
     record itself; matching names inside user content or tool arguments are
     ordinary JSON and must be preserved.  This is intentionally independent of
     the credential-redaction setting: caller-supplied provider sidecars must
