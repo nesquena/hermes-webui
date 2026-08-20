@@ -26382,6 +26382,13 @@ function applyLocaleToDOM() {
     const val = t(key);
     if (val && val !== key) el.setAttribute('aria-label', val);
   });
+  // Re-apply dynamic dashboard status (including loopback warnings) after locale changes.
+  // applyLocaleToDOM overwrites data-tooltip from static i18n-title keys, which would erase
+  // a live loopback warning until the next status fetch. By re-applying cached status,
+  // we keep the dynamic warning state authoritative across language switches.
+  if(typeof _applyDashboardStatus==='function'&&typeof _dashboardStatusCache!=='undefined'){
+    _applyDashboardStatus(_dashboardStatusCache);
+  }
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
 }

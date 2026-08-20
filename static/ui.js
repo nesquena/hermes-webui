@@ -1727,9 +1727,32 @@ let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps t
 let _dashboardSettingsLoadSeq=0;
 let _dashboardSettingsWriteSeq=0;
 
+function _isLoopbackHostname(hostname){
+  if(!hostname) return false;
+  const normalized=hostname.replace(/^\[|\]$/g,'').toLowerCase();
+  if(/^localhost\.?$/.test(normalized)) return true;
+  if(/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)){
+    const parts=normalized.split('.');
+    const octet2=parseInt(parts[1],10);
+    const octet3=parseInt(parts[2],10);
+    const octet4=parseInt(parts[3],10);
+    if(octet2>255||octet3>255||octet4>255) return false;
+    return true;
+  }
+  if(normalized==='::1') return true;
+  // IPv4-mapped IPv6 loopback (::ffff:7f00:0/104), as emitted by Chromium.
+  // First hextet covers 0x7f00-0x7fff (127.0.0.0/8). Second hextet is the
+  // remaining 16 bits of the 32-bit IPv4 address.
+  const m=normalized.match(/^::ffff:7f[0-9a-f]{2}:([0-9a-f]{1,4})$/);
+  if(m){
+    return true;
+  }
+  return false;
+}
+
 function _dashboardIsBrowserLoopback(){
   const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
-  return host==='127.0.0.1'||host==='localhost'||host==='::1';
+  return _isLoopbackHostname(host);
 }
 
 function _normalizeDashboardEnabledMode(mode){
@@ -1833,7 +1856,16 @@ else _initNavActionMirrors();
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
-  const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  const hasNonLoopbackBrowserUrl=function(){
+    if(!running||!url) return false;
+    try{
+      const parsed=new URL(url);
+      return !_isLoopbackHostname(parsed.hostname);
+    }catch(_){
+      return false;
+    }
+  }();
+  const warning=running&&!hasNonLoopbackBrowserUrl&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
     btn.classList.toggle('nav-action-visible',running);
