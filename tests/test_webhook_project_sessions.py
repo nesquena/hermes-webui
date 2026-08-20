@@ -144,7 +144,11 @@ def test_webhook_second_pass_keeps_older_project_rows_available(monkeypatch, tmp
 
     rows = models._load_cli_sessions_uncached(tmp_path, db, _cli_profile=None, cron_project_limit=False)
 
-    assert [call.get("include_sources") for call in calls] == [None, ("webhook",)]
+    assert [call.get("include_sources") for call in calls] == [
+        None,
+        ("webhook",),
+        ("kanban",),
+    ]
     assert len(rows) == 1
     assert rows[0]["session_id"] == "webhook-older"
     assert rows[0]["project_id"] == "webhook-project-id"

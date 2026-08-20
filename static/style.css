@@ -26,6 +26,7 @@
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14px;line-height:1.6;
   }
+  button,input,select,textarea{font-family:var(--font-ui);}
   /* ── Font size modifiers ── */
   /* ── Font size preference: scale key UI text elements ── */
   /* Default is 14px (no attribute needed). Small=12px, Large=16px, Extra Large=18px. */
@@ -2424,7 +2425,7 @@
   .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
-  .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-size:12px;}
+  .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-family:var(--font-ui);font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
   .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
   .markdown-table-sort:focus-visible{outline:1px solid var(--accent);outline-offset:2px;}
@@ -5499,8 +5500,9 @@ main.main > #mainPlugin{display:none;}
 .extension-installed-title{font-size:13px;font-weight:600;color:var(--text);overflow-wrap:anywhere;min-width:0;}
 .extension-installed-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted);}
 .extension-installed-meta code{font-family:var(--font-mono);font-size:11px;color:var(--text);overflow-wrap:anywhere;word-break:break-word;}
-.extension-toggle-btn{white-space:nowrap;flex:0 0 auto;}
-.extension-toggle-btn:disabled{opacity:.55;cursor:not-allowed;}
+.extension-installed-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex:0 0 auto;flex-wrap:wrap;}
+.extension-toggle-btn,.extension-configure-btn{white-space:nowrap;flex:0 0 auto;}
+.extension-toggle-btn:disabled,.extension-configure-btn:disabled{opacity:.55;cursor:not-allowed;}
 .extension-settings-box{margin-top:8px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg,var(--sidebar-bg));}
 .extension-settings-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px;}
 .extension-settings-title{font-size:12px;font-weight:700;color:var(--text);}
@@ -5573,7 +5575,8 @@ main.main > #mainPlugin{display:none;}
   .extensions-copy-diagnostics-btn{width:100%;}
   .extension-summary-grid{grid-template-columns:1fr;}
   .extension-installed-row{align-items:flex-start;flex-direction:column;}
-  .extension-toggle-btn{width:100%;}
+  .extension-installed-actions{width:100%;}
+  .extension-installed-actions .extension-toggle-btn,.extension-installed-actions .extension-configure-btn{width:auto;flex:1 1 140px;}
   .extension-sidecar-row-head{align-items:flex-start;flex-direction:column;}
   .extension-sidecar-fields>div{flex-direction:column;gap:2px;}
   .extension-sidecar-fields span{flex:0 0 auto;}
@@ -6857,7 +6860,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
    feels native to the WebUI rather than a one-off bridge UI. */
 .kanban-modal-overlay{
   position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);
-  display:flex;align-items:center;justify-content:center;
+  display:flex;align-items:center;align-items:safe center;justify-content:center;overflow-y:auto;
   z-index:1100;padding:24px;
 }
 .kanban-modal-overlay[hidden]{display:none;}
@@ -6870,6 +6873,9 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   padding:18px 18px 16px;
   color:var(--text);
   box-sizing:border-box;
+  max-height:calc(100vh - 48px);
+  max-height:calc(100dvh - 48px);
+  overflow-y:auto;
 }
 :root:not(.dark) .kanban-modal{
   background:linear-gradient(180deg,#fff,#f5f0e8);
