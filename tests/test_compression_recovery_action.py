@@ -87,6 +87,7 @@ def test_chat_start_blocks_generic_continue_after_compression_exhausted(monkeypa
 
 def test_chat_start_resolves_stale_snapshot_to_live_state_db_tip(monkeypatch, tmp_path):
     """A closed-tab follow-up must not append to a parent closed by compression."""
+    pytest.importorskip("hermes_state")
     _isolate_sessions(monkeypatch, tmp_path)
     monkeypatch.setattr(routes, "SESSION_DIR", models.SESSION_DIR)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "browser-agent")
@@ -345,11 +346,11 @@ def test_chat_start_continuation_409_survives_legacy_adapter_and_retries(monkeyp
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required for send() retry/adopt behavior")
-def test_send_retries_session_continuation_changed_409_and_adopts_tip():
+def test_send_retries_session_continuation_changed_409_and_adopts_tip(tmp_path):
     """send() must parse api()'s 409, retry the returned session_id, then adopt it."""
     driver = r'''
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[2] || process.argv[1], 'utf8');
+const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
 
 function extractFunction(source, name){
   const marker = 'function ' + name + '(';
@@ -445,6 +446,7 @@ async function runCase(script){
     }
   }
   const startData = postStartData || {};
+  const displayText = msgText;
   let streamId;
   const localStorage = {setItem(k,v){ storage[k]=v; }};
   function _setActiveSessionUrl(sid){ storage.url = sid; }
@@ -510,12 +512,14 @@ async function runCase(script){
   process.exit(1);
 });
 '''
+    driver_path = tmp_path / "send_continuation_retry.js"
+    driver_path.write_text(driver, encoding="utf-8")
     result = subprocess.run(
-        ["node", "-e", driver, str(ROOT / "static" / "messages.js")],
-        check=True,
+        ["node", str(driver_path), str(ROOT / "static" / "messages.js")],
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout)
 
     continuation = payload["continuation"]
