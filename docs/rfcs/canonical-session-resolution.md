@@ -59,6 +59,17 @@ correct visible session target, not moving execution ownership.
 | Continuation session | The active child/tip created after compression, usually represented by `continuation_session_id`, `_lineage_tip_id`, or newer lineage metadata. |
 | Lineage relation | Links such as `parent_session_id`, `_lineage_root_id`, `_lineage_tip_id`, and `_compression_segment_count` that connect rows belonging to one logical conversation. |
 
+### Reset successors
+
+A messaging conversation created after a user-visible reset is a separate
+top-level conversation, even when Hermes Agent retains `parent_session_id` as
+durable reset lineage. Sidebar projection must preserve that identifier without
+emitting child-session metadata for a reset successor. Compression
+continuations remain one visible conversation, while explicit branch and
+delegate sessions remain nested children. The canonical reset marker is
+`_reset_from == parent_session_id`; compatibility inference for older rows must
+require a reset end reason and the same non-empty `session_key`.
+
 ## Resolution Rules
 
 1. **Directly valid non-snapshot IDs stay stable.** If the requested session ID
