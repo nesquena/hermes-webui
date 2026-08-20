@@ -1,6 +1,7 @@
 import io
 import json
 import socket
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -277,6 +278,56 @@ def test_login_page_hides_password_controls_when_only_oidc_is_enabled(monkeypatc
     assert 'Enter your password to continue' not in captured["body"]
 
 
+@pytest.mark.parametrize(
+    ("auth_enabled", "password_enabled", "oidc_enabled", "next_path", "expected"),
+    [
+        (False, False, False, "/workspace", "redirect"),
+        (True, True, False, "", "password"),
+        (True, False, True, "", "oidc"),
+        (True, True, True, "", "password_and_oidc"),
+        (True, False, False, "", "passkey"),
+    ],
+)
+def test_login_route_composes_auth_modes(
+    monkeypatch, auth_enabled, password_enabled, oidc_enabled, next_path, expected
+):
+    """Every supported auth mode leaves `/login` with a usable route."""
+    import api.routes as routes
+
+    captured = {}
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: auth_enabled)
+    monkeypatch.setattr(
+        "api.auth.get_password_hash", lambda: "hash" if password_enabled else None
+    )
+    monkeypatch.setattr("api.auth_oidc.is_oidc_enabled", lambda: oidc_enabled)
+    monkeypatch.setattr(
+        routes,
+        "t",
+        lambda _handler, body, *, content_type=None, **_kwargs: captured.update(
+            {"body": body, "content_type": content_type}
+        )
+        or True,
+    )
+
+    handler = RouteFakeHandler()
+    query = f"next={next_path}" if next_path else ""
+    routes.handle_get(handler, SimpleNamespace(path="/login", query=query))
+
+    if expected == "redirect":
+        assert handler.status == 302
+        assert handler.header_values("Location") == ["/workspace"]
+        return
+
+    assert captured["content_type"] == "text/html; charset=utf-8"
+    body = captured["body"]
+    assert ('id="pw"' in body) is (expected in {"password", "password_and_oidc"})
+    assert ('id="oidc-login"' in body) is (expected in {"oidc", "password_and_oidc"})
+    if expected == "passkey":
+        assert 'id="pw"' not in body
+        assert 'id="oidc-login"' not in body
+        assert 'id="passkey-login"' in body
+
+
 def test_settings_hides_disable_auth_action_when_oidc_is_enabled():
     """The action only clears local password auth, never native OIDC."""
     panels_js = (Path(__file__).parent.parent / "static" / "panels.js").read_text(
@@ -286,6 +337,32 @@ def test_settings_hides_disable_auth_action_when_oidc_is_enabled():
     assert "let _settingsOidcEnabled=false;" in panels_js
     assert "_settingsOidcEnabled=!!authStatus.oidc_enabled;" in panels_js
     assert "disableBtn.style.display=active&&!_settingsOidcEnabled?'':'none';" in panels_js
+
+
+def test_settings_auth_status_distinguishes_oidc_from_passkey_only():
+    """Exercise the pure Settings status mapping rather than source strings."""
+    panels_js = (Path(__file__).parent.parent / "static" / "panels.js").read_text(
+        encoding="utf-8"
+    )
+    start = panels_js.index("function _settingsAuthStatusDescriptor(")
+    end = panels_js.index("\nfunction _renderSettingsAuthStatus", start)
+    descriptor = panels_js[start:end]
+    script = (
+        descriptor
+        + "\nconst cases=["
+        + "{auth_enabled:true,password_auth_enabled:false,oidc_enabled:true},"
+        + "{auth_enabled:true,password_auth_enabled:false,oidc_enabled:false},"
+        + "{auth_enabled:true,password_auth_enabled:true,oidc_enabled:true}];"
+        + "console.log(JSON.stringify(cases.map(_settingsAuthStatusDescriptor)));"
+    )
+    output = subprocess.check_output(["node", "-e", script], text=True)
+    statuses = json.loads(output)
+
+    assert statuses == [
+        {"labelKey": "auth_status_oidc_only", "cls": "detail-badge ok"},
+        {"labelKey": "auth_status_passkey_only", "cls": "detail-badge warn"},
+        {"labelKey": "auth_status_password", "cls": "detail-badge ok"},
+    ]
 
 
 def test_oidc_enablement_requires_explicit_allowlist(monkeypatch):
