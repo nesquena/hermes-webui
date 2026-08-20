@@ -1409,10 +1409,18 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // One-shot profile-switch workspace wins first; otherwise prefer the profile default.
+    // One-shot profile-switch workspace wins first; otherwise the CURRENT conversation's
+    // workspace wins, and only a blank page falls back to the profile-global default.
+    // Rationale: _profileDefaultWorkspace is global to the profile, so preferring it over
+    // S.session.workspace made a new chat opened from a given conversation land on the
+    // profile default instead of that conversation's own workspace. With several
+    // conversations running in parallel on different workspaces, that global pointer loses
+    // the context the user is actually in. It is also volatile: the server derives it from
+    // last_workspace.txt, which every conversation rewrites.
+    // The profile default remains the blank-page fallback (#804/#5169) and is never consumed (#823).
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S._profileDefaultWorkspace||null)||(S.session?S.session.workspace:null);
+    const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
