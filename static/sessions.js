@@ -2391,7 +2391,8 @@ async function loadSession(sid){
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
-  if (_draft && (typeof _restoreComposerDraft === 'function')) {
+  const _acceptedHandoffPendingClear = typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid);
+  if (_draft && !_acceptedHandoffPendingClear && (typeof _restoreComposerDraft === 'function')) {
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
   }
   if (typeof _restoreReadOnlyForkPayloadAfterLoad === 'function') {

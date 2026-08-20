@@ -1373,6 +1373,11 @@ function _hasReadOnlyForkPayloadForSid(sid) {
   return !!(record && record.state !== 'accepted');
 }
 
+function _hasReadOnlyForkAcceptedPendingClear(sid) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  return !!(record && record.state === 'accepted-pending-clear');
+}
+
 function _restoreReadOnlyForkPayload(record, sid, generation) {
   if (!_readOnlyForkPayloadVisible(record, sid, generation)) return false;
   const input = $('msg');
@@ -1451,7 +1456,7 @@ async function _prepareReadOnlyForkPayload(text, files) {
   const generationBeforeLoad = _loadSessionGeneration;
   const failureBeforeLoad = _sessionLoadFailureGeneration;
   S.session = null;
-  try { await loadSession(record.childSid); }
+  try { await loadSession(record.childSid, {preserveActiveInput:true}); }
   catch (error) {
     S.session = sourceSession; record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid);
     if (typeof showToast === 'function' && _readOnlyForkHandoffOwnsPane(record, record.childSid)) {
@@ -2012,7 +2017,14 @@ async function send(){
         _readOnlyForkHandoff.state = 'accepted-pending-clear';
         _retainReadOnlyForkPayload(_readOnlyForkHandoff, _readOnlyForkHandoff.childSid);
       }
-      if (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) return;
+      if (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+        if (!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+        if (typeof markInflight === 'function') markInflight(activeSid, startData.stream_id);
+        if (typeof saveInflightState === 'function') {
+          saveInflightState(activeSid,{streamId:startData.stream_id,messages:INFLIGHT[activeSid].messages||optimisticMessages,uploaded:uploadedNames,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+        }
+        return;
+      }
     }
   }catch(e){
     const errMsg=String((e&&e.message)||'');
