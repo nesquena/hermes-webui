@@ -1469,9 +1469,21 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     assert 'class="model-dropdown settings-model-dropdown"' in INDEX
     assert 'id="kanbanTaskModalProvider"' not in INDEX
 
-    # Labels / placeholder-free hint wired for i18n.
+    # Label wired for i18n. The explanatory hint is delivered ONCE, as the
+    # picker's sticky scope note (asserted in
+    # test_kanban_model_wording_is_dispatch_scoped_everywhere) -- repeating the
+    # same kanban_model_hint string as a per-row hint made the Model row the
+    # tallest row in the modal and pushed it past the calc(100vh - 48px) cap at
+    # 1920x1080 in the longer locales (#6906). The row therefore carries only the
+    # label plus the chip, whose empty state reads "Profile default".
     assert 'data-i18n="kanban_model"' in INDEX
-    assert 'data-i18n="kanban_model_hint"' in INDEX
+    _model_row_at = INDEX.index('<label for="kanbanTaskModalModel"')
+    model_row = INDEX[_model_row_at:INDEX.index('<div class="kanban-modal-row">', _model_row_at)]
+    assert 'kanban-modal-hint' not in model_row, (
+        "the Model row must not duplicate the picker scope note as a row hint "
+        "(#6906 modal height cap)"
+    )
+    assert 'data-i18n="kanban_no_model_override"' in model_row
 
     # The populator reuses the same /api/models catalog + provider grouping +
     # overflow the composer picker uses (data-extraModels feeds "Show more"),
