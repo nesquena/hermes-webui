@@ -93,6 +93,36 @@ console.log(_activeSessionIdForSidebar());
     assert _run_node(source) == "url-active"
 
 
+def test_reset_successor_does_not_show_fork_or_branch_indicator():
+    """Durable reset lineage must not be labelled as a user-created fork."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_showsForkOrBranchIndicator'));
+console.log(JSON.stringify({{
+  reset: _showsForkOrBranchIndicator({{session_id:'reset', parent_session_id:'parent', session_source:'messaging'}}),
+  fork: _showsForkOrBranchIndicator({{session_id:'fork', parent_session_id:'parent', session_source:'fork'}}),
+  child: _showsForkOrBranchIndicator({{session_id:'child', parent_session_id:'parent', relationship_type:'child_session'}}),
+}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {"reset": False, "fork": True, "child": True}
+    assert "if(_showsForkOrBranchIndicator(s)){" in js
+
+
 def test_collapsed_lineage_contains_active_hidden_segment():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
