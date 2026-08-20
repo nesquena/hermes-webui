@@ -1465,6 +1465,48 @@ function _readOnlyForkHandoffOwnsPane(record, sid) {
   return _readOnlyForkPayloadVisible(record, sid, record && record.childGeneration);
 }
 
+function _queueReadOnlyForkConcurrentSend(record, text, files) {
+  if (!record || !record.sourceSid || typeof queueSessionMessage !== 'function') return false;
+  const modelState = typeof _chatPayloadModelState === 'function' ? _chatPayloadModelState() : {};
+  queueSessionMessage(record.sourceSid, {
+    text:String(text || ''), files:Array.isArray(files) ? [...files] : [],
+    model:modelState.model, model_provider:modelState.model_provider,
+    profile:S.activeProfile || 'default', _readOnlyForkQueuedFor:record.sourceSid,
+  });
+  if ($('msg')) $('msg').value = '';
+  S.pendingFiles = [];
+  if (typeof autoResize === 'function') autoResize();
+  if (typeof renderTray === 'function') renderTray();
+  if (typeof updateQueueBadge === 'function') updateQueueBadge(record.sourceSid);
+  if (typeof showToast === 'function') showToast(`Queued: "${String(text || '').slice(0,40)}${String(text || '').length>40?'…':''}"`,2000);
+  return true;
+}
+
+function _transferReadOnlyForkConcurrentQueue(record) {
+  if (!record || !record.childSid || typeof SESSION_QUEUES === 'undefined') return;
+  const sourceQueue = SESSION_QUEUES[record.sourceSid];
+  if (!Array.isArray(sourceQueue)) return;
+  const handoffQueue = sourceQueue.filter(entry => entry && entry._readOnlyForkQueuedFor === record.sourceSid);
+  if (!handoffQueue.length) return;
+  const retainedQueue = sourceQueue.filter(entry => !entry || entry._readOnlyForkQueuedFor !== record.sourceSid);
+  if (retainedQueue.length) {
+    SESSION_QUEUES[record.sourceSid] = retainedQueue;
+    if (typeof _persistSessionQueueStorage === 'function') _persistSessionQueueStorage(record.sourceSid, retainedQueue);
+  } else {
+    delete SESSION_QUEUES[record.sourceSid];
+    if (typeof _clearPersistedSessionQueue === 'function') _clearPersistedSessionQueue(record.sourceSid);
+  }
+  for (const entry of handoffQueue) {
+    const payload = {...entry};
+    delete payload._readOnlyForkQueuedFor;
+    if (typeof queueSessionMessage === 'function') queueSessionMessage(record.childSid, payload);
+  }
+  if (typeof updateQueueBadge === 'function') {
+    updateQueueBadge(record.sourceSid);
+    updateQueueBadge(record.childSid);
+  }
+}
+
 function _deferReadOnlyForkHandoff(record) {
   if (!record) return;
   record.state = 'recovery';
@@ -1537,6 +1579,7 @@ async function _prepareReadOnlyForkPayload(text, files) {
   if (!S.session || S.session.session_id !== record.childSid || _loadingSessionId) {
     record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
   }
+  _transferReadOnlyForkConcurrentQueue(record);
   record.childGeneration = _loadSessionGeneration > generationBeforeLoad ? _loadSessionGeneration : null;
   if ((String(($('msg') || {}).value || '').trim() && String(($('msg') || {}).value || '') !== record.text) || (S.pendingFiles || []).length) {
     record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
@@ -1554,8 +1597,17 @@ async function send(){
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
-    if (S.session && (S.session.read_only || S.session.is_read_only) &&
-        typeof _isBranchableReadOnlySession === 'function' && _isBranchableReadOnlySession(S.session)) return;
+    const _activeHandoffRecord = [..._readOnlyForkPayloads.values()].find(record =>
+      record && ['branching','drafting','child-draft-owned'].includes(record.state));
+    const _handoffPane = _activeHandoffRecord && (!S.session ||
+      S.session.session_id === _activeHandoffRecord.sourceSid || S.session.session_id === _activeHandoffRecord.childSid);
+    if (_activeHandoffRecord && _handoffPane) {
+      const _handoffText = _composerTextWithPendingSelections().trim();
+      if (_handoffText || S.pendingFiles.length) {
+        _queueReadOnlyForkConcurrentSend(_activeHandoffRecord, _handoffText, S.pendingFiles);
+      }
+      return;
+    }
     const _text=_composerTextWithPendingSelections().trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.

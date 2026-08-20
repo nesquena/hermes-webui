@@ -286,24 +286,45 @@ def test_handoff_start_failure_restores_payload_and_clears_busy_without_queue_dr
         _close(pw, browser)
 
 
-def test_concurrent_served_handoff_preserves_newer_source_input_without_queue_write():
+def test_concurrent_served_handoff_queues_newer_source_input_during_handoff():
     pw, browser, page = _page()
     try:
         result = page.evaluate("""async () => {
           const calls=[]; let release; const gate=new Promise(r=>release=r);
           S.session={session_id:'cron-concurrent', raw_source:'cron', read_only:true}; $('msg').value='first reply';
-          window.queueSessionMessage=()=>calls.push('queue');
+          const originalQueueSessionMessage=window.queueSessionMessage;
+          window.queueSessionMessage=(sid,payload)=>{calls.push('queue'); return originalQueueSessionMessage(sid,payload);};
           window.api=async url=>{calls.push(url); if(url==='/api/session/branch'){await gate;return {session_id:'child-concurrent'};} if(url==='/api/session/draft')return {}; throw new Error(url);};
           const first=send(); await new Promise(r=>setTimeout(r,20)); $('msg').value='newer source input'; _loadSessionGeneration += 1; _loadingSessionId='other-pane'; await send(); release(); await first;
-          return {calls:calls.filter(url => ['/api/session/branch','/api/session/draft','queue'].includes(url)), text:$('msg').value, loading:_loadingSessionId, map:_readOnlyForkPayloads.size};
+          return {calls:calls.filter(url => ['/api/session/branch','/api/session/draft','queue'].includes(url)), text:$('msg').value, loading:_loadingSessionId, map:_readOnlyForkPayloads.size, queue:_getSessionQueue('cron-concurrent',false).map(entry=>entry.text)};
         }""")
-        assert result == {"calls":["/api/session/branch","/api/session/draft"], "text":"newer source input", "loading":"other-pane", "map":1}
+        assert result == {"calls":["/api/session/branch","queue","/api/session/draft"], "text":"", "loading":"other-pane", "map":1, "queue":["newer source input"]}
     finally:
         _close(pw, browser)
 
 
 def test_concurrent_source_submit_preserves_newer_input_without_source_queue():
-    test_concurrent_served_handoff_preserves_newer_source_input_without_queue_write()
+    test_concurrent_served_handoff_queues_newer_source_input_during_handoff()
+
+
+def test_concurrent_handoff_transfers_queued_reply_to_child_after_load():
+    pw, browser, page = _page()
+    try:
+        result = page.evaluate("""async () => {
+          const calls=[]; let release; const gate=new Promise(r=>release=r);
+          const originalQueueSessionMessage=window.queueSessionMessage;
+          window.queueSessionMessage=(sid,payload)=>{calls.push('queue'); return originalQueueSessionMessage(sid,payload);};
+          window.setBusy=value=>{S.busy=!!value;}; window.uploadPendingFiles=async()=>[]; window.attachLiveStream=()=>{};
+          S.session={session_id:'cron-transfer-source',raw_source:'cron',read_only:true,model:'m',model_provider:'p'};
+          $('msg').value='first transfer reply';
+          window.api=async url=>{calls.push(url); if(url==='/api/session/branch'){await gate;return {session_id:'child-transfer'};} if(url==='/api/session/draft')return {}; if(url==='/api/chat/start')return {stream_id:'stream-transfer'}; throw new Error(url);};
+          window.loadSession=async sid=>{_loadSessionGeneration+=1;S.session={session_id:sid,read_only:false,model:'m',model_provider:'p',composer_draft:{text:'first transfer reply',files:[]}};_loadingSessionId=null;};
+          const first=send(); await new Promise(r=>setTimeout(r,20)); $('msg').value='second transfer reply'; await send(); release(); await first;
+          return {calls:calls.filter(url=>['/api/session/branch','/api/session/draft','/api/chat/start','queue'].includes(url)),source:_getSessionQueue('cron-transfer-source',false).length,child:_getSessionQueue('child-transfer',false).map(entry=>entry.text),map:_readOnlyForkPayloads.size};
+        }""")
+        assert result == {"calls":["/api/session/branch","queue","/api/session/draft","queue","/api/chat/start","/api/session/draft"], "source":0, "child":["second transfer reply"], "map":0}
+    finally:
+        _close(pw, browser)
 
 
 def test_partial_batch_delete_cannot_block_later_cron_handoff():
