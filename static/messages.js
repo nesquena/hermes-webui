@@ -1350,6 +1350,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 // Live File objects cannot cross the server draft boundary. This cache is
 // passive recovery only, keyed by exactly one source or child SID at a time.
 const _readOnlyForkPayloads = new Map();
+const _READ_ONLY_COMPOSER_REFUSAL = 'Read-only imported sessions cannot be modified.';
 
 function _readOnlyForkPayloadVisible(record, sid, generation) {
   return !!(record && S.session && S.session.session_id === sid &&
@@ -1365,6 +1366,11 @@ function _retainReadOnlyForkPayload(record, sid) {
 
 function _retireReadOnlyForkPayload(sid) {
   if (sid) _readOnlyForkPayloads.delete(sid);
+}
+
+function _hasReadOnlyForkPayloadForSid(sid) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  return !!(record && record.state !== 'accepted');
 }
 
 function _restoreReadOnlyForkPayload(record, sid, generation) {
@@ -1427,7 +1433,9 @@ async function _prepareReadOnlyForkPayload(text, files) {
     if (!_restoreReadOnlyForkPayload(record, recoverySid, record.sourceGeneration)) {
       _retainReadOnlyForkPayload(record, recoverySid);
     }
-    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 4000);
+    if (typeof showToast === 'function' && _readOnlyForkPayloadVisible(record, recoverySid, record.sourceGeneration)) {
+      showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 4000);
+    }
     return null;
   }
   const sourceStillOwns = _readOnlyForkPayloadVisible(record, record.sourceSid, record.sourceGeneration);
@@ -1436,7 +1444,7 @@ async function _prepareReadOnlyForkPayload(text, files) {
     record.state = 'recovery';
     _retainReadOnlyForkPayload(record, record.childSid);
     if (typeof renderSessionList === 'function') void renderSessionList();
-    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_forked') : 'branch_forked', 3000);
+    if (typeof showToast === 'function' && sourceStillOwns) showToast(typeof t === 'function' ? t('branch_forked') : 'branch_forked', 3000);
     return null;
   }
   const sourceSession = S.session;
@@ -1446,13 +1454,17 @@ async function _prepareReadOnlyForkPayload(text, files) {
   try { await loadSession(record.childSid); }
   catch (error) {
     S.session = sourceSession; record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid);
-    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    if (typeof showToast === 'function' && _readOnlyForkHandoffOwnsPane(record, record.childSid)) {
+      showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    }
     return null;
   }
   if (_sessionLoadFailureGeneration > failureBeforeLoad && _sessionLoadFailureSid === record.childSid) {
     record.state = 'recovery';
     _retainReadOnlyForkPayload(record, record.childSid);
-    if (typeof showToast === 'function') showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    if (typeof showToast === 'function' && _readOnlyForkHandoffOwnsPane(record, record.childSid)) {
+      showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    }
     return null;
   }
   if (!S.session || S.session.session_id !== record.childSid || _loadingSessionId) {
@@ -1536,7 +1548,7 @@ async function send(){
       const command = typeof COMMANDS !== 'undefined' && COMMANDS.find(c => c.name === 'branch');
       if (command) { $('msg').value = ''; await command.fn(parsed.args); return; }
     } else {
-      if (typeof showToast === 'function') showToast('Read-only imported sessions cannot be modified.', 3000);
+      if (typeof showToast === 'function') showToast(_READ_ONLY_COMPOSER_REFUSAL, 3000);
       return;
     }
   }
@@ -1606,7 +1618,7 @@ async function send(){
     return;
   }
   if(S.session&&(S.session.read_only||S.session.is_read_only)){
-    if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
+    if(typeof showToast==='function') showToast(_READ_ONLY_COMPOSER_REFUSAL,3000);
     return;
   }
   let _slashDisplayTextOverride=null;
@@ -1803,6 +1815,7 @@ async function send(){
         if(typeof renderTray==='function') renderTray();
       } else {
         _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+        return;
       }
       setComposerStatus(`Upload error: ${e.message}`);
       return;
@@ -1991,9 +2004,14 @@ async function send(){
     _pendingMoaConfig=null;
     postStartData = startData;
     if (_readOnlyForkHandoff) {
-      await _clearComposerDraft(_readOnlyForkHandoff.childSid, _readOnlyForkHandoff.text, []);
-      _readOnlyForkPayloads.delete(_readOnlyForkHandoff.childSid);
-      _readOnlyForkHandoff.state = 'accepted';
+      try {
+        await _clearComposerDraft(_readOnlyForkHandoff.childSid, _readOnlyForkHandoff.text, [], {throwOnError:true});
+        _readOnlyForkPayloads.delete(_readOnlyForkHandoff.childSid);
+        _readOnlyForkHandoff.state = 'accepted';
+      } catch (clearError) {
+        _readOnlyForkHandoff.state = 'accepted-pending-clear';
+        _retainReadOnlyForkPayload(_readOnlyForkHandoff, _readOnlyForkHandoff.childSid);
+      }
       if (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) return;
     }
   }catch(e){

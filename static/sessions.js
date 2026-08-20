@@ -221,7 +221,9 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
-  if (S.session && S.session.session_id === sid && _isReadOnlySession(S.session)) return;
+  if (S.session && S.session.session_id === sid &&
+      (_isReadOnlySession(S.session) ||
+       (typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid)))) return;
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -266,7 +268,9 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   const opts = arguments[3] || {};
   if (!sid) return Promise.resolve(true);
-  if (S.session && S.session.session_id === sid && _isReadOnlySession(S.session)) return Promise.resolve(true);
+  if (S.session && S.session.session_id === sid &&
+      (_isReadOnlySession(S.session) ||
+       (typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid)))) return Promise.resolve(true);
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -341,6 +345,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
+  const opts = arguments[3] || {};
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
   _clearRememberedNewChatDraftSession(sid);
@@ -348,10 +353,12 @@ function _clearComposerDraft(sid, text, files) {
   else _suppressComposerDraftRestoreAfterSubmit(sid);
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
+    body: JSON.stringify({ session_id: sid, text: '', files: [] }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+  }).catch((error) => {
+    if (opts && opts.throwOnError) throw error;
+  });
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
@@ -1773,7 +1780,9 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    if (!(typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(currentSid))) {
+      await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    }
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
     // (rapid switch B→C), _loadingSessionId now points at that newer load —

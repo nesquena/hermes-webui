@@ -240,11 +240,17 @@ def test_branch_and_chat_start_are_each_attempted_once():
         result = page.evaluate("""async () => {
           const attempts={branch:0,start:0}; const retries={branch:null,start:null};
           S.session={session_id:'cron-once', raw_source:'cron', read_only:true}; $('msg').value='once';
+          const originalApi=window.api;
           window.api=async (url, opts) => {
-            if(url==='/api/session/branch'){attempts.branch++; retries.branch=opts.retries; return {session_id:'child-once'};}
-            if(url==='/api/session/draft')return {};
-            if(url==='/api/chat/start'){attempts.start++; retries.start=opts.retries; throw new TypeError('network');}
-            throw new Error(url);
+            if(url==='/api/session/branch') retries.branch=opts.retries;
+            if(url==='/api/chat/start') retries.start=opts.retries;
+            return originalApi(url, opts);
+          };
+          window.fetch=async (url) => {
+            if(String(url).includes('/api/session/branch')) { attempts.branch++; return new Response(JSON.stringify({session_id:'child-once'}), {status:200, headers:{'Content-Type':'application/json'}}); }
+            if(String(url).includes('/api/session/draft')) return new Response('{}', {status:200, headers:{'Content-Type':'application/json'}});
+            if(String(url).includes('/api/chat/start')) { attempts.start++; throw new TypeError('network'); }
+            return new Response('{}', {status:200, headers:{'Content-Type':'application/json'}});
           };
           window.loadSession=async sid=>{_loadSessionGeneration+=1; S.session={session_id:sid,read_only:false,composer_draft:{text:'once',files:[]}}; _loadingSessionId=null;};
           await send();
@@ -288,7 +294,7 @@ def test_concurrent_served_handoff_preserves_newer_source_input_without_queue_wr
           S.session={session_id:'cron-concurrent', raw_source:'cron', read_only:true}; $('msg').value='first reply';
           window.queueSessionMessage=()=>calls.push('queue');
           window.api=async url=>{calls.push(url); if(url==='/api/session/branch'){await gate;return {session_id:'child-concurrent'};} if(url==='/api/session/draft')return {}; throw new Error(url);};
-          const first=send(); await new Promise(r=>setTimeout(r,20)); $('msg').value='newer source input'; _loadingSessionId='other-pane'; await send(); release(); await first;
+          const first=send(); await new Promise(r=>setTimeout(r,20)); $('msg').value='newer source input'; _loadSessionGeneration += 1; _loadingSessionId='other-pane'; await send(); release(); await first;
           return {calls:calls.filter(url => ['/api/session/branch','/api/session/draft','queue'].includes(url)), text:$('msg').value, loading:_loadingSessionId, map:_readOnlyForkPayloads.size};
         }""")
         assert result == {"calls":["/api/session/branch","/api/session/draft"], "text":"newer source input", "loading":"other-pane", "map":1}
@@ -312,6 +318,24 @@ def test_partial_batch_delete_cannot_block_later_cron_handoff():
           return {map:_readOnlyForkPayloads.size, text:$('msg').value};
         }""")
         assert result == {"map":0, "text":""}
+    finally:
+        _close(pw, browser)
+
+
+def test_off_pane_child_draft_save_cannot_clear_handoff_payload():
+    pw, browser, page = _page()
+    try:
+        result = page.evaluate("""async () => {
+          const calls=[];
+          _readOnlyForkPayloads.set('child-off-pane', {sourceSid:'cron-off-pane', childSid:'child-off-pane', state:'child-draft-owned', text:'keep me', files:[]});
+          S.session={session_id:'child-off-pane', read_only:false};
+          window.api=async url=>{calls.push(url); return {};};
+          _saveComposerDraft('child-off-pane', '', []);
+          await _saveComposerDraftNow('child-off-pane', '', [], {throwOnError:true});
+          await new Promise(resolve=>setTimeout(resolve, 500));
+          return {calls:calls.filter(url => url === '/api/session/draft'), map:_readOnlyForkPayloads.size};
+        }""")
+        assert result == {"calls": [], "map": 1}
     finally:
         _close(pw, browser)
 
