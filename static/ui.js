@@ -15094,10 +15094,48 @@ function _loadedCompactionMarkerRawIdxs(messages){
 // A settled compaction whose marker sits before the server-loaded tail must
 // remain visible at the top of that tail. Anchoring it to an old assistant/tool
 // turn can bury it inside a hidden worklog, which makes compaction look absent.
-function _pinSettledCompressionReferenceAtTop(inner,node,referenceMessageRawIdx){
-  if(!inner||!node||referenceMessageRawIdx>=0) return false;
+function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx){
+  const inlineMarkers=[];
+  let latestPreWindowMarker=null;
+  const boundary=Number.isFinite(firstRenderedRawIdx)?firstRenderedRawIdx:-1;
+  for(const value of Array.isArray(markerRawIdxs)?markerRawIdxs:[]){
+    const rawIdx=Number(value);
+    if(!Number.isInteger(rawIdx)||rawIdx<0) continue;
+    if(rawIdx<boundary) latestPreWindowMarker=rawIdx;
+    else inlineMarkers.push(rawIdx);
+  }
+  const taskOwner=inlineMarkers.length
+    ?{kind:'inline',rawIdx:inlineMarkers[inlineMarkers.length-1]}
+    :latestPreWindowMarker===null
+      ?null
+      :{kind:'pre-window',rawIdx:latestPreWindowMarker};
+  return {inlineMarkers,latestPreWindowMarker,taskOwner};
+}
+function _insertCompactionCardNodes(entries,taskOwner,insertNode){
+  const insertedNodes=[];
+  let taskOwnerNode=null;
+  if(!Array.isArray(entries)||typeof insertNode!=='function') return {insertedNodes,taskOwnerNode};
+  for(const entry of entries){
+    if(!entry?.node) continue;
+    const inserted=insertNode(entry.node,entry.rawIdx,entry.kind)!==false;
+    if(!inserted||!entry.node.parentElement) continue;
+    insertedNodes.push(entry.node);
+    if(taskOwner&&entry.kind===taskOwner.kind&&entry.rawIdx===taskOwner.rawIdx) taskOwnerNode=entry.node;
+  }
+  return {insertedNodes,taskOwnerNode};
+}
+function _insertPreservedCompressionTaskFallback(taskOwnerNode,standaloneNode,insertNode){
+  if(taskOwnerNode?.parentElement||!standaloneNode||typeof insertNode!=='function') return false;
+  return insertNode(standaloneNode)!==false&&!!standaloneNode.parentElement;
+}
+function _pinCompactionCardAtTop(inner,node){
+  if(!inner||!node) return false;
   inner.appendChild(node);
   return true;
+}
+function _pinSettledCompressionReferenceAtTop(inner,node,referenceMessageRawIdx){
+  if(referenceMessageRawIdx>=0) return false;
+  return _pinCompactionCardAtTop(inner,node);
 }
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
@@ -16750,11 +16788,13 @@ function renderMessages(options){
   })();
   // Ultra-compact display (2026-08-18): every compaction marker loaded in the
   // transcript renders as its own collapsed card at its real position, so the
-  // user SEES each compaction and can reopen its digest inline. The single
-  // anchored reference card remains only for the settled-summary case where
-  // no marker message is loaded (server-truncated tail).
+  // user SEES each compaction and can reopen its digest inline. If a marker is
+  // older than the virtual window, only the latest such marker is pinned above
+  // the rendered rows; markers inside the window stay inline.
+  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const loadedCompactionRawIdxs=(!compressionState)?_loadedCompactionMarkerRawIdxs(S.messages):[];
-  const compactionCardNodes=loadedCompactionRawIdxs.map((markerRawIdx,pos)=>{
+  const compactionPlacements=_selectCompactionCardPlacements(loadedCompactionRawIdxs,firstRenderedRawIdx);
+  const _compactionCardEntry=(markerRawIdx,kind)=>{
     const markerMsg=S.messages[markerRawIdx];
     let raw='';
     try{
@@ -16764,16 +16804,28 @@ function renderMessages(options){
     }
     const segment=_compactionSummarySegment(raw);
     const text=segment!==null?segment:raw;
-    const isLatest=pos===loadedCompactionRawIdxs.length-1;
+    const ownsTasks=!!(compactionPlacements.taskOwner
+      && compactionPlacements.taskOwner.kind===kind
+      && compactionPlacements.taskOwner.rawIdx===markerRawIdx);
     const row=document.createElement('div');
-    row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text,false)}${isLatest?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;
-    return {node:row.firstElementChild, rawIdx:markerRawIdx};
-  });
-  const referenceNode=(!compressionState && !compactionCardNodes.length && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+    row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text,false)}${ownsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;
+    const node=row.firstElementChild;
+    if(node){
+      node.setAttribute('data-compaction-placement',kind);
+      node.setAttribute('data-compaction-raw-idx',String(markerRawIdx));
+      if(ownsTasks&&preservedCompressionTaskMessages.length) node.setAttribute('data-compaction-task-owner','1');
+    }
+    return {node,rawIdx:markerRawIdx,kind};
+  };
+  const preWindowCompactionCard=compactionPlacements.latestPreWindowMarker===null
+    ?null
+    :_compactionCardEntry(compactionPlacements.latestPreWindowMarker,'pre-window');
+  const compactionCardNodes=compactionPlacements.inlineMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'inline'));
+  const referenceNode=(!compressionState && loadedCompactionRawIdxs.length===0 && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;const node=row.firstElementChild;if(node&&preservedCompressionTaskMessages.length) node.setAttribute('data-compaction-task-owner','1');return node;})()
     : null;
   let referenceNodePinnedAtTop=false;
-  let preservedCompressionTaskCardsAttached=!!referenceNode||compactionCardNodes.length>0;
+  let preservedCompressionTaskOwnerNode=null;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -16781,7 +16833,6 @@ function renderMessages(options){
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     rawIdx++;
   }
-  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   // #6999: the turn-content maps MUST see the FULL visWithIdx, not the
   // virtual render window. _assistantTurnFinalVisibleContentMap /
   // _assistantTurnVisibleContentMap derive the echo-strip context for a
@@ -16814,7 +16865,16 @@ function renderMessages(options){
     // Keep the settled compacted-context card immediately visible in a long,
     // tail-loaded conversation. Put it in flow (not inside an old tool turn).
     referenceNodePinnedAtTop=_pinSettledCompressionReferenceAtTop(inner,referenceNode,referenceMessageRawIdx);
+    if(referenceNodePinnedAtTop&&referenceNode?.parentElement&&preservedCompressionTaskMessages.length){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
   }
+  const preWindowInsertion=_insertCompactionCardNodes(
+    preWindowCompactionCard?[preWindowCompactionCard]:[],
+    compactionPlacements.taskOwner,
+    node=>_pinCompactionCardAtTop(inner,node)
+  );
+  if(preWindowInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=preWindowInsertion.taskOwnerNode;
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
     if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
@@ -17361,7 +17421,7 @@ function renderMessages(options){
   }
 
   function _insertCompressionLikeNode(node, anchorIndex){
-    if(!node) return;
+    if(!node) return false;
     const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
     if(anchorIdx!==null && renderVisWithIdx[anchorIdx]){
       const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
@@ -17371,23 +17431,24 @@ function renderMessages(options){
         const blocks=_assistantTurnBlocks(turn);
         if(blocks){
           blocks.appendChild(node);
-          return;
+          return !!node.parentElement;
         }
       }
       const userRow=userRows.get(anchorRawIdx);
       if(userRow && userRow.parentElement){
         userRow.parentElement.insertBefore(node, userRow.nextSibling);
-        return;
+        return !!node.parentElement;
       }
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
-    if(!node) return;
-    if(rawIdx<firstRenderedRawIdx) return;
+    if(!node) return false;
+    if(rawIdx<firstRenderedRawIdx) return false;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     let anchorIdx=null;
     for(let i=0;i<renderVisWithIdx.length;i++){
@@ -17398,7 +17459,7 @@ function renderMessages(options){
     }
     if(anchorIdx===null){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
     const anchorSeg=assistantSegments.get(anchorRawIdx);
@@ -17407,23 +17468,24 @@ function renderMessages(options){
       const blocks=_assistantTurnBlocks(turn);
       if(blocks){
         blocks.insertBefore(node, anchorSeg);
-        return;
+        return !!node.parentElement;
       }
       const turnParent=turn && turn.parentElement;
       if(turnParent){
         turnParent.insertBefore(node, turn);
-        return;
+        return !!node.parentElement;
       }
     }
     const userRow=userRows.get(anchorRawIdx);
     if(userRow && userRow.parentElement){
       userRow.parentElement.insertBefore(node, userRow);
-      return;
+      return !!node.parentElement;
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
-  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+  const preservedOnlyNode=preservedCompressionTaskMessages.length
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn" data-compaction-task-fallback="1"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
     ? (()=>{let idx=null;for(let i=0;i<renderVisWithIdx.length;i++){if(renderVisWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
@@ -17431,12 +17493,25 @@ function renderMessages(options){
   const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
-  for(const entry of compactionCardNodes) _insertCompressionLikeNodeByRawIdx(entry.node, entry.rawIdx);
+  const inlineCompactionInsertion=_insertCompactionCardNodes(
+    compactionCardNodes,
+    compactionPlacements.taskOwner,
+    (node,markerRawIdx)=>_insertCompressionLikeNodeByRawIdx(node,markerRawIdx)
+  );
+  if(inlineCompactionInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=inlineCompactionInsertion.taskOwnerNode;
   if(!referenceNodePinnedAtTop){
-    if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);
-    else _insertCompressionLikeNode(referenceNode);
+    const referenceInserted=referenceNode&&referenceMessageRawIdx>=0
+      ?_insertCompressionLikeNodeByRawIdx(referenceNode,referenceMessageRawIdx)
+      :_insertCompressionLikeNode(referenceNode);
+    if(referenceInserted&&referenceNode?.parentElement&&preservedCompressionTaskMessages.length){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
   }
-  _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
+  _insertPreservedCompressionTaskFallback(
+    preservedCompressionTaskOwnerNode,
+    preservedOnlyNode,
+    node=>_insertCompressionLikeNode(node,preservedOnlyAnchor)
+  );
   _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, renderVisWithIdx.length?renderVisWithIdx.length-1:null);
   for(const entry of handoffSummaryStates){
     if(!entry||!entry.state) continue;

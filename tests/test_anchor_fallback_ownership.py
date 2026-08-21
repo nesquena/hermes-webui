@@ -683,6 +683,14 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _usedModelTurnChipLabel() {{ return ''; }}
         function _formatTurnDuration() {{ return ''; }}
         function _loadedCompactionMarkerRawIdxs() {{ return []; }}
+        function _selectCompactionCardPlacements() {{
+          return {{ inlineMarkers: [], latestPreWindowMarker: null, taskOwner: null }};
+        }}
+        function _insertCompactionCardNodes() {{
+          return {{ insertedNodes: [], taskOwnerNode: null }};
+        }}
+        function _insertPreservedCompressionTaskFallback() {{ return false; }}
+        function _pinCompactionCardAtTop() {{ return false; }}
         function _renderSettledAnchorSceneForMessage(message, segment, rawIdx) {{
           const group = new FakeElement('div');
           group.className = 'tool-worklog-group agent-activity-group';

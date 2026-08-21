@@ -1079,7 +1079,7 @@ def test_context_anchor_reference_uses_session_summary_fallback():
     assert "const referenceText=(()=>{" in src
     assert "if(!referenceMessage) return sessionCompressionSummary;" in src
     assert "return segment!==null?segment:raw;" in src
-    assert "!compactionCardNodes.length && _shouldShowSettledCompressionReference(referenceText)" in src
+    assert "loadedCompactionRawIdxs.length===0 && _shouldShowSettledCompressionReference(referenceText)" in src
     assert "!_isContextCompactionText(referenceText)" in src
 
 
@@ -1116,8 +1116,9 @@ def test_reference_message_uses_raw_transcript_position_before_anchor_fallback()
     src = _read("static/ui.js")
 
     assert "const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(" in src
-    assert "if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);" in src
-    assert "else _insertCompressionLikeNode(referenceNode);" in src
+    assert "referenceNode&&referenceMessageRawIdx>=0" in src
+    assert "?_insertCompressionLikeNodeByRawIdx(referenceNode,referenceMessageRawIdx)" in src
+    assert ":_insertCompressionLikeNode(referenceNode);" in src
 
 
 def test_reference_message_inserted_before_future_assistant_anchor():
@@ -1200,7 +1201,7 @@ def test_frontend_reference_insertion_skips_when_reference_is_before_render_wind
     assert end != -1, "raw-index insertion helper end not found"
     helper = src[start:end]
 
-    assert "if(rawIdx<firstRenderedRawIdx) return;" in helper
+    assert "if(rawIdx<firstRenderedRawIdx) return false;" in helper
 
 
 def test_reference_message_selection_prefers_latest_matching_marker():
@@ -1228,16 +1229,14 @@ def test_reference_message_falls_back_to_current_summary_when_only_stale_markers
     assert "return {message:null, rawIdx:-1};" in helper
 
 
-def test_preserved_task_list_attaches_once_per_render():
+def test_preserved_task_list_source_uses_latest_snapshot():
     src = _read("static/ui.js")
 
     assert "function _latestPreservedCompressionTaskListMessages" in src
     assert ".reverse().find(m=>_isPreservedCompressionTaskListMessage(m))" in src
     assert "const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);" in src
     assert "S.messages.filter(m=>_isPreservedCompressionTaskListMessage(m))" not in src
-    assert "let preservedCompressionTaskCardsAttached=!!referenceNode||compactionCardNodes.length>0;" in src
-    assert "const preservedOnlyNode=" in src
-    assert "(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)" in src
+
 
 
 def test_preserved_task_list_is_suppressed_when_latest_todo_state_has_no_active_items():
