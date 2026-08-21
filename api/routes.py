@@ -5339,6 +5339,96 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
+def _persist_terminal_anchor_scene_from_journal(
+    session_id: str,
+    stream_id: str,
+    *,
+    terminal_state: str | None = None,
+) -> bool:
+    """Server-side terminal settlement: materialize the canonical journal scene
+    into ``anchor_activity_scenes`` so it survives settle/replay without relying
+    on the browser's async scene POST (#7188 rework, must-fix #3).
+
+    Terminal sessions (and any session whose tab closed/refreshed before the
+    browser's ``_persistSettledAnchorScene`` POST landed) have no guarantee that
+    their run journal's Steer deliveries are projected into the settled
+    transcript. This function builds the canonical scene from the journal events
+    via ``_run_journal_live_snapshot`` and persists it server-side, exactly as
+    ``_handle_session_anchor_scene`` does for the browser POST path.
+
+    Called from the streaming ``finally`` block for completion, cancellation,
+    and error paths. Returns True if a scene was persisted, False otherwise.
+    """
+    if not session_id or not stream_id:
+        return False
+    try:
+        snapshot = _run_journal_live_snapshot(stream_id)
+    except Exception:
+        logger.debug(
+            "Terminal anchor-scene settlement: failed to build snapshot for %s",
+            stream_id,
+            exc_info=True,
+        )
+        return False
+    if not snapshot or not isinstance(snapshot, dict):
+        return False
+    scene = snapshot.get("anchor_activity_scene")
+    if not isinstance(scene, dict) or not scene.get("activity_rows"):
+        return False
+    # Stamp the terminal state so the settled scene reflects the run's outcome.
+    if terminal_state:
+        scene["terminal_state"] = terminal_state
+        lifecycle = scene.get("lifecycle")
+        if isinstance(lifecycle, dict):
+            lifecycle["terminal_state"] = terminal_state
+            lifecycle["status"] = "settled"
+        else:
+            scene["lifecycle"] = {"status": "settled", "terminal_state": terminal_state}
+    try:
+        s = get_session(session_id)
+    except Exception:
+        logger.debug(
+            "Terminal anchor-scene settlement: session %s not found for stream %s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+        return False
+    with _get_session_agent_lock(session_id):
+        messages = getattr(s, "messages", None) or []
+        idx, message = _find_anchor_scene_message(messages, scene=scene)
+        if message is None or idx is None:
+            return False
+        ref = _assistant_anchor_scene_message_ref(message)
+        records = dict(_anchor_scene_records(s))
+        records[ref or f"index:{idx}"] = {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": idx,
+            "message_ref": ref,
+            "stream_id": str(stream_id),
+            "scene": scene,
+            "updated_at": time.time(),
+        }
+        if len(records) > 256:
+            ordered = sorted(
+                records.items(),
+                key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+            )
+            records = dict(ordered[-256:])
+        s.anchor_activity_scenes = records
+        try:
+            s.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug(
+                "Terminal anchor-scene settlement: failed to save session %s for stream %s",
+                session_id,
+                stream_id,
+                exc_info=True,
+            )
+            return False
+    return True
+
+
 def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
