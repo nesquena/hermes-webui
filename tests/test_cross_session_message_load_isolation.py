@@ -561,11 +561,66 @@ async function runStaleRejectedIdleCatch() {
   };
 }
 
+async function runPendingSwitchBack() {
+  createEnvironment();
+  S.session = JSON.parse(JSON.stringify(API_BEACON_META.session));
+  S.messages = [{ role: 'assistant', content: 'visible-beacon-transcript' }];
+
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  const calls = {
+    atlasMeta: apiHost.enqueue(buildMessageUrl('sid-atlas', 0)),
+    beaconMeta: apiHost.enqueue(buildMessageUrl('sid-beacon', 0)),
+    beaconMsgs: apiHost.enqueue(buildMessageUrl('sid-beacon', 1)),
+  };
+
+  const pendingSwitch = loadSession('sid-atlas');
+  await waitForQueued(apiHost, calls.atlasMeta.url);
+  const pendingAuthority = {
+    destination: _loadingSessionId,
+    generation: _loadSessionGeneration,
+  };
+
+  // S.session still identifies Beacon while Atlas metadata is pending. Clicking
+  // Beacon again must supersede the Atlas request instead of hitting the
+  // same-session no-op.
+  const switchBack = loadSession('sid-beacon');
+  await waitForQueued(apiHost, calls.beaconMeta.url);
+  const switchBackAuthority = {
+    destination: _loadingSessionId,
+    generation: _loadSessionGeneration,
+  };
+
+  // Let the superseded Atlas response return first. Its stale continuation must
+  // preserve Beacon's newer destination + generation authority.
+  calls.atlasMeta._resolve(API_ATLAS_META);
+  await pendingSwitch;
+  calls.beaconMeta._resolve(API_BEACON_META);
+  await waitForQueued(apiHost, calls.beaconMsgs.url);
+  calls.beaconMsgs._resolve(API_BEACON_MSGS);
+  await switchBack;
+
+  return {
+    scenario: 'pending-switch-back',
+    pendingAuthority,
+    switchBackAuthority,
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    toolCalls: snapshotState().toolCalls,
+    apiCalls: snapshotState().apiCalls,
+    loadingSid: snapshotState().loadingSid,
+    loadingGeneration: snapshotState().loadingGeneration,
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
+    pendingSwitchBack: await runPendingSwitchBack(),
   };
 }
 
@@ -618,6 +673,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     cross = body["crossSessionOrdering"]
     stale = body["staleIdleCatch"]
     observed = body["observedIdleCrossSessionOrdering"]
+    switch_back = body["pendingSwitchBack"]
 
     def _assert_atlas_wins(session_result, *, label):
         assert session_result["finalSid"] == "sid-atlas", f"{label}: stale overlap should end on Atlas session"
@@ -683,6 +739,23 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert stale["apiCalls"].count(
         "/api/session?session_id=sid-atlas&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1"
     ) == 2, "both old and active loads should have attempted message fetch"
+
+    # 4) Pending switch-back: while Atlas metadata is unresolved, S.session still
+    #    identifies Beacon. Re-selecting Beacon must supersede Atlas rather than
+    #    taking the ordinary same-session no-op, and both destination + generation
+    #    must remain authoritative after Atlas's stale continuation returns.
+    assert switch_back["pendingAuthority"] == {"destination": "sid-atlas", "generation": 1}
+    assert switch_back["switchBackAuthority"] == {"destination": "sid-beacon", "generation": 2}
+    assert switch_back["finalSid"] == "sid-beacon"
+    assert switch_back["messages"] == ["stale-beacon-transcript"]
+    assert switch_back["toolCalls"] == [{"name": "tool-beacon-stale", "done": True}]
+    assert switch_back["apiCalls"] == [
+        "/api/session?session_id=sid-atlas&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-beacon&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-beacon&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+    ]
+    assert switch_back["loadingSid"] is None
+    assert switch_back["loadingGeneration"] == 2
 
     assert cross["loadingSid"] is None, "load marker should be cleared after successful completion"
     assert stale["loadingSid"] is None, "load marker should be cleared after stale reject + re-owner completion"
