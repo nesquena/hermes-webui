@@ -82,22 +82,24 @@ function clearPending(sid) {
 }
 const _readPendingSessionModel = readPending;
 const _clearPendingSessionModel = clearPending;
+let _loadSessionGeneration = 7;
 
 // ---- command helpers the extracted cmdGoal references ----
+const _effects = [];
 const t = k => k;
-const showToast = () => {};
-const renderMessages = () => {};
-const clearLiveToolCards = () => {};
-const appendThinking = () => {};
-const setBusy = () => {};
-const setComposerStatus = () => {};
-const markInflight = () => {};
-const saveInflightState = () => {};
-const startApprovalPolling = () => {};
-const startClarifyPolling = () => {};
-const _fetchYoloState = () => {};
-const attachLiveStream = () => {};
-const renderSessionList = () => {};
+const showToast = (...args) => { _effects.push({kind:'toast', args}); };
+const renderMessages = (...args) => { _effects.push({kind:'renderMessages', args}); };
+const clearLiveToolCards = () => { _effects.push({kind:'clearLiveToolCards'}); };
+const appendThinking = () => { _effects.push({kind:'appendThinking'}); };
+const setBusy = value => { _effects.push({kind:'setBusy', value}); };
+const setComposerStatus = value => { _effects.push({kind:'setComposerStatus', value}); };
+const markInflight = (sid, streamId) => { _effects.push({kind:'markInflight', sid, streamId}); };
+const saveInflightState = (sid, state) => { _effects.push({kind:'saveInflightState', sid, state}); };
+const startApprovalPolling = sid => { _effects.push({kind:'startApprovalPolling', sid}); };
+const startClarifyPolling = sid => { _effects.push({kind:'startClarifyPolling', sid}); };
+const _fetchYoloState = sid => { _effects.push({kind:'fetchYoloState', sid}); };
+const attachLiveStream = (sid, streamId) => { _effects.push({kind:'attachLiveStream', sid, streamId}); };
+const renderSessionList = () => { _effects.push({kind:'renderSessionList'}); };
 const newSession = async () => {};
 const $ = () => null;
 const INFLIGHT = {};
@@ -189,6 +191,67 @@ const S = {
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
     out.markerAfter = readPending(SID);
+  } else if (scenario === 'session_switch_mid_request') {
+    S.messages = [{role:'user', content:'goal owner prompt'}];
+    S.toolCalls = [{name:'owner-tool'}];
+    _nextResponse = () => {
+      S.session = {
+        session_id: 'sid-new-pane', workspace: '/tmp/new', model: 'gpt-4o',
+        model_provider: 'openai', profile: 'default', active_stream_id: 'new-stream',
+      };
+      S.messages = [{role:'user', content:'new pane prompt'}];
+      S.toolCalls = [{name:'new-pane-tool'}];
+      S.activeStreamId = 'new-stream';
+      return {stream_id:'goal-owner-stream', pending_started_at:2,
+        message:'Goal started for owner'};
+    };
+    await cmdGoal('ship it');
+    out.current = {
+      sid: S.session.session_id,
+      activeStreamId: S.activeStreamId,
+      sessionActiveStreamId: S.session.active_stream_id,
+      messages: S.messages,
+      toolCalls: S.toolCalls,
+    };
+    out.ownerInflight = INFLIGHT[SID];
+    out.effects = _effects;
+  } else if (scenario === 'same_session_reopen_mid_request') {
+    S.messages = [{role:'user', content:'goal owner prompt'}];
+    S.toolCalls = [{name:'owner-tool'}];
+    _nextResponse = () => {
+      // loadSession() exposes the destination session id before its transcript
+      // settles.  The generation changes synchronously when that reload starts.
+      _loadSessionGeneration += 1;
+      S.session = {
+        session_id: SID, workspace: '/tmp/ws', model: 'openai/gpt-5.4',
+        model_provider: 'openai', profile: 'default', active_stream_id: null,
+      };
+      S.messages = [{role:'user', content:'reopened transcript still loading'}];
+      S.toolCalls = [{name:'reopened-pane-tool'}];
+      S.activeStreamId = null;
+      return {stream_id:'goal-owner-stream', pending_started_at:2,
+        message:'Goal started for owner'};
+    };
+    await cmdGoal('ship it');
+    out.current = {
+      sid: S.session.session_id,
+      activeStreamId: S.activeStreamId,
+      sessionActiveStreamId: S.session.active_stream_id,
+      messages: S.messages,
+      toolCalls: S.toolCalls,
+    };
+    out.ownerInflight = INFLIGHT[SID];
+    out.effects = _effects;
+  } else if (scenario === 'missing_stream') {
+    S.messages = [{role:'user', content:'goal owner prompt'}];
+    _nextResponse = () => ({ok:true});
+    out.result = await cmdGoal('ship it');
+    out.effects = _effects;
+  } else if (scenario === 'api_failure') {
+    S.messages = [{role:'user', content:'goal owner prompt'}];
+    _nextResponse = () => { throw new Error('kickoff unavailable'); };
+    out.result = await cmdGoal('ship it');
+    out.effects = _effects;
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -258,3 +321,80 @@ def test_goal_kickoff_without_marker_sends_no_explicit_pick(driver_path):
     out = _run_scenario(driver_path, "no_marker_no_pick")
     assert "explicit_model_pick" not in out["payload"]
     assert out["markerAfter"] is None
+
+
+def test_goal_response_cannot_cross_session_boundary(driver_path):
+    """A goal kickoff may finish after navigation without mutating the new pane."""
+    out = _run_scenario(driver_path, "session_switch_mid_request")
+
+    assert out["current"] == {
+        "sid": "sid-new-pane",
+        "activeStreamId": "new-stream",
+        "sessionActiveStreamId": "new-stream",
+        "messages": [{"role": "user", "content": "new pane prompt"}],
+        "toolCalls": [{"name": "new-pane-tool"}],
+    }
+    assert out["ownerInflight"]["messages"] == [
+        {"role": "user", "content": "goal owner prompt"}
+    ]
+    pane_effects = {
+        "toast",
+        "renderMessages",
+        "clearLiveToolCards",
+        "appendThinking",
+        "setBusy",
+        "setComposerStatus",
+        "startApprovalPolling",
+        "startClarifyPolling",
+        "fetchYoloState",
+        "attachLiveStream",
+    }
+    assert not any(effect["kind"] in pane_effects for effect in out["effects"])
+    assert any(effect["kind"] == "markInflight" for effect in out["effects"])
+    assert any(effect["kind"] == "saveInflightState" for effect in out["effects"])
+
+
+def test_goal_response_cannot_mutate_reopened_same_session_pane(driver_path):
+    """A same-id reopen replaces the pane before messages settle; the delayed
+    kickoff response must use the captured owner snapshot, not the loading pane."""
+    out = _run_scenario(driver_path, "same_session_reopen_mid_request")
+
+    assert out["current"] == {
+        "sid": "sid-6705-behaviour",
+        "activeStreamId": None,
+        "sessionActiveStreamId": None,
+        "messages": [{"role": "user", "content": "reopened transcript still loading"}],
+        "toolCalls": [{"name": "reopened-pane-tool"}],
+    }
+    assert out["ownerInflight"]["messages"] == [
+        {"role": "user", "content": "goal owner prompt"}
+    ]
+    pane_effects = {
+        "toast",
+        "renderMessages",
+        "clearLiveToolCards",
+        "appendThinking",
+        "setBusy",
+        "setComposerStatus",
+        "startApprovalPolling",
+        "startClarifyPolling",
+        "fetchYoloState",
+        "attachLiveStream",
+    }
+    assert not any(effect["kind"] in pane_effects for effect in out["effects"])
+    assert any(effect["kind"] == "markInflight" for effect in out["effects"])
+    assert any(effect["kind"] == "saveInflightState" for effect in out["effects"])
+
+
+def test_goal_reports_missing_stream_and_api_failure_to_callers(driver_path):
+    """Context Goal finish must be able to roll back its synthetic user bubble
+    when cmdGoal did not actually start a stream."""
+    missing = _run_scenario(driver_path, "missing_stream")
+    failed = _run_scenario(driver_path, "api_failure")
+
+    assert missing["result"] is False
+    assert failed["result"] is False
+    assert any(
+        effect["kind"] == "toast" and "kickoff unavailable" in effect["args"]
+        for effect in failed["effects"]
+    )
