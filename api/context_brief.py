@@ -17,11 +17,11 @@ and never mutates the session.
 from __future__ import annotations
 
 import copy
-import tempfile
-import os
 import hashlib
 import json
 import logging
+import tempfile
+import os
 import re
 import threading
 import time
@@ -29,23 +29,11 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
-# Self-contained copies of the session-squash helpers (upstream lacks
-# api/session_squash). Deduplicate against that module if the squash
-# feature lands upstream.
+# Self-contained copies of the small session_squash.py helpers this module
+# needs (text extraction, busy-field pruning, transcript distillation,
+# atomic JSON writes). They are inlined so this PR stays reviewable on its
+# own; if session_squash lands upstream they can be deduplicated.
 _DISTILL_BUDGET_CHARS = 100_000
-
-def _atomic_write(path: Path, payload: bytes) -> None:
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
-    finally:
-        Path(tmp_name).unlink(missing_ok=True)
-
-
 
 
 def _message_text(content) -> str:
@@ -60,6 +48,39 @@ def _message_text(content) -> str:
     return ""
 
 
+def _busy_fields(session) -> dict:
+    busy = {}
+    for field in ("active_stream_id", "pending_user_message", "pending_started_at", "pending_turn_id"):
+        value = getattr(session, field, None)
+        if value:
+            busy[field] = str(value)[:80]
+    attachments = getattr(session, "pending_attachments", None)
+    if attachments:
+        busy["pending_attachments"] = len(attachments)
+    return busy
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        Path(tmp_name).unlink(missing_ok=True)
+
+
+def _extract_llm_content(response) -> str:
+    message = response.choices[0].message
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", message)
+    if not isinstance(content, str):
+        content = str(content) if content else ""
+    return content.strip()
 
 
 def _distill_transcript(session, budget: int = _DISTILL_BUDGET_CHARS) -> str:
@@ -113,33 +134,6 @@ def _distill_transcript(session, budget: int = _DISTILL_BUDGET_CHARS) -> str:
 
     sections.sort(key=lambda s: int(s.split("]")[0].split("[")[1]) if s.startswith("--- [") else 0)
     return "\n\n".join(sections)
-
-
-
-
-def _extract_llm_content(response) -> str:
-    message = response.choices[0].message
-    if isinstance(message, dict):
-        content = message.get("content")
-    else:
-        content = getattr(message, "content", message)
-    if not isinstance(content, str):
-        content = str(content) if content else ""
-    return content.strip()
-
-
-
-
-def _busy_fields(session) -> dict:
-    busy = {}
-    for field in ("active_stream_id", "pending_user_message", "pending_started_at", "pending_turn_id"):
-        value = getattr(session, field, None)
-        if value:
-            busy[field] = str(value)[:80]
-    attachments = getattr(session, "pending_attachments", None)
-    if attachments:
-        busy["pending_attachments"] = len(attachments)
-    return busy
 
 
 logger = logging.getLogger(__name__)
@@ -943,6 +937,7 @@ def _persist_revalidated_llm_brief(
     text: str,
     brief_source: str,
     message_count: int,
+    automatic: bool,
 ) -> tuple[dict, object, bool]:
     """Revalidate and persist under the route's canonical admission fence."""
     from api.models import _get_session_agent_lock
@@ -954,6 +949,8 @@ def _persist_revalidated_llm_brief(
         fresh_session, fresh_source = _resolve_session(sid)
         if fresh_source != expected_source:
             raise BriefError("session source changed during brief generation", 409)
+        if automatic and bool(getattr(fresh_session, "archived", False)):
+            raise BriefError("session was archived during brief generation", 410)
         if _session_has_active_run(sid, session=fresh_session):
             raise BriefError("session resumed during brief generation", 409)
         if not _same_transcript_revision(
@@ -1090,7 +1087,7 @@ def _generate_llm_brief(session, sid: str, deterministic: dict) -> tuple[str, st
 
 # ── job orchestration ────────────────────────────────────────────────────
 
-def start_brief_job(sid: str) -> dict:
+def start_brief_job(sid: str, *, automatic: bool = False) -> dict:
     """Start (or refuse to duplicate) the background LLM-narrative job.
 
     The session resolution I/O happens before the registry lock; the
@@ -1105,6 +1102,9 @@ def start_brief_job(sid: str) -> dict:
     session, _source = _resolve_session(sid)  # 404 before registering a job
     if not (getattr(session, "messages", None) or []):
         raise BriefError("nothing to brief (session has no messages)")
+    if automatic and bool(getattr(session, "archived", False)):
+        raise BriefError("archived sessions are not briefed automatically", 410)
+
     job_id = uuid.uuid4().hex[:16]
     job = {
         "job_id": job_id,
@@ -1114,6 +1114,7 @@ def start_brief_job(sid: str) -> dict:
         "finished_at": None,
         "result": None,
         "error": None,
+        "_automatic": bool(automatic),
     }
     with _JOBS_LOCK:
         _purge_jobs_locked()
@@ -1153,9 +1154,14 @@ def _finish_job(job: dict, *, result: dict | None = None, error: str | None = No
 
 def _run_brief_job(job: dict) -> None:
     sid = job["session_id"]
+    automatic = bool(job.get("_automatic"))
     started = time.monotonic()
     try:
         session, source = _resolve_session(sid)
+        if automatic and bool(getattr(session, "archived", False)):
+            raise BriefError("session was archived before brief generation", 410)
+        if automatic and _session_has_active_run(sid, session=session):
+            raise BriefError("session resumed before brief generation", 409)
         snapshot = _snapshot_session(session)
         revision = _session_revision(snapshot)
         deterministic = build_deterministic_brief(snapshot, sid, source=source)
@@ -1170,6 +1176,7 @@ def _run_brief_job(job: dict) -> None:
             text=text,
             brief_source=brief_source,
             message_count=deterministic["meta"]["message_count"],
+            automatic=automatic,
         )
         _finish_job(
             job,
@@ -1195,10 +1202,100 @@ def _run_brief_job(job: dict) -> None:
             },
         )
     except BriefError as exc:
+        if automatic and exc.status not in {404, 410}:
+            _requeue_auto_session(sid)
         _finish_job(job, error=str(exc))
     except Exception as exc:
+        if automatic:
+            _requeue_auto_session(sid)
         logger.exception("context brief job failed for %s", sid)
         _finish_job(job, error=f"internal error: {exc}")
+
+
+# ── automatic end-of-turn regeneration (validated 2026-08-14) ────────────
+#
+# A daemon worker receives the exact session ids whose runs just ended, so the
+# brief is already fresh when the user opens the panel without scanning the
+# session fleet. Cost guards, all evaluated before any LLM call:
+#   - no global session listing: only ids claimed from the finished-run queue;
+#   - archived sessions are never regenerated automatically;
+#   - no regeneration when the stored brief matches the message count and
+#     session revision (including same-count retries/edits);
+#   - never while the session has an active run (fail-closed on doubt);
+#   - per-session minimum interval (default 60 s, bounded 30–600 s);
+#   - single brief job per session (registry single-flight);
+#   - burst cap: at most _AUTO_MAX_PER_TICK jobs enqueued per tick, so a
+#     downtime backlog drains slowly instead of storming the provider.
+
+# Direction decision 2026-08-15: auto brief is opt-in (Settings switch);
+# default off. Manual ↻ regeneration in the Context tab is unaffected.
+_AUTO_DEFAULT_ENABLED = False
+_AUTO_DEFAULT_MIN_INTERVAL = 60.0
+_AUTO_MIN_INTERVAL_BOUNDS = (30.0, 600.0)
+_AUTO_TICK_SECONDS = 20.0
+_AUTO_MAX_PER_TICK = 2
+
+_AUTO_LIFECYCLE_LOCK = threading.Lock()
+_AUTO_STOP = threading.Event()
+_AUTO_WAKE = threading.Event()
+_AUTO_THREAD = None
+_AUTO_LAST_ENQUEUE_AT: dict[str, float] = {}
+_AUTO_PENDING_SESSION_IDS: set[str] = set()
+_AUTO_PENDING_LOCK = threading.Lock()
+
+
+def _add_auto_pending(session_ids) -> None:
+    with _AUTO_PENDING_LOCK:
+        _AUTO_PENDING_SESSION_IDS.update(str(sid) for sid in session_ids if sid)
+
+
+def _discard_auto_pending(sid: str) -> None:
+    with _AUTO_PENDING_LOCK:
+        _AUTO_PENDING_SESSION_IDS.discard(sid)
+
+
+def _claim_auto_pending(sid: str) -> bool:
+    """Atomically consume the current pending generation before starting work."""
+    with _AUTO_PENDING_LOCK:
+        if sid not in _AUTO_PENDING_SESSION_IDS:
+            return False
+        _AUTO_PENDING_SESSION_IDS.remove(sid)
+        return True
+
+
+def _auto_pending_snapshot() -> tuple[str, ...]:
+    with _AUTO_PENDING_LOCK:
+        return tuple(_AUTO_PENDING_SESSION_IDS)
+
+
+def _requeue_auto_session(sid: str) -> None:
+    _add_auto_pending((sid,))
+    _AUTO_WAKE.set()
+
+
+def get_auto_config() -> dict:
+    """Effective auto-brief configuration (settings.json, clamped/bounded)."""
+    from api.config import load_settings
+
+    try:
+        settings = load_settings() or {}
+    except Exception:
+        settings = {}
+    try:
+        min_interval = float(
+            settings.get("context_brief_min_interval_seconds") or _AUTO_DEFAULT_MIN_INTERVAL
+        )
+    except (TypeError, ValueError):
+        min_interval = _AUTO_DEFAULT_MIN_INTERVAL
+    lo, hi = _AUTO_MIN_INTERVAL_BOUNDS
+    min_interval = min(max(min_interval, lo), hi)
+    enabled = settings.get("context_brief_auto", _AUTO_DEFAULT_ENABLED)
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    return {
+        "enabled": enabled,
+        "min_interval_seconds": min_interval,
+    }
 
 
 def _session_has_active_run(sid: str, *, session=None) -> bool:
@@ -1227,3 +1324,133 @@ def _session_has_active_run(sid: str, *, session=None) -> bool:
         or getattr(session, "pending_turn_id", None)
         or getattr(session, "pending_started_at", None)
     )
+
+
+def _auto_tick() -> None:
+    """Process only changed, non-archived sessions whose run just finished."""
+    cfg = get_auto_config()
+    from api import config as _cfg
+
+    try:
+        finished = _cfg.claim_finished_run_session_ids()
+    except Exception:
+        logger.exception("auto brief: finished-session claim failed")
+        if not cfg["enabled"]:
+            with _AUTO_PENDING_LOCK:
+                _AUTO_PENDING_SESSION_IDS.clear()
+            _AUTO_LAST_ENQUEUE_AT.clear()
+        return
+    if not cfg["enabled"]:
+        # Disabled means discard, not defer: runs completed while auto-brief is
+        # off must never be retained or billed retroactively on re-enable.
+        with _AUTO_PENDING_LOCK:
+            _AUTO_PENDING_SESSION_IDS.clear()
+        _AUTO_LAST_ENQUEUE_AT.clear()
+        return
+    _add_auto_pending(finished)
+    pending = _auto_pending_snapshot()
+    if not pending:
+        return
+
+    now = time.monotonic()
+    # Prune debounce entries older than one hour so the map stays bounded.
+    for old_sid, ts in list(_AUTO_LAST_ENQUEUE_AT.items()):
+        if now - ts > 3600.0:
+            _AUTO_LAST_ENQUEUE_AT.pop(old_sid, None)
+    enqueued = 0
+    for sid in sorted(pending):
+        if enqueued >= _AUTO_MAX_PER_TICK:
+            break
+        if not sid:
+            _discard_auto_pending(sid)
+            continue
+        if now - _AUTO_LAST_ENQUEUE_AT.get(sid, 0.0) < cfg["min_interval_seconds"]:
+            continue  # keep pending until the debounce window expires
+        try:
+            session, _source = _resolve_session(sid)
+        except BriefError as exc:
+            if exc.status in {404, 410}:
+                _discard_auto_pending(sid)
+            else:
+                logger.warning("auto brief: resolve rejected for %s: %s", sid, exc)
+            continue
+        except Exception:
+            logger.exception("auto brief: resolve failed for %s", sid)
+            continue
+        if bool(getattr(session, "archived", False)):
+            _discard_auto_pending(sid)
+            continue
+        if _session_has_active_run(sid, session=session):
+            continue  # route admission or worker registry says the run resumed
+        count = len(getattr(session, "messages", None) or [])
+        if count <= 0:
+            _discard_auto_pending(sid)
+            continue
+        stored = load_llm_brief(session, sid)
+        if _llm_brief_is_current(session, stored, count):
+            _discard_auto_pending(sid)
+            continue  # unchanged since the last generation
+        with _JOBS_LOCK:
+            duplicate = any(
+                str(j.get("session_id")) == sid and j.get("status") == "running"
+                for j in _JOBS.values()
+            )
+        if duplicate:
+            continue  # retain a newer finish event until the older job exits
+        if not _claim_auto_pending(sid):
+            continue
+        try:
+            start_brief_job(sid, automatic=True)
+        except BriefError as exc:
+            if exc.status not in {404, 410}:
+                _requeue_auto_session(sid)
+            continue
+        except Exception:
+            _requeue_auto_session(sid)
+            logger.exception("auto brief: enqueue failed for %s", sid)
+            continue
+        _AUTO_LAST_ENQUEUE_AT[str(sid)] = now
+        enqueued += 1
+
+
+def _auto_loop() -> None:
+    while not _AUTO_STOP.is_set():
+        try:
+            _auto_tick()
+        except Exception:
+            logger.exception("auto brief tick failed")
+        _AUTO_WAKE.wait(_AUTO_TICK_SECONDS)
+        _AUTO_WAKE.clear()
+
+
+def start_auto_brief_worker() -> bool:
+    """Start the end-of-turn brief worker (idempotent)."""
+    global _AUTO_THREAD
+    with _AUTO_LIFECYCLE_LOCK:
+        if _AUTO_THREAD is not None and _AUTO_THREAD.is_alive():
+            return False
+        _AUTO_STOP.clear()
+        _AUTO_WAKE.clear()
+        _AUTO_THREAD = threading.Thread(
+            target=_auto_loop, name="hermes-webui-context-auto-brief", daemon=True
+        )
+        try:
+            _AUTO_THREAD.start()
+        except BaseException:
+            _AUTO_THREAD = None
+            raise
+        return True
+
+
+def stop_auto_brief_worker(timeout: float = 2.0) -> bool:
+    global _AUTO_THREAD
+    _AUTO_STOP.set()
+    _AUTO_WAKE.set()
+    thread = _AUTO_THREAD
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
+    alive = bool(thread is not None and thread.is_alive())
+    with _AUTO_LIFECYCLE_LOCK:
+        if not alive and thread is _AUTO_THREAD:
+            _AUTO_THREAD = None
+    return not alive
