@@ -1953,6 +1953,52 @@ async function send(){
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
 
+async function startRegeneration(sessionId, regenerationRevision){
+  const sid=String(sessionId||'');
+  if(!sid||!regenerationRevision||!S.session||S.session.session_id!==sid)return;
+  const snapshot=Array.isArray(S.messages)?S.messages.slice():[];
+  let assistantIndex=-1;
+  let userIndex=-1;
+  for(let i=snapshot.length-1;i>=0;i--){
+    if(assistantIndex<0&&snapshot[i]?.role==='assistant'){assistantIndex=i;continue;}
+    if(assistantIndex>=0&&snapshot[i]?.role==='user'){userIndex=i;break;}
+  }
+  if(userIndex<0)return;
+  const retained=Object.assign({},snapshot[userIndex],{_pending:true});
+  S.messages=snapshot.slice(0,userIndex+1);
+  S.messages[userIndex]=retained;
+  renderMessages();setBusy(true);
+  if(typeof ensureLiveWorklogShell==='function')ensureLiveWorklogShell();
+  else if(typeof appendThinking==='function')appendThinking('',{pending:true});
+  try{
+    const response=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+      session_id:sid,regenerate:true,regeneration_revision:regenerationRevision
+    })});
+    if(!S.session||S.session.session_id!==sid)return;
+    const streamId=response&&response.stream_id;
+    if(!streamId)throw new Error('Regeneration did not start a stream.');
+    S.activeStreamId=streamId;
+    S.session.active_stream_id=streamId;
+    S.session.regeneration_revision=null;
+    if(typeof response.pending_started_at==='number')S.session.pending_started_at=response.pending_started_at;
+    if(response.title&&typeof applySessionTitleUpdate==='function')applySessionTitleUpdate(sid,response.title);
+    if(!INFLIGHT[sid])INFLIGHT[sid]={messages:S.messages.slice(),uploaded:[],toolCalls:[]};
+    markInflight(sid,streamId);
+    if(typeof saveInflightState==='function')saveInflightState(sid,{streamId,messages:S.messages.slice(),uploaded:[],toolCalls:[]});
+    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{startedAt:S.session.pending_started_at||Date.now()/1000});
+    if(typeof updateSendBtn==='function')updateSendBtn();
+    if(typeof renderSessionList==='function')void renderSessionList();
+    attachLiveStream(sid,streamId,[]);
+  }catch(error){
+    if(S.session&&S.session.session_id===sid){
+      S.messages=snapshot;delete INFLIGHT[sid];
+      if(typeof clearInflightState==='function')clearInflightState(sid);
+      removeThinking();renderMessages();setBusy(false);setComposerStatus('');
+    }
+    throw error;
+  }
+}
+
 const LIVE_STREAMS={};
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
@@ -6139,7 +6185,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -6578,6 +6624,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
+            if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             if(S.session&&S.session.session_id){
@@ -6818,6 +6865,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -6990,6 +7038,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
+        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{
@@ -8556,7 +8605,7 @@ function _clarifyExpiryMs(pending) {
   if (Number.isFinite(expiresAt) && expiresAt > 0) return expiresAt * 1000;
   const requestedAt = Number(pending && pending.requested_at);
   const timeoutSeconds = Number(pending && pending.timeout_seconds);
-  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds)) {
+  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
     return (requestedAt + timeoutSeconds) * 1000;
   }
   return 0;

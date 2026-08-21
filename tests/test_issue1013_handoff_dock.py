@@ -108,6 +108,28 @@ def test_handoff_delete_clears_local_storage_markers():
     assert "ids.forEach(_clearHandoffStorageForSession);" in SESSIONS_JS
 
 
+def test_handoff_catch_surfaces_400_message_verbatim():
+    """Finding #5 (handoff UI): a 400 from the summary endpoint carries an
+    actionable message (e.g. an ambiguous custom-provider slug collision). The
+    catch must surface it verbatim instead of the generic 'try again' text."""
+    assert "e && e.status === 400 && e.message" in SESSIONS_JS
+    # The generic 'try again' text must no longer be the sole error message.
+    assert "errorText," in SESSIONS_JS
+
+
+def test_model_save_catches_surface_error_and_abort():
+    """Finding #5 (settings UI): aux + default model saves must surface the
+    server's actionable message and abort (retain dirty state) rather than
+    swallowing it into a generic failure / 'settings saved'."""
+    panels_js = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    # Default-model save no longer degrades to "settings saved" after a failure.
+    assert "Failed to update default model — settings saved" not in panels_js
+    # It surfaces the server message and aborts.
+    assert "const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:''" in panels_js
+    # Aux save surfaces the server message too.
+    assert "const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';" in panels_js
+
+
 def test_handoff_summary_renders_as_transcript_card_not_dock_card():
     assert "function setHandoffUi" in SESSIONS_JS or "function setHandoffUi" in (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     ui_js = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
@@ -394,6 +416,83 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
     assert persisted[0]["sid"] == "session-with-exception"
     assert persisted[0]["fallback"] is True
     assert persisted[0]["rounds"] == models.CONVERSATION_ROUND_THRESHOLD
+
+
+def test_ambiguous_custom_provider_handoff_returns_400_not_fallback(monkeypatch):
+    """Finding #4: a custom-provider slug collision on a handoff must surface as a
+    400 with the actionable rename message — NOT a 200 local fallback.
+
+    Previously AmbiguousCustomProviderError fell into the generic ``except
+    Exception`` handler that returns 200 with a ``warning`` the UI ignores,
+    marking the handoff handled and hiding the fix from the user.
+    """
+    import api.routes as routes
+    import api.config as cfg
+    import api.models as models
+
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(
+        routes, "j",
+        lambda _handler, payload, status=200, extra_headers=None: {**payload, "_status": status},
+    )
+    monkeypatch.setattr(
+        routes, "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "_status": status},
+    )
+
+    persisted = []
+    monkeypatch.setattr(
+        routes, "_persist_handoff_summary",
+        lambda sid, summary, channel, rounds, fallback=False: persisted.append(sid) or {"ok": True},
+    )
+
+    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(
+        models, "get_cli_session_messages",
+        lambda sid: [
+            {"role": "user", "content": "Could you check this?", "timestamp": 1.0},
+            {"role": "assistant", "content": "Sure, I can help", "timestamp": 2.0},
+        ],
+    )
+
+    # require_ai_agent_class() imports run_agent and hermes_cli.runtime_provider
+    # before model resolution; stub them so execution reaches resolve_model_provider.
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
+        "api_key": "x", "provider": "openrouter", "base_url": None,
+    }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    class _DummyAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _DummyAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    rename_msg = (
+        "Custom providers ['Foo (Bar)', 'foo-bar'] all normalize to the same "
+        "provider slug 'foo-bar'; rename one so each has a unique slug."
+    )
+
+    def _raise_ambiguous(*args, **kwargs):
+        raise cfg.AmbiguousCustomProviderError(rename_msg)
+
+    monkeypatch.setattr(cfg, "resolve_model_provider", _raise_ambiguous)
+
+    response = routes._handle_handoff_summary(object(), {"session_id": "session-ambiguous"})
+
+    assert response.get("_status") == 400, response
+    assert response.get("type") == "custom_provider_ambiguous", response
+    assert response.get("error") == rename_msg
+    # Must NOT have silently degraded to a persisted fallback summary.
+    assert persisted == [], "ambiguity must not persist a 200 fallback summary"
+    assert "summary" not in response
 
 
 def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
