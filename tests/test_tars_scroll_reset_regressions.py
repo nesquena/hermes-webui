@@ -26,15 +26,25 @@ def _scroll_listener_block() -> str:
 
 def test_clicking_current_session_is_noop_before_load_session_side_effects():
     load_session = _function_body(SESSIONS_JS, "async function loadSession")
+    begin_navigation = _function_body(SESSIONS_JS, "function _beginSessionNavigationRequest")
 
     current_idx = load_session.index("const currentSid = S.session ? S.session.session_id : null")
-    noop_idx = load_session.index("if(currentSid===sid && !forceReload) return")
-    loading_idx = load_session.index("_loadingSessionId = sid")
+    noop_idx = load_session.index("if(currentSid===sid && !forceReload &&")
+    noop_return_idx = load_session.index("return;", noop_idx)
+    navigation_idx = load_session.index("_beginSessionNavigationRequest(sid)")
     stop_idx = load_session.index("stopApprovalPolling")
 
-    assert current_idx < noop_idx < loading_idx < stop_idx, (
+    assert current_idx < noop_idx < noop_return_idx < navigation_idx < stop_idx, (
         "clicking the already-open sidebar row must be a no-op before loadSession() "
-        "mutates loading/runtime state or scroll-affecting UI"
+        "claims navigation authority or mutates runtime/scroll-affecting UI"
+    )
+
+    generation_idx = begin_navigation.index("const generation=++_loadSessionGeneration")
+    loading_idx = begin_navigation.index("_loadingSessionId=sid")
+    return_idx = begin_navigation.index("return generation")
+    assert generation_idx < loading_idx < return_idx, (
+        "the shared navigation helper must record both generation and destination "
+        "before returning authority to loadSession()"
     )
 
 
