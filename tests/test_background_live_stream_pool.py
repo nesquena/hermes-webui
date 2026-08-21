@@ -397,6 +397,23 @@ def test_blank_resource_protocols_still_fail_closed():
     assert out["first"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
 
 
+def test_newest_blank_same_origin_resource_does_not_reuse_stale_h2():
+    """A stale h2 entry must not widen the pool after the transport becomes unknown.
+
+    Resource Timing entries are chronological. If the newest same-origin entry
+    has no protocol, walking farther back to an old h2 observation would turn an
+    uncertain current transport into a permanently cached multiplexed verdict.
+    """
+    out = json.loads(_run_node(_sw_pool_source(
+        "console.log(JSON.stringify({ cap:_liveStreamPoolMax() }));",
+        resources=[
+            ("https://webui.example.net/old.js", "h2"),
+            ("https://webui.example.net/new.js", ""),
+        ],
+    )))
+    assert out["cap"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
+
+
 def test_navigation_protocol_still_wins_when_present():
     """No behaviour change when the worker is not controlling the page."""
     out = json.loads(_run_node(_sw_pool_source(

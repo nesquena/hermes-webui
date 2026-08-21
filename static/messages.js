@@ -2198,8 +2198,13 @@ function _liveStreamPoolMax(){
             try{ sameOrigin=(new URL(entry.name,here)).origin===here; }
             catch(_){ sameOrigin=false; }
             if(!sameOrigin) continue;
-            const candidate=String(entry.nextHopProtocol||'');
-            if(candidate){ proto=candidate; break; }
+            // Entries are chronological and we scan newest-first. The newest
+            // same-origin observation is therefore decisive even when its
+            // protocol is blank: continuing to an older h2 entry would turn a
+            // stale transport into a permanently cached multiplexed verdict.
+            // Leave `proto` blank in that case so the caller fails closed.
+            proto=String(entry.nextHopProtocol||'');
+            break;
           }
         }
       }
