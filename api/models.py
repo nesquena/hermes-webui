@@ -6124,9 +6124,20 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
         if state_db_source == 'webui':
+            # A WebUI-native /branch sidecar is the authoritative source for
+            # fork provenance. Its mirrored state.db row is intentionally
+            # generic ``source='webui'`` and cannot represent that distinction.
+            # Preserve the explicit marker when it has the required parent;
+            # otherwise keep the existing state.db normalization behavior.
+            preserve_native_fork = bool(
+                str(session.get('session_source') or '').strip().lower() == 'fork'
+                and str(session.get('parent_session_id') or '').strip()
+            )
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
-            session['session_source'] = state_db_session_source
+            session['session_source'] = (
+                'fork' if preserve_native_fork else state_db_session_source
+            )
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
         # Overlay the real state.db message count for WebUI-owned rows AND for

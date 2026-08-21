@@ -469,6 +469,38 @@ def test_state_db_webui_source_overrides_stale_cli_json_metadata(_isolate):
         conn.close()
 
 
+def test_state_db_webui_source_preserves_explicit_sidecar_fork_metadata(_isolate):
+    """A generic WebUI mirror must not erase sidecar fork provenance."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        session = Session(
+            session_id='lineage_api_native_fork_source',
+            title='Forked conversation',
+            messages=[{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'hi'}],
+            updated_at=t0,
+            parent_session_id='lineage_api_fork_parent',
+            session_source='fork',
+        )
+        session.save(touch_updated_at=False)
+        _insert_state_row(
+            conn,
+            'lineage_api_native_fork_source',
+            source='webui',
+            started_at=t0,
+        )
+
+        row = {row['session_id']: row for row in all_sessions()}['lineage_api_native_fork_source']
+
+        assert row['session_source'] == 'fork'
+        assert row['source_tag'] == 'webui'
+        assert row['raw_source'] == 'webui'
+        assert row['source_label'] == 'WebUI'
+        assert row['is_cli_session'] is False
+    finally:
+        conn.close()
+
+
 def test_sessions_route_keeps_state_db_webui_row_with_stale_cli_json_when_cli_hidden(_isolate, monkeypatch):
     """The hot route must apply state.db source correction before CLI filtering."""
     conn = _ensure_state_db(_isolate)
