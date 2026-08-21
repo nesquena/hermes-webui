@@ -81,9 +81,11 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 function getModelLabel(modelId) {{ return String(modelId || 'Unknown'); }}
-function t() {{ return ''; }}
+let modelSwitchedTranslation = '';
+function t(key) {{ return key === 'model_switched' ? modelSwitchedTranslation : ''; }}
 eval(extractFunc('_bareModelId'));
 eval(extractFunc('_localModelSwitchText'));
+eval(extractFunc('_gatewayModelWarningText'));
 const cases = {{
   // Genuine local fallback: configured model failed, another one served.
   realSwitch: _localModelSwitchText(
@@ -130,9 +132,25 @@ const cases = {{
   noRequested: _localModelSwitchText({{ _usedModel: 'kimi-k3' }}, ''),
   nullMsg: _localModelSwitchText(null, 'gpt-5.6-sol'),
 }};
+modelSwitchedTranslation = 'Modèle changé';
+cases.gatewayLocalized = _gatewayModelWarningText({{
+  model_changed: true,
+  requested_model: 'requested/model',
+  used_model: 'served/model',
+}});
 console.log(JSON.stringify(cases));
 """
     return json.loads(_run_node(source))
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_gateway_switch_uses_the_same_localized_prefix_as_local_switch():
+    """Gateway and local switch notices must not mix English and active-locale copy."""
+    cases = _eval_local_switch_cases()
+
+    assert cases["gatewayLocalized"] == (
+        "Modèle changé: requested/model → served/model"
+    )
 
 
 def test_bare_model_id_strips_routing_hints():

@@ -7507,7 +7507,7 @@ function _gatewayModelWarningText(routing){
   if(!routing||!routing.model_changed)return'';
   const requested=getModelLabel(routing.requested_model||'requested model');
   const used=getModelLabel(routing.used_model||'served model');
-  return`Model switched: ${requested} → ${used}`;
+  return`${t('model_switched')||'Model switched'}: ${requested} → ${used}`;
 }
 function _latestGatewayRoutingForSession(session){
   if(!session)return null;
