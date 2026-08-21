@@ -2135,26 +2135,16 @@ assert.strictEqual(assistants2.length, 0,
 
 
 def test_gateway_user_msg_timestamp_uses_pending_started_at():
-    """Review finding #2 (gateway timestamp parity): the persisted Gateway
-    user row must be stamped with the turn's pending_started_at, not a
-    fresh time.time() — otherwise the optimistic↔persisted timestamp match
+    """Review finding #2 (gateway timestamp parity): the persisted Gateway/active-turn
+    user row must be stamped with the turn's pending_started_at (via active_turn_identity),
+    not a fresh time.time() — otherwise the optimistic↔persisted timestamp match
     fails on Gateway sessions.
     """
-    src = (REPO_ROOT / "api" / "gateway_chat.py").read_text(encoding="utf-8")
-    # The user row construction must read the captured turn stamp
-    assert "turn_started_at = getattr(s, \"pending_started_at\", None)" in src
-    assert "user_msg = {\"role\": \"user\", \"content\": str(msg_text or \"\"), \"timestamp\": turn_started_at}" in src
-    # Fallback to now only when the turn stamp is absent
-    assert "if not isinstance(turn_started_at, (int, float)):" in src
-    fallback_pos = src.find("if not isinstance(turn_started_at, (int, float)):")
-    assert "turn_started_at = now" in src[fallback_pos:fallback_pos + 120]
-    # The user row's timestamp must not be a fresh now in the primary path
-    user_msg_pos = src.find("user_msg = {\"role\": \"user\"")
-    around = src[user_msg_pos - 400:user_msg_pos + 200]
-    assert "timestamp\": turn_started_at" in around
-    assert 'timestamp": now}' not in around, (
-        "user row must use turn_started_at, not a fresh now"
-    )
+    src = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+    # The active turn authority takes pending_started_at from session
+    assert "getattr(session, 'pending_started_at', None)" in src
+    # _materialize_active_turn_user sets timestamp from identity
+    assert "message['timestamp'] = identity['timestamp']" in src
 
 
 def test_same_transcript_message_requires_text_match_on_equal_timestamp():
