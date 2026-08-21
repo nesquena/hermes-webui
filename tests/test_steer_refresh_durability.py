@@ -419,28 +419,32 @@ console.log(JSON.stringify({{recorded,renders,rows:scene.activity_rows}}));
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required")
-def test_steer_activity_row_renders_as_immutable_user_message():
+def test_steer_activity_row_inherits_safe_user_markdown_rendering():
     source = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     function_source = _extract_js_function(source, "_anchorSceneNodeForRow")
     script = f"""
 const vm=require('vm');
 function makeEl(tag){{
   return {{
-    tagName:String(tag||'').toUpperCase(), className:'', textContent:'', children:[], attrs:{{}},
+    tagName:String(tag||'').toUpperCase(), className:'', textContent:'', innerHTML:'', children:[], attrs:{{}},
     setAttribute(name,value){{this.attrs[name]=String(value);}},
     appendChild(child){{this.children.push(child);return child;}},
   }};
 }}
 const sandbox={{
   document:{{createElement:makeEl}},
-  window:{{_showThinking:true}},
+  window:{{_showThinking:true,_renderUserMarkdown:true}},
   t:key=>key==='steer_message_label'?'Steer':'',
+  _getCachedRender:(text,isUser)=>{{
+    if(text!=='*helloooo* <img src=x onerror=alert(1)>'||isUser!==true) throw new Error('wrong user render input');
+    return '<em>helloooo</em> &lt;img src=x onerror=alert(1)&gt;';
+  }},
 }};
 vm.createContext(sandbox);
 vm.runInContext({json.dumps(function_source)},sandbox);
 const row={{
   row_id:'run:4',local_id:'run:4',kind:'control_boundary',role:'user',
-  source_event_type:'steer_delivered',status:'delivered',text:'Use <img src=x onerror=alert(1)>',
+  source_event_type:'steer_delivered',status:'delivered',text:'*helloooo* <img src=x onerror=alert(1)>',
   payload:{{files:['notes.txt']}},
 }};
 const node=sandbox._anchorSceneNodeForRow(row,{{settled:true}});
@@ -459,7 +463,8 @@ console.log(JSON.stringify(node));
         "steer-delivered-files",
     ]
     assert node["children"][0]["textContent"] == "Steer"
-    assert node["children"][1]["textContent"] == "Use <img src=x onerror=alert(1)>"
+    assert node["children"][1]["innerHTML"] == "<em>helloooo</em> &lt;img src=x onerror=alert(1)&gt;"
+    assert node["children"][1]["textContent"] == ""
     assert node["children"][2]["textContent"] == "notes.txt"
 
 

@@ -13195,7 +13195,10 @@ function _anchorSceneNodeForRow(row, opts){
     node.appendChild(label);
     const body=document.createElement('div');
     body.className='msg-body';
-    body.textContent=text;
+    // Steer is user-authored transcript content. Use the exact same safe user
+    // renderer as ordinary user bubbles so the render_user_markdown preference,
+    // fenced-block handling, sanitization, and render cache stay consistent.
+    body.innerHTML=_getCachedRender(text,true);
     node.appendChild(body);
     if(files.length){
       const attachments=document.createElement('div');
