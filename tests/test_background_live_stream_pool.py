@@ -386,7 +386,7 @@ def test_transport_uncertainty_guard_is_fail_closed():
 
 def test_marking_transport_uncertain_prunes_immediately_and_locks_budget():
     out = json.loads(_run_node(_pool_source("""
-globalThis.S={sessionId:'a'};
+globalThis.S={session:{session_id:'a'}};
 for (const sid of ['a','b','c','d']) {
   LIVE_STREAMS[sid]={streamId:'s'+sid};
   _touchLiveStreamUse(sid);

@@ -2169,7 +2169,7 @@ function _markLiveStreamTransportUncertain(){
   _liveStreamTransportUncertain=true;
   // The replacement EventSource's transport is unknowable before it opens.
   // Prune immediately and keep the HTTP/1.1-safe budget until the next reload.
-  const keepSid=(typeof S!=='undefined'&&S&&S.sessionId)?String(S.sessionId):'';
+  const keepSid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
   closeOtherLiveStreams(keepSid);
 }
 
