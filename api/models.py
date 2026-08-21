@@ -65,12 +65,15 @@ PROJECT_ASSIGNED_CLI_LIMIT = 200
 # eating the whole window; project-filtered server pagination is still the real
 # fix for profiles that large.
 PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
-# How many project-scoped follow-up queries one sidebar build may pay after the
-# global assigned window came back saturated. The follow-up is what keeps a busy
-# project from starving quieter ones (greptile P1 on #6659); the cap is what
-# keeps the worst case bounded at 1 global query + 1 GROUP BY probe + this many
-# project-scoped queries, each itself bounded to one project's remaining budget.
-PROJECT_ASSIGNED_CLI_REFILL_PROJECTS = 32
+# The project-scoped follow-up below is deliberately NOT capped by project
+# count: any fixed cap would recreate the starvation it repairs — every starved
+# project past the cap stays unreachable on every rebuild (greptile P1 on
+# #6659). Its work is bounded by construction instead: it fires only when the
+# global assigned window came back saturated; each scoped query is limited to
+# one project's remaining budget; and the sum of those budgets across every
+# starved project is at most effective_limit * len(projects), which the scan
+# ceiling above already caps. Worst case per build: 1 global query + 1 GROUP BY
+# probe + one small project-scoped query per starved project.
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -7887,8 +7890,8 @@ def _load_cli_sessions_uncached(
         # first (the only cost most profiles pay), and only if it came back
         # saturated does a project-scoped follow-up top up the projects it
         # starved. Worst case per build: 1 global query + 1 GROUP BY probe +
-        # PROJECT_ASSIGNED_CLI_REFILL_PROJECTS project-scoped queries, each
-        # bounded to one project's remaining budget.
+        # one project-scoped query per starved project, each bounded to that
+        # project's remaining budget (whose sum the scan ceiling bounds).
         known_project_ids = _known_project_ids() if project_assigned_limit is not False else frozenset()
         if (
             project_assigned_limit is not False
@@ -7992,10 +7995,14 @@ def _load_cli_sessions_uncached(
                         and row_count > kept_per_project.get(project_id, 0)
                     )
                     # Neediest first (fewest conversations delivered, then id for
-                    # a deterministic order), and capped: a profile with hundreds
-                    # of simultaneously starved projects must not turn one sidebar
-                    # build into hundreds of scans.
-                    for _kept, project_id in starved[:PROJECT_ASSIGNED_CLI_REFILL_PROJECTS]:
+                    # a deterministic order). EVERY starved project is served: a
+                    # fixed per-build project cap would leave every project past
+                    # it unreachable on each rebuild — the very starvation this
+                    # pass exists to repair (greptile P1 on #6659). The per-build
+                    # cost stays bounded because each query is limited to one
+                    # project's remaining budget (sum <= the scan ceiling) and
+                    # only fires when the global window was saturated.
+                    for _kept, project_id in starved:
                         remaining = effective_limit - kept_per_project.get(project_id, 0)
                         if remaining <= 0:
                             continue
