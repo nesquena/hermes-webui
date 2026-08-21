@@ -10,30 +10,32 @@ every request (~2-3s for multi-thousand-message transcripts). The cache must:
 - never cache ACTIVE sessions (active_stream_id / pending_user_message).
 """
 
-import importlib
-import sys
 import time
-import types
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-
 @pytest.fixture()
 def routes_env(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "state"))
-    (tmp_path / "state" / "sessions").mkdir(parents=True)
-    for mod in ("api.config", "api.models", "api.routes"):
-        sys.modules.pop(mod, None)
-    config = importlib.import_module("api.config")
-    models = importlib.import_module("api.models")
-    routes = importlib.import_module("api.routes")
-    yield types.SimpleNamespace(config=config, models=models, routes=routes)
-    for mod in ("api.routes", "api.models", "api.config"):
-        sys.modules.pop(mod, None)
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+
+    home = tmp_path / "home"
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(config, "STATE_DIR", state_dir)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache.clear()
+    yield SimpleNamespace(config=config, models=models, routes=routes)
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache.clear()
 
 
 def _make_session(routes_env, sid="20260101_000000_cache1", n=6):
