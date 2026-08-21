@@ -292,11 +292,12 @@ def test_stream_scoped_fallback_notices_dict_exists():
     # which holds STREAMS_LOCK and rejects post-terminal publications
     # (greptile P1: write must be atomic w.r.t. cancel_stream()'s under-lock
     # snapshot; gate-certifier blocker #1: post-CAS notice B must be rejected).
-    publish_call_idx = src.find("_publish_fallback_notice(stream_id, _pending_fallback_notices[-1])")
+    publish_call_idx = src.find("_publish_fallback_notice(stream_id, _notice_to_publish)")
     assert publish_call_idx != -1, (
-        "_agent_status_callback must publish the latest notice through "
-        "_publish_fallback_notice() so the write is atomic under STREAMS_LOCK "
-        "and post-terminal publications are rejected."
+        "_agent_status_callback must publish the pending notice through "
+        "_publish_fallback_notice() so the write is atomic under STREAMS_LOCK, "
+        "post-terminal publications are rejected, and the minted generation is "
+        "bound to the same pending-notice dict later selected for row stamping."
     )
 
     # 3. cancel_stream() claims the notice under STREAMS_LOCK BEFORE flag.set()
