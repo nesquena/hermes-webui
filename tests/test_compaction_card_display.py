@@ -52,10 +52,10 @@ def test_compaction_digest_and_preview_drop_instruction_envelope() -> None:
     )
     digest = (
         '## Historical Task Snapshot\nUser asked: "fix the planning bug"\n'
-        "## Goal\nFix the MES planning defect.\n"
+        "## Goal\nFix the planning defect.\n"
         "## Active State\n- worktree ready\n"
         "## Détail complet\nRésumé intégral : lire la note "
-        "/opt/obsidian/vault/MES/Hermes/Compactions/compaction-test.md"
+        "docs/compaction-test.md"
     )
     marker = envelope + "\n" + digest + "\n--- END OF CONTEXT SUMMARY ---"
     script = f"""
