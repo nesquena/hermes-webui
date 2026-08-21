@@ -289,8 +289,8 @@ Core-sanitized manifest inventory that was present at the initial page boot. It
 returns `null` for empty, malformed, unknown, or untrusted IDs without creating
 settings or storage state. Re-registering the same ID in one page returns the
 same handle object; different IDs receive different handles. The handle exposes
-only the canonical `id`, `settings`, and `storage` fields, backed by the same
-factories used by the legacy accessors.
+only the canonical `id`, `settings`, `storage`, and `events` fields. Settings and
+storage are backed by the same factories used by the legacy accessors.
 
 Manifest enable/disable changes still take effect after a WebUI reload. A handle
 already created in the current page may remain cached across a status refresh;
@@ -299,6 +299,96 @@ cooperative attribution convenience for extensions sharing the page—not a
 sandbox, isolation mechanism, capability or permission system, or security
 boundary. Extensions still execute with the full WebUI session authority
 described above.
+
+### Custom Configure editors
+
+Extensions with structured configuration that does not fit scalar
+`settings_schema` fields can register one custom editor entry point on their
+scoped E0 settings handle:
+
+```js
+const ext = window.hermesExt?.register?.("dictionary-manager");
+const unregister = ext?.settings?.registerConfigure?.(({ opener, restoreFocus }) => {
+  openDictionaryManager({ opener, restoreFocus });
+});
+```
+
+`registerConfigure(handler)` is available only through a valid boot-trusted E0
+handle. It does not require `settings_schema` or extension-owned storage. The
+first handler registered for an extension wins; duplicates return `null` and do
+not replace it. A successful registration returns an idempotent unregister
+function.
+
+Core shows one **Configure** button only for the extension's current
+effective-enabled row under **Settings → Extensions → Installed**. Diagnostics
+never shows the button. Late registration updates an already-mounted Installed
+row. Disable or uninstall status removes the entry point immediately; uninstall
+followed by a same-ID reinstall cannot revive the old page-local handler until a
+full WebUI reload injects and registers the new extension script.
+
+Core enters a pending state before invoking the handler and passes the activated
+button as `opener` plus a one-shot `restoreFocus()` callback. The extension owns
+its dialog, validation, persistence, and close lifecycle. It must either call
+`restoreFocus()` when its UI closes or return a thenable whose settlement means
+the Configure UI is closed. Both paths end pending and converge on Core's
+one-shot focus restoration. A synchronous non-thenable handler remains disabled
+while unsettled. If it never calls `restoreFocus()`, it remains disabled until reload.
+Core does not guess dialog lifetime with a timeout.
+
+Synchronous throws, thenable-access failures, and asynchronous rejections are
+isolated, logged with the extension ID, and surfaced as a generic failure. Focus
+returns to the connected opener when possible, otherwise to the current visible
+Configure button or the Installed tab without forcing navigation. The hook does
+not let an extension return DOM for Core to render, add a backend settings route,
+or change the trusted same-origin extension model.
+
+### Turn lifecycle events
+
+A registered extension can react when a session turn observed by the current page
+starts or reaches a terminal state:
+
+```js
+const ext = window.hermesExt.register("desktop-companion");
+const stop = ext && ext.events.on("turn:complete", event => {
+  console.log(event.sessionId, event.streamId, event.status);
+});
+
+// Remove the listener when the extension no longer needs it.
+if (stop) stop();
+```
+
+The supported event types are `turn:start`, `turn:complete`, `turn:error`, and
+`turn:cancel`. The frozen event object always contains `type`, `sessionId`,
+`streamId`, and `timestamp` (Unix seconds). Start events also contain
+`startedAt`; terminal events contain `endedAt` and may contain `status`.
+`events.on(type, handler)` returns an idempotent unsubscribe function, or `null`
+for an unsupported type or non-function handler. An exception in one extension
+listener is logged and does not prevent other listeners or the chat UI from
+continuing.
+
+The version-1 mapping is deliberately small: attaching a confirmed live session
+stream emits `turn:start`; SSE `done` emits `turn:complete`; SSE `cancel` and
+application errors classified as `cancelled` or `interrupted` emit
+`turn:cancel`; other application errors and an unrecoverable live-stream
+connection failure emit `turn:error`. Transport-only `stream_end` does not emit
+a second terminal event.
+
+Core suppresses reconnect duplicates so a recently observed
+`sessionId`/`streamId` pair produces at most one start event and one terminal
+event. `sessionId` is the owner of the original stream; server-side compression
+or session rotation at completion does not change that lifecycle identity.
+Terminal callbacks run after Core has cleared the original stream ownership,
+applied the current session's immediate terminal transcript projection, and
+returned the owned pane to its idle state. They do not wait for unrelated
+follow-up work such as notifications, queued turns, or optional recovery
+refreshes.
+
+This is a page-local, live-stream notification surface. It does not replay
+history, report turns that finish without this page observing their stream, or
+provide token, tool, approval, or metrics events. It follows the same cooperative
+trust model as `register(id)` and adds no sandbox or permission boundary. A
+durable or global agent event stream is a separate Core contract. Ephemeral
+`/btw` answer streams are not included in this version.
 
 ## URL rules
 

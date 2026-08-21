@@ -19,6 +19,7 @@ flipped the default to 'steer'; this file was updated for the rename while
 preserving the persistence-mirror guarantees (the load-failure path must still
 honor the saved preference, not clobber it with a hardcoded default).
 """
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -47,8 +48,12 @@ class TestEagerDefault:
         eager_idx = BOOT_JS.find("window._defaultMessageMode=_readPersistedDefaultMessageMode()")
         assert eager_idx >= 0, "eager default assignment not found"
         # The async IIFE awaits /api/settings; the success-path assignment lives inside it.
-        await_idx = BOOT_JS.find("const s=await api('/api/settings')")
-        assert await_idx >= 0, "async settings fetch not found"
+        await_match = re.search(
+            r"const s=await api\('/api/settings'(?:,\{[^)]*\})?\)",
+            BOOT_JS,
+        )
+        assert await_match, "async settings fetch with optional options not found"
+        await_idx = await_match.start()
         assert eager_idx < await_idx, (
             "the eager window._defaultMessageMode default must be set BEFORE the async "
             "/api/settings fetch — otherwise the boot-window race (#5167) persists"

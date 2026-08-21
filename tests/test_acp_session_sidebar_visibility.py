@@ -175,3 +175,49 @@ def test_acp_session_appears_in_projection_as_cli(tmp_path):
     assert row['is_cli_session'] is True
     assert row['session_source'] == 'cli'
     assert row['source_label'] == 'ACP'
+
+
+def test_newer_kanban_rows_do_not_evict_cli_sessions_from_projection(tmp_path):
+    """Kanban has a bounded window separate from interactive conversations."""
+    kanban_count = models.KANBAN_PROJECT_CHIP_LIMIT + 5
+    sessions = [
+        {
+            'id': 'older-cli-session',
+            'source': 'cli',
+            'title': 'CLI conversation',
+        },
+        *[
+            {
+                'id': f'newer-kanban-{i:03d}',
+                'source': 'kanban',
+                'title': f'Kanban worker {i:03d}',
+            }
+            for i in range(kanban_count)
+        ],
+    ]
+
+    results = _call_uncached(tmp_path, sessions)
+    result_ids = {row['session_id'] for row in results}
+    kanban_rows = [row for row in results if row.get('source_tag') == 'kanban']
+
+    assert 'older-cli-session' in result_ids
+    assert len(kanban_rows) == models.KANBAN_PROJECT_CHIP_LIMIT
+    assert {row['session_id'] for row in kanban_rows} == {
+        f'newer-kanban-{i:03d}'
+        for i in range(kanban_count - models.KANBAN_PROJECT_CHIP_LIMIT, kanban_count)
+    }
+
+    from api.routes import _dedupe_cli_sidebar_sessions_for_api
+
+    hidden = _dedupe_cli_sidebar_sessions_for_api(
+        results,
+        set(),
+        show_kanban_sessions=False,
+    )
+    visible = _dedupe_cli_sidebar_sessions_for_api(
+        results,
+        set(),
+        show_kanban_sessions=True,
+    )
+    assert not any(row.get('source_tag') == 'kanban' for row in hidden)
+    assert sum(row.get('source_tag') == 'kanban' for row in visible) == models.KANBAN_PROJECT_CHIP_LIMIT

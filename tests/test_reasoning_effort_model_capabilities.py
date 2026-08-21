@@ -3,6 +3,23 @@
 from api import config as cfg
 
 
+GPT_5_6_MODELS = (
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+)
+
+OPENAI_FAMILY_PROVIDERS = (
+    "openai",
+    "openai-api",
+    "openai-codex",
+    "azure",
+    "azure-openai",
+    "azure-foundry",
+)
+
+
 def test_cursor_acp_models_do_not_support_reasoning_effort_levels():
     assert cfg.resolve_model_reasoning_efforts(
         "cursor/composer-2.5",
@@ -38,6 +55,21 @@ def test_openai_codex_max_effort_is_clamped_before_streaming():
         "gpt-5.5",
         provider_id="openai-codex",
     ) == "xhigh"
+
+
+def test_openai_family_gpt56_models_expose_and_preserve_max():
+    for provider in OPENAI_FAMILY_PROVIDERS:
+        for model in GPT_5_6_MODELS:
+            efforts = cfg.resolve_model_reasoning_efforts(
+                f"@{provider}:{model}",
+                provider_id=provider,
+            )
+            assert "max" in efforts, f"{model} on {provider} must expose max"
+            assert cfg.coerce_reasoning_effort_for_model(
+                "max",
+                f"@{provider}:{model}",
+                provider_id=provider,
+            ) == "max", f"{model} on {provider} must preserve max"
 
 
 def test_unsupported_xhigh_degrades_to_high_not_disabled():
@@ -79,8 +111,8 @@ def test_coerce_preserves_effort_for_unrecognized_model():
         "some-unknown-model-xyz",
         provider_id="some-custom-provider",
     ) == "high"
-    # #3505 default-deny refinement (maintainer 2026-07-11): 'max' is a supra-
-    # ceiling WebUI-only level, so on an UNRECOGNIZED provider it degrades to
+    # #3505 default-deny refinement (maintainer 2026-07-11): 'max' is above the
+    # universally safe ceiling, so on an UNRECOGNIZED provider it degrades to
     # xhigh (a truly-unknown provider would 400 on max). All OTHER levels still
     # preserve verbatim below.
     assert cfg.coerce_reasoning_effort_for_model(
@@ -434,16 +466,18 @@ def test_max_effort_preserved_for_adaptive_anthropic_and_deepseek():
     ) == "max"
 
 
-def test_max_degrades_across_all_openai_family_lanes():
-    # 'max' is WebUI-only; direct OpenAI, openai-api, and Azure Foundry GPT-5 all
-    # cap at xhigh (o-series at high), not just openai-codex. (#4627 re-gate)
-    for prov in ("openai", "openai-api", "azure-foundry", "openai-codex"):
-        assert cfg.coerce_reasoning_effort_for_model(
-            "max", model_id="gpt-5.1", provider_id=prov
-        ) == "xhigh", f"gpt-5 on {prov} must degrade max->xhigh"
-        assert cfg.coerce_reasoning_effort_for_model(
-            "max", model_id="o3", provider_id=prov
-        ) == "high", f"o-series on {prov} must degrade max->high"
+def test_max_degrades_for_pre_gpt56_and_o_series_across_openai_family_lanes():
+    # GPT-5 models before 5.6 cap at xhigh, while o1/o3/o4 cap at high, across
+    # direct OpenAI, ChatGPT/Codex, and Azure provider aliases.
+    for provider in OPENAI_FAMILY_PROVIDERS:
+        for model in ("gpt-5", "gpt-5.1", "gpt-5.5"):
+            assert cfg.coerce_reasoning_effort_for_model(
+                "max", model_id=model, provider_id=provider
+            ) == "xhigh", f"{model} on {provider} must degrade max->xhigh"
+        for model in ("o1", "o3-mini", "o4-mini"):
+            assert cfg.coerce_reasoning_effort_for_model(
+                "max", model_id=model, provider_id=provider
+            ) == "high", f"{model} on {provider} must degrade max->high"
 
 
 def test_max_degrades_for_azure_bedrock_hosted_legacy_claude():
@@ -461,7 +495,7 @@ def test_max_degrades_for_azure_bedrock_hosted_legacy_claude():
 
 def test_max_degrades_on_unknown_provider_but_other_levels_preserved():
     # #3505 default-deny refinement (maintainer call 2026-07-11): 'max' is above
-    # the universal ceiling, so an unknown/custom provider (empty capability list)
+    # the universally safe ceiling, so an unknown/custom provider (empty capability list)
     # must degrade 'max'->'xhigh' rather than send an unsupported level — while all
     # other levels keep the conservative preserve-verbatim behavior.
     assert cfg.coerce_reasoning_effort_for_model(
@@ -560,4 +594,3 @@ def test_qwen_prefixed_alias_reasoning_detection():
             f"{model} must remain reasoning-capable (DeepSeek-R1 hybrid, "
             f"Qwen 2.x must not shadow the DeepSeek detector)"
         )
-

@@ -44,6 +44,41 @@ _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION = 0
 _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION: dict[str, int] = {}
 
 
+def get_session_list_cache_snapshot() -> dict[str, object]:
+    """Return scalar cache occupancy without waiting or changing LRU state.
+
+    Held-section discipline: between the nonblocking acquire and the release,
+    only ``len()`` and module-constant reads are permitted. Nothing that can
+    resolve config, resolve a profile, touch the filesystem, import a module, or
+    wait on another lock may be added here. ``_SESSIONS_CACHE_LOCK`` is an
+    ``RLock``, so a nonblocking acquire from a thread already holding it would
+    report available mid-mutation; the health collector is this helper's only
+    caller and never runs nested inside a cache rebuild.
+    """
+    result = {
+        "available": False,
+        "entries": 0,
+        "inflight_rebuilds": 0,
+        "cap": 0,
+    }
+    acquired = False
+    try:
+        acquired = _SESSIONS_CACHE_LOCK.acquire(blocking=False)
+        if not acquired:
+            return result
+        return {
+            "available": True,
+            "entries": max(0, int(len(_SESSIONS_CACHE))),
+            "inflight_rebuilds": max(0, int(len(_SESSIONS_CACHE_INFLIGHT))),
+            "cap": max(0, int(_SESSIONS_CACHE_MAX_ENTRIES)),
+        }
+    except Exception:
+        return result
+    finally:
+        if acquired:
+            _SESSIONS_CACHE_LOCK.release()
+
+
 def _session_list_cache_session_dir() -> Path:
     try:
         import api.routes as _routes

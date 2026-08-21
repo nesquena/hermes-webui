@@ -28,6 +28,7 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.subprocess_utils import windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
@@ -215,9 +216,14 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     try:
         r = subprocess.run(
-            [git_executable] + args, cwd=str(cwd), capture_output=True,
-            text=True, timeout=timeout,
-            encoding='utf-8', errors='replace',
+            [git_executable] + args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash

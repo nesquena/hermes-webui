@@ -1953,6 +1953,52 @@ async function send(){
   }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
 
+async function startRegeneration(sessionId, regenerationRevision){
+  const sid=String(sessionId||'');
+  if(!sid||!regenerationRevision||!S.session||S.session.session_id!==sid)return;
+  const snapshot=Array.isArray(S.messages)?S.messages.slice():[];
+  let assistantIndex=-1;
+  let userIndex=-1;
+  for(let i=snapshot.length-1;i>=0;i--){
+    if(assistantIndex<0&&snapshot[i]?.role==='assistant'){assistantIndex=i;continue;}
+    if(assistantIndex>=0&&snapshot[i]?.role==='user'){userIndex=i;break;}
+  }
+  if(userIndex<0)return;
+  const retained=Object.assign({},snapshot[userIndex],{_pending:true});
+  S.messages=snapshot.slice(0,userIndex+1);
+  S.messages[userIndex]=retained;
+  renderMessages();setBusy(true);
+  if(typeof ensureLiveWorklogShell==='function')ensureLiveWorklogShell();
+  else if(typeof appendThinking==='function')appendThinking('',{pending:true});
+  try{
+    const response=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+      session_id:sid,regenerate:true,regeneration_revision:regenerationRevision
+    })});
+    if(!S.session||S.session.session_id!==sid)return;
+    const streamId=response&&response.stream_id;
+    if(!streamId)throw new Error('Regeneration did not start a stream.');
+    S.activeStreamId=streamId;
+    S.session.active_stream_id=streamId;
+    S.session.regeneration_revision=null;
+    if(typeof response.pending_started_at==='number')S.session.pending_started_at=response.pending_started_at;
+    if(response.title&&typeof applySessionTitleUpdate==='function')applySessionTitleUpdate(sid,response.title);
+    if(!INFLIGHT[sid])INFLIGHT[sid]={messages:S.messages.slice(),uploaded:[],toolCalls:[]};
+    markInflight(sid,streamId);
+    if(typeof saveInflightState==='function')saveInflightState(sid,{streamId,messages:S.messages.slice(),uploaded:[],toolCalls:[]});
+    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{startedAt:S.session.pending_started_at||Date.now()/1000});
+    if(typeof updateSendBtn==='function')updateSendBtn();
+    if(typeof renderSessionList==='function')void renderSessionList();
+    attachLiveStream(sid,streamId,[]);
+  }catch(error){
+    if(S.session&&S.session.session_id===sid){
+      S.messages=snapshot;delete INFLIGHT[sid];
+      if(typeof clearInflightState==='function')clearInflightState(sid);
+      removeThinking();renderMessages();setBusy(false);setComposerStatus('');
+    }
+    throw error;
+  }
+}
+
 const LIVE_STREAMS={};
 const _STREAM_NOTIFICATION_BACKGROUND={};
 
@@ -2066,9 +2112,26 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
+function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
+  const runtime=typeof window!=='undefined'&&window.HermesExtensionSettings;
+  const dispatch=runtime&&runtime._dispatchTurnLifecycle;
+  if(typeof dispatch!=='function') return false;
+  try{
+    return dispatch(type,{sessionId,streamId,...details});
+  }catch(error){
+    if(typeof console!=='undefined'&&typeof console.error==='function'){
+      try{console.error('[Hermes extensions] lifecycle dispatch failed:',error);}catch(_loggingError){ }
+    }
+    return false;
+  }
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
+    ?S.session.pending_started_at
+    :Date.now()/1000;
   // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
   // the tab was hidden during this stream so the done-notification fires for a
   // backgrounded tab. A reconnect with a different streamId re-seeds (the old
@@ -2596,7 +2659,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
-            setComposerStatus('Reconnected');
+            setComposerStatus('Reconnected',1000);
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
@@ -4569,7 +4632,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     el.addEventListener('animationend',e=>{
       const span=e.target;
       if(!span||!span.classList||!span.classList.contains('stream-fade-word')) return;
-      span.replaceWith(document.createTextNode(span.textContent||''));
+      // Keep the animated inline node stable for the lifetime of the live turn.
+      // Replacing each word with a fresh text node makes native scroll anchoring
+      // choose a new anchor while the transcript is still growing, producing a
+      // visible vertical bounce. Final settlement rebuilds plain persisted DOM.
+      span.classList.remove('is-new');
+      if(span.style) span.style.removeProperty('--stream-fade-ms');
     });
   }
   function _streamFadeRenderer(el){
@@ -5222,6 +5290,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const force=!!(options&&options.force);
     const skipAnchorProcessProse=!!(options&&options.skipAnchorProcessProse);
     if(!assistantBody||(!force&&!_renderPending)) return;
+    // #6449: guard — this stream's session is no longer the active pane.
+    // Callers already gate on _isActiveSession(), but add the guard here too
+    // so any future call-site cannot leak rendering into the wrong session.
+    if(!_isActiveSession()) return;
     if(_renderPending) _cancelAnimationFramePendingStreamRender();
     const displayText=segmentStart===0
       ? _parseStreamState().displayText
@@ -5547,6 +5619,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(_renderPending) return;
     if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
+    // #6449: guard — this stream's session is no longer the active frontend pane.
+    // Drop the scheduled render instead of writing into a detached or wrong-session DOM.
+    // Callers (token/interim_assistant handlers) already gate on _isActiveSession(), but
+    // the rAF/setTimeout window between schedule and execution can outlive a session switch.
+    if(!_isActiveSession()) return;
     _renderPending=true;
     // Cap render rate to ~15fps. The browser's rAF fires at 60fps, but each DOM
     // update takes 50-150ms on large sessions. During GC pauses, rAF callbacks
@@ -5562,6 +5639,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _renderPending=false;
       // Guard: a pending setTimeout+rAF can outlive stream finalization.
       if(_streamFinalized) return;
+      // #6449: guard — the frontend session changed between rAF schedule and execution.
+      // Writing DOM into this stream's assistantBody would leak text into the wrong pane.
+      if(!_isActiveSession()) return;
       // Mobile scroll-jank guard: temporarily disable overflow-anchor before DOM
       // writes to suppress Chromium scroll re-anchoring during streaming growth.
       if(typeof window._fixMobileScrollJank==='function') window._fixMobileScrollJank();
@@ -6123,7 +6203,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -6234,7 +6314,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
-          if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+          if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
           if(uploaded.length){
             const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
             if(lastUser)lastUser.attachments=uploaded;
@@ -6326,6 +6406,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
         _setActivePaneIdleIfOwner();
+        _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{
+          status:d.status||'completed',
+          endedAt:Date.now()/1000,
+        });
         playNotificationSound();
         // #4416: notify if the tab was hidden at ANY point during this stream
         // (not just at done-receive time, which a throttled background-tab SSE
@@ -6510,6 +6594,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      const _extensionErrorType=(d.type==='cancelled'||d.type==='interrupted')?'turn:cancel':'turn:error';
       const currentSid=S.session&&S.session.session_id;
       const eventSid=d.old_session_id||d.session_id||'';
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
@@ -6557,6 +6642,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           } else if(d.session&&typeof d.session==='object'){
             S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
+            if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
             _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
             S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             if(S.session&&S.session.session_id){
@@ -6607,6 +6693,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _setActivePaneIdleIfOwner();
       renderSessionList(); // clear streaming indicator immediately on apperror
+      _dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId,{
+        status:d.status||d.type||(_extensionErrorType==='turn:cancel'?'cancelled':'error'),
+        endedAt:Date.now()/1000,
+      });
     });
 
     source.addEventListener('warning',e=>{
@@ -6623,9 +6713,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return;
         }
         // Show as a small inline notice, not a full error
-        setComposerStatus(`${d.message||'Warning'}`);
-        // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
+        setComposerStatus(`${d.message||'Warning'}`,d.type==='fallback'?4000:undefined);
       }catch(_){}
     });
 
@@ -6674,7 +6762,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st&&st.active){
-              setComposerStatus('Reconnected');
+              setComposerStatus('Reconnected',1000);
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
@@ -6795,6 +6883,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -6809,6 +6898,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // a second GET race where the visible cancelled work briefly collapses to only
       // the fallback "Task cancelled" marker (#4076).
       const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
+      renderSessionList();
+      _setActivePaneIdleIfOwner();
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
@@ -6834,10 +6925,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(_wasFollowingAtCancelFb && typeof scrollToBottom==='function') scrollToBottom();
             _markSessionViewed(activeSid, S.messages.length);
           }
+        }finally{
+          _dispatchExtensionTurnLifecycle('turn:cancel',activeSid,streamId,{
+            status:_cancelData.status||_cancelData.type||'cancelled',
+            endedAt:Date.now()/1000,
+          });
         }
       })();
-      renderSessionList();
-      _setActivePaneIdleIfOwner();
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
@@ -6962,6 +7056,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
+        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{
@@ -6987,6 +7082,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
         }
         syncTopbar();renderMessages({preserveScroll:true});
+        if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
@@ -7065,6 +7161,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     _setActivePaneIdleIfOwner();
+    _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
+      status:'connection_lost',
+      endedAt:Date.now()/1000,
+    });
   }
 
   (async()=>{
@@ -7106,6 +7206,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
+    _dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId,{
+      startedAt:_extensionTurnStartedAt,
+    });
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
@@ -7228,18 +7331,9 @@ function _updateYoloPill() {
 }
 
 async function toggleYoloFromApproval() {
-  const sid = S.session && S.session.session_id;
-  if (!sid) return;
-  try {
-    await api('/api/session/yolo', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, enabled: true }),
-    });
-    _yoloEnabled = true;
-    _updateYoloPill();
-    hideApprovalCard(true);
-    showToast(t('yolo_enabled'));
-  } catch (e) { showToast('YOLO: ' + e.message); }
+  const owner = _captureApprovalResponseOwner();
+  if (!owner) return false;
+  return !!(await respondApproval('once', {yolo: true, owner}));
 }
 
 // ── Approval polling ──
@@ -7301,8 +7395,13 @@ function hideApprovalCard(force=false) {
       return;
     }
   }
+  const preserveDisplayedOwner = _approvalOwnerIdentityMatches(
+    _approvalDisplayedOwner,
+    _approvalResponding,
+  );
   _approvalSessionId = null;
   _resetApprovalCardState();
+  if (!preserveDisplayedOwner) _approvalDisplayedOwner = null;
   card.classList.remove("visible");
   card.classList.remove("collapsed");
   _setPromptFlyoutHidden(card, true);
@@ -7316,6 +7415,8 @@ let _approvalSessionId = null;
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
 let _approvalResponding = null;
+let _approvalClearedOwner = null;
+let _approvalDisplayedOwner = null;
 
 const _DISMISSED_APPROVALS_KEY = 'hermes_dismissed_approvals';
 
@@ -7404,20 +7505,113 @@ function _renderPendingApprovalForActiveSession() {
   if (entry) showApprovalCard(entry.pending, entry.pendingCount);
 }
 
-function _approvalResponseMatches(sid, approvalId) {
+function _approvalMirrorOwnerFor(sid, approvalId) {
+  const entry = _approvalPendingBySession.get(sid);
+  const pending = entry && entry.pending;
+  if (!pending || pending.approval_id !== approvalId) return {runId: '', mirrorToken: ''};
+  const runId = String(pending.run_id || '').trim();
+  const mirrorToken = String(pending._gateway_mirror_token || '').trim();
+  return runId && mirrorToken ? {runId, mirrorToken} : {runId: '', mirrorToken: ''};
+}
+
+function _approvalOwnerForPending(sid, pending) {
+  if (!pending) return null;
+  const approvalId = pending.approval_id || null;
+  if (!sid || !approvalId) return null;
+  const runId = String(pending.run_id || '').trim();
+  const mirrorToken = String(pending._gateway_mirror_token || '').trim();
+  return {
+    sid,
+    approvalId,
+    runId: runId && mirrorToken ? runId : '',
+    mirrorToken: runId && mirrorToken ? mirrorToken : '',
+  };
+}
+
+function _approvalOwnerIdentityMatches(left, right) {
+  return !!(
+    left &&
+    right &&
+    left.sid === right.sid &&
+    left.approvalId === right.approvalId &&
+    left.runId === right.runId &&
+    left.mirrorToken === right.mirrorToken
+  );
+}
+
+function _captureApprovalResponseOwner() {
+  const card = $("approvalCard");
+  const sid = _approvalSessionId;
+  const approvalId = _approvalCurrentId;
+  if (!card || !card.classList.contains("visible") || !sid || !approvalId) return null;
+  if (!S.session || S.session.session_id !== sid) return null;
+  if (
+    !_approvalDisplayedOwner ||
+    _approvalDisplayedOwner.sid !== sid ||
+    _approvalDisplayedOwner.approvalId !== approvalId
+  ) return null;
+  return {..._approvalDisplayedOwner, generation: _loadSessionGeneration};
+}
+
+function _approvalResponseOwnerIsCurrent(owner) {
+  return !!(
+    owner &&
+    S.session &&
+    S.session.session_id === owner.sid &&
+    _loadSessionGeneration === owner.generation &&
+    _approvalOwnerIdentityMatches(_approvalDisplayedOwner, owner)
+  );
+}
+
+function _approvalResponseMatches(
+  sid,
+  approvalId,
+  generation = _loadSessionGeneration,
+  mirrorOwner = _approvalMirrorOwnerFor(sid, approvalId),
+) {
   return !!(
     _approvalResponding &&
     _approvalResponding.sid === sid &&
-    (_approvalResponding.approvalId || null) === (approvalId || null)
+    _approvalResponding.generation === generation &&
+    _approvalResponding.approvalId === approvalId &&
+    _approvalResponding.runId === mirrorOwner.runId &&
+    _approvalResponding.mirrorToken === mirrorOwner.mirrorToken
+  );
+}
+
+function _releaseApprovalResponseOwner(owner) {
+  if (_approvalResponseMatches(owner.sid, owner.approvalId, owner.generation, owner)) {
+    _approvalResponding = null;
+  }
+  const card = $("approvalCard");
+  if (
+    _approvalOwnerIdentityMatches(_approvalDisplayedOwner, owner) &&
+    (!card || !card.classList.contains("visible"))
+  ) {
+    _approvalDisplayedOwner = null;
+  }
+}
+
+function _approvalClearedOwnerMayRefresh(owner) {
+  return !!(
+    _approvalClearedOwner === owner &&
+    S.session &&
+    S.session.session_id === owner.sid &&
+    _loadSessionGeneration === owner.generation &&
+    _approvalSessionId === null &&
+    _approvalCurrentId === null
   );
 }
 
 function _setApprovalControlsDisabled(choice, disabled) {
-  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+  const loadingId = choice === "skipAll"
+    ? "approvalSkipAll"
+    : (choice ? "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1) : null);
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny","approvalSkipAll"].forEach(id => {
     const b = $(id);
     if (!b) return;
     b.disabled = !!disabled;
-    if (disabled && choice && b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) {
+    if (disabled && b.id === loadingId) {
       b.classList.add("loading");
     } else {
       b.classList.remove("loading");
@@ -7435,16 +7629,25 @@ function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
   if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
+  _approvalClearedOwner = null;
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
-  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null, approval_id: pending.approval_id || null});
+  const sig = JSON.stringify({
+    desc,
+    cmd,
+    sid: pending._session_id || (S.session && S.session.session_id) || null,
+    approval_id: pending.approval_id || null,
+    run_id: pending.run_id || null,
+    mirror_token: pending._gateway_mirror_token || null,
+  });
   const card = $("approvalCard");
   const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   $("approvalDesc").textContent = desc;
   $("approvalCmd").textContent = cmd;
   _approvalSessionId = sid;
   _approvalCurrentId = pending.approval_id || null;
+  _approvalDisplayedOwner = _approvalOwnerForPending(sid, pending);
   _approvalSignature = sig;
   // Show "1 of N" counter when multiple approvals are queued
   const counter = $("approvalCounter");
@@ -7467,7 +7670,7 @@ function showApprovalCard(pending, pendingCount) {
   }
   const responding = _approvalResponseMatches(sid, _approvalCurrentId);
   _setApprovalControlsDisabled(
-    responding ? _approvalResponding.choice : null,
+    responding ? (_approvalResponding.controlChoice || _approvalResponding.choice) : null,
     responding,
   );
   _setPromptFlyoutHidden(card, false);
@@ -7539,12 +7742,20 @@ function _syncApprovalTranscriptSpace(card, opts) {
   setTimeout(measure, 420);
 }
 
-function _restoreFailedApprovalResponse(sid, errMsg) {
-  _approvalResponding = null;
+function _restoreFailedApprovalResponse(owner, errMsg) {
+  const isCurrent = _approvalResponseOwnerIsCurrent(owner);
+  _releaseApprovalResponseOwner(owner);
+  if (!isCurrent) return;
   _setApprovalControlsDisabled(null, false);
-  if (_approvalPromptBelongsToActiveSession(sid)) _renderPendingApprovalForActiveSession();
+  _renderPendingApprovalForActiveSession();
   if (typeof showToast === "function") showToast(errMsg, 5000);
   if (typeof setStatus === "function") setStatus(errMsg);
+}
+
+function _applyApprovalYoloProjection(result) {
+  if (!result || typeof result.yolo_enabled !== "boolean") return;
+  _yoloEnabled = result.yolo_enabled;
+  _updateYoloPill();
 }
 
 function toggleApprovalCardCollapsed(forceCollapsed) {
@@ -7556,59 +7767,84 @@ function toggleApprovalCardCollapsed(forceCollapsed) {
   _syncApprovalTranscriptSpace(card, {immediate: true});
 }
 
-async function respondApproval(choice) {
-  const sid = _approvalSessionId || (S.session && S.session.session_id);
-  if (!sid) return;
-  const approvalId = _approvalCurrentId;
-  if (_approvalResponseMatches(sid, approvalId)) return;
+async function respondApproval(choice, options = {}) {
+  const owner = options.owner || _captureApprovalResponseOwner();
+  if (!_approvalResponseOwnerIsCurrent(owner)) return false;
+  const {sid, approvalId} = owner;
+  if (_approvalResponseMatches(sid, approvalId, owner.generation, owner)) return false;
+  _approvalClearedOwner = null;
   _unmarkApprovalDismissed(sid, approvalId);
-  _approvalResponding = {sid, approvalId: approvalId || null, choice};
-  _setApprovalControlsDisabled(choice, true);
+  const controlChoice = options.yolo ? "skipAll" : choice;
+  _approvalResponding = {...owner, choice};
+  _approvalResponding.controlChoice = controlChoice;
+  _setApprovalControlsDisabled(controlChoice, true);
   try {
     const result = await api("/api/approval/respond", {
       method: "POST",
-      body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
+      body: JSON.stringify({
+        session_id: sid,
+        choice,
+        approval_id: approvalId,
+        ...(owner.runId ? {run_id: owner.runId} : {}),
+        ...(owner.mirrorToken ? {mirror_token: owner.mirrorToken} : {}),
+        ...(options.yolo ? {yolo: true} : {}),
+      })
     });
+    if (!_approvalResponseOwnerIsCurrent(owner)) {
+      _releaseApprovalResponseOwner(owner);
+      return false;
+    }
     if (result && result.ok) {
-      _approvalResponding = null;
+      _releaseApprovalResponseOwner(owner);
+      if (options.yolo) _applyApprovalYoloProjection(result);
       const pendingEntry = _approvalPendingBySession.get(sid);
-      const samePending = !!(pendingEntry && pendingEntry.pending && (pendingEntry.pending.approval_id || null) === (approvalId || null));
-      // `stale_cleared` means the server found nothing pending for this session
-      // (the approval already resolved or its stream ended while the card was
-      // up). The orphan card must be cleared unconditionally so it can never
-      // get stuck — even if the displayed id has since drifted. (#4948 local
-      // variant: previously surfaced as a stuck "Approval response not
-      // accepted." toast.)
-      if (result.stale_cleared || (_approvalSessionId === sid && _approvalCurrentId === approvalId)) {
-        _approvalSessionId = null;
-        _approvalCurrentId = null;
-        hideApprovalCard(true);
-      }
-      if (samePending || result.stale_cleared) _clearApprovalPendingForSession(sid);
-      // Hardening for the narrow stale-clear race: a brand-new approval could
-      // have been parked server-side after the server's empty-check but before
-      // we processed this stale response. The unconditional clear above would
-      // hide that fresh card. Re-query the authoritative server pending state
-      // (same endpoint the fallback poll uses) so any approval that arrived in
-      // the window re-surfaces immediately instead of waiting for the next
-      // SSE/poll tick. Best-effort; poll/SSE remain the backstop. (Opus review
-      // nit on the #4948 fix.)
+      const pendingOwner = _approvalMirrorOwnerFor(sid, approvalId);
+      const samePending = !!(
+        pendingEntry &&
+        pendingEntry.pending &&
+        pendingEntry.pending.approval_id === approvalId &&
+        pendingOwner.runId === owner.runId &&
+        pendingOwner.mirrorToken === owner.mirrorToken
+      );
+      if (samePending) _clearApprovalPendingForSession(sid);
+      _approvalSessionId = null;
+      _approvalCurrentId = null;
+      _approvalClearedOwner = owner;
+      hideApprovalCard(true);
       if (result.stale_cleared) {
-        api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false})
-          .then(data => {
-            if (data && data.pending && _approvalPromptBelongsToActiveSession(sid)) {
-              showApprovalForSession(sid, data.pending, data.pending_count || 1);
-            }
-          })
-          .catch(() => {});
+        void (async () => {
+          if (!_approvalClearedOwnerMayRefresh(owner)) return;
+          try {
+            const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false});
+            if (!_approvalClearedOwnerMayRefresh(owner)) return;
+            _approvalClearedOwner = null;
+            if (data && data.pending) showApprovalForSession(sid, data.pending, data.pending_count || 1);
+          } catch (_) {
+            if (_approvalClearedOwner === owner) _approvalClearedOwner = null;
+          }
+        })();
       }
-      return;
+      if (options.yolo) showToast(t(_yoloEnabled ? 'yolo_enabled' : 'yolo_disabled'));
+      return options.yolo ? result : true;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
-    _restoreFailedApprovalResponse(sid, errMsg);
+    _restoreFailedApprovalResponse(owner, errMsg);
+    return false;
   } catch(e) {
-    const errMsg = (e && e.message) || (t("approval_responding") + " failed");
-    _restoreFailedApprovalResponse(sid, errMsg);
+    let errorPayload = null;
+    if (e && typeof e.body === 'string') {
+      try { errorPayload = JSON.parse(e.body); } catch (_) { /* non-JSON HTTP error */ }
+    }
+    const errMsg = (errorPayload && (errorPayload.error || errorPayload.message))
+      || (e && e.message)
+      || (t("approval_responding") + " failed");
+    if (!_approvalResponseOwnerIsCurrent(owner)) {
+      _releaseApprovalResponseOwner(owner);
+      return false;
+    }
+    if (options.yolo) _applyApprovalYoloProjection(errorPayload);
+    _restoreFailedApprovalResponse(owner, errMsg);
+    return false;
   }
 }
 
@@ -7987,6 +8223,20 @@ function startSessionStream(sid) {
     // the hidden-tab return (loadSession force + keepStaleUntilLoaded): the new
     // transcript replaces the old in a single render frame — NO clear+refetch,
     // so the #5177/#5189 blank-gap "jump" is not reintroduced.
+    // #6999: focusing a backgrounded tab also fires the visibility-recovery
+    // probe in sessions.js (refreshActiveSessionIfExternallyUpdated), which
+    // holds the shared _activeSessionExternalRefreshInFlight guard while it
+    // probes + force-reloads this same session. This handler honors that guard
+    // so the two paths never start two concurrent loadSession(force) calls
+    // (double full-transcript fetch + double renderMessages pass = the OOM
+    // pattern on long sessions). The probe side carries its own
+    // _loadingSessionId guard; loadSession() keeps its legitimate
+    // newest-wins supersede semantics untouched.
+    // #6999 re-gate: while the probe owns the guard, frames are COALESCED via
+    // _coalesceSessionUpdatedWhileRefreshHeld — the max announced count is
+    // latched per SID and the owner's finally runs ONE guarded follow-up when
+    // local state is still behind (a bare return dropped the update; production
+    // does not guarantee a second event).
     es.addEventListener('session-updated', e => {
       try {
         const d = JSON.parse(e.data || '{}');
@@ -7999,12 +8249,13 @@ function startSessionStream(sid) {
           : (S.session && S.session.session_id === sid);
         if (!isCurrent) return;
         if (S.activeStreamId) return;
+        const serverCount = Number(d.message_count);
+        if (typeof _coalesceSessionUpdatedWhileRefreshHeld === 'function' && _coalesceSessionUpdatedWhileRefreshHeld(sid, serverCount)) return;
         // Re-check against our CURRENT known count — a concurrent load may have
         // already caught us up between the server's emit and now.
         const localCount = (S.session && S.session.session_id === sid && Number.isFinite(Number(S.session.message_count)))
           ? Number(S.session.message_count)
           : (Array.isArray(S.messages) ? S.messages.length : 0);
-        const serverCount = Number(d.message_count);
         if (!Number.isFinite(serverCount) || serverCount <= localCount) return;
         if (typeof loadSession === 'function') {
           void loadSession(sid, {force: true, externalRefreshReason: 'session-updated', keepStaleUntilLoaded: true});
@@ -8372,7 +8623,7 @@ function _clarifyExpiryMs(pending) {
   if (Number.isFinite(expiresAt) && expiresAt > 0) return expiresAt * 1000;
   const requestedAt = Number(pending && pending.requested_at);
   const timeoutSeconds = Number(pending && pending.timeout_seconds);
-  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds)) {
+  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
     return (requestedAt + timeoutSeconds) * 1000;
   }
   return 0;

@@ -86,8 +86,11 @@ def test_merge_append_only_caches_canonical_keys_and_preserves_identity(monkeypa
     assert len(dict(call_counts["content"])) == 2
     assert len(dict(call_counts["visible"])) == 2
     assert set(dict(call_counts["dedup"]).values()) == {1}
-    assert set(dict(call_counts["content"]).values()) == {1}
-    assert set(dict(call_counts["visible"]).values()) == {1}
+    # Source-aware reconciliation deliberately computes content/visible keys
+    # once for sidecar ownership and once for state.db ownership. Reusing one
+    # cached key here would reintroduce the literal-workspace-prefix collision.
+    assert set(dict(call_counts["content"]).values()) == {2}
+    assert set(dict(call_counts["visible"]).values()) == {2}
 
 
 def test_merge_append_only_helpers_do_not_see_mutated_content(monkeypatch):
