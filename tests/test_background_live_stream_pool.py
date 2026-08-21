@@ -357,6 +357,21 @@ def test_resource_timing_fallback_respects_http1():
     assert out["cap"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
 
 
+def test_multiplexed_decision_is_revalidated_after_transport_change():
+    """A page-lifetime h2 verdict must not outlive a later HTTP/1.1 transport."""
+    out = json.loads(_run_node(_sw_pool_source(
+        "const first=_liveStreamPoolMax();\n"
+        "globalThis.performance = { getEntriesByType: (t) => "
+        "t === 'navigation' ? [{ nextHopProtocol: '' }] : "
+        "(t === 'resource' ? [{ name: 'https://webui.example.net/new.js', "
+        "nextHopProtocol: 'http/1.1' }] : []) };\n"
+        "console.log(JSON.stringify({ first, second:_liveStreamPoolMax() }));",
+        resources=[("https://webui.example.net/old.js", "h2")],
+    )))
+    assert out["first"] == _source_const("LIVE_STREAM_POOL_MAX_MULTIPLEXED")
+    assert out["second"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
+
+
 def test_cross_origin_resources_must_not_widen_the_pool():
     """A third-party CDN on h2 says nothing about this origin's connection.
 

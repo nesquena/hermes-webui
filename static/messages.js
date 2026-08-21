@@ -2163,13 +2163,10 @@ function closeLiveStream(sessionId, streamId, source){
 const LIVE_STREAM_POOL_MAX_HTTP1=3;
 const LIVE_STREAM_POOL_MAX_MULTIPLEXED=30;
 
-// Resolved lazily and memoised only once a definite answer is available: the
-// navigation timing entry can be missing very early in page life, and an
-// unknown transport must not be cached as if it were HTTP/1.1 forever.
-let _liveStreamPoolMaxCache=0;
-
 function _liveStreamPoolMax(){
-  if(_liveStreamPoolMaxCache) return _liveStreamPoolMaxCache;
+  // Re-evaluate whenever the pool is arbitrated. A service-worker-controlled
+  // page can reconnect over a different transport without reloading, so a
+  // page-lifetime h2 verdict could later exhaust an HTTP/1.1 connection budget.
   let proto='';
   try{
     if(typeof performance!=='undefined'&&performance.getEntriesByType){
@@ -2216,10 +2213,9 @@ function _liveStreamPoolMax(){
   // h2 / h2c / h3 / h3-29… multiplex over one connection; everything else
   // (http/1.1, http/1.0, http/0.9) spends one connection per stream.
   const multiplexed=(proto==='h2'||proto==='h2c'||proto.slice(0,2)==='h3');
-  _liveStreamPoolMaxCache=multiplexed
+  return multiplexed
     ? LIVE_STREAM_POOL_MAX_MULTIPLEXED
     : LIVE_STREAM_POOL_MAX_HTTP1;
-  return _liveStreamPoolMaxCache;
 }
 // sid -> monotonically increasing use counter. Recency, not open order, decides
 // eviction: a conversation the user keeps visiting must outlive one they opened
