@@ -301,7 +301,6 @@ def test_archive_backed_ster_directory_is_accepted(
     from api.upload import _session_attachment_dir
 
     sid = "archive_steer_sid"
-    stream_id = "archive_steer_run"
 
     # Create a fake session upload inbox with an extracted archive directory.
     session_root = _session_attachment_dir(sid).resolve()
@@ -385,9 +384,6 @@ def test_terminal_settlement_persists_anchor_scene_without_browser(
     journal scene into anchor_activity_scenes server-side, with no browser.
     """
     from api import routes
-    from api import streaming
-    from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
-    from api.models import Session
 
     cache, streams, agents = isolated_steer_state
     sid = "settlement_sid"
