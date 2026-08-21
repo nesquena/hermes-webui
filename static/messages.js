@@ -2102,13 +2102,151 @@ function closeLiveStream(sessionId, streamId, source){
   }
 }
 
+// ── Background live-stream pool ────────────────────────────────────────────
+// #2313 established a real constraint: one EventSource per background
+// conversation exhausts the browser's per-origin connection budget (six on
+// HTTP/1.1) and starves ordinary fetch/XHR traffic. The original fix satisfied
+// it the blunt way — close EVERY stream except the viewed one.
+//
+// That caps the count at one, which is stricter than the constraint requires
+// and costs the operator the whole point of running several conversations at
+// once: switching away from a running turn dropped its token feed, so coming
+// back had to re-fetch and replay the run journal instead of having simply kept
+// receiving. Bounding the pool instead of collapsing it to one honours #2313
+// (the budget stays capped) while keeping background turns live.
+//
+// Concurrent chat SSE budget.
+//
+// #2313's constraint is real, but it is a property of the TRANSPORT the browser
+// negotiated — not of this app. On HTTP/1.1 a browser allows ~6 connections per
+// origin; on HTTP/2/3 requests are multiplexed over a single connection and the
+// limit effectively disappears.
+//
+// Note the deployment topology: the browser never speaks to the Python server
+// directly. It terminates TLS against `tailscale serve`, which then proxies to
+// 127.0.0.1:8789 over plain HTTP/1.1. Only the browser<->tailscale leg spends
+// the per-origin budget, so the Python server's own protocol version is
+// irrelevant to this cap and cannot be used to infer it — forcing the Python
+// server to speak h2 would not widen anything.
+//
+// `tailscale serve` advertises h2 via ALPN by default (tailscale#20882), so
+// that first leg is normally multiplexed. But that is a property of someone
+// else's deployment, not an invariant this code may assume: a different
+// front-end (nginx, a plain HTTP origin, a Funnel change) would silently
+// reintroduce the HTTP/1.1 budget.
+//
+// So ask the browser what it actually negotiated rather than hardcoding an
+// assumption about a leg this code cannot see. `nextHopProtocol` reports the
+// protocol used for the document request against that first hop.
+//
+// Sizing of the multiplexed cap (measured on this deployment, not guessed):
+// holding N concurrent SSE connections against the live server while probing
+// ordinary requests gave, for N = 14 / 30 / 60 / 120 respectively, 0 rejected
+// connections, +14 / +30 / +60 / +106 server threads, +0 / +0 / +1 / +3 MB RSS,
+// and an unchanged 2 ms latency on concurrent ordinary requests. The Python
+// server's own ceiling is a 128-worker semaphore that sheds load with 503
+// rather than degrading, and `tailscale serve` runs Go's net/http2 whose
+// default SETTINGS_MAX_CONCURRENT_STREAMS is 250. Thirty chat streams plus the
+// always-open session-list/gateway streams therefore sit inside every budget on
+// the path, with room for several devices connected at once: the measured
+// 30-stream point cost 0 rejections and no measurable RSS, and the server
+// tolerated 4x that before its own shed-load ceiling.
+//
+// Client-side cost per background stream is likewise small: a background pool
+// entry holds {streamId, source} plus the session's INFLIGHT accumulators, and
+// assistant turn payloads on this deployment measure 0.1 KB median / 0.8 KB p95
+// / 10 KB max, so 30 parked conversations stay well inside a mobile tab budget.
+//
+// The HTTP/1.1 figure stays at 3 regardless: that budget is ~6 TCP connections
+// TOTAL per origin, shared with the always-open streams and ordinary
+// fetch/XHR traffic, and no measurement can widen it.
+const LIVE_STREAM_POOL_MAX_HTTP1=3;
+const LIVE_STREAM_POOL_MAX_MULTIPLEXED=30;
+
+// Resolved lazily and memoised only once a definite answer is available: the
+// navigation timing entry can be missing very early in page life, and an
+// unknown transport must not be cached as if it were HTTP/1.1 forever.
+let _liveStreamPoolMaxCache=0;
+
+function _liveStreamPoolMax(){
+  if(_liveStreamPoolMaxCache) return _liveStreamPoolMaxCache;
+  let proto='';
+  try{
+    if(typeof performance!=='undefined'&&performance.getEntriesByType){
+      const nav=performance.getEntriesByType('navigation');
+      if(nav&&nav.length) proto=String(nav[0].nextHopProtocol||'');
+      // A controlling service worker serves the navigation from its own fetch
+      // handler, and the resulting PerformanceNavigationTiming reports an EMPTY
+      // nextHopProtocol -- the real transport is not exposed on that entry. On
+      // an h2 origin that silently pinned the pool (and the nav cache sized off
+      // it) to the HTTP/1.1 budget on every visit after the first. Resource
+      // entries for same-origin subresources are not intercepted the same way
+      // and still carry the negotiated protocol, so use them as the fallback.
+      if(!proto){
+        const here=(typeof location!=='undefined'&&location.origin)?location.origin:'';
+        if(here){
+          const res=performance.getEntriesByType('resource')||[];
+          for(let i=res.length-1;i>=0;i--){
+            const entry=res[i];
+            if(!entry||!entry.name) continue;
+            // Same-origin only: a third-party CDN negotiating h2 says nothing
+            // about the connection this app's streams actually use, and
+            // trusting it would OVER-size the pool. Compare parsed origins --
+            // a prefix test would accept "https://host.evil.com" for the
+            // origin "https://host".
+            let sameOrigin=false;
+            try{ sameOrigin=(new URL(entry.name,here)).origin===here; }
+            catch(_){ sameOrigin=false; }
+            if(!sameOrigin) continue;
+            const candidate=String(entry.nextHopProtocol||'');
+            if(candidate){ proto=candidate; break; }
+          }
+        }
+      }
+    }
+  }catch(_){ proto=''; }
+  // Unknown transport: fail closed on the HTTP/1.1 budget and retry later
+  // instead of memoising a guess.
+  if(!proto) return LIVE_STREAM_POOL_MAX_HTTP1;
+  // h2 / h2c / h3 / h3-29… multiplex over one connection; everything else
+  // (http/1.1, http/1.0, http/0.9) spends one connection per stream.
+  const multiplexed=(proto==='h2'||proto==='h2c'||proto.slice(0,2)==='h3');
+  _liveStreamPoolMaxCache=multiplexed
+    ? LIVE_STREAM_POOL_MAX_MULTIPLEXED
+    : LIVE_STREAM_POOL_MAX_HTTP1;
+  return _liveStreamPoolMaxCache;
+}
+// sid -> monotonically increasing use counter. Recency, not open order, decides
+// eviction: a conversation the user keeps visiting must outlive one they opened
+// earlier and abandoned.
+const _LIVE_STREAM_USE={};
+let _liveStreamUseClock=0;
+
+function _touchLiveStreamUse(sid){
+  if(!sid) return;
+  _LIVE_STREAM_USE[sid]=++_liveStreamUseClock;
+}
+
 function closeOtherLiveStreams(activeSid){
-  // Keep the live token SSE connection scoped to the conversation pane the user
-  // is actually viewing. Background sessions still show running/finished state
-  // through the session list and can reattach when selected, but they should not
-  // keep one EventSource each and exhaust the browser connection pool (#2313).
-  for(const sid of Object.keys(LIVE_STREAMS)){
-    if(sid!==activeSid) closeLiveStream(sid);
+  // Evict only what the connection budget actually requires, least-recently-used
+  // first. The viewed conversation is never a candidate: it owns the pane.
+  _touchLiveStreamUse(activeSid);
+  const background=Object.keys(LIVE_STREAMS).filter(sid=>sid!==activeSid);
+  // +1 for the active session, which occupies a slot in the budget whether or
+  // not it currently has a live stream attached.
+  const budget=Math.max(0,_liveStreamPoolMax()-1);
+  if(background.length<=budget) return;
+  // Ascending use counter == least recently used first. An untouched stream
+  // (never registered a use) sorts to the front and is evicted first.
+  background.sort((a,b)=>(_LIVE_STREAM_USE[a]||0)-(_LIVE_STREAM_USE[b]||0));
+  const evictCount=background.length-budget;
+  for(let i=0;i<evictCount;i++){
+    // Delegate to closeLiveStream: it snapshots the live-turn DOM and flags
+    // INFLIGHT.reattach so returning to the conversation restores what was
+    // streamed. Closing the transport directly here would lose exactly the
+    // content this pool exists to preserve.
+    closeLiveStream(background[i]);
+    delete _LIVE_STREAM_USE[background[i]];
   }
 }
 
