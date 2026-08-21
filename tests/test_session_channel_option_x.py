@@ -31,15 +31,31 @@ def _js_function_decl(src: str, name: str) -> str:
     i = brace + 1
     in_str = None
     escaped = False
+    line_comment = False
+    block_comment = False
     while i < len(src) and depth:
         ch = src[i]
-        if in_str:
+        nxt = src[i + 1] if i + 1 < len(src) else ""
+        if line_comment:
+            if ch == "\n":
+                line_comment = False
+        elif block_comment:
+            if ch == "*" and nxt == "/":
+                block_comment = False
+                i += 1
+        elif in_str:
             if escaped:
                 escaped = False
             elif ch == "\\":
                 escaped = True
             elif ch == in_str:
                 in_str = None
+        elif ch == "/" and nxt == "/":
+            line_comment = True
+            i += 1
+        elif ch == "/" and nxt == "*":
+            block_comment = True
+            i += 1
         elif ch in ('"', "'", "`"):
             in_str = ch
         elif ch == "{":
