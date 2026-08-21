@@ -4496,10 +4496,12 @@ function insightsPeriodChange() {
   const isCustom = sel.value === 'custom';
   customWrap.style.display = isCustom ? 'flex' : 'none';
   if (isCustom) {
-    // Default the range to the last 30 calendar days.
+    // Default the range to the last 30 calendar days only when the user
+    // hasn't already picked a custom range — so Custom(A/B) → preset →
+    // Custom still shows A/B instead of silently erasing it.
     const startEl = $('insightsStart');
     const endEl = $('insightsEnd');
-    if (startEl && endEl) {
+    if (startEl && endEl && !startEl.value && !endEl.value) {
       const end = new Date();
       const start = new Date();
       start.setDate(start.getDate() - 29);  // inclusive: start..today = 30 days
@@ -4696,7 +4698,8 @@ async function _openWikiBrowser() {
  *   31–90 days → 2-day buckets
  *   91–180 days → 3-day buckets
  *   181–365 days → 8-day buckets
- * Result is always <= ~52 bars.
+ *   >365 days → dynamic (ceil(len/52)) to keep chart bounded
+ * Result is always <= ~52 bars (tested up to 5 calendar years ≈1826 days).
  * Each bucket row has:
  *   - label: short label for axis (e.g. MM-DD or MM-DD–MM-DD)
  *   - title: full tooltip title (e.g. 2026-01-01 – 2026-01-05)
@@ -4708,7 +4711,7 @@ function _bucketDailyTokensForChart(rows) {
   const len = rows.length;
   if (len <= 30) return rows;  // per-day resolution for 7/30-day ranges
 
-  // Target <= 75 bars; derive bucket size
+  // Target <= 52 bars; derive bucket size
   let bucketSize;
   if (len <= 90) {
     bucketSize = 2;
@@ -4717,7 +4720,7 @@ function _bucketDailyTokensForChart(rows) {
   } else if (len <= 365) {
     bucketSize = 8;  // <=52 bars for 365 days (ceil(365/8)=46)
   } else {
-    bucketSize = 8;  // fallback for >365 (shouldn't occur in practice)
+    bucketSize = Math.ceil(len / 52);  // 5-year ≈1826 → 36 → 51 bars, preserves invariant
   }
 
   const result = [];
@@ -4897,7 +4900,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   const effStart = isCustomRange && d.effective_start;
   const effEnd = isCustomRange && d.effective_end;
   const rangeLabel = isCustomRange
-    ? (effStart && effEnd ? effStart + ' → ' + effEnd : t('insights_footer').replace('{days}', d.period_days))
+    ? (effStart && effEnd ? t('insights_footer_range').replace('{start}', effStart).replace('{end}', effEnd) : t('insights_footer').replace('{days}', d.period_days))
     : t('insights_footer').replace('{days}', d.period_days);
     box.innerHTML = `
       ${_renderSystemHealthPanel()}
