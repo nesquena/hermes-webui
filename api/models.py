@@ -15,7 +15,7 @@ import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, overload
+from typing import Literal, cast, overload
 
 try:  # pragma: no cover - platform-specific imports.
     import fcntl as _fcntl
@@ -69,7 +69,8 @@ PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
 # count: any fixed cap would recreate the starvation it repairs — every starved
 # project past the cap stays unreachable on every rebuild (greptile P1 on
 # #6659). Its work is bounded by construction instead: it fires only when the
-# global assigned window came back saturated; each scoped query is limited to
+# global assigned query is logically saturated OR its final raw candidate window
+# was exhausted while projection stayed short; each scoped query is limited to
 # one project's remaining budget; and the sum of those budgets across every
 # starved project is at most effective_limit * len(projects), which the scan
 # ceiling above already caps. Worst case per build: 1 global query + 1 GROUP BY
@@ -7961,22 +7962,34 @@ def _load_cli_sessions_uncached(
                 # One global newest-first query covers every profile whose whole
                 # assigned history fits in the window — the overwhelmingly common
                 # case, and the only query most builds pay.
-                global_rows = read_importable_agent_session_rows(
-                    db_path,
-                    limit=query_limit,
-                    log=logger,
-                    exclude_sources=interactive_excluded,
-                    project_assignment='assigned',
+                global_rows, global_window_exhausted = cast(
+                    tuple[list[dict], bool],
+                    read_importable_agent_session_rows(
+                        db_path,
+                        limit=query_limit,
+                        log=logger,
+                        exclude_sources=interactive_excluded,
+                        project_assignment='assigned',
+                        return_window_exhaustion=True,
+                    ),
                 )
                 _spend_assigned_rows(global_rows)
 
-                # When that window came back FULL it truncated by recency, so a
-                # single busy project can have consumed all of it and left
-                # quieter projects with nothing — their chips would show an empty
-                # project even though the rows exist (greptile P1 on #6659). A
-                # short window cannot hide anything: it already saw every
-                # assigned conversation the db has, so no follow-up is paid.
-                if effective_limit and query_limit and len(global_rows) >= query_limit:
+                # A full logical result truncates by recency, as does a result
+                # that stays short only because the final raw candidate window
+                # was consumed by compression/visibility projection.  In either
+                # case older rows can still exist, so only then pay the GROUP BY
+                # probe that identifies projects needing a scoped top-up. A short
+                # result from an unfilled raw window has seen every candidate and
+                # keeps the one-global-query fast path.
+                if (
+                    effective_limit
+                    and query_limit
+                    and (
+                        len(global_rows) >= query_limit
+                        or global_window_exhausted
+                    )
+                ):
                     # One GROUP BY over sessions.project_id (no join, no lineage
                     # recursion) says which projects still own rows this pass has
                     # not delivered, so the follow-up queries below are paid only

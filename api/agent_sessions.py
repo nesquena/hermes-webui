@@ -537,7 +537,8 @@ def read_importable_agent_session_rows(
     include_sources: tuple[str, ...] | None = None,
     project_assignment: str | None = None,
     project_ids: tuple[str, ...] | None = None,
-) -> list[dict]:
+    return_window_exhaustion: bool = False,
+) -> list[dict] | tuple[list[dict], bool]:
     """Return agent sessions projected as importable conversations.
 
     Hermes Agent can create rows in ``state.db.sessions`` before a session has
@@ -580,6 +581,13 @@ def read_importable_agent_session_rows(
     result can exceed ``limit`` by the number of such anchors. Callers must
     therefore iterate the result rather than assume ``len(rows) <= limit``.
 
+    ``return_window_exhaustion=True`` returns ``(rows, exhausted)`` instead of
+    just ``rows``. ``exhausted`` is true only when the final bounded raw-candidate
+    window was full while its logical projection still under-delivered ``limit``.
+    That lets a caller distinguish a genuinely short database from a compressed
+    or filtered projection that needs a narrow recovery query, without paying a
+    count probe for ordinary short windows.
+
     That recovery is deliberately bounded by the oversampled candidate set
     (the ``CANDIDATE_WINDOW_MULTIPLIERS`` window that actually ran — ``limit *
     8``, or ``limit * 32`` when the first window was consumed and re-widened):
@@ -588,6 +596,10 @@ def read_importable_agent_session_rows(
     children render top-level, exactly as they did before. Widening that window
     is a ``CANDIDATE_WINDOW_MULTIPLIERS`` change, not a change to this walk.
     """
+    def _result(rows: list[dict], exhausted: bool = False):
+        """Preserve the list API unless this caller needs raw-window status."""
+        return (rows, exhausted) if return_window_exhaustion else rows
+
     wanted_project_ids: tuple[str, ...] = ()
     if project_ids is not None:
         if str(project_assignment or '').strip().lower() != 'assigned':
@@ -600,10 +612,10 @@ def read_importable_agent_session_rows(
         if not wanted_project_ids:
             # An empty narrowing selects nothing. Returning [] keeps that exact
             # instead of degrading to "every assigned conversation".
-            return []
+            return _result([])
     db_path = Path(db_path)
     if not db_path.exists():
-        return []
+        return _result([])
 
     log = log or logger
     # Open read-only for this projection/listing path: it is a pure read, and
@@ -638,7 +650,7 @@ def read_importable_agent_session_rows(
                 "Upgrade hermes-agent to fix this.",
                 db_path,
             )
-            return []
+            return _result([])
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
@@ -745,7 +757,7 @@ def read_importable_agent_session_rows(
                 # and every row it does have is unassigned. Keep both answers
                 # exact instead of emitting SQL against a missing column.
                 if wanted == 'assigned':
-                    return []
+                    return _result([])
             elif {'parent_session_id', 'end_reason'} <= session_cols:
                 continuation_checks = [
                     "parent.end_reason IN ('compression', 'cli_close')",
@@ -873,7 +885,7 @@ def read_importable_agent_session_rows(
         if limit is not None:
             result_limit = max(0, int(limit))
             if result_limit == 0:
-                return []
+                return _result([])
             # The sidebar only needs a small visible window. Bound the expensive
             # messages join to a recent-activity candidate set instead of
             # aggregating every historical Hermes state.db session before
@@ -927,14 +939,20 @@ def read_importable_agent_session_rows(
             # fully consumed and still came up short instead of silently
             # truncating the caller's request.
             projected: list[dict] = []
+            window_exhausted = False
             for multiplier in CANDIDATE_WINDOW_MULTIPLIERS:
                 candidate_limit = max(result_limit * multiplier, result_limit)
                 cur.execute(candidate_sql, [*params, candidate_limit])
                 raw_rows = [dict(row) for row in cur.fetchall()]
                 projected = _project(raw_rows)
-                if len(projected) >= result_limit or len(raw_rows) < candidate_limit:
-                    # Either the request is satisfied or the window was not the
-                    # binding constraint (the db has nothing more to give).
+                window_exhausted = (
+                    len(raw_rows) >= candidate_limit
+                    and len(projected) < result_limit
+                )
+                if not window_exhausted:
+                    # Either the request is satisfied or the raw candidate window
+                    # was not binding, so projection has seen every candidate this
+                    # query can reveal.
                     break
             selected = projected[:result_limit]
 
@@ -974,7 +992,7 @@ def read_importable_agent_session_rows(
                 selected.append(parent)
                 have.add(parent_id)
                 pending.append(parent)
-            return selected
+            return _result(selected, window_exhausted)
 
         cur.execute(
             f"""
@@ -987,7 +1005,7 @@ def read_importable_agent_session_rows(
             """,
             params,
         )
-        return _project([dict(row) for row in cur.fetchall()])
+        return _result(_project([dict(row) for row in cur.fetchall()]))
 
 
 def read_assigned_project_row_counts(
