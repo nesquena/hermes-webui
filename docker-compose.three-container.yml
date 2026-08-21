@@ -51,6 +51,15 @@ services:
       # Defaults to 1000 to match WANTED_UID/WANTED_GID in the webui service.
       - HERMES_UID=${UID:-1000}
       - HERMES_GID=${GID:-1000}
+      # Gateway API server (port 8642). The WebUI's Tasks/cron health probe
+      # reaches this listener via HERMES_API_URL below. The agent only starts
+      # the listener when API_SERVER_KEY is a usable value (>=16 chars); set
+      # it in .env to enable the gateway API. Without a key the gateway daemon
+      # still runs (messaging + cron) but port 8642 stays unbound and the
+      # WebUI reports "Gateway endpoint not reachable".
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${API_SERVER_KEY:-}
       # Bind-mount permission handling for the agent — narrow set of overrides.
       # NOTE: The agent's HERMES_HOME_MODE applies to the HERMES_HOME *directory*
       # mode (default 0700) — NOT to credential files like the WebUI's variant.
@@ -60,10 +69,6 @@ services:
       # The agent's container detection (/.dockerenv) already auto-skips
       # credential chmod inside Docker, so HERMES_SKIP_CHMOD is redundant here.
       # - HERMES_HOME_MODE=0750
-      # Bind to 0.0.0.0 so that other services can reach the agent's api.
-      # We map the service to 127.0.0.1 with docker, so it won't be reachable
-      # outside the host
-      - API_SERVER_HOST=0.0.0.0
     restart: unless-stopped
     deploy:
       resources:
@@ -136,14 +141,18 @@ services:
       #   echo "UID=$(id -u)" >> .env && echo "GID=$(id -g)" >> .env
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
+      # Forward the API server key so the WebUI's gateway health probe can
+      # authenticate (must match the agent's API_SERVER_KEY above).
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}
+      # Optional: enable password auth. Set HERMES_WEBUI_PASSWORD in .env
+      # (required if you expose the port beyond 127.0.0.1).
+      - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD:-}
       # NOTE: When using bind-mount volumes shared across containers, ALL containers
       # that write to the same host directory must run as the same UID/GID.
       # If hermes-agent initialises the state dir as root (UID 0), hermes-webui
       # will get a PermissionError accessing those paths — including a crash on every
       # HTTP request if the auth signing-key file is unreadable. Either set WANTED_UID
       # to match the agent container's UID, or use a named Docker volume (preferred).
-      # Optional: set a password for remote access
-      # - HERMES_WEBUI_PASSWORD=your-secret-password
       # Bind-mount permission handling for the WebUI (fixes #1389, #1399).
       # NOTE: WebUI's HERMES_HOME_MODE is a credential-file threshold (allow
       # group bits on .env/.signing_key/etc.), DIFFERENT from the agent's

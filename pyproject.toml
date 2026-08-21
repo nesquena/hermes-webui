@@ -21,6 +21,14 @@ dynamic = ["version", "dependencies"]
 Repository = "https://github.com/nesquena/hermes-webui"
 Issues = "https://github.com/nesquena/hermes-webui/issues"
 
+[project.scripts]
+# Packaged CLI entry point (#6739): `hermes-webui` starts the WebUI server, the
+# pip-installed equivalent of `python server.py` from a source checkout. The
+# generated console script calls bootstrap.main(), which runs launcher-python
+# discovery and dep-ensure before launching the server — matching the effective
+# behavior of the `python server.py` / `python -m server` launch surface.
+hermes-webui = "bootstrap:main"
+
 [tool.setuptools]
 include-package-data = true
 packages = ["api", "static"]

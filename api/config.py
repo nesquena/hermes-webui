@@ -1150,6 +1150,7 @@ _FALLBACK_MODELS = [
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7",             "label": "MiniMax M2.7"},
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
     # Z.AI / GLM
+    {"provider": "Z.AI",      "id": "zai/glm-5.3",                      "label": "GLM-5.3"},
     {"provider": "Z.AI",      "id": "zai/glm-5.2",                      "label": "GLM-5.2"},
     {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
     {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
@@ -1735,6 +1736,7 @@ _PROVIDER_MODELS = {
         {"id": "@nous:google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
     ],
     "zai": [
+        {"id": "glm-5.3", "label": "GLM-5.3"},
         {"id": "glm-5.2", "label": "GLM-5.2"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
@@ -2614,6 +2616,85 @@ def _get_provider_cfg(provider_id) -> dict:
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
+class AmbiguousCustomProviderError(ValueError):
+    """Raised when two+ custom_providers[] entries normalize to the same slug.
+
+    A custom provider is identified downstream by a SLUG (``custom:<slug>``):
+    ``resolve_model_provider()`` returns it, and the credential lookup
+    (``resolve_custom_provider_connection``) resolves the API key + base_url by
+    scanning ``custom_providers[]`` for the FIRST entry whose name normalizes to
+    that slug — independent of model ownership or the endpoint chosen earlier. So
+    when two distinct provider names normalize to the same slug (e.g. ``Foo Bar``
+    and ``foo-bar`` both -> ``custom:foo-bar``), consuming the slug on ANY path
+    could pair one entry's endpoint with another entry's credential — including
+    the asymmetric case where only one of the colliding entries lists the
+    requested model. Rather than guess, every slug-only boundary fails closed and
+    surfaces the collision so the user can rename one provider. Subclasses
+    ``ValueError`` so existing ``except ValueError`` / broad-``except`` fallbacks
+    continue to catch it.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        # Expose the actionable rename text as ``.message`` so HTTP handlers can
+        # forward it verbatim (as the JSON ``error``) without ``str(e)`` casts,
+        # and it reaches the user on the handoff + save paths instead of being
+        # swallowed into a generic fallback.
+        self.message = message
+
+
+def _custom_provider_slug_key(value: object) -> str:
+    """Canonical bare slug for custom-provider identity + collision detection.
+
+    Derived from the SINGLE authoritative slug PRODUCER
+    ``_custom_provider_slug_from_name()`` — the same function that mints the
+    ``custom:<slug>`` ids resolve_model_provider() actually returns, persists,
+    and routes on. Using the producer's normalization (not a private variant)
+    everywhere means every slug-only boundary — bare + qualified resolution,
+    credential lookup, auxiliary persistence — compares against ONE identity, so
+    names that genuinely collide at the producer level (e.g. ``Foo (Bar)`` and
+    ``foo-bar`` both -> ``custom:foo-bar``) are detected as collisions instead of
+    slipping through a looser key. Returns the bare slug (no ``custom:`` prefix).
+    Accepts a bare provider name or a ``custom:<slug>`` id.
+    """
+    produced = _custom_provider_slug_from_name(value)
+    return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
+
+
+def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
+    """Return the single named ``custom_providers`` entry matching ``slug_key``.
+
+    Pure and lock-safe: operates only on the passed-in list, so it can be called
+    while holding ``_cfg_lock`` (unlike ``get_config()``-based resolvers).
+
+    Membership is built from ALL named entries, INDEPENDENT of model ownership,
+    because slug-only credential resolution scans every same-slug entry and
+    returns the first match. Raises ``AmbiguousCustomProviderError`` when 2+
+    entries share the key so an endpoint and an API key can never be resolved
+    from different entries on any path. Returns the matching entry, or ``None``
+    when no entry matches.
+    """
+    if not slug_key or not isinstance(custom_providers, list):
+        return None
+    matches: list[dict] = []
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        if _custom_provider_slug_key(name) == slug_key:
+            matches.append(entry)
+    if len(matches) >= 2:
+        names = [str(e.get("name") or "").strip() for e in matches]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all normalize to the same provider slug "
+            f"{slug_key!r}; an endpoint and API key could be resolved from "
+            f"different entries. Rename one so each custom provider has a unique slug."
+        )
+    return matches[0] if matches else None
+
+
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -2667,9 +2748,30 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     if isinstance(config_provider, str) and config_provider.strip().lower() == "local":
         config_provider = "custom"
 
+    def _finalize(model: object, provider: object, base_url: object) -> tuple:
+        """Point-of-return collision guard.
+
+        Fail closed HERE — immediately before handing a ``custom:<slug>`` back —
+        never up front. A slug collision on one custom pair must not block a
+        request that resolves to a DIFFERENT provider (an unrelated
+        ``@openrouter:...`` / ``@custom:safe-provider:...`` lane, or the bare
+        ``custom`` proxy), so the ambiguity check runs only on the slug actually
+        being returned. ``_unique_custom_provider_entry`` raises
+        AmbiguousCustomProviderError when >=2 config entries share the slug, so a
+        downstream credential lookup can never first-match a different entry than
+        the one whose endpoint we resolved. No-op for bare ``custom`` and every
+        non-custom provider.
+        """
+        if isinstance(provider, str) and provider.startswith("custom:"):
+            _unique_custom_provider_entry(
+                cfg.get('custom_providers', []),
+                _custom_provider_slug_key(provider),
+            )
+        return model, provider, base_url
+
     model_id = (model_id or "").strip()
     if not model_id:
-        return model_id, config_provider, config_base_url
+        return _finalize(model_id, config_provider, config_base_url)
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
@@ -2730,6 +2832,57 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     )
     custom_providers = cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
+        # Disambiguation guard: when two custom_providers[] entries both list the
+        # same bare model id (e.g. dogapi and packyapi both advertise
+        # 'claude-sonnet-5'), a plain first-match scan routes on config WRITE
+        # ORDER — silently hijacking the model to whichever entry appears first,
+        # regardless of the active provider the user actually configured. If the
+        # ACTIVE provider is itself a named custom provider (config_provider
+        # resolved to 'custom:<slug>', including via model.base_url → named-slug
+        # matching), prefer THAT entry when it also owns the model, so an explicit
+        # active endpoint wins over an overlapping earlier entry. Falls through to
+        # the ordered scan below when the active provider is bare 'custom' / not a
+        # named custom entry, or when it doesn't list this model.
+        _active_custom_slug = ''
+        if isinstance(config_provider, str) and config_provider.startswith('custom:'):
+            _active_custom_slug = config_provider
+
+        def _entry_owns_model(entry: dict) -> bool:
+            entry_model = (entry.get('model') or '').strip()
+            ids = set()
+            if entry_model:
+                ids.add(entry_model)
+            ids.update(_configured_model_ids(entry.get('models')))
+            return model_id in ids
+
+        # Explicit active named provider wins over config order when it owns the
+        # model. Only CONSUME the active slug (and thus let _finalize fail closed
+        # on a collision) when the active provider actually lists this model: if
+        # it doesn't, fall through so an unrelated collision on the active slug
+        # never blocks a request that resolves to a different provider.
+        if _active_custom_slug:
+            _active_key = _custom_provider_slug_key(_active_custom_slug)
+            _active_owner = next(
+                (
+                    e for e in custom_providers
+                    if isinstance(e, dict)
+                    and _entry_owns_model(e)
+                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                ),
+                None,
+            )
+            # Exactly one entry carries the active slug AND owns the model ->
+            # authoritative, even when model.base_url is stale/absent or points at
+            # a different endpoint. An explicit, unambiguous named provider must
+            # never lose to config order: a stale URL is not evidence to discard
+            # it. _finalize() fails closed if the active slug is shared by >=2
+            # entries (endpoint + credential could then split).
+            if _active_owner is not None:
+                return _finalize(
+                    model_id,
+                    _active_custom_slug,
+                    (_active_owner.get('base_url') or '').strip() or None,
+                )
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
@@ -2742,7 +2895,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_slug_from_name(entry_name)
-                return model_id, provider_hint, entry_base_url or None
+                # _finalize() applies the all-entry collision guard on this
+                # bare-'custom' / fall-through path before returning the slug.
+                return _finalize(model_id, provider_hint, entry_base_url or None)
 
     # Check user-defined providers (config.yaml → providers:).
     # Mirrors the custom_providers scan above — exact match against each
@@ -2801,14 +2956,21 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     parsed_provider_hint = _parse_provider_qualified_model_id(model_id)
     if parsed_provider_hint is not None:
         bare_model, provider_hint = parsed_provider_hint
+        # Session/send/handoff shapes encode the provider as @custom:<slug>:model
+        # and reach here after the ownership scan only saw the ENCODED string.
+        # _finalize() applies the all-entry uniqueness check before returning the
+        # slug so the downstream credential lookup can't first-match a different
+        # colliding entry — but ONLY on the custom:<slug> actually returned, so an
+        # unrelated collision never blocks this explicit hint (@openrouter, a
+        # non-colliding @custom:other, ...).
         if (
             provider_hint.startswith("custom:")
             and config_base_url
             and _is_local_server_provider(config_provider)
             and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
         ):
-            return bare_model, config_provider, config_base_url
-        return bare_model, provider_hint, _get_provider_base_url(provider_hint)
+            return _finalize(bare_model, config_provider, config_base_url)
+        return _finalize(bare_model, provider_hint, _get_provider_base_url(provider_hint))
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -2826,11 +2988,11 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # #854 / #894 for Nous, where this guard was originally added).
         _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
         if config_provider in _PORTAL_PROVIDERS:
-            return model_id, config_provider, config_base_url
+            return _finalize(model_id, config_provider, config_base_url)
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
-            return bare, config_provider, config_base_url
+            return _finalize(bare, config_provider, config_base_url)
         # The OpenAI Codex provider uses a real base_url, but its default
         # ChatGPT endpoint cannot serve OpenRouter-style provider/model IDs.
         # Keep that narrow exception before the custom endpoint protection so
@@ -2856,7 +3018,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
                         _slug = _custom_provider_slug_from_name(prefix)
                         _base = (_entry.get("base_url") or "").strip()
-                        return model_id, _slug, _base or None
+                        return _finalize(model_id, _slug, _base or None)
 
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
         # just because the model name contains a slash (e.g. google/gemma-4-26b-a4b).
@@ -2870,7 +3032,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             # pointing at a loopback/private host.
             if (_is_local_server_provider(config_provider)
                     or _base_url_points_at_local_server(config_base_url)):
-                return model_id, config_provider, config_base_url
+                return _finalize(model_id, config_provider, config_base_url)
             # Strip the provider prefix only when it's a known provider namespace
             # AND stripping is the right call for this configured provider:
             #
@@ -2918,22 +3080,22 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 #     model.models / custom_providers[].models). Authoritative and
                 #     network-free, so #5979 survives a cold restart — preserve.
                 if _model_id_declared_in_config(model_id, config_provider):
-                    return model_id, config_provider, config_base_url
+                    return _finalize(model_id, config_provider, config_base_url)
                 # (2) The endpoint's live/cached catalog advertised it.
                 _advertised = _endpoint_advertised_model_ids(config_provider)
                 if _advertised:
                     # Full id advertised → route on it verbatim (#5979/#3872/#548).
                     if model_id in _advertised:
-                        return model_id, config_provider, config_base_url
+                        return _finalize(model_id, config_provider, config_base_url)
                     # ONLY the bare id advertised → the prefix is a redundant
                     # leftover the relay rejects; strip it (#433). Keep the
                     # ``prefix in _PROVIDER_MODELS`` belt so an adversarial catalog
                     # advertising a bare id can't strip an unknown-vendor prefix.
                     if bare in _advertised and prefix in _PROVIDER_MODELS:
-                        return bare, config_provider, config_base_url
+                        return _finalize(bare, config_provider, config_base_url)
                     # Advertised but neither exact shape matched → intrinsic /
                     # unknown prefix the proxy routes on; preserve it whole.
-                    return model_id, config_provider, config_base_url
+                    return _finalize(model_id, config_provider, config_base_url)
                 # (3) Provenance genuinely unavailable (cold/unbuilt or
                 #     fingerprint-mismatched catalog AND not config-declared).
                 #     Distinguish a DELIBERATE selection from a stale leftover:
@@ -2959,17 +3121,17 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 #     the static first-party catalog silently flipped routing
                 #     (exactly how #5979 regressed).
                 if explicitly_picked:
-                    return model_id, config_provider, config_base_url
+                    return _finalize(model_id, config_provider, config_base_url)
                 if prefix in _PROVIDER_MODELS and _is_first_party_model(prefix, bare):
-                    return bare, config_provider, config_base_url
-                return model_id, config_provider, config_base_url
+                    return _finalize(bare, config_provider, config_base_url)
+                return _finalize(model_id, config_provider, config_base_url)
             # Non-custom first-party provider pointed at an OpenAI-compatible
             # proxy (e.g. provider=openai + base_url=litellm): the bare id is
             # what it expects — "openai/gpt-5.4" → "gpt-5.4" (#433).
             if prefix in _PROVIDER_MODELS:
-                return bare, config_provider, config_base_url
+                return _finalize(bare, config_provider, config_base_url)
             # Intrinsic / unknown prefix — pass the full model_id through unchanged.
-            return model_id, config_provider, config_base_url
+            return _finalize(model_id, config_provider, config_base_url)
 
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
@@ -2991,7 +3153,11 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         ):
             return model_id, "openrouter", None
 
-    return model_id, config_provider, config_base_url
+    # Final active-provider fallback: when nothing more specific matched, route
+    # on the configured provider. _finalize() fails closed here too if that
+    # provider is a collision-shared custom:<slug> (per finding #2 — the check
+    # must reach this last fallback, not just the earlier explicit paths).
+    return _finalize(model_id, config_provider, config_base_url)
 
 
 def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
@@ -3005,13 +3171,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if not pid.startswith("custom:"):
         return None, None
 
-    def _slugify(value: str) -> str:
-        s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-        while "--" in s:
-            s = s.replace("--", "-")
-        return s.strip("-")
-
-    slug = _slugify(pid.split(":", 1)[1].strip())
+    slug = _custom_provider_slug_key(pid)
     if not slug:
         return None, None
 
@@ -3039,18 +3199,13 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if not isinstance(custom_providers, list):
         custom_providers = []
 
-    for entry in custom_providers:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or "").strip()
-        if not name:
-            continue
-        entry_slug = _slugify(name)
-        if entry_slug != slug:
-            continue
-
-        base_url = str(entry.get("base_url") or "").strip() or None
-        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
+    # Fail closed when the slug maps to multiple entries (raises); otherwise use
+    # the single matching entry. Shared with resolve_model_provider so endpoint
+    # and credential are always resolved from the SAME entry.
+    matched_entry = _unique_custom_provider_entry(custom_providers, slug)
+    if matched_entry is not None:
+        base_url = str(matched_entry.get("base_url") or "").strip() or None
+        api_key = _resolve_key(matched_entry.get("api_key"), matched_entry.get("key_env"), pid)
         return api_key, base_url
 
     # If exactly one custom provider is configured, use it as a pragmatic
@@ -3513,6 +3668,24 @@ def _zai_glm_thinking_toggle_supported(model_id: str, provider_id: str) -> bool 
     return cls in {"effort", "thinking"}
 
 
+_OPENAI_FAMILY_REASONING_PROVIDERS = frozenset({
+    "openai-codex", "openai", "openai-api",
+    "azure-foundry", "azure-openai", "azure",
+})
+
+_GPT_5_6_REASONING_MODELS = frozenset({
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+})
+
+
+def _is_gpt_5_6_reasoning_model(bare_model: str) -> bool:
+    """Return whether an OpenAI-family model uses GPT-5.6's max ladder."""
+    return str(bare_model or "").strip().lower() in _GPT_5_6_REASONING_MODELS
+
+
 def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
@@ -3527,15 +3700,15 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
-    # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap GPT-5 at xhigh
-    # and o-series at high — 'max' is a WebUI-only level none of them accept.
-    if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
+    # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
+    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
+    if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5"):
+        if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
             return [eff for eff in normalized if eff != "max"]
-    # 'max' is a WebUI-level ceiling; providers whose native ladder tops out lower
-    # must NOT advertise it, otherwise a stored/CLI 'max' degrades WORSE than the
+    # Providers whose native ladder tops out below 'max' must NOT advertise it,
+    # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
     # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
     # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
@@ -3882,11 +4055,11 @@ def resolve_model_reasoning_efforts(
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
     Always passes the sourced list through _filter_reasoning_efforts_for_provider
-    so the hard provider ceilings (openai-codex/openai/azure GPT-5 cap at xhigh,
-    Gemini + pre-adaptive/cloud-hosted Claude cap at xhigh) are applied uniformly
-    — the UI dropdown (which gates options on this list) and coercion therefore
-    agree: 'max' is offered ONLY for models whose native ladder genuinely includes
-    it, and is stripped everywhere it would be rejected/mishandled.
+    so the hard provider ceilings (OpenAI-family GPT-5 before 5.6 at xhigh and
+    o-series at high; Gemini + pre-adaptive/cloud-hosted Claude at xhigh) are
+    applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
+    retained for GPT-5.6 and other models whose native ladder includes it, and
+    stripped where it would be rejected or mishandled.
     """
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
@@ -4079,16 +4252,17 @@ def coerce_reasoning_effort_for_model(
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
     # models.dev / heuristics, and those can (a) return [] for an unrecognized
-    # model or (b) wrongly advertise a WebUI-only level like 'max' for a provider
+    # model or (b) wrongly advertise 'max' for a provider
     # whose native ladder tops out lower. _filter_reasoning_efforts_for_provider
-    # encodes the known ceilings (openai-codex gpt-5, Gemini, pre-adaptive
-    # Anthropic all cap below 'max'); if it actively EXCLUDES the requested level,
-    # honor that ceiling and degrade down the ladder even when the sourced list is
-    # empty or (mistakenly) includes the level. This keeps a stored/CLI 'max' from
-    # reaching an adapter that would silently downgrade it worse than xhigh/high
-    # (Gemini→medium, legacy Claude manual-thinking→8k). For providers with NO
-    # ceiling rule the filter returns the full list unchanged, so genuinely
-    # unknown models still preserve the configured effort (#3505 behavior).
+    # encodes the known ceilings (OpenAI-family GPT-5 before 5.6, Gemini, and
+    # pre-adaptive Anthropic all cap below 'max'); if it actively EXCLUDES the
+    # requested level, honor that ceiling and degrade down the ladder even when
+    # the sourced list is empty or (mistakenly) includes the level. This keeps a
+    # stored/CLI 'max' from reaching an adapter that would silently downgrade it
+    # worse than xhigh/high (Gemini→medium, legacy Claude manual-thinking→8k).
+    # GPT-5.6 is intentionally not capped. For providers with NO ceiling rule the
+    # filter returns the full list unchanged, so genuinely unknown models still
+    # preserve the configured effort (#3505 behavior).
     ceiling = _filter_reasoning_efforts_for_provider(
         list(VALID_REASONING_EFFORTS), str(model_id or ""), str(provider_id or "")
     )
@@ -4106,15 +4280,15 @@ def coerce_reasoning_effort_for_model(
     # both for models KNOWN not to support reasoning AND for models we simply
     # don't recognize (custom providers, aggregator-rewritten ids, brand-new
     # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
-    # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') -
+    # model rejects (e.g. pre-5.6 GPT-5 'max', o1/o3/o4 above 'high') -
     # those paths return a NON-empty clamped set, so the degrade ladder below
     # still applies. When the set is empty we can't tell "unsupported" from
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
     #
     # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
-    # 2026-07-11): 'max' is a WebUI-only level ABOVE the universally-safe ceiling
-    # 'xhigh'. A genuinely unknown/custom provider will 400 on it. So when the
+    # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
+    # genuinely unknown/custom provider will 400 on it. So when the
     # capability list is empty AND the provider is not one we recognize as
     # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
     # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
@@ -4828,12 +5002,51 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
             if provider and (provider.startswith("custom:") or provider == "custom"):
-                try:
-                    _, _, resolved_base_url = resolve_model_provider(model)
-                    if resolved_base_url:
-                        slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
-                except Exception:
-                    pass
+                # Resolve the auxiliary slot's base_url against the SELECTED
+                # provider, not the active main provider. A bare
+                # resolve_model_provider(model) ignores `provider` and routes the
+                # model through whatever main provider is active — so when the
+                # selected auxiliary provider (custom:A) and the active main
+                # provider (custom:B) both list the same model id, the slot was
+                # persisted with provider=custom:A but base_url=B's endpoint
+                # (overlapping-id misroute, sibling of the resolve_model_provider
+                # fix). For a named custom:<slug> selection, look up that
+                # provider's OWN custom_providers[] entry directly. Note we do
+                # NOT route through model_with_provider_context here: the
+                # @custom:<slug>:model form resolves base_url to None (the
+                # @provider path doesn't carry a custom entry's base_url), which
+                # would drop the base_url entirely. Fall back to the bare resolve
+                # only for the unnamed `custom` case, which has no own entry.
+                resolved_base_url = None
+                if provider.startswith("custom:"):
+                    # Resolve the selected provider's base_url from the
+                    # config_data already loaded under _cfg_lock above. Do NOT
+                    # call resolve_custom_provider_connection() / get_config()
+                    # here: they re-acquire the non-reentrant _cfg_lock we
+                    # already hold, self-deadlocking whenever the cache is stale
+                    # or the profile path changed. Use the shared uniqueness
+                    # helper on the in-scope dict so this slug-only save fails
+                    # closed on a collision (raises AmbiguousCustomProviderError)
+                    # exactly like every other path — otherwise the ambiguity
+                    # would be swallowed and the wrong endpoint persisted.
+                    _cp_match = _unique_custom_provider_entry(
+                        config_data.get("custom_providers", []),
+                        _custom_provider_slug_key(provider),
+                    )
+                    if _cp_match is not None:
+                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                if not resolved_base_url:
+                    # Best-effort fallback for the unnamed `custom` case (no own
+                    # entry). Keep it non-fatal for unexpected errors, but let a
+                    # genuine ambiguity propagate so the save fails closed.
+                    try:
+                        _, _, resolved_base_url = resolve_model_provider(model)
+                    except AmbiguousCustomProviderError:
+                        raise
+                    except Exception:
+                        resolved_base_url = None
+                if resolved_base_url:
+                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
             if advanced is not None:
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)
@@ -6372,6 +6585,51 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     # preserving vendor hierarchy for multi-slash IDs (#3360).
     # Skip for URI-scheme IDs whose slashes are path separators (#3429).
     bare = lookup_id.split("/", 1)[1] if ("/" in lookup_id and not _has_scheme(lookup_id)) else lookup_id
+    # Bedrock/Vertex IDs carry a dotted cross-region routing prefix and a vendor
+    # namespace -- ``us.anthropic.claude-opus-5``,
+    # ``mistral.mistral-large-2407-v1:0`` -- plus sometimes a trailing ``:<n>``
+    # provisioned-revision suffix. None of that belongs in a human label, which
+    # otherwise reads "Us.anthropic.claude Opus 5" in the turn footer.
+    #
+    # Only the two documented shapes are stripped, against a CLOSED allow-list.
+    # A generic "drop leading letters-only dot segments" loop rewrites any
+    # uncatalogued dotted ID: ``deepseek.v3`` renders as "V3" (vendor silently
+    # deleted) and ``foo.bar.baz`` as "BAZ".
+    #
+    # Inlined rather than factored into a module-level helper because the
+    # regression harnesses in tests/test_issue3429_* extract this function's
+    # source and eval it in isolation; a module-level call would NameError there.
+    # Kept in lockstep with ``_stripDottedModelPrefix()`` in static/ui.js --
+    # tests/test_dotted_model_label.py drives both from one table.
+    if bare and "." in bare and not _has_scheme(bare):
+        # ``global`` is a real Bedrock routing head, not just a region code --
+        # the catalog at api/config.py:1901-1909 ships six
+        # ``global.anthropic.claude-*`` IDs and the routing notes below use that
+        # as the canonical Bedrock shape. Omitting it left those labels reading
+        # "Global.anthropic.claude Opus 4 7".
+        _regions = {"us", "eu", "apac", "global", "us-gov"}
+        _vendors = {
+            "anthropic", "amazon", "meta", "mistral", "cohere", "ai21",
+            "stability", "writer", "deepseek", "qwen", "openai", "google",
+            # Bedrock foundation-model vendors added after the first pass. Without
+            # these, real IDs rendered with the namespace intact -- "Us.luma.ray 2",
+            # "Twelvelabs.marengo Embed 2 7", "Ibm.granite 3 8B Instruct".
+            "luma", "twelvelabs", "ibm", "nvidia", "snowflake",
+        }
+        _segs = bare.split(".")
+        _i = 0
+        if (len(_segs) - _i >= 3 and _segs[_i].lower() in _regions
+                and _segs[_i + 1].lower() in _vendors):
+            _i += 1
+        if len(_segs) - _i >= 2 and _segs[_i].lower() in _vendors:
+            # Dropping the vendor is only safe when what remains still names the
+            # model. A bare version remainder (``deepseek.v3``) means the vendor
+            # WAS the name.
+            _rest = ".".join(_segs[_i + 1:])
+            if not re.fullmatch(r"v?\d+(?:[.\-]\d+)*", _rest, re.IGNORECASE):
+                _i += 1
+        if _i > 0:
+            bare = re.sub(r":\d+$", "", ".".join(_segs[_i:]))
     return " ".join(
         w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
         for w in bare.replace("_", "-").split("-")
@@ -6960,7 +7218,30 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     and _provider_cfg["models"]
                     and _canonical == _canonicalise_provider_id(active_provider)
                 )
-                if not (_is_known_provider or _has_provider_route or _has_models_only_active_route):
+                # A known provider listed in config.yaml without route
+                # configuration should only appear in the picker when it was
+                # already detected from credential sources (env vars, hermes
+                # auth, credential pool).  Otherwise a provider with
+                # metadata-only entries in config.yaml (e.g.
+                # ``openai-api: {name: "OpenAI API"}``) would still render
+                # in the model selector after the API key is removed (#6335).
+                # Resolve provider aliases on both sides so an alias-named
+                # config key (e.g. ``x-ai`` in providers, ``google`` in
+                # config.yaml) matches credential evidence reported under the
+                # agent's canonical alias (``xai``, ``gemini``) (#6338).
+                # Normalise detected_providers entries into the same
+                # alias-resolved namespace as _canonical so that a WebUI
+                # canonical form in detected_providers (e.g. ``x-ai`` added
+                # by a prior loop iteration) also matches (#6338).
+                _resolved_detected = {
+                    _resolve_provider_alias(_pid) for _pid in detected_providers
+                }
+                _already_credentialed = (
+                    _resolve_provider_alias(_canonical) in _resolved_detected
+                    or _canonical in _resolved_detected
+                )
+                _admit_as_known = _is_known_provider and _already_credentialed
+                if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
 
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
@@ -8582,6 +8863,10 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
     ``HERMES_WEBUI_SESSIONS_MAX`` env override, then to
     ``DEFAULT_SESSIONS_CACHE_MAX`` — a typo can never disable the bound and
     reintroduce unbounded memory growth.
+
+    This is the sole resolution authority and it is side-effect free. The cap
+    diagnostics report is published by the code that enforces it; see
+    ``_LAST_APPLIED_SESSIONS_CACHE_MAX`` below.
     """
     active_cfg = config_data if isinstance(config_data, dict) else get_config()
     webui_cfg = active_cfg.get("webui", {}) if isinstance(active_cfg, dict) else {}
@@ -8590,7 +8875,10 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
         if raw is not None:
             try:
                 value = int(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError covers YAML's float infinities (`.inf`, `1e400`),
+                # which safe_load resolves to a real float. Without it a typo
+                # would escape the fallback and raise out of every caller.
                 value = None
             if value is not None and value >= 1:
                 return value
@@ -8599,6 +8887,16 @@ def get_sessions_cache_max(config_data: dict | None = None) -> int:
     if isinstance(SESSIONS_MAX, int) and SESSIONS_MAX >= 1:
         return SESSIONS_MAX
     return DEFAULT_SESSIONS_CACHE_MAX
+
+
+# The cap api/models.py::_evict_sessions_over_cap() last enforced. That function
+# publishes it after its own fallback and range normalization, so a nonblocking
+# diagnostics read reports what eviction applied without re-entering config or
+# profile I/O, and nothing else writes this field. Seeded from the config
+# reload_config() already loaded at import (see `cfg` above) through the getter's
+# dict mode, which reads no file and takes no lock, so the value is right before
+# the first eviction pass instead of after it.
+_LAST_APPLIED_SESSIONS_CACHE_MAX: int = get_sessions_cache_max(cfg)
 CHAT_LOCK = threading.Lock()
 
 
@@ -8814,19 +9112,39 @@ class StreamChannel:
                 self._SUBSCRIBER_QUEUE_MAXSIZE,
             )
 
+    def _diagnostic_counters_locked(self) -> dict[str, object]:
+        """Return the counter dict. CALLER CONTRACT: ``self._lock`` is held."""
+        return {
+            "subscriber_count": len(self._subscribers),
+            "offline_buffered_events": len(self._offline_buffer),
+            # Cumulative over the channel lifetime (ops visibility), vs. the
+            # per-cycle count subscribe_with_snapshot() reports for truncation.
+            "offline_dropped_events": self._offline_dropped_total,
+            # Cumulative per-subscriber queue drops (replay + broadcast) over
+            # the channel lifetime — surfaces slow/backpressured tabs.
+            "subscriber_dropped_events": self._subscriber_dropped_total,
+        }
+
     def diagnostic_snapshot(self) -> dict[str, object]:
         """Return non-sensitive stream observation counters for health checks."""
         with self._lock:
-            return {
-                "subscriber_count": len(self._subscribers),
-                "offline_buffered_events": len(self._offline_buffer),
-                # Cumulative over the channel lifetime (ops visibility), vs. the
-                # per-cycle count subscribe_with_snapshot() reports for truncation.
-                "offline_dropped_events": self._offline_dropped_total,
-                # Cumulative per-subscriber queue drops (replay + broadcast) over
-                # the channel lifetime — surfaces slow/backpressured tabs.
-                "subscriber_dropped_events": self._subscriber_dropped_total,
-            }
+            return self._diagnostic_counters_locked()
+
+    def try_diagnostic_snapshot(self) -> dict[str, object] | None:
+        """Return the same counters without waiting, or ``None`` when busy.
+
+        An aggregate health poll must never stall behind one channel's producer
+        or subscriber work, so a contended channel is reported as unavailable
+        instead of waited on. ``diagnostic_snapshot()`` keeps its blocking
+        contract for the per-stream ``/health?deep=1`` view, which needs the
+        counters of every stream rather than a best-effort aggregate.
+        """
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            return self._diagnostic_counters_locked()
+        finally:
+            self._lock.release()
 
 
 def create_stream_channel() -> StreamChannel:
@@ -9082,6 +9400,56 @@ ACTIVE_RUNS: dict = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
 LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
+
+
+def active_run_is_attachable(run_entry) -> bool:
+    """Return whether a run row still represents renderable live work.
+
+    ``ACTIVE_RUNS`` tracks WORKER LIFECYCLE, which is deliberately broader than
+    "a turn a browser may attach to": ``cancel_stream()`` leaves the row in
+    ``phase="cancelling"`` while the worker unwinds so a successor cannot start
+    on top of it. That row is already terminal from the client's perspective —
+    its run journal ends in a terminal event — so recovery paths that hand a
+    stream id to the renderer must exclude it. Otherwise every fresh
+    ``/api/session/stream`` subscription replays ``server_turn_started`` for a
+    cancelled run, the client attaches, consumes the terminal event, tears the
+    renderer down and resubscribes, and the loop repeats indefinitely.
+
+    Non-dict entries stay attachable so callers that store an opaque marker are
+    unaffected; production registrations are dicts carrying ``phase``.
+    """
+    return not (
+        isinstance(run_entry, dict)
+        and str(run_entry.get("phase") or "").strip() == "cancelling"
+    )
+
+
+def active_run_cancel_is_stale(
+    run_entry,
+    *,
+    grace_seconds: float,
+    now: float | None = None,
+) -> bool:
+    """Return whether a cancelling worker outlived its bounded unwind window.
+
+    The age anchor is ``cancelled_at`` rather than the original ``started_at``
+    so a long-running turn that was just cancelled is never mistaken for an
+    orphan; ``started_at`` remains the fallback for rows created before the
+    cancellation timestamp existed. Callers own the grace window because the
+    tolerated unwind differs per surface.
+    """
+    if not isinstance(run_entry, dict):
+        return False
+    if str(run_entry.get("phase") or "").strip() != "cancelling":
+        return False
+    anchor = run_entry.get("cancelled_at") or run_entry.get("started_at")
+    if not anchor:
+        return False
+    try:
+        age = (time.time() if now is None else float(now)) - float(anchor)
+        return age >= float(grace_seconds)
+    except (TypeError, ValueError):
+        return False
 
 
 def register_active_run(stream_id: str, **metadata) -> None:
@@ -9948,6 +10316,70 @@ if _settings_file_exists:
 
 # ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
 SESSIONS: collections.OrderedDict = collections.OrderedDict()
+
+
+def get_runtime_diagnostics_snapshot() -> dict[str, dict[str, object]]:
+    """Return nonblocking scalar observations owned by the config module."""
+    result = {
+        "sessions": {"available": False, "resident": 0, "cap": 0},
+        "models_cache": {
+            "available": False,
+            "groups": 0,
+            "models": 0,
+            "age_seconds": None,
+        },
+    }
+    try:
+        if LOCK.acquire(blocking=False):
+            try:
+                # Held-section discipline: len(), arithmetic, and owner-held
+                # scalars only. Never call anything here that can resolve config
+                # or a profile, touch the filesystem, import a module, or wait on
+                # another lock — the cap is the scalar _evict_sessions_over_cap()
+                # published, precisely so this section stays leaf-nonblocking.
+                result["sessions"] = {
+                    "available": True,
+                    "resident": max(0, int(len(SESSIONS))),
+                    "cap": max(0, int(_LAST_APPLIED_SESSIONS_CACHE_MAX)),
+                }
+            finally:
+                LOCK.release()
+    except Exception:
+        pass
+    try:
+        if _available_models_cache_lock.acquire(blocking=False):
+            try:
+                # Same held-section discipline: len(), isinstance, float(), and
+                # time.monotonic() only. _available_models_cache_lock is an RLock
+                # (see its definition), so a nonblocking acquire from a thread
+                # that already holds it would report available mid-build; safe
+                # here because health collection is never nested inside a
+                # catalog build, and nothing may be added that changes that.
+                snapshot = _available_models_cache
+                groups = snapshot.get("groups") if isinstance(snapshot, dict) else None
+                group_count = len(groups) if isinstance(groups, list) else 0
+                model_count = 0
+                if isinstance(groups, list):
+                    for group in groups:
+                        if isinstance(group, dict):
+                            for bucket in ("models", "extra_models"):
+                                models = group.get(bucket)
+                                if isinstance(models, list):
+                                    model_count += len(models)
+                age = None
+                if snapshot is not None and _available_models_cache_ts:
+                    age = max(0.0, time.monotonic() - float(_available_models_cache_ts))
+                result["models_cache"] = {
+                    "available": True,
+                    "groups": max(0, int(group_count)),
+                    "models": max(0, int(model_count)),
+                    "age_seconds": age,
+                }
+            finally:
+                _available_models_cache_lock.release()
+    except Exception:
+        pass
+    return result
 
 # ── Profile state initialisation ────────────────────────────────────────────
 # Must run after all imports are resolved to correctly patch module-level caches
