@@ -3927,6 +3927,10 @@ async function loadContextBrief(force){
   await _loadBriefInto($('contextBriefPanel'), force);
 }
 
+async function loadWorkspaceContextBrief(force){
+  await _loadBriefInto($('workspaceContextPanel'), force);
+}
+
 
 async function _loadBriefInto(panel, force){
   if (!panel) return;
@@ -3939,6 +3943,9 @@ async function _loadBriefInto(panel, force){
   if (!force && panel.dataset.briefSid === sid && panel.dataset.briefLoaded === '1') return;
   panel.dataset.briefSid = sid;
   panel.dataset.briefLoaded = '';
+  // Invalidate the actionable payload as soon as a load starts: consumers
+  // (Goal finish) must never act on data older than the last load attempt.
+  panel._briefData = null;
   panel.innerHTML = `<div class="ctx-brief-empty">${esc(t('loading'))}</div>`;
   // Per-panel generation counter: two visible panels must not cancel each other.
   const seq = (panel._briefReqSeq = (panel._briefReqSeq || 0) + 1);
@@ -3982,9 +3989,9 @@ function renderContextBrief(brief, panel){
     const gen = llm.generated_at ? _ctxBriefTs(llm.generated_at) : '';
     const staleBadge = llm.stale ? `<span class="ctx-brief-badge-stale">${esc(t('context_brief_stale'))}</span>` : '';
     const fallbackNote = llm.source === 'fallback-template' ? ` · ${esc(t('context_brief_fallback'))}` : '';
-    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))} ${staleBadge}<span class="ctx-brief-dim ctx-brief-gen-date">${esc(gen)}${fallbackNote}</span></div><div class="ctx-brief-md">${_ctxBriefMdLite(llm.text)}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_regenerate'))}</button></div></div>`);
+    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))} ${staleBadge}<span class="ctx-brief-dim ctx-brief-gen-date">${esc(gen)}${fallbackNote}</span></div><div class="ctx-brief-md">${_ctxBriefMdLite(llm.text)}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_regenerate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
   } else {
-    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))}</div><div class="ctx-brief-dim ctx-brief-summary-hint">${esc(t('context_brief_summary_hint'))}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_generate'))}</button></div></div>`);
+    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))}</div><div class="ctx-brief-dim ctx-brief-summary-hint">${esc(t('context_brief_summary_hint'))}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_generate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
   }
 
   // Conversation thread: requests and their conclusions read in sequence,
@@ -4069,6 +4076,80 @@ async function _contextBriefRefresh(btn){
     _pollContextBriefJob();
   } catch(e){
     if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
+  }
+}
+
+// Compose a /goal from the brief's remaining (pending + in_progress) todos and
+// send it to the conversation, so the agent finishes the "reste à faire" work.
+async function _contextBriefGoalFinish(btn){
+  const sid = _contextBriefSid();
+  if (!sid) return;
+  const host = btn && btn.closest ? btn.closest('[data-brief-sid]') : null;
+  // Never post todos from a stale panel into a different conversation.
+  if (!host || host.dataset.briefSid !== sid){
+    if (host) _loadBriefInto(host, true);
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  // The cached brief can predate todo changes made later in this same
+  // conversation (the render hooks intentionally reuse the briefLoaded
+  // dedupe). Force-fetch the brief now so the action is built from the live
+  // todo state and never relaunches work that is already completed.
+  await _loadBriefInto(host, true);
+  if (_contextBriefSid() !== sid || host.dataset.briefSid !== sid || host.dataset.briefLoaded !== '1'){
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  const brief = host._briefData;
+  const items = (brief && brief.todos && Array.isArray(brief.todos.items) ? brief.todos.items : [])
+    .filter(it => it && (it.status === 'pending' || it.status === 'in_progress'))
+    .map(it => String(it.content || '').trim())
+    .filter(Boolean);
+  if (!items.length){
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_none'));
+    return;
+  }
+  const capped = items.slice(0, 12);
+  const list = capped.map(s => `- ${s}`).join('\n');
+  const goalText = `${t('context_goal_finish_prefix')}\n${list}`;
+  const question = t('context_goal_finish_confirm').replace('{n}', String(capped.length));
+  const ok = await showConfirmDialog({
+    title: t('context_goal_finish'),
+    message: question,
+    confirmLabel: t('context_goal_finish'),
+    focusCancel: true,
+  });
+  if (!ok) return;
+  // The dialog is async: the user may have switched conversations while it
+  // was open. Re-validate before acting so the goal never starts in a
+  // different session than the brief it was built from.
+  if (_contextBriefSid() !== sid || host.dataset.briefSid !== sid){
+    _loadBriefInto(host, true);
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  // A raw POST /api/goal starts the kickoff on the server but leaves this tab
+  // idle: no user bubble, no busy state, no SSE. Reload then hydrates via
+  // loadSession. Reuse cmdGoal (composer /goal) so the prompt and first
+  // tokens appear live without a refresh.
+  await _hydrateContextBriefGoalFinish(sid, goalText);
+}
+
+async function _hydrateContextBriefGoalFinish(sid, goalText){
+  if (typeof cmdGoal !== 'function') {
+    if (typeof showToast === 'function') showToast(t('context_brief_error'));
+    return false;
+  }
+  if (typeof S !== 'undefined' && S.session && S.session.session_id === sid && Array.isArray(S.messages)) {
+    S.messages.push({role:'user', content:goalText, _ts:Date.now()/1000});
+    if (typeof renderMessages === 'function') renderMessages();
+  }
+  try {
+    await cmdGoal(goalText);
+    return true;
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
+    return false;
   }
 }
 

@@ -6530,6 +6530,7 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .ctx-brief-md-p{margin:2px 0;}
 .ctx-brief-btn{cursor:pointer;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--accent-text,var(--blue));font-size:12px;font-weight:600;padding:4px 10px;}
 .ctx-brief-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.ctx-brief-btn-goal{color:var(--green,#22c55e);}
 .ctx-brief-btn:hover{background:var(--hover-bg,rgba(127,127,127,.12));}
 .ctx-brief-summary-hint{margin:2px 0 4px;line-height:1.4;}
 .ctx-brief-generating{margin-bottom:10px;padding:8px 12px;border:1px dashed var(--border);border-radius:8px;color:var(--muted);font-size:12px;}
@@ -6543,6 +6544,11 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .rightpanel[data-active-tab="files"] .workspace-artifacts{display:none!important;}
 .rightpanel[data-active-tab="todos"] .breadcrumb-bar,.rightpanel[data-active-tab="todos"] .file-tree,.rightpanel[data-active-tab="todos"] #wsEmptyState,.rightpanel[data-active-tab="todos"] .workspace-artifacts{display:none!important;}
 .rightpanel:not([data-active-tab="todos"]) .workspace-todos{display:none!important;}
+.rightpanel[data-active-tab="context"] .breadcrumb-bar,.rightpanel[data-active-tab="context"] .file-tree,.rightpanel[data-active-tab="context"] #wsEmptyState,.rightpanel[data-active-tab="context"] .workspace-artifacts{display:none!important;}
+/* An already-open file preview (.preview-area.visible is display:flex) must not
+   leak under/next to the Context brief — hide the whole preview chrome too. */
+.rightpanel[data-active-tab="context"] #previewArea,.rightpanel[data-active-tab="context"] .preview-area,.rightpanel[data-active-tab="context"] .preview-area.visible{display:none!important;}
+.rightpanel:not([data-active-tab="context"]) .workspace-context{display:none!important;}
 .cron-run-usage-strip{display:inline-flex;align-items:center;gap:4px;margin-left:8px;color:var(--text-secondary);font-size:11px;opacity:.72;white-space:nowrap;}
 .cron-run-usage-footer{display:flex;margin:8px 0 0 0;padding-top:8px;border-top:1px solid var(--border-subtle);}
 .cron-item.active,.ws-row.active,.profile-card.active{background:var(--accent-bg);}

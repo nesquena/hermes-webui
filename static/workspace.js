@@ -370,11 +370,12 @@ if(typeof document !== 'undefined'){
 }
 
 function switchWorkspacePanelTab(tab){
-  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : 'files';
+  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : tab === 'todos' ? 'todos' : tab === 'context' ? 'context' : 'files';
   _setWorkspacePanelTabDataset();
   const filesTab = $('workspaceFilesTab');
   const artifactsTab = $('workspaceArtifactsTab');
   const todosTab = $('workspaceTodosTab');
+  const contextTab = $('workspaceContextTab');
   if(filesTab){
     filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
     filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
@@ -387,12 +388,19 @@ function switchWorkspacePanelTab(tab){
     todosTab.classList.toggle('active', _workspacePanelActiveTab === 'todos');
     todosTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'todos' ? 'true' : 'false');
   }
+  if(contextTab){
+    contextTab.classList.toggle('active', _workspacePanelActiveTab === 'context');
+    contextTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'context' ? 'true' : 'false');
+  }
   const artifacts = $('workspaceArtifacts');
   if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
   const todosPanel = $('workspaceTodosPanel');
   if(todosPanel) todosPanel.hidden = _workspacePanelActiveTab !== 'todos';
+  const contextPanel = $('workspaceContextPanel');
+  if(contextPanel) contextPanel.hidden = _workspacePanelActiveTab !== 'context';
   if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
   if(_workspacePanelActiveTab === 'todos') _loadWorkspacePanelTodos();
+  if(_workspacePanelActiveTab === 'context' && typeof loadWorkspaceContextBrief === 'function') loadWorkspaceContextBrief();
 }
 
 function _loadWorkspacePanelTodos(){
