@@ -8956,12 +8956,114 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     # the paginated load). The append-only merge is O(n) over already-bounded
     # in-memory lists; the real latency win here is skipping the lineage-parent
     # DISK load above, which we still skip. (#4070 ship-review)
-    return merge_session_messages_append_only(
+    #
+    # perf: the merge itself is still expensive for multi-thousand-message
+    # historical transcripts (~2-3s per request: json.dumps merge keys +
+    # loose-content probes per row), and GET /api/session re-runs it on every
+    # open/poll. Memoize per session id. Validity is fail-closed:
+    #   - only INACTIVE sessions (no active stream, no pending user message):
+    #     an active session's in-memory tail can be ahead of its disk
+    #     signature, so it always recomputes;
+    #   - the child sidecar's exact stat signature plus every lineage parent
+    #     signature recorded by _webui_sidecar_lineage_messages_for_display;
+    #   - the sidecar row count and last timestamp (guards unsaved in-memory
+    #     appends that have not reached disk yet);
+    #   - a content fingerprint of the (bounded) state.db rows.
+    # Any uncertainty (missing signature, fingerprint failure) skips caching.
+    cache_key = None
+    if not getattr(session, "active_stream_id", None) and not getattr(session, "pending_user_message", None):
+        cache_key = _display_merge_cache_key(session, sidecar_messages, state_db_messages)
+    if cache_key is not None:
+        sid = str(getattr(session, "session_id", "") or "")
+        with _display_merge_cache_lock:
+            entry = _display_merge_cache.get(sid)
+            if entry is not None and entry.get("key") == cache_key:
+                _display_merge_cache.move_to_end(sid, last=True)
+                return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+    merged = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
     )
+    if cache_key is not None:
+        sid = str(getattr(session, "session_id", "") or "")
+        with _display_merge_cache_lock:
+            _display_merge_cache[sid] = {"key": cache_key, "messages": merged}
+            _display_merge_cache.move_to_end(sid, last=True)
+            while len(_display_merge_cache) > _DISPLAY_MERGE_CACHE_MAX:
+                _display_merge_cache.popitem(last=False)
+        # Same shallow-copy contract as the cache-hit path (and as the lineage
+        # cache): callers may attach display metadata to the returned rows.
+        return [dict(m) if isinstance(m, dict) else m for m in merged]
+    return merged
+
+
+# perf: memoized sidecar↔state.db display merges for GET /api/session.
+# See _limited_webui_messages_for_display_with_sidecar for the validity rules.
+_DISPLAY_MERGE_CACHE_MAX = 16
+_display_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
+_display_merge_cache_lock = threading.Lock()
+
+
+def _display_merge_cache_key(session, sidecar_messages, state_db_messages):
+    """Return a fail-closed validity key for the display-merge cache, or None.
+
+    None means "do not cache": any component that cannot be resolved exactly
+    (missing sidecar signature, unfingerprintable state rows) disables the
+    cache for this request rather than risking a stale transcript.
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if self_sig is None:
+        return None
+    # Lineage parents: reuse the signatures recorded by the (already memoized)
+    # lineage stitch so a write to any parent snapshot invalidates this cache
+    # too. A lineage without snapshot parents records no entry — empty tuple.
+    parent_sigs: tuple = ()
+    with _lineage_display_cache_lock:
+        lineage_entry = _lineage_display_cache.get(sid)
+        if lineage_entry is not None:
+            parent_sigs = tuple(
+                (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
+                for path, sig in (lineage_entry.get("parent_sigs") or [])
+            )
+    last_ts = None
+    if sidecar_messages:
+        last = sidecar_messages[-1]
+        if isinstance(last, dict):
+            last_ts = last.get("timestamp")
+    state_fp = _state_db_rows_fingerprint(state_db_messages)
+    if state_fp is None:
+        return None
+    return (
+        self_sig,
+        parent_sigs,
+        len(sidecar_messages),
+        last_ts,
+        state_fp,
+        getattr(session, "truncation_watermark", None),
+        getattr(session, "truncation_boundary", None),
+    )
+
+
+def _state_db_rows_fingerprint(rows) -> str | None:
+    """Content fingerprint of the state.db display rows, or None on failure."""
+    try:
+        h = hashlib.sha256()
+        h.update(str(len(rows)).encode("utf-8"))
+        for row in rows:
+            if isinstance(row, dict):
+                h.update(json.dumps(row, sort_keys=True, default=str).encode("utf-8", "replace"))
+            else:
+                h.update(repr(row).encode("utf-8", "replace"))
+        return h.hexdigest()
+    except Exception:
+        return None
 
 
 def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
