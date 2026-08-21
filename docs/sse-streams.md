@@ -56,6 +56,31 @@ infer it from the status code. Clients that only need session updates should
 use `/api/session/stream` directly; the gateway probe is only relevant for
 clients that display CLI/TUI/messaging sessions.
 
+## Browser background-stream connection budget
+
+The browser keeps the selected conversation's `EventSource` open and may retain
+recent background session streams in a bounded least-recently-used pool. Pool
+eviction always calls the normal `closeLiveStream` teardown so inflight snapshot
+and reattach bookkeeping remain intact.
+
+The connection budget is fail-closed:
+
+- HTTP/1.1, unknown, blank, cross-origin, or stale timing evidence allows at
+  most **3** simultaneous chat/session streams, leaving headroom for fetch/XHR
+  inside the browser's per-origin connection limit.
+- A stable HTTP/2 or HTTP/3 page may retain up to **30** streams because the
+  connection is multiplexed. The frontend prefers the newest same-origin
+  Resource Timing entry and uses navigation timing only when no such entry
+  exists.
+- The protocol of a replacement `EventSource` cannot be known before opening.
+  Therefore any explicit reconnect, SSE error, `online` transition, or BFCache
+  restore permanently locks the current page to the 3-stream budget and prunes
+  excess streams immediately. A reload is required before transport evidence
+  may widen the pool again.
+
+These rules are client-side safety limits; they do not alter the server SSE
+endpoint contracts or heartbeat cadence.
+
 ## Heartbeats and proxy behavior
 
 - All long-lived streams emit SSE keepalive comment lines on the
