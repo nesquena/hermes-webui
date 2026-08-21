@@ -101,6 +101,165 @@ console.log(JSON.stringify(metrics));
     assert metrics["bottomPad"] == 0
 
 
+def test_compaction_cards_cross_virtualization_threshold_with_one_task_owner():
+    """Execute the real window and compaction DOM helpers with a tiny DOM.
+
+    This deliberately reuses issue #500's proven virtualization harness instead
+    of evaluating all of renderMessages() against a hand-built browser clone.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+const assert = require('assert');
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
+  user: 120,
+  assistant: 160,
+  tool_call: 400,
+  default: 140,
+};
+const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
+const MESSAGE_VIRTUAL_BUFFER_PX = 0;
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualWindow'));
+eval(extractFunc('_selectCompactionCardPlacements'));
+eval(extractFunc('_pinCompactionCardAtTop'));
+eval(extractFunc('_insertCompactionCardNodes'));
+eval(extractFunc('_insertPreservedCompressionTaskFallback'));
+eval(extractFunc('_insertCompressionLikeNodeByRawIdx'));
+
+class MiniNode {
+  constructor(label, rawIdx = null) {
+    this.label = label;
+    this.rawIdx = rawIdx;
+    this.children = [];
+    this.parentElement = null;
+  }
+  appendChild(node) {
+    if (node.parentElement) node.remove();
+    node.parentElement = this;
+    this.children.push(node);
+    return node;
+  }
+  insertBefore(node, reference) {
+    if (node.parentElement) node.remove();
+    node.parentElement = this;
+    const index = this.children.indexOf(reference);
+    if (index < 0) this.children.push(node);
+    else this.children.splice(index, 0, node);
+    return node;
+  }
+  remove() {
+    if (!this.parentElement) return;
+    const index = this.parentElement.children.indexOf(this);
+    if (index >= 0) this.parentElement.children.splice(index, 1);
+    this.parentElement = null;
+  }
+}
+function _assistantTurnBlocks() { return null; }
+function taskCount(node) {
+  return (node.label === 'task' ? 1 : 0)
+    + node.children.reduce((total, child) => total + taskCount(child), 0);
+}
+function card(kind, rawIdx, taskOwner) {
+  const node = new MiniNode(`${kind}:${rawIdx}`, rawIdx);
+  if (taskOwner && taskOwner.kind === kind && taskOwner.rawIdx === rawIdx) {
+    node.appendChild(new MiniNode('task'));
+  }
+  return {kind, rawIdx, node};
+}
+
+const visible = Array.from({length: 100}, (_, index) => ({
+  rawIdx: index * 2,
+  m: {role: 'user'},
+}));
+const virtualWindow = _messageVirtualWindow({
+  total: visible.length,
+  scrollTop: 120 * 200,
+  viewportHeight: 720,
+  heights: Array.from({length: visible.length}, () => 120),
+  defaultHeight: 120,
+  bufferPx: 0,
+  threshold: MESSAGE_VIRTUAL_THRESHOLD_ROWS,
+  keepTailCount: 20,
+});
+assert.strictEqual(virtualWindow.virtualized, true);
+const renderVisWithIdx = visible.slice(virtualWindow.start);
+const firstRenderedRawIdx = renderVisWithIdx[0].rawIdx;
+assert.strictEqual(firstRenderedRawIdx, 160);
+
+let inner;
+let assistantSegments;
+let userRows;
+function renderScenario(markers) {
+  const placements = _selectCompactionCardPlacements(markers, firstRenderedRawIdx);
+  inner = new MiniNode('inner');
+  assistantSegments = new Map();
+  userRows = new Map();
+  let taskOwnerNode = null;
+
+  if (placements.latestPreWindowMarker !== null) {
+    const entry = card('pre-window', placements.latestPreWindowMarker, placements.taskOwner);
+    const mounted = _insertCompactionCardNodes(
+      [entry],
+      placements.taskOwner,
+      node => _pinCompactionCardAtTop(inner, node),
+    );
+    taskOwnerNode = mounted.taskOwnerNode;
+  }
+
+  for (const entry of renderVisWithIdx) {
+    const row = new MiniNode(`row:${entry.rawIdx}`, entry.rawIdx);
+    inner.appendChild(row);
+    userRows.set(entry.rawIdx, row);
+  }
+
+  const inlineEntries = placements.inlineMarkers.map(rawIdx =>
+    card('inline', rawIdx, placements.taskOwner)
+  );
+  const mounted = _insertCompactionCardNodes(
+    inlineEntries,
+    placements.taskOwner,
+    (node, rawIdx) => _insertCompressionLikeNodeByRawIdx(node, rawIdx),
+  );
+  taskOwnerNode = mounted.taskOwnerNode || taskOwnerNode;
+
+  const fallback = new MiniNode('standalone-tasks');
+  fallback.appendChild(new MiniNode('task'));
+  const fallbackInserted = _insertPreservedCompressionTaskFallback(
+    taskOwnerNode,
+    fallback,
+    node => { inner.appendChild(node); return true; },
+  );
+  return {placements, inner, taskOwnerNode, fallbackInserted};
+}
+
+const mixed = renderScenario([1, 79, 159, 170]);
+assert.deepStrictEqual(mixed.placements, {
+  inlineMarkers: [170],
+  latestPreWindowMarker: 159,
+  taskOwner: {kind: 'inline', rawIdx: 170},
+});
+assert.strictEqual(mixed.inner.children[0].label, 'pre-window:159');
+assert.ok(
+  mixed.inner.children.indexOf(mixed.taskOwnerNode)
+    < mixed.inner.children.findIndex(node => node.rawIdx > 170),
+);
+assert.strictEqual(taskCount(mixed.inner), 1);
+assert.strictEqual(mixed.fallbackInserted, false);
+
+const preWindowOnly = renderScenario([1, 79, 159]);
+assert.strictEqual(preWindowOnly.taskOwnerNode.label, 'pre-window:159');
+assert.strictEqual(taskCount(preWindowOnly.inner), 1);
+assert.strictEqual(preWindowOnly.fallbackInserted, false);
+
+const noMarkers = renderScenario([]);
+assert.strictEqual(noMarkers.taskOwnerNode, null);
+assert.strictEqual(noMarkers.fallbackInserted, true);
+assert.strictEqual(taskCount(noMarkers.inner), 1);
+console.log('ok');
+"""
+    assert _run_node(source) == "ok"
+
+
 def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     render_start = js.index("function renderMessages(options)")

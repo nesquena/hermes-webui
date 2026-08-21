@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from pathlib import Path
 
@@ -103,11 +102,51 @@ assert.deepStrictEqual(_loadedCompactionMarkerRawIdxs({json.dumps(messages)}), [
     _run_node(script)
 
 
+def test_compaction_placement_selection_covers_window_boundaries() -> None:
+    source = UI_JS.read_text(encoding="utf-8")
+    helper = _extract_function(source, "_selectCompactionCardPlacements")
+    script = f"""
+const assert = require('assert');
+{helper}
+assert.deepStrictEqual(
+  _selectCompactionCardPlacements([3, 11, 49, 50, 88], 50),
+  {{
+    inlineMarkers: [50, 88],
+    latestPreWindowMarker: 49,
+    taskOwner: {{kind: 'inline', rawIdx: 88}},
+  }},
+);
+assert.deepStrictEqual(
+  _selectCompactionCardPlacements([3, 11, 49], 50),
+  {{
+    inlineMarkers: [],
+    latestPreWindowMarker: 49,
+    taskOwner: {{kind: 'pre-window', rawIdx: 49}},
+  }},
+);
+assert.deepStrictEqual(
+  _selectCompactionCardPlacements([50, 88], 50),
+  {{
+    inlineMarkers: [50, 88],
+    latestPreWindowMarker: null,
+    taskOwner: {{kind: 'inline', rawIdx: 88}},
+  }},
+);
+assert.deepStrictEqual(
+  _selectCompactionCardPlacements([], 50),
+  {{inlineMarkers: [], latestPreWindowMarker: null, taskOwner: null}},
+);
+"""
+    _run_node(script)
+
+
 def test_settled_reference_is_pinned_at_top_when_marker_is_outside_tail() -> None:
     source = UI_JS.read_text(encoding="utf-8")
+    pin_helper = _extract_function(source, "_pinCompactionCardAtTop")
     helper = _extract_function(source, "_pinSettledCompressionReferenceAtTop")
     script = f"""
 const assert = require('assert');
+{pin_helper}
 {helper}
 const children = [];
 const inner = {{ appendChild(node) {{ children.push(node); return node; }} }};
@@ -118,8 +157,3 @@ assert.strictEqual(_pinSettledCompressionReferenceAtTop(inner, {{id:'inline'}}, 
 assert.deepStrictEqual(children, [card]);
 """
     _run_node(script)
-    assert re.search(
-        r"referenceNodePinnedAtTop\s*=\s*_pinSettledCompressionReferenceAtTop\(",
-        source,
-    ), "render path must pin the settled summary before transcript rows"
-    assert "if(!referenceNodePinnedAtTop)" in source
