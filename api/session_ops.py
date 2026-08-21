@@ -120,7 +120,7 @@ def plan_regeneration(session, *, expected_revision=None, lock_held=False):
     """Prepare one canonical display/context pair for a locked regeneration."""
     lock_context = nullcontext() if lock_held else _get_session_agent_lock(session.session_id)
     with lock_context:
-        rows, context = regeneration_state(session)
+        rows, context = regeneration_state(session, use_sidecar=True)
         revision = regeneration_revision_for(rows, session=session, context=context)
         if expected_revision is not None and expected_revision != revision:
             raise RegenerationUnavailable("stale_regeneration_revision")
@@ -217,8 +217,13 @@ def regeneration_context(session):
     return regeneration_state(session)[1]
 
 
-def regeneration_state(session):
+def regeneration_state(session, *, use_sidecar=False):
     """Read one immutable state.db snapshot and reconcile both transcript views."""
+    if use_sidecar:
+        # Use the WebUI sidecar messages to avoid hitting state.db (e.g., for regeneration)
+        messages = getattr(session, "messages", [])
+        context = getattr(session, "context_messages", [])
+        return messages, context
     from api.models import (
         get_state_db_session_messages,
         reconciled_state_db_messages_for_session,
@@ -242,7 +247,7 @@ def regeneration_state(session):
 
 
 def regeneration_revision(session) -> str:
-    rows, context = regeneration_state(session)
+    rows, context = regeneration_state(session, use_sidecar=True)
     return regeneration_revision_for(
         rows,
         session=session,
