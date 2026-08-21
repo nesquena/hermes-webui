@@ -1,0 +1,116 @@
+# Three-service Docker Compose: Hermes Agent (gateway + dashboard) + WebUI
+#
+# v0.14+ layout from docs/docker.md: the built-in dashboard runs INSIDE the
+# hermes-agent process via HERMES_DASHBOARD_HOST / HERMES_DASHBOARD_PORT.
+# This avoids the startup failure of the legacy three-container layout, where
+# `dashboard --host 0.0.0.0 --insecure` as a separate container is rejected by
+# the agent image's auth gate when no dashboard auth provider is registered:
+#
+#   Refusing to bind dashboard to 0.0.0.0 — the auth gate engages on
+#   non-loopback binds, but no auth providers are registered.  (issue #6876)
+#
+# QUICK START:
+#   docker compose -f docker-compose.three-service.yml up -d
+#   Open http://localhost:8787 (chat) and http://localhost:9119 (dashboard)
+#
+# The dashboard listener is covered by the agent's own auth gate (the gateway
+# API_SERVER_KEY), and the host-side publish stays loopback-only by default.
+# For remote access set HERMES_AGENT_BIND=0.0.0.0 and API_SERVER_KEY (>=16
+# chars) in .env, then recreate the stack. The WebUI reports "Hermes agent is
+# not responding" when the gateway listener is down — API_SERVER_KEY must be
+# set for port 8642 to open.
+#
+# NOTE ON VOLUMES:
+#   This file uses named Docker volumes (hermes-home, hermes-agent-src) which
+#   work out of the box. When using bind mounts, ALL containers must mount the
+#   same host path AND run as the same UID/GID (set via the UID/GID env vars).
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    ports:
+      # Gateway API (port 8642). Bind to loopback by default; set
+      # HERMES_AGENT_BIND=0.0.0.0 in .env for remote access.
+      - "${HERMES_AGENT_BIND:-127.0.0.1}:8642:8642"
+      # Built-in dashboard (port 9119), served by the agent process itself.
+      - "127.0.0.1:9119:9119"
+    volumes:
+      # Persist config, state, sessions, skills, memory across restarts
+      - hermes-home:/home/hermes/.hermes
+      # Expose agent source so the WebUI can install dependencies from it
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/home/hermes/.hermes
+      # Align UID/GID across containers sharing the hermes-home volume.
+      - HERMES_UID=${UID:-1000}
+      - HERMES_GID=${GID:-1000}
+      # Built-in dashboard (v0.14+): runs inside the gateway process instead
+      # of a separate `dashboard --host 0.0.0.0 --insecure` container (which
+      # the auth gate rejects — issue #6876).
+      - HERMES_DASHBOARD_HOST=0.0.0.0
+      - HERMES_DASHBOARD_PORT=9119
+      # Gateway API server (port 8642). The listener only opens when
+      # API_SERVER_KEY is a usable value (>=16 chars); set it in .env.
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${API_SERVER_KEY:-}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+    networks:
+      - hermes-net
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      # Expose on localhost only. Remove 127.0.0.1: to expose on all interfaces
+      # (set HERMES_WEBUI_PASSWORD if doing so).
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # Same hermes home as the agent — shares config, sessions, state
+      - hermes-home:/home/hermeswebui/.hermes
+      # Agent source mounted where docker_init.bash expects it (read-only).
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
+      # Workspace directory — browse and edit files from the WebUI.
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      # WebUI health/status checks reach the gateway over the compose network.
+      - HERMES_API_URL=http://hermes-agent:8642
+      # Match your host user's UID/GID for correct file permissions.
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+      # Forward the API server key so the WebUI gateway probe can authenticate.
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}
+      # Optional: enable password auth. Set HERMES_WEBUI_PASSWORD in .env.
+      - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD:-}
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  # IMPORTANT — upgrading the agent image:
+  #   The hermes-agent-src volume is initialised from the agent image's
+  #   /opt/hermes on first `up`; Docker reuses the volume verbatim on later
+  #   runs. After upgrading the agent image, run:
+  #
+  #     docker compose -f docker-compose.three-service.yml down
+  #     docker volume rm <project>_hermes-agent-src
+  #     docker compose -f docker-compose.three-service.yml pull
+  #     docker compose -f docker-compose.three-service.yml up -d
+  hermes-home:
+  hermes-agent-src:
