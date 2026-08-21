@@ -710,13 +710,11 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     fallback chains (issue #3294).
 
     This helper reads the config for a *known* profile home directly off disk,
-    bypassing the thread-local resolver entirely. When ``profile_home`` matches
-    the path the ambient resolver would pick (the common single-profile case),
-    we return the cached ``get_config()`` to preserve in-memory overrides used
-    by tests and runtime callers. Only when the session's profile home diverges
-    from the ambient path do we read the session profile's file directly — a
-    pure read with no global cache mutation, so it is race-free across
-    concurrent sessions on different profiles.
+    bypassing the thread-local resolver entirely. When the profile directory
+    contains a config.yaml, we read it directly — a pure read with no global
+    cache mutation, ensuring race-free isolation across concurrent requests
+    and sessions on different profiles. If no config.yaml exists on disk
+    (e.g. in-memory test setups or fresh installs), we fall back to get_config().
     """
     if not profile_home:
         return get_config()
@@ -724,31 +722,21 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         target = Path(profile_home).expanduser()
     except Exception:
         return get_config()
-    try:
-        from api.profiles import get_active_hermes_home
 
-        if Path(get_active_hermes_home()).expanduser() == target:
-            return get_config()
-    except Exception:
-        pass
-    # If the ambient resolver already points at this profile home, defer to
-    # get_config() so in-memory overrides (monkeypatched cfg) are honored. This
-    # MUST run before the nonexistent-home guard below: a matching ambient home
-    # whose directory doesn't physically exist yet (fresh install, monkeypatched
-    # cfg) must still resolve through get_config(), not return {} (#4516 gate).
-    try:
-        if _get_config_path().parent == target:
-            return get_config()
-    except Exception:
-        pass
+    config_file = target / "config.yaml"
+    if config_file.exists():
+        profile_cfg = _load_yaml_config_file(config_file)
+        _apply_config_defaults(profile_cfg)
+        return profile_cfg
+
     if not target.exists():
-        return {}
-    # Read the profile file directly and apply documented defaults locally so the
-    # returned dict matches ambient get_config() shape (including built-in
-    # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(target / "config.yaml")
-    _apply_config_defaults(profile_cfg)
-    return profile_cfg
+        try:
+            if _get_config_path().parent != target:
+                return {}
+        except Exception:
+            return {}
+
+    return get_config()
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:

@@ -425,6 +425,110 @@ def test_gateway_multimodal_message_preserves_remote_profile_workspace(monkeypat
     assert msg == "hello"
 
 
+def test_isolated_profile_config_read_does_not_mutate_or_read_shared_cache(monkeypatch, tmp_path):
+    """Explicit profile config lookup must not leak into or read from mutable global config cache."""
+    alice_home = tmp_path / "profiles" / "alice"
+    alice_home.mkdir(parents=True)
+    (alice_home / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-alice\n", encoding="utf-8")
+
+    bob_home = tmp_path / "profiles" / "bob"
+    bob_home.mkdir(parents=True)
+    (bob_home / "config.yaml").write_text("terminal:\n  backend: local\n  cwd: /Users/bob\n", encoding="utf-8")
+
+    from api import profiles
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # Active TLS profile is alice
+    profiles.set_request_profile("alice")
+    try:
+        # 1. alice resolves to remote cwd
+        assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
+        assert workspace._remote_terminal_cwd() == "/srv/remote-alice"
+
+        # 2. bob resolves to None (local backend)
+        assert workspace._remote_terminal_cwd("bob") is None
+
+        # 3. Simulate concurrent reload on global _cfg_cache pointing to bob or dirty state
+        monkeypatch.setattr(api_config, "_cfg_cache", {"terminal": {"backend": "local", "cwd": "/Users/polluted"}})
+
+        # Explicit lookup of alice still resolves to alice's on-disk terminal cwd, not polluted global cache
+        assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
+        assert workspace.validate_workspace_to_add("/srv/remote-alice/sub", profile="alice") == Path("/srv/remote-alice/sub")
+    finally:
+        profiles.clear_request_profile()
+
+
+def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
+    """Workspace route actions (add, remove, rename, reorder) must be fully isolated per profile."""
+    from api import profiles
+    from api.routes import (
+        _handle_workspace_add,
+        _handle_workspace_remove,
+        _handle_workspace_rename,
+        _handle_workspace_reorder,
+    )
+
+    alice_home = tmp_path / "profiles" / "alice"
+    alice_home.mkdir(parents=True)
+    (alice_home / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-alice\n", encoding="utf-8")
+
+    bob_home = tmp_path / "profiles" / "bob"
+    bob_home.mkdir(parents=True)
+    (bob_home / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-bob\n", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+
+    class MockHandler:
+        def __init__(self):
+            self.status = 200
+            self.data = None
+        def send_response(self, code): self.status = code
+        def send_header(self, *args): pass
+        def end_headers(self): pass
+        @property
+        def wfile(self):
+            class W:
+                def write(inner_self, b): pass
+            return W()
+
+    # Add workspace under Alice
+    profiles.set_request_profile("alice")
+    try:
+        h1 = MockHandler()
+        _handle_workspace_add(h1, {"path": "/srv/remote-alice/project1", "name": "Project 1"})
+        assert len(workspace.load_workspaces(profile="alice")) == 2
+        assert any(w["path"] == "/srv/remote-alice/project1" for w in workspace.load_workspaces(profile="alice"))
+    finally:
+        profiles.clear_request_profile()
+
+    # Bob's workspaces must be clean and not contain Alice's workspace
+    profiles.set_request_profile("bob")
+    try:
+        h2 = MockHandler()
+        assert len(workspace.load_workspaces(profile="bob")) == 1
+        assert workspace.load_workspaces(profile="bob")[0]["path"] == "/srv/remote-bob"  # Default workspace for bob
+
+        _handle_workspace_add(h2, {"path": "/srv/remote-bob/app", "name": "Bob App"})
+        bob_ws = workspace.load_workspaces(profile="bob")
+        assert any(w["path"] == "/srv/remote-bob/app" for w in bob_ws)
+        assert not any("remote-alice" in w["path"] for w in bob_ws)
+    finally:
+        profiles.clear_request_profile()
+
+    # Re-verify Alice's workspaces did not get Bob's workspace
+    profiles.set_request_profile("alice")
+    try:
+        alice_ws = workspace.load_workspaces(profile="alice")
+        assert len(alice_ws) == 2
+        assert any(w["path"] == "/srv/remote-alice/project1" for w in alice_ws)
+        assert not any("remote-bob" in w["path"] for w in alice_ws)
+    finally:
+        profiles.clear_request_profile()
+
+
 
 
 

@@ -14160,11 +14160,21 @@ def handle_get(handler, parsed) -> bool:
         return _handle_session_export(handler, parsed)
 
     if parsed.path == "/api/workspaces":
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        try:
+            lw = get_last_workspace(profile=active_profile)
+        except TypeError:
+            lw = get_last_workspace()
         return j(
             handler,
             {
-                "workspaces": load_workspaces(),
-                "last": get_last_workspace(),
+                "workspaces": wss,
+                "last": lw,
                 "terminal_remote_backend": _terminal_remote_backend_enabled(),
             },
         )
@@ -14626,7 +14636,10 @@ def handle_get(handler, parsed) -> bool:
         # profile-scoped via the per-request hermes_profile cookie set in server.py.
         # Fail open: a resolution error must never 500 this boot-critical endpoint.
         try:
-            _profile_default_workspace = get_profile_default_workspace()
+            try:
+                _profile_default_workspace = get_profile_default_workspace(profile=active_profile_name)
+            except TypeError:
+                _profile_default_workspace = get_profile_default_workspace()
         except Exception:
             logger.debug("Failed to resolve profile default workspace for /api/profile/active", exc_info=True)
             _profile_default_workspace = None
@@ -25822,11 +25835,17 @@ def _handle_workspace_add(handler, body):
         p = validate_workspace_to_add(path_str, profile=active_profile)
     except ValueError as e:
         return bad(handler, str(e))
-    wss = load_workspaces()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     if any(w["path"] == str(p) for w in wss):
         return bad(handler, "Workspace already in list")
     wss.append({"path": str(p), "name": name or p.name})
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25834,9 +25853,17 @@ def _handle_workspace_remove(handler, body):
     path_str = body.get("path", "").strip()
     if not path_str:
         return bad(handler, "path is required")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     wss = [w for w in wss if w["path"] != path_str]
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25845,14 +25872,22 @@ def _handle_workspace_rename(handler, body):
     name = body.get("name", "").strip()
     if not path_str or not name:
         return bad(handler, "path and name are required")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     for w in wss:
         if w["path"] == path_str:
             w["name"] = name
             break
     else:
         return bad(handler, "Workspace not found", 404)
-    save_workspaces(wss)
+    try:
+        save_workspaces(wss, profile=active_profile)
+    except TypeError:
+        save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -25866,7 +25901,12 @@ def _handle_workspace_reorder(handler, body):
     paths = body.get("paths", [])
     if not paths or not isinstance(paths, list):
         return bad(handler, "paths is required and must be a list")
-    wss = load_workspaces()
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    try:
+        wss = load_workspaces(profile=active_profile)
+    except TypeError:
+        wss = load_workspaces()
     by_path = {w["path"]: w for w in wss}
     # Build reordered list: given order first, then any omitted entries
     reordered = []
@@ -25880,7 +25920,10 @@ def _handle_workspace_reorder(handler, body):
     for w in wss:
         if w["path"] not in seen:
             reordered.append(w)
-    save_workspaces(reordered)
+    try:
+        save_workspaces(reordered, profile=active_profile)
+    except TypeError:
+        save_workspaces(reordered)
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
