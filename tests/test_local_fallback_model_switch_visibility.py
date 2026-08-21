@@ -104,15 +104,19 @@ const cases = {{
     '@custom:local:llama3:8b'),
   slashQualifiedSwitch: _localModelSwitchText(
     {{ _usedModel: 'my-local/gpt-4' }}, 'openai/gpt-4'),
+  bareRequestedSlashUsed: _localModelSwitchText(
+    {{ _usedModel: 'my-local/gpt-4' }}, 'gpt-4'),
+  slashRequestedBareUsed: _localModelSwitchText(
+    {{ _usedModel: 'gpt-4' }}, 'my-local/gpt-4'),
   slashHintedSwitch: _localModelSwitchText(
     {{ _usedModel: '@ollama:my-local/gpt-4' }}, '@ollama:openai/gpt-4'),
   slashHintedSame: _localModelSwitchText(
     {{ _usedModel: 'openai/gpt-4' }}, '@ollama:openai/gpt-4'),
   slashHintedSameReverse: _localModelSwitchText(
     {{ _usedModel: '@ollama:openai/gpt-4' }}, 'openai/gpt-4'),
-  providerQualifiedRequestedSame: _localModelSwitchText(
+  providerQualifiedRequestedSwitch: _localModelSwitchText(
     {{ _usedModel: 'claude-opus-5' }}, 'anthropic/claude-opus-5'),
-  providerQualifiedUsedSame: _localModelSwitchText(
+  providerQualifiedUsedSwitch: _localModelSwitchText(
     {{ _usedModel: 'anthropic/claude-opus-5' }}, 'claude-opus-5'),
   identical: _localModelSwitchText({{ _usedModel: 'gpt-5.6-sol' }}, 'gpt-5.6-sol'),
   caseInsensitive: _localModelSwitchText(
@@ -154,8 +158,8 @@ def test_bare_model_id_preserves_colon_tag_after_the_routing_prefix():
     assert _local_model_switch("@ollama:llama3:8b", "llama3:8b") is False
 
 
-def test_slash_namespace_is_preserved_without_breaking_bare_provider_notation():
-    """Two namespaced IDs differ, while one namespaced/bare pair is notation-only."""
+def test_slash_namespace_is_never_equivalent_to_a_bare_model_id():
+    """Slash-qualified identity stays distinct from a bare name in both directions."""
     from api.streaming import _bare_model_id, _local_model_switch
 
     assert _bare_model_id("@ollama:openai/gpt-4") == "openai/gpt-4"
@@ -167,15 +171,16 @@ def test_slash_namespace_is_preserved_without_breaking_bare_provider_notation():
     assert _local_model_switch("openai/gpt-4", "my-local/gpt-4") is True
     assert _local_model_switch("@ollama:openai/gpt-4", "@ollama:my-local/gpt-4") is True
 
+    # A slash namespace is identity-bearing even when the other side has the
+    # same basename. Both directions must stamp the local fallback switch.
+    assert _local_model_switch("gpt-4", "my-local/gpt-4") is True
+    assert _local_model_switch("my-local/gpt-4", "gpt-4") is True
+    assert _local_model_switch("anthropic/claude-opus-5", "claude-opus-5") is True
+    assert _local_model_switch("claude-opus-5", "anthropic/claude-opus-5") is True
+
     # A routing hint does not change the namespaced model identity.
     assert _local_model_switch("@ollama:openai/gpt-4", "openai/gpt-4") is False
     assert _local_model_switch("openai/gpt-4", "@ollama:openai/gpt-4") is False
-
-    # Runtime resolution can preserve or remove a redundant first-party provider
-    # prefix depending on the endpoint. Keep the legacy equivalence in either
-    # direction when only one side is namespaced.
-    assert _local_model_switch("anthropic/claude-opus-5", "claude-opus-5") is False
-    assert _local_model_switch("claude-opus-5", "anthropic/claude-opus-5") is False
 
 
 def test_requested_model_is_captured_before_the_run_mutates_agent_model():
@@ -246,14 +251,18 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert "qwen2.5:8b" in cases["customColonTaggedSwitch"]
     assert "openai/gpt-4" in cases["slashQualifiedSwitch"]
     assert "my-local/gpt-4" in cases["slashQualifiedSwitch"]
+    assert cases["bareRequestedSlashUsed"] == "Model switched: gpt-4 → my-local/gpt-4"
+    assert cases["slashRequestedBareUsed"] == "Model switched: my-local/gpt-4 → gpt-4"
     assert "openai/gpt-4" in cases["slashHintedSwitch"]
     assert "my-local/gpt-4" in cases["slashHintedSwitch"]
+    assert "anthropic/claude-opus-5" in cases["providerQualifiedRequestedSwitch"]
+    assert "claude-opus-5" in cases["providerQualifiedRequestedSwitch"]
+    assert "claude-opus-5" in cases["providerQualifiedUsedSwitch"]
+    assert "anthropic/claude-opus-5" in cases["providerQualifiedUsedSwitch"]
 
     # Everything else must stay silent.
     assert cases["slashHintedSame"] == ""
     assert cases["slashHintedSameReverse"] == ""
-    assert cases["providerQualifiedRequestedSame"] == ""
-    assert cases["providerQualifiedUsedSame"] == ""
     assert cases["notationOnly"] == ""
     assert cases["notationOnlyCustom"] == ""
     assert cases["identical"] == ""

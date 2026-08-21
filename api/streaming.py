@@ -2675,16 +2675,10 @@ def _local_model_switch(requested_model, used_model) -> bool:
     used = _bare_model_id(used_model).lower()
     if not requested or not used:
         return False
-    if requested == used:
-        return False
-    # Runtime resolution may preserve a provider-qualified model id or reduce it
-    # to its bare form depending on the endpoint. When only one side still has a
-    # slash, a shared basename is therefore notation-only and cannot prove a
-    # switch. When both sides are namespaced, compare the complete identities so
-    # distinct models such as openai/gpt-4 and my-local/gpt-4 do not collapse.
-    if "/" not in requested or "/" not in used:
-        return requested.rsplit("/", 1)[-1] != used.rsplit("/", 1)[-1]
-    return True
+    # _bare_model_id removes only the @provider: routing notation. Everything
+    # left, including a slash namespace, is model identity: ``gpt-4`` and
+    # ``my-local/gpt-4`` must therefore remain distinct in either direction.
+    return requested != used
 
 
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
@@ -11726,7 +11720,7 @@ def _run_agent_streaming(
                                 # switch. Gateway turns already carry their own
                                 # model_changed flag, so only stamp when there is
                                 # no gateway routing payload and the two models
-                                # genuinely differ (notation-insensitive).
+                                # genuinely differ (routing-notation-insensitive).
                                 if not _gateway_routing and _local_model_switch(
                                     _requested_model_for_switch, _used_model
                                 ):

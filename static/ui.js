@@ -5183,11 +5183,8 @@ function _localModelSwitchText(msg, requestedModel){
   const requestedId=_bareModelId(requested,msg._requestedProvider).toLowerCase();
   if(!usedId||!requestedId)return'';
   if(usedId===requestedId)return'';
-  // Runtime resolution can leave one side provider-qualified and the other bare.
-  // A shared basename is inconclusive in that one-namespaced case, but two full
-  // slash namespaces remain identity-bearing and must be compared in full.
-  if((!usedId.includes('/')||!requestedId.includes('/'))&&
-      usedId.split('/').pop()===requestedId.split('/').pop())return'';
+  // _bareModelId removes only the @provider: routing notation. A remaining slash
+  // namespace is identity-bearing, even when the other id has the same basename.
   return`${t('model_switched')||'Model switched'}: ${getModelLabel(requested)} → ${getModelLabel(used)}`;
 }
 function _reasoningEffortContext(){
