@@ -39,7 +39,9 @@ def test_question_jump_expands_windowed_history_and_highlights_question():
     assert "function _messageVisibleIndexForRawIdx(rawIdx, visWithIdx)" in UI_JS
     assert "function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container)" in UI_JS
     assert "const visibleIdx=_messageVisibleIndexForRawIdx(questionRawIdx, visWithIdx);" in UI_JS
-    assert "container.scrollTop=_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container);" in UI_JS
+    assert "const virtualTarget=clampTargetScrollTop(_messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container));" in UI_JS
+    assert "_beginMessageJumpScroll(container);" in UI_JS
+    assert "container.scrollTop=virtualTarget;" in UI_JS
     assert "_messageVirtualWindowKey='';" in UI_JS
     assert "_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())" in UI_JS
     assert "renderMessages({ preserveScroll:true })" in UI_JS

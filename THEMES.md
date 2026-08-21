@@ -144,6 +144,36 @@ font size. Persists alongside theme and skin.
 
 ---
 
+## Typography Tokens
+
+The three font tokens are declared in `static/style.css`:
+
+- `--font-ui`: user interface chrome, controls, composer chrome, labels, and
+  ordinary non-code UI text
+- `--font-conversation`: user/assistant message prose
+- `--font-mono`: code, tool details, logs, identifiers, and terminal text
+
+By default:
+
+```css
+--font-conversation: var(--font-ui);
+--font-mono: ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+```
+
+For CSS-based custom skins and extension stylesheets/scripts, override the three
+font tokens directly (`--font-ui`, `--font-conversation`, `--font-mono`) on the
+skin root (`:root[data-skin="..."]`), including any mode-specific variant.
+`window.registerHermesSkin()` currently accepts only the documented design-token
+allowlist (no `--font-*` tokens), so custom font families should be supplied via
+CSS rather than skin registration.
+
+Leaving `--font-conversation` untouched keeps prose coupled to `--font-ui`;
+override it only when a different reading face is explicitly required. Avoid
+hard-coded selector-level font declarations when one of these tokens already
+expresses the intent.
+
+---
+
 ## How It Works Internally
 
 1. **Theme:** `document.documentElement.classList.toggle('dark', isDark)` —

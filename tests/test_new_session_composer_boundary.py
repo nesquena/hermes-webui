@@ -130,7 +130,8 @@ def _composer_authority_helpers() -> str:
 
 def _review_race_production_helpers() -> str:
     names_and_markers = (
-        ("insertSavedPromptIntoComposer", "\n\nlet _savedPromptsCache"),
+        ("_appendComposerText", "\n\nfunction insertSavedPromptIntoComposer"),
+        ("insertSavedPromptIntoComposer", "\n\nfunction _seedSelectedTextRefineDraft"),
         ("_restoreComposerDraftAfterFailedSend", "\n\nasync function send("),
         ("_stashClarifyDraft", "\n\nfunction _resetClarifyCardState("),
     )
@@ -2169,13 +2170,18 @@ def test_all_draft_post_paths_use_the_per_session_write_queue():
 
 
 def test_owner_swap_restore_and_mutation_drain_have_no_await_gap():
-    start = SESSIONS_JS.index("S.session=data.session;S.messages=data.session.messages||[]")
+    start = SESSIONS_JS.index("S.session=data.session;")
+    adopt = SESSIONS_JS.index("_adoptRegenerationRevision(data.session)", start)
+    messages = SESSIONS_JS.index("S.messages=data.session.messages||[]", adopt)
     restore = SESSIONS_JS.index("_restoreComposerDraft(S.session.composer_draft)", start)
     drain = SESSIONS_JS.index("_drainComposerOwnershipTransition(composerTransition)", restore)
     first_await = SESSIONS_JS.index("await _saveComposerDraftNow(", drain)
 
-    assert "await " not in SESSIONS_JS[restore:drain]
-    assert restore < drain < first_await
+    assert start < adopt < messages < restore < drain < first_await
+    executable = "\n".join(
+        line.split("//", 1)[0] for line in SESSIONS_JS[start:drain].splitlines()
+    )
+    assert "await " not in executable
 
 
 def test_ordered_programmatic_callbacks_preserve_latest_replacement_and_raw_file():
@@ -2501,7 +2507,7 @@ def test_new_session_and_clarify_disabled_reasons_do_not_unlock_each_other():
 def test_async_composer_producers_route_through_ownership_authority():
     assert "_composerAddFiles([file],null,producerHandle)" in BOOT_JS
     assert BOOT_JS.count("_composerSetText(") >= 5
-    assert "_composerAppendText(addition,null,producer,null,'block')" in MESSAGES_JS
+    assert "_composerAppendText(text,null,producer,null,'block')" in MESSAGES_JS
     assert "_composerAddFiles(accepted)" in UI_JS
     assert "_composerRemoveFile(f,S.session&&S.session.session_id)" in UI_JS
     assert "const captureProducerHandle=_micComposerProducerToken" in BOOT_JS

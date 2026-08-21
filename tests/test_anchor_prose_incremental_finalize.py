@@ -48,8 +48,10 @@ function extractFn(src, name){
 
 HARNESS_JS_TEMPLATE = r"""
 const fs = require('fs');
+const vm = require('vm');
 const msgSrc = fs.readFileSync(__MSG_SRC__, 'utf8');
 const uiSrc = fs.readFileSync(__UI_SRC__, 'utf8');
+const anchorSrc = fs.readFileSync(__ANCHOR_SRC__, 'utf8');
 let _extractSource = msgSrc;
 let _anchorProseSmdCache;
 let _anchorProseIncrementalNode;
@@ -215,6 +217,11 @@ function createHarness(options={}){
   global.renderMd = (text)=>String(text || '');
   global.esc = (value)=>String(value || '');
 
+  vm.runInThisContext(anchorSrc, {filename:'assistant_turn_anchors.js'});
+  if(!window.HermesAssistantTurnAnchors){
+    throw new Error('assistant_turn_anchors.js did not expose HermesAssistantTurnAnchors');
+  }
+
   _anchorProseSmdCache = cache;
   window._anchorProseSmdCache = cache;
   _extractSource = msgSrc;
@@ -227,6 +234,7 @@ function createHarness(options={}){
   return {
     calls,
     cache,
+    anchorApi: window.HermesAssistantTurnAnchors,
     renderRow(row){
       return _anchorSceneNodeForRow(row, {settled:false});
     },
@@ -283,6 +291,54 @@ function runCase(name){
     };
   }
 
+  if(name === 'interim_assistant_tool_boundary_keeps_interim_prose_authoritative_full_text'){
+    const registry = harness.anchorApi.createAssistantTurnAnchorRegistry({
+      session_id:'session-final-char',
+      turn_id:'turn-final-char',
+      run_id:'run-final-char',
+      stream_id:'stream-final-char',
+      local_id:'assistant-msg-final-char',
+      source_message_refs:['assistant-msg-final-char'],
+    });
+    const context = {
+      session_id:'session-final-char',
+      turn_id:'turn-final-char',
+      run_id:'run-final-char',
+      stream_id:'stream-final-char',
+    };
+    const authoritativeText = 'Streaming with punctuation.';
+    harness.anchorApi.applyAssistantTurnAnchorSourceEvent(registry,{
+      source_event_type:'interim_assistant',
+      seq:1,
+      local_id:'prose-final-char',
+      payload:{text:authoritativeText},
+      ...context,
+    });
+    harness.anchorApi.applyAssistantTurnAnchorSourceEvent(registry,{
+      source_event_type:'tool',
+      seq:2,
+      local_id:'tool-final-char',
+      payload:{text:'tool started', name:'search', tool_call_id:'tool-call-1'},
+      ...context,
+    });
+    const scene = harness.anchorApi.projectAssistantTurnAnchorActivityScene(registry,{mode:'compact_worklog'});
+    const rows = Array.isArray(scene && scene.activity_rows) ? scene.activity_rows : [];
+    const proseActivityRow = rows.find((row)=>row.role === 'prose') || null;
+    const toolActivityRow = rows.find((row)=>row.role === 'tool') || null;
+    const proseNode = proseActivityRow ? harness.renderRow(proseActivityRow) : null;
+    const proseBody = proseNode && proseNode.querySelector('.msg-body');
+    return {
+      sceneRowsCount: rows.length,
+      proseStatus: proseActivityRow ? proseActivityRow.status : null,
+      proseSourceText: proseActivityRow ? proseActivityRow.text : null,
+      proseRenderedText: proseBody ? proseBody.textContent : null,
+      toolStatus: toolActivityRow ? toolActivityRow.status : null,
+      toolSourceEventType: toolActivityRow ? toolActivityRow.source_event_type : null,
+      finalizeCount: harness.calls.ended,
+      authoritativeText,
+    };
+  }
+
   if(name === 'tool_boundary_completes_row'){
     harness.renderRow(row('running', 'pre tool'));
     const node = harness.renderRow(row('completed', 'pre tool.'));
@@ -328,6 +384,7 @@ def _run_scenario(case_name: str) -> dict:
     script = HARNESS_JS_TEMPLATE
     script = script.replace("__MSG_SRC__", json.dumps(str(ROOT / 'static' / 'messages.js')))
     script = script.replace("__UI_SRC__", json.dumps(str(ROOT / 'static' / 'ui.js')))
+    script = script.replace("__ANCHOR_SRC__", json.dumps(str(ROOT / 'static' / 'assistant_turn_anchors.js')))
     script = script.replace("__EXTRACT_FN_JS__", EXTRACT_FN_JS)
     script = script.replace("__CASE__", case)
     result = subprocess.run([NODE, "-e", script], cwd=ROOT, text=True, capture_output=True, check=False)
@@ -395,3 +452,15 @@ def test_anchor_prose_parser_end_failure_falls_back_to_full_renderMd():
     assert data["renderCount"] == 1
     assert data["bodyText"] == "streamed final."
     assert data["cacheSize"] == 0
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required for anchor prose incremental harness tests")
+def test_interim_assistant_to_tool_boundary_must_render_full_authoritative_punctuation():
+    data = _run_scenario("interim_assistant_tool_boundary_keeps_interim_prose_authoritative_full_text")
+    assert data["sceneRowsCount"] >= 2
+    assert data["proseStatus"] == "completed"
+    assert data["toolStatus"] == "running"
+    assert data["toolSourceEventType"] == "tool"
+    assert data["proseSourceText"] == data["authoritativeText"]
+    assert data["proseRenderedText"] == data["authoritativeText"]
+    assert data["finalizeCount"] == 1

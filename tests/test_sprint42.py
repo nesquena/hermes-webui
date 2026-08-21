@@ -10,6 +10,7 @@ Covers:
 """
 import ast
 import threading
+import time
 import pathlib
 import re
 import queue
@@ -465,6 +466,113 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
     def test_clarify_callback_passes_configured_timeout_seconds(self):
         """clarify prompt data should use clarify.timeout from config when present."""
+        result = self._capture_clarify_timeout({"clarify": {"timeout": 300}})
+        self.assertEqual(result["clarify_result"], "selected")
+        self.assertEqual(len(result["payloads"]), 1)
+        self.assertEqual(result["payloads"][0]["timeout_seconds"], 300)
+
+    def test_clarify_callback_zero_timeout_is_unlimited(self):
+        """0 (or negative) must pass through as unlimited — never fall back to a default."""
+        for config in ({"clarify": {"timeout": 0}}, {"agent": {"clarify_timeout": 0}}):
+            with self.subTest(config=config):
+                result = self._capture_clarify_timeout(config)
+                self.assertEqual(len(result["payloads"]), 1)
+                self.assertEqual(result["payloads"][0]["timeout_seconds"], 0)
+
+    def test_clarify_timeout_falls_back_to_agent_clarify_timeout(self):
+        """Without the legacy clarify.timeout key, agent.clarify_timeout governs (canonical order)."""
+        import api.streaming as streaming
+        with mock.patch.object(streaming, "get_config", return_value={"agent": {"clarify_timeout": 45}}):
+            self.assertEqual(streaming._clarify_timeout_seconds(), 45)
+        with mock.patch.object(streaming, "get_config", return_value={}):
+            self.assertEqual(streaming._clarify_timeout_seconds(), 3600)
+
+    def test_clarify_session_profile_beats_ambient(self):
+        """A non-default session's profile config must win over the ambient
+        (process-default) config — the exact divergence this fix resolves."""
+        import api.streaming as streaming
+        fake_session = type("FakeSession", (), {"profile": "ops"})()
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch("api.models._get_profile_home", return_value=pathlib.Path("/fake/profiles/ops")), \
+             mock.patch("api.config.get_config_for_profile_home", return_value={"agent": {"clarify_timeout": 0}}), \
+             mock.patch.object(streaming, "get_config", return_value={"agent": {"clarify_timeout": 600}}):
+            # session profile says 0 (unlimited); ambient says 600 → session wins
+            self.assertEqual(
+                streaming._clarify_timeout_seconds(streaming._clarify_session_config("sess-x")),
+                0,
+            )
+
+    def test_clarify_timeout_resolution_matrix(self):
+        """The resolver must match the Agent core's canonical resolution order:
+        legacy clarify.timeout wins, else agent.clarify_timeout, else 3600;
+        non-positive values stay unlimited, invalid values fall back to 3600."""
+        import api.streaming as streaming
+        cases = [
+            ({"clarify": {"timeout": 120}}, 120),                          # legacy wins
+            ({"clarify": {"timeout": 120}, "agent": {"clarify_timeout": 0}}, 120),  # legacy beats canonical
+            ({"agent": {"clarify_timeout": 45}}, 45),                      # canonical fallback
+            ({}, 3600),                                                    # absent → 3600
+            ({"agent": {"clarify_timeout": "abc"}}, 3600),                 # invalid → 3600
+            ({"clarify": {"timeout": "abc"}}, 3600),                       # invalid legacy → 3600
+            ({"agent": {"clarify_timeout": 0}}, 0),                        # unlimited
+            ({"agent": {"clarify_timeout": -5}}, -5),                      # negative → unlimited
+            ({"clarify": {"timeout": -1}}, -1),                            # legacy negative → unlimited
+        ]
+        for cfg, expected in cases:
+            with self.subTest(config=cfg):
+                self.assertEqual(streaming._clarify_timeout_seconds(cfg), expected)
+
+    def test_await_clarify_unlimited_resolves_later(self):
+        """An unlimited (timeout<=0) prompt keeps waiting until the user answers."""
+        import api.streaming as streaming
+        entry = types.SimpleNamespace(result="yes", event=threading.Event())
+        cancel = threading.Event()
+        threading.Timer(0.05, entry.event.set).start()
+        response, expired = streaming._await_clarify_response(entry, 0, cancel)
+        self.assertEqual(response, "yes")
+        self.assertFalse(expired)
+
+    def test_await_clarify_unlimited_cancel_exits(self):
+        """Cancellation still unblocks an unlimited wait promptly."""
+        import api.streaming as streaming
+        entry = types.SimpleNamespace(result=None, event=threading.Event())
+        cancel = threading.Event()
+        cancel.set()
+        started = time.monotonic()
+        response, expired = streaming._await_clarify_response(entry, 0, cancel)
+        self.assertTrue(expired)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_await_clarify_finite_times_out(self):
+        """A finite timeout still expires without a response (fail-safe kept)."""
+        import api.streaming as streaming
+        entry = types.SimpleNamespace(result=None, event=threading.Event())
+        response, expired = streaming._await_clarify_response(entry, 0.05, threading.Event())
+        self.assertTrue(expired)
+
+    def test_await_clarify_finite_resolves(self):
+        """A finite timeout with a user response resolves normally."""
+        import api.streaming as streaming
+        entry = types.SimpleNamespace(result="ok", event=threading.Event())
+        entry.event.set()
+        response, expired = streaming._await_clarify_response(entry, 300, threading.Event())
+        self.assertEqual(response, "ok")
+        self.assertFalse(expired)
+
+    def test_clarify_metadata_unlimited_has_no_expiry(self):
+        """timeout_seconds <= 0 must not fall back to the 120s default or set an expires_at."""
+        from api.clarify import _with_timeout_metadata
+        item = _with_timeout_metadata({"timeout_seconds": 0, "requested_at": 1234.0})
+        self.assertEqual(item["timeout_seconds"], 0)
+        self.assertEqual(item["expires_at"], 0)
+        # Finite timeouts still get an expires_at.
+        item2 = _with_timeout_metadata({"timeout_seconds": 300, "requested_at": 1234.0})
+        self.assertEqual(item2["expires_at"], 1534.0)
+
+    def _capture_clarify_timeout(self, config):
+        """Drive _run_agent_streaming with a fake agent that invokes the clarify
+        callback, capturing the payload the bridge submits. Returns a dict with
+        ``clarify_result`` and ``payloads``."""
         import api.streaming as streaming
 
         captured = {}
@@ -572,7 +680,8 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         with mock.patch.object(streaming, "get_session", return_value=fake_session), \
              mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
              mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai-codex", None)), \
-             mock.patch.object(streaming, "get_config", return_value={"clarify": {"timeout": 300}}), \
+             mock.patch.object(streaming, "get_config", return_value=config), \
+             mock.patch("api.config.get_config_for_profile_home", return_value=config), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
              mock.patch("api.clarify.submit_pending", side_effect=fake_submit_pending), \
              mock.patch.dict(sys.modules, {
@@ -589,9 +698,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 stream_id=fake_stream_id,
             )
 
-        self.assertEqual(captured["clarify_result"], "selected")
-        self.assertEqual(len(submit_payloads), 1)
-        self.assertEqual(submit_payloads[0]["timeout_seconds"], 300)
+        return {"clarify_result": captured.get("clarify_result"), "payloads": submit_payloads}
 
 
 class TestSessionDBAST(unittest.TestCase):

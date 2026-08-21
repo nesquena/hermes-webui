@@ -819,21 +819,38 @@ def test_kanban_modal_mobile_responsive_css():
     """On narrow phones (<=640px) a tall kanban modal must stay reachable: the
     overlay scrolls (overflow-y:auto) and safe-centers its content
     (align-items:safe center) so an overflowing modal is never clipped above
-    the fold where its top can't be scrolled back into view."""
+    the fold where its top can't be scrolled back into view.
+
+    A further short-landscape override (<=640px AND <=480px tall) top-anchors
+    the overlay (align-items:flex-start) instead of centering — an even
+    stronger anti-clip guarantee for pathological short-landscape viewports
+    (e.g. 480x320) where centering a capped modal would push its lower rows
+    past the fold. Every overlay override must still scroll."""
     # There are several `.kanban-modal-overlay{...}` rules (skin override, base
-    # desktop, and the mobile <=640px override, which is last in the file).
+    # desktop, the mobile <=640px override, and the short-landscape override).
     # Match against COMPACT_STYLE — whitespace-stripped, like the sibling CSS
-    # tests — and take the last rule to isolate the mobile override, instead of
-    # depending on brittle @media-block bracket matching.
+    # tests. Every mobile override must be scrollable; the primary phone
+    # override must safe-center; a short-landscape override may top-anchor.
     overlay_rules = re.findall(r"\.kanban-modal-overlay\{([^}]*)\}", COMPACT_STYLE)
     assert overlay_rules, "no .kanban-modal-overlay rule found in style.css"
-    mobile = overlay_rules[-1]
-    assert "overflow-y:auto" in mobile, f"mobile overlay must be scrollable. Got: {mobile}"
-    # `align-items:safe center` compacts to `align-items:safecenter`.
-    assert "align-items:safecenter" in mobile, (
-        f"mobile overlay must safe-center its content so an overflowing modal "
-        f"is never clipped above the fold. Got: {mobile}"
+    # The primary phone override safe-centers AND scrolls.
+    phone_rules = [r for r in overlay_rules if "align-items:safecenter" in r]
+    assert phone_rules, (
+        f"a mobile overlay override must safe-center its content so an "
+        f"overflowing modal is never clipped above the fold. "
+        f"Got rules: {overlay_rules}"
     )
+    assert "overflow-y:auto" in phone_rules[-1], (
+        f"the phone overlay must be scrollable. Got: {phone_rules[-1]}"
+    )
+    # Any top-anchored short-landscape override must ALSO scroll (top-anchoring
+    # is a valid anti-clip alternative to centering, but it must not drop the
+    # overflow-y:auto that keeps the modal reachable).
+    for rule in overlay_rules:
+        if "align-items:flex-start" in rule:
+            assert "overflow-y:auto" in rule, (
+                f"a top-anchored overlay override must still scroll. Got: {rule}"
+            )
 
 
 def test_kanban_task_detail_renderer_executes_with_log_and_formats_feedback():

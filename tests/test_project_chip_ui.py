@@ -229,3 +229,51 @@ class TestProjectChipLongPressTouch:
         # touch tuning so the native callout/selection doesn't compete with the gesture
         assert "touch-action:manipulation" in chip_rule
         assert "user-select:none" in chip_rule
+
+
+class TestQuickCreateMobileDrawer:
+    """The project-chip "+" (quick-create) must close the mobile sidebar drawer.
+
+    On phones the sidebar is a full-screen drawer (`.sidebar.mobile-open`,
+    z-index 200) covering the main chat view. The quick-create button creates
+    the new project conversation but never closed the drawer, so on mobile the
+    tap *looked* like a no-op — the session was created, just hidden underneath.
+    Mirrors `$('btnNewChat').onclick` in boot.js and the #5409 close in
+    `_openSidebarSession`.
+    """
+
+    def _quick_create_block(self):
+        idx = SESSIONS_JS.find("function _attachProjectQuickCreateButton(")
+        assert idx != -1, "project quick-create helper not found in sessions.js"
+        # Function body incl. the full onclick success path (~3K covers it).
+        return SESSIONS_JS[idx: idx + 3000]
+
+    def test_quick_create_success_path_closes_mobile_drawer(self):
+        block = self._quick_create_block()
+        assert "closeMobileSidebar" in block, (
+            "project quick-create + must close the mobile sidebar after "
+            "newSession so the new conversation is visible on phones"
+        )
+        # Guarded call, matching the _openSidebarSession (#5409) convention.
+        assert "typeof closeMobileSidebar==='function'" in block
+
+    def test_quick_create_close_runs_after_sidebar_repaint(self):
+        """The close must sit in the success path after the sidebar repaint —
+        not before newSession (the drawer would reopen over the pending load)
+        and not in the catch branch (failure should keep the drawer open so the
+        user can see the toast and retry)."""
+        block = self._quick_create_block()
+        render_idx = block.find("renderSessionList({deferWhileInteracting:false})")
+        close_idx = block.find("closeMobileSidebar")
+        catch_idx = block.find("catch(err)")
+        assert render_idx != -1, "sidebar repaint call not found in quick-create handler"
+        assert close_idx != -1, "closeMobileSidebar not found in quick-create handler"
+        assert catch_idx != -1, "success-path try/catch not found in quick-create handler"
+        assert close_idx > render_idx, (
+            "closeMobileSidebar must run after the sidebar repaint in the success path"
+        )
+        assert close_idx < catch_idx, (
+            "closeMobileSidebar must stay in the success path (try block) — moving it "
+            "into the catch branch would keep the drawer open over the error toast"
+        )
+
