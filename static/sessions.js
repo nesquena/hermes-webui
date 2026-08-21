@@ -2019,6 +2019,11 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
+  // Loading a real existing session abandons any pre-session toolset override
+  // staged on the empty composer before any deferred refresh work runs.
+  S._pendingSessionToolsets=null;
   // #6704 P1: the squash pulse lives on shared desktop/mobile controls. Project
   // only the session whose CURRENT generation has successfully supplied
   // metadata and is now authoritative for the visible UI. Projecting the
@@ -2027,11 +2032,6 @@ async function loadSession(sid){
   if(typeof _squashSyncRunningIndicatorForSession==='function'){
     _squashSyncRunningIndicatorForSession(S.session.session_id);
   }
-  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
-  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
-  // Loading a real existing session abandons any pre-session toolset override
-  // staged on the empty composer before any deferred refresh work runs.
-  S._pendingSessionToolsets=null;
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
