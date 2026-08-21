@@ -15095,21 +15095,21 @@ function _loadedCompactionMarkerRawIdxs(messages){
 // remain visible at the top of that tail. Anchoring it to an old assistant/tool
 // turn can bury it inside a hidden worklog, which makes compaction look absent.
 function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx){
+  const preWindowMarkers=[];
   const inlineMarkers=[];
-  let latestPreWindowMarker=null;
   const boundary=Number.isFinite(firstRenderedRawIdx)?firstRenderedRawIdx:-1;
   for(const value of Array.isArray(markerRawIdxs)?markerRawIdxs:[]){
     const rawIdx=Number(value);
     if(!Number.isInteger(rawIdx)||rawIdx<0) continue;
-    if(rawIdx<boundary) latestPreWindowMarker=rawIdx;
+    if(rawIdx<boundary) preWindowMarkers.push(rawIdx);
     else inlineMarkers.push(rawIdx);
   }
   const taskOwner=inlineMarkers.length
     ?{kind:'inline',rawIdx:inlineMarkers[inlineMarkers.length-1]}
-    :latestPreWindowMarker===null
+    :!preWindowMarkers.length
       ?null
-      :{kind:'pre-window',rawIdx:latestPreWindowMarker};
-  return {inlineMarkers,latestPreWindowMarker,taskOwner};
+      :{kind:'pre-window',rawIdx:preWindowMarkers[preWindowMarkers.length-1]};
+  return {preWindowMarkers,inlineMarkers,taskOwner};
 }
 function _insertCompactionCardNodes(entries,taskOwner,insertNode){
   const insertedNodes=[];
@@ -16788,9 +16788,9 @@ function renderMessages(options){
   })();
   // Ultra-compact display (2026-08-18): every compaction marker loaded in the
   // transcript renders as its own collapsed card at its real position, so the
-  // user SEES each compaction and can reopen its digest inline. If a marker is
-  // older than the virtual window, only the latest such marker is pinned above
-  // the rendered rows; markers inside the window stay inline.
+  // user SEES each compaction and can reopen its digest inline. Markers older
+  // than the virtual window are pinned above the rendered rows in transcript
+  // order; markers inside the window stay inline.
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const loadedCompactionRawIdxs=(!compressionState)?_loadedCompactionMarkerRawIdxs(S.messages):[];
   const compactionPlacements=_selectCompactionCardPlacements(loadedCompactionRawIdxs,firstRenderedRawIdx);
@@ -16817,9 +16817,7 @@ function renderMessages(options){
     }
     return {node,rawIdx:markerRawIdx,kind};
   };
-  const preWindowCompactionCard=compactionPlacements.latestPreWindowMarker===null
-    ?null
-    :_compactionCardEntry(compactionPlacements.latestPreWindowMarker,'pre-window');
+  const preWindowCompactionCards=compactionPlacements.preWindowMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'pre-window'));
   const compactionCardNodes=compactionPlacements.inlineMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'inline'));
   const referenceNode=(!compressionState && loadedCompactionRawIdxs.length===0 && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;const node=row.firstElementChild;if(node&&preservedCompressionTaskMessages.length) node.setAttribute('data-compaction-task-owner','1');return node;})()
@@ -16870,7 +16868,7 @@ function renderMessages(options){
     }
   }
   const preWindowInsertion=_insertCompactionCardNodes(
-    preWindowCompactionCard?[preWindowCompactionCard]:[],
+    preWindowCompactionCards,
     compactionPlacements.taskOwner,
     node=>_pinCompactionCardAtTop(inner,node)
   );
