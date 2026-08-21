@@ -13,6 +13,7 @@ from api import run_journal
 @pytest.fixture
 def isolated_steer_state():
     from api.config import (
+        AGENT_INSTANCES,
         SESSION_AGENT_CACHE,
         SESSION_AGENT_CACHE_LOCK,
         STREAMS,
@@ -25,8 +26,10 @@ def isolated_steer_state():
     with STREAMS_LOCK:
         streams_snapshot = dict(STREAMS)
         STREAMS.clear()
+        agents_snapshot = dict(AGENT_INSTANCES)
+        AGENT_INSTANCES.clear()
     try:
-        yield SESSION_AGENT_CACHE, STREAMS
+        yield SESSION_AGENT_CACHE, STREAMS, AGENT_INSTANCES
     finally:
         with SESSION_AGENT_CACHE_LOCK:
             SESSION_AGENT_CACHE.clear()
@@ -34,6 +37,8 @@ def isolated_steer_state():
         with STREAMS_LOCK:
             STREAMS.clear()
             STREAMS.update(streams_snapshot)
+            AGENT_INSTANCES.clear()
+            AGENT_INSTANCES.update(agents_snapshot)
 
 
 def _handler():
@@ -55,7 +60,7 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
     from api import streaming
     from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
 
-    cache, streams = isolated_steer_state
+    cache, streams, agents = isolated_steer_state
     sid = "steer_journal_sid"
     stream_id = "steer_journal_run"
     agent = MagicMock()
@@ -65,6 +70,7 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
         cache[sid] = (agent, "sig")
     with STREAMS_LOCK:
         streams[stream_id] = stream
+        agents[stream_id] = agent
 
     session = MagicMock(active_stream_id=stream_id)
     journal_event = {
@@ -76,10 +82,12 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
     }
     captured = {}
 
-    def accept_and_append(_writer, event_name, payload, accept):
+    def accept_and_append(_writer, event_name, payload, accept, *, publish=None):
         captured["event_name"] = event_name
         captured["payload"] = payload
         assert accept() is True
+        assert publish is not None
+        publish(journal_event)
         return True, journal_event, None, None
 
     with patch.object(streaming, "get_session", return_value=session), patch.object(
@@ -112,6 +120,20 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
         "accepted": True,
         "fallback": None,
         "stream_id": stream_id,
+        "durable": True,
+        "published": True,
+        "steer_event": {
+            "version": 1,
+            "type": "steer_delivered",
+            "event": "steer_delivered",
+            "event_id": f"{stream_id}:7",
+            "seq": 7,
+            "run_id": stream_id,
+            "session_id": sid,
+            "stream_id": stream_id,
+            "created_at": 123.0,
+            "payload": captured["payload"],
+        },
     }
 
 
@@ -119,7 +141,7 @@ def test_rejected_steer_does_not_create_a_delivery_event(isolated_steer_state):
     from api import streaming
     from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
 
-    cache, streams = isolated_steer_state
+    cache, streams, agents = isolated_steer_state
     sid = "steer_rejected_sid"
     stream_id = "steer_rejected_run"
     agent = MagicMock()
@@ -129,9 +151,11 @@ def test_rejected_steer_does_not_create_a_delivery_event(isolated_steer_state):
         cache[sid] = (agent, "sig")
     with STREAMS_LOCK:
         streams[stream_id] = stream
+        agents[stream_id] = agent
 
-    def reject(_writer, _event_name, _payload, accept):
+    def reject(_writer, _event_name, _payload, accept, *, publish=None):
         assert accept() is False
+        assert publish is not None
         return False, None, "rejected", None
 
     with patch.object(
@@ -160,7 +184,7 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
     from api import streaming
     from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
 
-    cache, streams = isolated_steer_state
+    cache, streams, agents = isolated_steer_state
     sid = "steer_journal_failure_sid"
     stream_id = "steer_journal_failure_run"
     agent = MagicMock()
@@ -170,11 +194,13 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
         cache[sid] = (agent, "sig")
     with STREAMS_LOCK:
         streams[stream_id] = stream
+        agents[stream_id] = agent
 
     persistence_error = OSError("disk unavailable")
 
-    def fail_after_accept(_writer, _event_name, _payload, accept):
+    def fail_after_accept(_writer, _event_name, _payload, accept, *, publish=None):
         assert accept() is True
+        assert publish is not None
         return True, None, "persistence_error", persistence_error
 
     with patch.object(
@@ -198,6 +224,7 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
         "fallback": "persistence_error",
         "stream_id": stream_id,
         "durable": False,
+        "published": False,
     }
 
 
@@ -211,8 +238,62 @@ def test_frontend_warns_when_accepted_steer_is_not_durable():
 
     assert "result.durable===false||result.fallback==='persistence_error'" in body
     assert "showToast(t('steer_delivery_not_durable'),5000,'warning')" in body
+    assert "result.published===false&&!responseRecorded" in body
+    assert "showToast(t('steer_delivery_live_delayed'),5000,'warning')" in body
     assert "else showToast(t('cmd_steer_delivered'),2500)" in body
     assert i18n.count("steer_delivery_not_durable:") >= 15
+    assert i18n.count("steer_delivery_live_delayed:") >= 15
+
+
+def test_publication_failure_keeps_durable_event_in_http_response(isolated_steer_state):
+    from api import streaming
+    from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK
+
+    cache, streams, agents = isolated_steer_state
+    sid = "steer_publish_failure_sid"
+    stream_id = "steer_publish_failure_run"
+    agent = MagicMock()
+    agent.steer.return_value = True
+    stream = MagicMock()
+    stream.put_nowait.side_effect = RuntimeError("subscriber unavailable")
+    with SESSION_AGENT_CACHE_LOCK:
+        cache[sid] = (agent, "sig")
+    with STREAMS_LOCK:
+        streams[stream_id] = stream
+        agents[stream_id] = agent
+
+    journal_event = {
+        "version": 1,
+        "event_id": f"{stream_id}:4",
+        "seq": 4,
+        "run_id": stream_id,
+        "session_id": sid,
+        "created_at": 456.0,
+    }
+
+    def publish_fails(_writer, _event_name, _payload, accept, *, publish=None):
+        assert accept() is True and publish is not None
+        try:
+            publish(journal_event)
+        except RuntimeError as exc:
+            return True, journal_event, "publication_error", exc
+        raise AssertionError("publication should fail")
+
+    with patch.object(streaming, "get_session", return_value=MagicMock(active_stream_id=stream_id)), patch.object(
+        streaming.RunJournalWriter,
+        "accept_and_append_if_nonterminal",
+        autospec=True,
+        side_effect=publish_fails,
+    ):
+        handler = _handler()
+        streaming._handle_chat_steer(handler, {"session_id": sid, "text": "saved steer"})
+
+    body = _response(handler)
+    assert body["accepted"] is True
+    assert body["durable"] is True
+    assert body["published"] is False
+    assert body["fallback"] == "publication_error"
+    assert body["steer_event"]["event_id"] == f"{stream_id}:4"
 
 
 def test_terminal_journal_wins_race_without_late_delivery_event(
@@ -223,7 +304,7 @@ def test_terminal_journal_wins_race_without_late_delivery_event(
     from api import streaming
     from api.config import SESSION_AGENT_CACHE_LOCK, STREAMS_LOCK, create_stream_channel
 
-    cache, streams = isolated_steer_state
+    cache, streams, agents = isolated_steer_state
     sid = "steer_terminal_race_sid"
     stream_id = "steer_terminal_race_run"
     stream = create_stream_channel()
@@ -242,6 +323,7 @@ def test_terminal_journal_wins_race_without_late_delivery_event(
         cache[sid] = (agent, "sig")
     with STREAMS_LOCK:
         streams[stream_id] = stream
+        agents[stream_id] = agent
 
     def test_writer(session_id, run_id):
         return run_journal.RunJournalWriter(

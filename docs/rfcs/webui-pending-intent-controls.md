@@ -367,21 +367,41 @@ After the active runtime accepts a Steer, WebUI records a `steer_delivered`
 event in that run's append-only journal. The journal envelope owns the event's
 `event_id`, `run_id`, and `seq`; live SSE broadcast and reconnect replay must
 carry that same `event_id` rather than minting a browser-local identity. The
-payload records `session_id`, `stream_id`, `text`, `status: delivered`, and
-`created_at`. It remains presentation/replay metadata and must not be appended
-as a normal next-turn user message or treated as proof of application.
+payload records `session_id`, `stream_id`, one authoritative user-authored
+`text`, bounded path-free attachment labels in `files`, `status: delivered`, and
+`created_at`. The browser sends structured `user_text` plus uploaded
+`attachment_paths`; the server accepts only files that actually exist inside that
+session's server-owned upload inbox, then constructs Agent-facing file-tool
+guidance from those verified paths. It does not trust independent visible and
+runtime strings—or arbitrary path text—so the durable timeline cannot hide
+different instructions sent to the Agent. The event
+remains presentation/replay metadata: its `control_boundary` kind preserves
+runtime semantics, while its user role renders the author's guidance as an
+immutable user message. It must not be appended as a normal next-turn user
+message or treated as proof of application.
 
-The terminal check, runtime acceptance call, and delivery append occur under the
-run journal's same per-path lock. If a terminal event wins that lock, WebUI does
-not call `agent.steer()` and returns the existing `stream_dead` recovery signal,
-so the browser restores the user's draft instead of claiming delivery. If Steer
+The endpoint resolves the agent from the exact active `stream_id` ownership map,
+not the longer-lived session cache, so a retired cached agent cannot receive a
+Steer journaled under its successor run. The terminal check, runtime acceptance
+call, and delivery append occur under the run journal's same per-path lock. If a
+terminal event wins that lock, WebUI does not call `agent.steer()` and returns
+the existing `stream_dead` recovery signal, so the browser restores the user's
+draft instead of claiming delivery. If Steer
 wins the lock, acceptance and `steer_delivered` persistence finish before a
-terminal writer can append. If journal persistence fails after runtime
+terminal writer can append. The Steer row is fsynced before durable success is
+returned, and its queue publication occurs under the same per-run ordering lock,
+so live SSE order and journal/replay order cannot disagree. The accepted HTTP
+response carries the same `event_id`, `seq`, and event payload as SSE/replay;
+the originating browser may project it immediately and dedupe the later SSE by
+that identity. If journal persistence fails after runtime
 acceptance, WebUI returns `accepted: true`, `durable: false`, and
 `fallback: persistence_error`, logs the durability failure, and does not
 broadcast a non-replayable delivery event. The browser must preserve the fact
 that runtime delivery occurred while warning that the Steer may disappear after
-refresh; it must not restore or resend the accepted input automatically.
+refresh; it must not restore or resend the accepted input automatically. If
+durable persistence succeeds but live queue publication fails, WebUI returns
+`published: false` with the durable event envelope so the current tab can still
+render it immediately and other clients recover it through replay.
 
 ## Implementation Slices
 

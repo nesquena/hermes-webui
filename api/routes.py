@@ -3515,7 +3515,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         if event_name == "steer_delivered":
             text = str(payload.get("text") or "").strip()
-            if text:
+            files = payload.get("files") if isinstance(payload.get("files"), list) else []
+            if text or files:
                 mark_boundary(event_seq)
                 reasoning_segment_break = True
                 delivered_steer_events.append(
@@ -3830,11 +3831,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "row_id": row_id,
                 "order_index": len(anchor_activity_rows),
                 "kind": "control_boundary",
-                "role": "control",
-                "display_hint": "control_boundary_row",
+                "role": "user",
+                "display_hint": "user_message",
                 "display_hints": {
-                    "compact_worklog": "control_boundary_row",
-                    "transparent_stream": "chronological_activity",
+                    "compact_worklog": "user_message",
+                    "transparent_stream": "user_message",
                 },
                 "source_event_type": "steer_delivered",
                 "event_id": event_id,
@@ -4052,6 +4053,14 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
             thinking = row.get("thinking")
             if isinstance(thinking, dict) and thinking.get("text") == row.get("text"):
                 row.pop("thinking", None)
+            if str(raw_row.get("source_event_type") or "") == "steer_delivered":
+                raw_payload = raw_row.get("payload") if isinstance(raw_row.get("payload"), dict) else {}
+                files = raw_payload.get("files") if isinstance(raw_payload.get("files"), list) else []
+                if files:
+                    # The compact session projection normally drops duplicated
+                    # payloads, but attachment labels exist nowhere else on a
+                    # Steer row and are part of its visible user-authored record.
+                    row["payload"] = {"files": files[:20]}
         compact_rows.append(row)
     compact_scene["activity_rows"] = compact_rows
     projected["anchor_activity_scene"] = compact_scene

@@ -87,9 +87,10 @@ def test_cached_agent_session_identity_matches_requested_sid():
     assert _cached_agent_matches_session(legacy, "requested") is True
 
 
-def test_handle_chat_steer_evicts_mismatched_cached_agent(monkeypatch):
+def test_handle_chat_steer_ignores_mismatched_session_cache_without_stream_agent(monkeypatch):
     import api.streaming as streaming
     from api.streaming import _handle_chat_steer
+    import queue
 
     class Handler:
         headers = {}
@@ -117,14 +118,27 @@ def test_handle_chat_steer_evicts_mismatched_cached_agent(monkeypatch):
     )
     config.SESSION_AGENT_CACHE.clear()
     config.SESSION_AGENT_CACHE["requested"] = (wrong_agent, "sig")
+    stream_id = "requested-stream"
+    with config.STREAMS_LOCK:
+        config.STREAMS[stream_id] = queue.Queue()
+        config.AGENT_INSTANCES.pop(stream_id, None)
+    monkeypatch.setattr(
+        streaming,
+        "get_session",
+        lambda _sid: SimpleNamespace(active_stream_id=stream_id),
+    )
     handler = Handler()
 
-    _handle_chat_steer(handler, {"session_id": "requested", "text": "please steer"})
+    try:
+        _handle_chat_steer(handler, {"session_id": "requested", "text": "please steer"})
+    finally:
+        with config.STREAMS_LOCK:
+            config.STREAMS.pop(stream_id, None)
+            config.AGENT_INSTANCES.pop(stream_id, None)
 
     payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert handler.status == 200
     assert payload == {"accepted": False, "fallback": "no_cached_agent", "stream_id": None}
-    assert "requested" not in config.SESSION_AGENT_CACHE
-    assert closed_entries == [("requested", (wrong_agent, "sig"))]
-
+    assert config.SESSION_AGENT_CACHE["requested"] == (wrong_agent, "sig")
+    assert closed_entries == []
     config.SESSION_AGENT_CACHE.clear()

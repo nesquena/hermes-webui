@@ -370,7 +370,7 @@ def test_chat_activity_display_mode_live_cleanup_removes_existing_activity_rows(
     end = UI_JS.index("function _removeEmptyLiveWorklogShells", start)
     block = UI_JS[start:end]
 
-    assert "clearLiveToolCards();" in block
+    assert "clearLiveToolCards({preserveDom:true});" in block
     assert "removeThinking" in block
     assert ".transparent-event-row" in block
     assert "#liveRunStatus" in block

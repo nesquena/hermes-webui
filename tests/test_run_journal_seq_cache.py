@@ -187,6 +187,85 @@ def test_accept_transaction_orders_delivery_before_concurrent_terminal(tmp_path)
     ]
 
 
+def test_accept_transaction_publishes_before_concurrent_terminal(tmp_path):
+    writer = run_journal.RunJournalWriter(
+        "sess_publish", "run_publish", session_dir=tmp_path
+    )
+    terminal_started = threading.Event()
+    terminal_finished = threading.Event()
+    published = []
+
+    def append_terminal():
+        terminal_started.set()
+        run_journal.append_run_event(
+            "sess_publish",
+            "run_publish",
+            "done",
+            {"session": {}},
+            session_dir=tmp_path,
+        )
+        terminal_finished.set()
+
+    def accept():
+        threading.Thread(target=append_terminal).start()
+        assert terminal_started.wait(timeout=10)
+        assert not terminal_finished.wait(timeout=0.1)
+        return True
+
+    def publish(event):
+        # Publication is in the same ordering domain as append: the terminal
+        # writer cannot commit (and then enqueue) before this callback runs.
+        assert not terminal_finished.is_set()
+        published.append(event["event_id"])
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "publish first"},
+        accept,
+        publish=publish,
+    )
+    assert accepted is True and event is not None and reason is None and error is None
+    assert published == [event["event_id"]]
+    assert terminal_finished.wait(timeout=10)
+
+
+def test_steer_delivery_fsyncs_before_durable_success(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_fsync", "run_fsync", session_dir=tmp_path
+    )
+    fsync_calls = []
+    monkeypatch.setattr(run_journal.os, "fsync", lambda fd: fsync_calls.append(fd))
+    monkeypatch.setattr(run_journal, "_fsync_parent_dir", lambda _path: None)
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "persist me"},
+        lambda: True,
+    )
+
+    assert accepted is True and event is not None and reason is None and error is None
+    assert len(fsync_calls) == 1, "durable success requires the steer row fsynced before return"
+
+
+def test_steer_fsync_failure_reports_accepted_but_not_durable(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_fsync_fail", "run_fsync_fail", session_dir=tmp_path
+    )
+    monkeypatch.setattr(run_journal.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fsync failed")))
+    monkeypatch.setattr(run_journal, "_fsync_parent_dir", lambda _path: None)
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        {"text": "accepted runtime text"},
+        lambda: True,
+    )
+
+    assert accepted is True
+    assert event is None
+    assert reason == "persistence_error"
+    assert isinstance(error, OSError)
+
+
 def test_delete_evicts_seq_cache_so_recreated_run_restarts(tmp_path):
     run_journal.append_run_event(
         "sess_del", "run_del", "token", {"text": "one"}, session_dir=tmp_path

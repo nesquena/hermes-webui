@@ -3814,7 +3814,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(const row of rows){
       if(!row||typeof row!=='object') continue;
       const role=String(row.role||'');
-      if(role==='tool'||role==='thinking'||role==='control') return true;
+      // Steer is user-authored, but it still needs a persisted Anchor scene even
+      // when the rest of the turn is prose-only.
+      if(String(row.source_event_type||'')==='steer_delivered') return true;
+      if(role==='tool'||role==='thinking') return true;
       if(role==='lifecycle'){
         const source=String(row.source_event_type||'');
         // compression cards are worklog-worthy; a bare terminal/done lifecycle is not.
@@ -6449,10 +6452,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
         const txt=String(d.text||'').trim();
-        if(!txt||sid!==activeSid) return;
+        const files=Array.isArray(d.files)?d.files.filter(Boolean):[];
+        if((!txt&&!files.length)||sid!==activeSid) return;
         _applyToAnchor('steer_delivered',d,e);
         // Persist the live anchor snapshot so settlement and reconnect retain
-        // the control row instead of reverting to a pre-Steer scene.
+        // the user-authored row instead of reverting to a pre-Steer scene.
         snapshotLiveTurn();
       }catch(_){}
     });

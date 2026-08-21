@@ -421,7 +421,9 @@ def _append_run_event_locked(
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(line)
         fh.flush()
-        if _should_fsync_event(terminal_state):
+        # A delivered Steer becomes user-visible durable conversation history
+        # immediately, before the run's next terminal fsync boundary.
+        if _should_fsync_event(terminal_state) or event_name == "steer_delivered":
             os.fsync(fh.fileno())
     _discard_cached_summary(path)
     if created_file:
@@ -481,7 +483,7 @@ class RunJournalWriter:
             session_dir=self.session_dir,
         )
 
-    def accept_and_append_if_nonterminal(self, event_name: str, payload, accept):
+    def accept_and_append_if_nonterminal(self, event_name: str, payload, accept, *, publish=None):
         """Run ``accept`` and append its event before any terminal writer wins.
 
         Returns ``(accepted, event, reason, error)``. The callback is never called
@@ -508,6 +510,14 @@ class RunJournalWriter:
                 )
             except Exception as exc:
                 return True, None, "persistence_error", exc
+            if publish is not None:
+                try:
+                    # Keep queue publication in the same per-run ordering domain
+                    # as journal append. A terminal producer cannot commit and
+                    # publish a later seq before this delivery is observable.
+                    publish(event)
+                except Exception as exc:
+                    return True, event, "publication_error", exc
             return True, event, None, None
 
 
