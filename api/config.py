@@ -1414,22 +1414,34 @@ def _configured_model_label_overrides(raw_models: object) -> dict[str, str]:
     bare-string entry never yields an override so the derived (title-cased) label
     still wins for it (#6657, greptile api/config.py:7293).
 
-    Mirrors ``_configured_model_options``' shape support: only list entries that
-    are dicts can carry a label, first occurrence of an id wins, and the
-    mapping (``models:`` as a dict) shape carries no labels at all.
+    Mirrors ``_configured_model_ids``' first-occurrence contract across BOTH
+    shapes: every list item — bare string or dict — claims its candidate id
+    in ``seen`` before label authority is decided, so a later duplicate dict
+    can never supply a label for an id the ids walker already accepted as a
+    bare string. Only the winning first occurrence contributes an override,
+    and only when it is a dict with a nonblank ``label``. The mapping
+    (``models:`` as a dict) shape carries no labels at all.
     """
     overrides: dict[str, str] = {}
     if not isinstance(raw_models, list):
         return overrides
     seen: set[str] = set()
     for item in raw_models:
-        if not isinstance(item, dict):
-            continue
-        candidate = item.get("id") or item.get("model") or item.get("name")
+        if isinstance(item, dict):
+            candidate = item.get("id") or item.get("model") or item.get("name")
+            can_carry_label = True
+        else:
+            # A bare-string entry never carries a label, but it still claims
+            # the id so an ignored later duplicate cannot contribute one
+            # (deep-review 2026-08-20, api/config.py:1401-1435).
+            candidate = item
+            can_carry_label = False
         model_id = str(candidate or "").strip()
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
+        if not can_carry_label:
+            continue
         label = str(item.get("label") or "").strip()
         if label:
             overrides[model_id] = label
