@@ -5393,6 +5393,70 @@ let _sessionTouchStartIndex=0; // first canonical row currently present in the t
 // current owner is the same object. This prevents a stale handler from
 // erasing bookkeeping for a newer installed owner.
 let _touchScrollOwner=null;
+
+function _touchIntervalState(total, startIndex, endIndex){
+  const t=Math.max(0, Number(total)||0);
+  const start=Math.min(t, Math.max(0, Number(startIndex)||0));
+  const end=Math.min(t, Math.max(start, Number(endIndex)||0));
+  return {start:start,end:end,total:t,complete:start===0&&end===t};
+}
+
+function _touchCurrentInterval(state){
+  const total=state&&state.flatRows?state.flatRows.length:(_sessionTouchTotalCount||0);
+  const start=_sessionTouchStartIndex||0;
+  const end=_sessionTouchLoadedCount||0;
+  return _touchIntervalState(total, start, end);
+}
+
+function _sessionActiveRowInList(list, activeSid){
+  if(!list) return null;
+  try{
+    const active=list.querySelector&&list.querySelector('.session-item.active[data-sid]');
+    if(active) return active;
+  }catch(_){}
+  try{
+    if(activeSid&&list.querySelector){
+      const sid=String(activeSid);
+      const esc=(typeof CSS!=='undefined'&&CSS.escape)?CSS.escape(sid):sid.replace(/"/g,'\\"');
+      const exact=list.querySelector('.session-item[data-sid="'+esc+'"]');
+      if(exact) return exact;
+    }
+  }catch(_){}
+  try{
+    const rows=list.querySelectorAll&&list.querySelectorAll('.session-item[data-sid]');
+    for(const row of Array.from(rows||[])){
+      if(row&&row.classList&&row.classList.contains&&row.classList.contains('active')) return row;
+      if(activeSid&&row&&row.dataset&&row.dataset.sid===activeSid) return row;
+    }
+  }catch(_){}
+  return null;
+}
+
+function _correctActiveTouchAnchor(list, activeSid){
+  if(!list||!activeSid) return false;
+  const row=_sessionActiveRowInList(list, activeSid);
+  if(!row||typeof row.getBoundingClientRect!=='function'||typeof list.getBoundingClientRect!=='function') return false;
+  const rowRect=row.getBoundingClientRect();
+  const listRect=list.getBoundingClientRect();
+  if(!rowRect||!listRect) return false;
+  const intersects=rowRect.bottom>listRect.top&&rowRect.top<listRect.bottom;
+  if(intersects) return false;
+  const current=Math.max(0, Number(list.scrollTop)||0);
+  const maxScroll=Math.max(0, (Number(list.scrollHeight)||0)-(Number(list.clientHeight)||0));
+  let next=current;
+  if(rowRect.top<listRect.top){
+    next=current-(listRect.top-rowRect.top);
+  }else if(rowRect.bottom>listRect.bottom){
+    next=current+(rowRect.bottom-listRect.bottom);
+  }
+  next=Math.max(0, Math.min(maxScroll, Math.round(next)));
+  if(next!==current){
+    list.scrollTop=next;
+    return true;
+  }
+  return false;
+}
+
 // Canonical render state saved by renderSessionListFromCache after the initial
 // touch render. Contains the ordered flat session rows, group metadata, the
 // _renderOneSession closure, and the active session ID — everything needed to
@@ -5466,18 +5530,21 @@ function _ensureTouchSentinelObserver(list){
             return;
           }
           if(token!==_touchBatchToken) return;
-          const t=_sessionTouchTotalCount||0;
-          const l=_sessionTouchLoadedCount||0;
-          if(l>=t) {
-            if(token===_touchBatchToken) _touchBatchPending=false;
-            return;
-          }
           const el=_sessionTouchListEl;
-          if(!_touchLoadedBoundaryNearViewport(el, _touchRenderState, 200)) {
+          const interval=_touchCurrentInterval(_touchRenderState);
+          if(interval.complete) {
             if(token===_touchBatchToken) _touchBatchPending=false;
             return;
           }
-          try{_appendTouchBatch();}
+          const direction=_touchNextBatchDirection(el, _touchRenderState, 200);
+          if(!direction) {
+            if(token===_touchBatchToken) _touchBatchPending=false;
+            return;
+          }
+          try{
+            if(direction==='up') _prependTouchBatch();
+            else _appendTouchBatch();
+          }
           finally{ if(token===_touchBatchToken) _touchBatchPending=false; }
         });
       }
@@ -5508,13 +5575,25 @@ function _touchStartBoundaryNearViewport(list, state, lookahead){
   if(!list||!state) return false;
   const start=Math.min((state.flatRows&&state.flatRows.length)||0, Math.max(0, Number(_sessionTouchStartIndex)||0));
   if(start<=0) return false;
-  const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
-  const scrollTop=Math.max(0, Number(list.scrollTop)||0);
   const margin=Math.max(0, Number(lookahead)||200);
+  const existingItems=list.querySelectorAll&&list.querySelectorAll('.session-item[data-sid]');
+  const firstRow=existingItems&&existingItems[0];
+  if(firstRow&&typeof firstRow.getBoundingClientRect==='function'&&typeof list.getBoundingClientRect==='function'){
+    const rowRect=firstRow.getBoundingClientRect();
+    const listRect=list.getBoundingClientRect();
+    if(rowRect&&listRect){
+      // Use real container coordinates, not start*rowHeight projection: group
+      // headers, controls, density, and wrapped titles can all shift the first
+      // rendered row away from the projected virtual row boundary.
+      return (rowRect.top-listRect.top)<=margin;
+    }
+  }
   // The first rendered row lives after the before-spacer height. When the
   // viewport approaches that boundary, prepend the previous canonical batch so
   // a bounded deep-active touch window can be scrolled upward into real rows
   // instead of a permanent blank spacer.
+  const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
+  const scrollTop=Math.max(0, Number(list.scrollTop)||0);
   const startBoundary=start*itemHeight;
   return (scrollTop-startBoundary)<=margin;
 }
@@ -5834,9 +5913,8 @@ function _updateTouchGroupSpacers(list, state, startIndex, endIndex){
 function _updateTouchSentinel(list, total, startIndex, endIndex){
   const sentinel=list.querySelector('[data-touch-sentinel]');
   if(!sentinel) return;
-  const start=Math.max(0, Number(startIndex)||0);
-  const end=Math.min(total, Math.max(start, Number(endIndex)||0));
-  if(start<=0&&end>=total){
+  const interval=_touchIntervalState(total, startIndex, endIndex);
+  if(interval.complete){
     sentinel.style.display='none';
     if(_touchSentinelObserver) _touchSentinelObserver.unobserve(sentinel);
   }else{
@@ -5982,15 +6060,15 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
     sentinel.style.cssText='padding:12px 8px;text-align:center;color:var(--muted);font-size:12px;';
     list.appendChild(sentinel);
   }
-  const loaded=_sessionTouchLoadedCount;
-  if(loaded>=total){
+  const interval=_touchIntervalState(total, _sessionTouchStartIndex, _sessionTouchLoadedCount);
+  if(interval.complete){
     sentinel.style.display='none';
   }else{
     sentinel.style.display='';
     sentinel.textContent='Loading more\u2026';
   }
   _ensureTouchSentinelObserver(list);
-  if(loaded<total&&_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
+  if(!interval.complete&&_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
   // Event-driven batch trigger: a passive scroll listener on the list arms
   // ONE coalesced RAF per scroll burst. The IntersectionObserver can stall
   // after one append (sentinel stays intersecting, no new transition fires),
@@ -8911,6 +8989,9 @@ function renderSessionListFromCache(){
     // when the list scrolls naturally. Fixed for #1669 follow-up.
     list.scrollTop=listScrollTopBeforeRender;
     _resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);
+  }
+  if(_isTouchPrimary()&&activeSidForSidebar){
+    _correctActiveTouchAnchor(list, activeSidForSidebar);
   }
   // Set up the touch sentinel for incremental batched loading.
   // This must happen after the list DOM is built and scroll is restored.

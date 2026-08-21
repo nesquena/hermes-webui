@@ -552,6 +552,164 @@ console.log(JSON.stringify(result));
 
 
 @_node_tests
+def test_setup_and_observer_use_interval_direction_for_unloaded_prefix():
+    """Setup/observer must treat [start,total) as incomplete and prepend.
+
+    A deep-active touch render can have the suffix fully loaded while the
+    prefix is still virtual. The sentinel must remain enabled, and an observer
+    trigger near the first real row must route through _touchNextBatchDirection()
+    to prepend, not return early on end>=total or unconditionally append.
+    """
+    total = 120
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(total)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+let microtasks = [];
+const realPromise = Promise;
+global.Promise = {{ resolve: function() {{ return {{ then: function(fn) {{ microtasks.push(fn); }} }}; }} }};
+function drainMicrotasks() {{ while (microtasks.length) microtasks.shift()(); }}
+let rafCallbacks = [];
+global.requestAnimationFrame = function(fn) {{ rafCallbacks.push(fn); return rafCallbacks.length; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+let observed = false;
+window.IntersectionObserver = function(cb, opts) {{
+  this._cb = cb;
+  this.disconnect = function(){{}};
+  this.observe = function(){{ observed = true; }};
+  this.unobserve = function(){{ observed = false; }};
+  this._fire = function(isIntersecting) {{ this._cb([{{isIntersecting: isIntersecting}}]); }};
+}};
+global.IntersectionObserver = window.IntersectionObserver;
+const list = makeList();
+list.clientHeight = 520;
+list.scrollHeight = {total} * SESSION_VIRTUAL_ROW_HEIGHT;
+list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT;
+list.getBoundingClientRect = function() {{ return {{top: 100, bottom: 620, height: 520}}; }};
+const gw = makeEl('div');
+gw.className = 'session-date-group';
+gw.setAttribute('data-group-label', 'G');
+const body = makeBodyThatTracksItems(list);
+body.className = 'session-date-body';
+gw.appendChild(body);
+list._groups['G'] = gw;
+list.children.push(gw);
+const before = _sessionVirtualSpacer(40 * SESSION_VIRTUAL_ROW_HEIGHT, 'before');
+body.appendChild(before);
+for (let i = 40; i < {total}; i++) {{
+  const item = makeSessionItem('s' + i);
+  item.getBoundingClientRect = function() {{ return {{top: 110, bottom: 162, height: 52}}; }};
+  body.appendChild(item);
+}}
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+list.children.push(list._sentinel);
+eval(extractFunc('_setupTouchSentinel'));
+let appendCalls = 0;
+let prependCalls = 0;
+const realAppend = _appendTouchBatch;
+const realPrepend = _prependTouchBatch;
+_appendTouchBatch = function() {{ appendCalls++; realAppend(); }};
+_prependTouchBatch = function() {{ prependCalls++; realPrepend(); }};
+_setupTouchSentinel(list, {total}, {json.dumps(flat_rows)}, function(s) {{ return makeSessionItem(s.session_id); }}, 's60', {total}, 40);
+const sentinelShownAfterSetup = list._sentinel.style.display !== 'none';
+const observedAfterSetup = observed;
+const observer = _touchSentinelObserver;
+if (observer && observer._fire) observer._fire(true);
+drainMicrotasks();
+global.Promise = realPromise;
+const sids = list._items.map(function(i) {{ return i.dataset.sid; }});
+console.log(JSON.stringify({{
+  sentinelShownAfterSetup: sentinelShownAfterSetup,
+  observedAfterSetup: observedAfterSetup,
+  appendCalls: appendCalls,
+  prependCalls: prependCalls,
+  start: _sessionTouchStartIndex,
+  end: _sessionTouchLoadedCount,
+  count: list._items.length,
+  ordered: sids.every(function(sid, idx) {{ return sid === 's' + idx; }}),
+  sentinelHiddenAfterPrepend: list._sentinel.style.display === 'none',
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["sentinelShownAfterSetup"] is True
+    assert result["observedAfterSetup"] is True
+    assert result["appendCalls"] == 0
+    assert result["prependCalls"] == 1
+    assert result["start"] == 0
+    assert result["end"] == total
+    assert result["count"] == total
+    assert result["ordered"] is True
+    assert result["sentinelHiddenAfterPrepend"] is True
+
+
+@_node_tests
+def test_active_anchor_uses_real_row_container_geometry():
+    """Projection chooses the window; real DOM rectangles correct scroll.
+
+    The active row can be shifted by group headers and wrapped controls, so the
+    post-render anchor must compare the actual row rect with the list rect. It
+    should correct when the row is outside the viewport and preserve scroll when
+    the row already intersects it.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 1000;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+row.getBoundingClientRect = function() { return {top: 760, bottom: 812, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+const afterMove = list.scrollTop;
+row.getBoundingClientRect = function() { return {top: 300, bottom: 352, height: 52}; };
+const movedAgain = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, afterMove, movedAgain, finalScrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is True
+    assert result["afterMove"] == 1212
+    assert result["movedAgain"] is False
+    assert result["finalScrollTop"] == 1212
+
+
+@_node_tests
+def test_touch_start_boundary_uses_first_row_geometry():
+    """Upward batch trigger must read the live first row, not start*height."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 0;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const first = makeSessionItem('s40');
+first.getBoundingClientRect = function() { return {top: 250, bottom: 302, height: 52}; };
+list._items = [first];
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 120;
+const state = {flatRows: new Array(120), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+const nearByGeometry = _touchStartBoundaryNearViewport(list, state, 200);
+first.getBoundingClientRect = function() { return {top: 450, bottom: 502, height: 52}; };
+const farByGeometry = _touchStartBoundaryNearViewport(list, state, 200);
+console.log(JSON.stringify({nearByGeometry, farByGeometry}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["nearByGeometry"] is True
+    assert result["farByGeometry"] is False
+
+
+@_node_tests
 def test_stale_continuous_raf_cannot_clear_newer_owner():
     """Continuous batch RAFs are owner-qualified like scroll RAFs.
 
@@ -924,6 +1082,10 @@ function _invalidateTouchRender() {
 }
 
 // Extract and eval all touch functions
+eval(extractFunc('_touchIntervalState'));
+eval(extractFunc('_touchCurrentInterval'));
+eval(extractFunc('_sessionActiveRowInList'));
+eval(extractFunc('_correctActiveTouchAnchor'));
 eval(extractFunc('_createTouchGroupWrapper'));
 eval(extractFunc('_updateTouchGroupSpacers'));
 eval(extractFunc('_updateTouchSentinel'));
@@ -4228,12 +4390,23 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   for (const cb of staleRafCbs) cb();
   const staleToken4 = _touchBatchToken; // token the stale microtask captured
   samplePending('after_stale_raf');
+  // Queue a real FIFO probe AFTER stale A and BEFORE newer B. We then queue the
+  // newer production scheduler continuation before draining microtasks, so the
+  // order is: stale A → probe → newer B. The probe must still see B's pending
+  // ownership as true; if stale A clears the latch unconditionally, it bites.
+  let pendingProbeAfterStale4 = null;
+  let tokenProbeAfterStale4 = null;
   // Create a same-generation token supersession through the real scroll
   // scheduler. We deliberately release the latch before draining stale so the
   // newer scroll handler can queue its own RAF/Promise; this isolates the token
   // guard (gen, owner, list, loaded, total, and geometry all stay valid).
   _touchBatchPending = false;
   samplePending('after_adversarial_release');
+  Promise.resolve().then(function(){{
+    pendingProbeAfterStale4 = _touchBatchPending;
+    tokenProbeAfterStale4 = _touchBatchToken;
+    samplePending('probe_between_stale_and_newer');
+  }});
   if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
   const newerRafCbs = rafCallbacks.splice(0);
   for (const cb of newerRafCbs) cb();
@@ -4241,17 +4414,16 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   const tokenAfterSupersede4 = _touchBatchToken;
   const snapAfterSupersede4 = snapshotLiveTree();
   const newerToken4 = _touchBatchToken;
-  const pendingBetween4 = _touchBatchPending;
   samplePending('after_newer_raf_before_microtasks');
-  // Drain stale microtask, then newer microtask in FIFO order.
+  // Drain stale microtask, the probe, then newer microtask in FIFO order.
   for (let i = 0; i < 10; i++) await Promise.resolve();
   // Attribute appends to the schedule that queued them.
   const staleAppends4 = appendLog.filter(function(e) {{ return e.token === staleToken4; }}).length;
   const newerAppends4 = appendLog.filter(function(e) {{ return e.token === newerToken4; }}).length;
   // The probe runs after the stale continuation and before the newer
   // continuation. If the stale path incorrectly clears pending despite token
-  // mismatch, pendingBetween4 is false and this oracle bites.
-  const staleDidNotClear4 = pendingBetween4 === true;
+  // mismatch, pendingProbeAfterStale4 is false and this oracle bites.
+  const staleDidNotClear4 = pendingProbeAfterStale4 === true && tokenProbeAfterStale4 === newerToken4;
   const newerCleared4 = _touchBatchPending === false;
   const newerLoaded4 = _sessionTouchLoadedCount;
   const tree4 = assertLiveTreeUntouched(snap4);
