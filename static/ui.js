@@ -2793,9 +2793,9 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   // recovers the image after it has been zoomed/panned out of view.
   const fitBtn = document.createElement('button');
   fitBtn.className = 'img-lightbox-fit';
-  fitBtn.setAttribute('aria-label', 'Reset zoom to fit (F)');
-  fitBtn.setAttribute('title', 'Reset zoom to fit (F)');
-  fitBtn.textContent = 'Fit';
+  fitBtn.setAttribute('aria-label', t('img_lightbox_fit_title'));
+  fitBtn.setAttribute('title', t('img_lightbox_fit_title'));
+  fitBtn.textContent = t('img_lightbox_fit');
   fitBtn.onclick = e => { e.stopPropagation(); if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); };
   lb.appendChild(viewport);
   lb.appendChild(cls);
