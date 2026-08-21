@@ -8940,6 +8940,52 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     )
 
 
+def _display_merge_cached_messages(session, sidecar_messages):
+    """Return the memoized merged transcript, or None when it can't be reused.
+
+    Lets GET /api/session skip loading the state.db rows entirely on a hit. That
+    is only sound because the cache key can be built from the existing
+    commit-reliable DB/WAL/SHM signature (`_state_db_session_signature`) rather
+    than a fingerprint computed FROM the loaded rows -- otherwise the key could
+    not be built without paying exactly the cost we are trying to avoid.
+
+    Fail-closed by construction: returns None whenever the session is active,
+    the key cannot be built, or the cached entry does not match, and the caller
+    then performs the normal full load + merge.
+    """
+    if getattr(session, "active_stream_id", None) or getattr(
+        session, "pending_user_message", None
+    ):
+        return None
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid:
+        return None
+    with _display_merge_cache_lock:
+        entry = _display_merge_cache.get(sid)
+        if entry is None:
+            return None
+    # Resolve the sidecar exactly like the merge helper does: it treats None as
+    # "load the lineage myself", and the cache entry was keyed on that RESOLVED
+    # list. Probing with a bare None would key on an empty sidecar and miss
+    # every time -- silently reverting this optimisation.
+    if sidecar_messages is None:
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    else:
+        sidecar_messages = list(sidecar_messages or [])
+    # Building the key requires the sidecar rows (cheap: already in memory or
+    # served from the lineage cache) but not the state.db rows -- that
+    # asymmetry is the whole point.
+    cache_key = _display_merge_cache_key(session, sidecar_messages, None)
+    if cache_key is None:
+        return None
+    with _display_merge_cache_lock:
+        entry = _display_merge_cache.get(sid)
+        if not _display_merge_cache_entry_usable(entry, cache_key):
+            return None
+        _display_merge_cache.move_to_end(sid, last=True)
+        return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+
+
 def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, state_db_messages) -> list:
     if sidecar_messages is None:
         sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
@@ -8977,7 +9023,7 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
             entry = _display_merge_cache.get(sid)
-            if entry is not None and entry.get("key") == cache_key:
+            if _display_merge_cache_entry_usable(entry, cache_key):
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
     merged = merge_session_messages_append_only(
@@ -8989,7 +9035,11 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
-            _display_merge_cache[sid] = {"key": cache_key, "messages": merged}
+            _display_merge_cache[sid] = {
+                "key": cache_key,
+                "messages": merged,
+                "stored_at": time.monotonic(),
+            }
             _display_merge_cache.move_to_end(sid, last=True)
             while len(_display_merge_cache) > _DISPLAY_MERGE_CACHE_MAX:
                 _display_merge_cache.popitem(last=False)
@@ -9002,8 +9052,35 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
 # perf: memoized sidecar↔state.db display merges for GET /api/session.
 # See _limited_webui_messages_for_display_with_sidecar for the validity rules.
 _DISPLAY_MERGE_CACHE_MAX = 16
+# While another turn streams, state.db changes for every delta. The key reuses
+# the project's established streaming freeze marker so unrelated writes do not
+# evict every historical transcript. Bound that deliberate freeze tightly:
+# after five seconds the full state.db load + merge runs again, so an external
+# edit to an inactive target session can never remain stale indefinitely.
+_DISPLAY_MERGE_STREAMING_TTL_SECONDS = 5.0
 _display_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
 _display_merge_cache_lock = threading.Lock()
+
+
+def _display_merge_cache_entry_usable(entry, cache_key) -> bool:
+    if entry is None or entry.get("key") != cache_key:
+        return False
+    try:
+        state_key = cache_key[4]
+    except (IndexError, TypeError):
+        return False
+    is_streaming_key = (
+        isinstance(state_key, (list, tuple))
+        and bool(state_key)
+        and state_key[0] == "streaming"
+    )
+    if not is_streaming_key:
+        return True
+    try:
+        age = time.monotonic() - float(entry["stored_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return 0.0 <= age <= _DISPLAY_MERGE_STREAMING_TTL_SECONDS
 
 
 def _display_merge_cache_key(session, sidecar_messages, state_db_messages):
@@ -9037,7 +9114,22 @@ def _display_merge_cache_key(session, sidecar_messages, state_db_messages):
         last = sidecar_messages[-1]
         if isinstance(last, dict):
             last_ts = last.get("timestamp")
-    state_fp = _state_db_rows_fingerprint(state_db_messages)
+    # Prefer the existing commit-reliable DB/WAL/SHM signature. Serialising
+    # every state.db display row costs more than the cached response budget, so
+    # the cache could never pay for itself. During a stream the project-standard
+    # freeze marker prevents unrelated per-delta commits from churning this key;
+    # streaming entries have a strict five-second TTL. Fail closed onto the exact
+    # row fingerprint whenever the signature cannot be read.
+    state_fp = _state_db_session_signature(
+        sid, getattr(session, "profile", None) or None
+    )
+    if state_fp is None:
+        # state_db_messages is None on the cache-probe path, where the rows were
+        # deliberately not loaded. Fingerprinting None would key on the empty
+        # row set and could match an entry built from real rows, so fail closed.
+        if state_db_messages is None:
+            return None
+        state_fp = _state_db_rows_fingerprint(state_db_messages)
     if state_fp is None:
         return None
     return (
@@ -9049,6 +9141,61 @@ def _display_merge_cache_key(session, sidecar_messages, state_db_messages):
         getattr(session, "truncation_watermark", None),
         getattr(session, "truncation_boundary", None),
     )
+
+
+def _state_db_session_signature(session_id, profile=None):
+    """Commit-reliable state.db signature for a session cache key.
+
+    The signature is intentionally database-wide rather than sampled per row.
+    ``_sqlite_file_stat_cache_key`` is the existing proven invalidation primitive
+    for WebUI state caches: it combines content summaries with DB/WAL/SHM stat
+    stamps and advances on every SQLite commit, including same-length edits to
+    optional message columns and continuation-parent rows.
+
+    Outside a stream, this may invalidate a session cache when *another*
+    session is written. That is a deliberate safety trade-off: false
+    invalidation costs one cold merge, while missed invalidation can serve a
+    stale or shrunk transcript. During an active stream, the project-standard
+    streaming marker freezes those unrelated per-delta commits; the cache layer
+    limits such entries to five seconds before forcing a fresh full merge. The
+    normal DB signature call costs about 1.3 ms on the production state.db
+    versus 1.4 s for serialising all 36k display rows in Python.
+
+    Returns None on any failure so callers fail closed onto the exact row
+    fingerprint rather than trusting a partial key.
+    """
+    from api.models import (
+        _agent_state_db_path,
+        _cli_sessions_streaming_freeze_marker,
+        _sqlite_file_stat_cache_key,
+    )
+
+    sid = str(session_id or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    try:
+        streaming_marker = _cli_sessions_streaming_freeze_marker()
+    except Exception:
+        streaming_marker = None
+    if streaming_marker is not None:
+        return streaming_marker
+    try:
+        db_path = _agent_state_db_path(profile=profile)
+        if not db_path or not Path(db_path).exists():
+            return None
+        signature = _sqlite_file_stat_cache_key(Path(db_path))
+    except Exception:
+        return None
+    if signature is None:
+        return None
+    # ``_sqlite_file_stat_cache_key`` is a tuple of the content fingerprint and
+    # DB/WAL/SHM stat stamps. A completely empty result is not a valid key.
+    try:
+        if not any(component is not None for component in signature):
+            return None
+    except TypeError:
+        return None
+    return signature
 
 
 def _state_db_rows_fingerprint(rows) -> str | None:
@@ -13064,6 +13211,10 @@ def handle_get(handler, parsed) -> bool:
             metadata_summary = None
             limited_sidecar_messages = None
             state_db_since_timestamp = None
+            # Set by the limited-display path when the memoized merge can be
+            # reused without loading the state.db rows; must exist for every
+            # branch below, including the ones that never probe the cache.
+            _display_cache_hit = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -13087,10 +13238,35 @@ def handle_get(handler, parsed) -> bool:
                 _backstop = _state_db_backstop_limit_for_display(s, msg_before)
                 if _backstop is not None:
                     _state_db_reader_kwargs["limit"] = _backstop
-                state_db_messages = get_state_db_session_messages(
-                    sid,
-                    **_state_db_reader_kwargs,
-                )
+                # perf: on the limited-display path the state.db rows are only
+                # consumed by the memoized merge below. Now that the cache key
+                # is a bounded SQL signature rather than a fingerprint OF these
+                # rows, a hit no longer needs them -- and materialising tens of
+                # thousands of dicts was the dominant remaining cost (~2.3s on a
+                # 36k-row session) even when the merge itself was served from
+                # cache. Probe the cache first and skip the load on a hit.
+                #
+                # Deliberately narrow: only when msg_limit is set (the merge
+                # helper below is the sole consumer) and only for inactive
+                # sessions, matching the cache's own validity rule. Any miss
+                # falls through to the normal full load, so this can only skip
+                # work that would have produced an identical merged result.
+                _display_cache_hit = None
+                if (
+                    msg_limit is not None
+                    and not getattr(s, "active_stream_id", None)
+                    and not getattr(s, "pending_user_message", None)
+                ):
+                    _display_cache_hit = _display_merge_cached_messages(
+                        s, limited_sidecar_messages
+                    )
+                if _display_cache_hit is not None:
+                    state_db_messages = []
+                else:
+                    state_db_messages = get_state_db_session_messages(
+                        sid,
+                        **_state_db_reader_kwargs,
+                    )
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed
@@ -13123,11 +13299,14 @@ def handle_get(handler, parsed) -> bool:
                     # them chronologically and dedupe exact repeats.
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
                 elif msg_limit is not None:
-                    _all_msgs = _limited_webui_messages_for_display_with_sidecar(
-                        s,
-                        limited_sidecar_messages,
-                        state_db_messages,
-                    )
+                    if _display_cache_hit is not None:
+                        _all_msgs = _display_cache_hit
+                    else:
+                        _all_msgs = _limited_webui_messages_for_display_with_sidecar(
+                            s,
+                            limited_sidecar_messages,
+                            state_db_messages,
+                        )
                 else:
                     _all_msgs = merge_session_messages_append_only(
                         _webui_sidecar_lineage_messages_for_display(s),
