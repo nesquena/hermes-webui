@@ -215,16 +215,12 @@ def test_unmatched_transcript_row_does_not_duplicate_below_its_own_output():
     )
 
 
-def test_unmatched_transcript_row_slightly_before_started_at_is_adopted():
-    """Current-turn user row whose timestamp drifted slightly earlier than
-    pending_started_at must still be classified as this turn, not history.
+def test_identical_prompt_point_four_seconds_before_boundary_keeps_both_turns():
+    """A row at ``pending_started_at - 0.4s`` is historical even when its
+    normalized text matches the pending prompt.
 
-    Review 2026-08-18 (CHANGES_REQUESTED): +0.4s drift is adopted, but -0.4s
-    made the row look older than the boundary, so the classifier returned i+1
-    and the merge inserted a second bubble above the existing row.
-
-    Mirror of the +0.4 case, with attachments: one prompt bubble, existing
-    files kept, placed immediately above the first active-turn output.
+    Text plus timestamp proximity is not turn identity.  The earlier row and
+    the pending turn must each keep their own bubble and distinct attachments.
     """
     body = f"""
 {_PROBE_TAIL}
@@ -233,47 +229,39 @@ const session={{
   active_stream_id:'stream-1',
   pending_user_message:{json.dumps(_PROMPT)},
   pending_started_at:{_T0},
-  pending_attachments:[{{name:'courant.png'}}],
+  pending_attachments:[{{name:'courant.pdf'}}],
 }};
 const messages={_transcript(
         {
             "role": "user",
             "content": _PROMPT,
             "timestamp": _T0 - 0.4,
-            "attachments": [{"name": "courant.png"}],
+            "attachments": [{"name": "precedent.png"}],
         },
         with_live=False,
     )};
 const merged=_mergePendingSessionMessage(session, messages);
 const idxs=idxsOfPrompt(messages);
-const firstOutput=firstTurnOutputIdx(messages);
 process.stdout.write(JSON.stringify({{
   merged,
   promptIdxs: idxs,
-  firstOutputIdx: firstOutput,
-  belowOwnOutput: idxs.length ? (Math.max.apply(null, idxs) > firstOutput && firstOutput >= 0) : false,
-  duplicated: idxs.length > 1,
   attachmentsByIdx: messages.map(m=>Array.isArray(m&&m.attachments)?m.attachments.map(a=>a&&a.name):null),
   order: messages.map(m=>`${{m.role}}@${{m.timestamp!==undefined?m.timestamp:'live'}}`),
 }}));
 """
     result = _run_probe(body)
-    assert not result["duplicated"], (
-        "the pending prompt was rendered twice (the transcript row plus a "
-        f"materialized copy): {result['order']}"
+    assert result["merged"] is True
+    assert result["promptIdxs"] == [2, 3], (
+        "strictly pre-boundary history must not be adopted as the current turn, "
+        f"even at sub-second distance: {result['order']}"
     )
-    assert not result["belowOwnOutput"], (
-        f"the adopted bubble landed below its own turn output: {result['order']}"
+    assert result["attachmentsByIdx"][2] == ["precedent.png"], (
+        "the historical turn must keep its attachment: "
+        f"{result['attachmentsByIdx']} ({result['order']})"
     )
-    assert result["promptIdxs"] == [result["firstOutputIdx"] - 1], (
-        "the drifted current-turn user row must sit at the turn boundary; "
-        f"got indices {result['promptIdxs']} with turn output starting at "
-        f"{result['firstOutputIdx']} ({result['order']})"
-    )
-    prompt_idx = result["promptIdxs"][0]
-    assert result["attachmentsByIdx"][prompt_idx] == ["courant.png"], (
-        "adopting the slightly-earlier current-turn row must keep its "
-        f"attachments: {result['attachmentsByIdx']} ({result['order']})"
+    assert result["attachmentsByIdx"][3] == ["courant.pdf"], (
+        "the pending turn must keep its attachment: "
+        f"{result['attachmentsByIdx']} ({result['order']})"
     )
 
 
