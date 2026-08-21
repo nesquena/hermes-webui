@@ -12,7 +12,6 @@ historical lineage merges once. These tests pin the contract:
 """
 from __future__ import annotations
 
-import os
 import time
 
 import pytest
