@@ -11957,6 +11957,16 @@ def _run_agent_streaming(
         # CLI/cron env fallback resumes — same lifecycle slot as the env
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
+        try:
+            from api.session_events import publish_session_list_changed
+
+            publish_session_list_changed(
+                "session_turn_complete",
+                profile=getattr(s, "profile", None) if s is not None else None,
+                session_id=getattr(s, "session_id", None) or session_id,
+            )
+        except Exception:
+            logger.debug("Failed to publish completed session turn", exc_info=True)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)

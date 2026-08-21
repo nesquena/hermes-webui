@@ -17925,6 +17925,11 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
     # are side-effect-free (header read + stat-only fingerprint), safe pre-response.
     resume_event_id = _session_events_resume_event_id(handler, parsed)
     _idle_journal_fp = session_journal_fingerprint(session_id)
+    # A completed turn may finish between active-stream probes. Subscribe to the
+    # in-process session-change bus before committing the response so the idle
+    # path can still deliver a scoped transcript snapshot immediately instead of
+    # relying on the next manual sidebar refresh.
+    session_change_subscriber = subscribe_session_events()
 
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -17999,6 +18004,14 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 subscriber, subscriber_stream, stream_snapshot, active_stream_id = attach_active_stream()
                 if subscriber is not None:
                     break
+                try:
+                    session_change = session_change_subscriber.get_nowait()
+                except queue.Empty:
+                    session_change = None
+                if isinstance(session_change, dict):
+                    changed_session_id = str(session_change.get("session_id") or "").strip()
+                    if not changed_session_id or changed_session_id == session_id:
+                        emit_session_snapshot(active_stream_id)
                 # Journal advanced with no live stream to attach → a run completed
                 # entirely within the wait (or the first attach). Re-sync via a
                 # snapshot boundary (the same honest-recovery contract used for a
@@ -18066,6 +18079,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
                 subscriber_stream.unsubscribe(subscriber)
             except Exception:
                 pass
+        unsubscribe_session_events(session_change_subscriber)
     return True
 
 

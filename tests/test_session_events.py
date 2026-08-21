@@ -159,6 +159,27 @@ def test_session_event_queue_unscoped_pending_stays_unscoped_when_followed_by_sc
         session_events.unsubscribe_session_events(q)
 
 
+def test_per_session_sse_idle_path_consumes_scoped_completion_events():
+    """Keep the warm open-chat stream live when a turn ends between probes."""
+    routes = Path("api/routes.py").read_text(encoding="utf-8")
+    handler_start = routes.find("def _handle_session_run_journal_stream_for_session")
+    assert handler_start >= 0
+    handler_end = routes.find("\ndef ", handler_start + 1)
+    handler_body = routes[handler_start:handler_end if handler_end >= 0 else None]
+    assert "session_change_subscriber = subscribe_session_events()" in handler_body
+    assert "session_change_subscriber.get_nowait()" in handler_body
+    assert "changed_session_id == session_id" in handler_body
+    assert "unsubscribe_session_events(session_change_subscriber)" in handler_body
+
+
+def test_streaming_publishes_scoped_turn_completion_event():
+    """Ensure every durable WebUI turn invalidates matching open transcripts."""
+    streaming = Path("api/streaming.py").read_text(encoding="utf-8")
+    assert '"session_turn_complete"' in streaming
+    assert "publish_session_list_changed(" in streaming
+    assert 'session_id=getattr(s, "session_id", None) or session_id' in streaming
+
+
 def test_session_event_queue_drain_race_preserves_incoming_profile():
     from api import session_events
 
