@@ -15364,9 +15364,10 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body["session_id"]).strip()
         if not is_safe_session_id(sid):
             return bad(handler, "Invalid session id", 400)
-        from api.context_brief import BriefError, get_brief_payload
+        from api.context_brief import BriefError, get_auto_config, get_brief_payload
         try:
             brief = get_brief_payload(sid)
+            brief["auto"] = get_auto_config()
         except BriefError as exc:
             return bad(handler, str(exc), exc.status)
         except Exception:

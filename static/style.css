@@ -6530,6 +6530,7 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .ctx-brief-md-p{margin:2px 0;}
 .ctx-brief-btn{cursor:pointer;margin-top:6px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--accent-text,var(--blue));font-size:12px;font-weight:600;padding:4px 10px;}
 .ctx-brief-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.ctx-brief-btn-inline{margin:0 0 0 6px;padding:0 7px;font-size:11px;line-height:1.5;vertical-align:middle}
 .ctx-brief-btn-goal{color:var(--green,#22c55e);}
 .ctx-brief-btn:hover{background:var(--hover-bg,rgba(127,127,127,.12));}
 .ctx-brief-summary-hint{margin:2px 0 4px;line-height:1.4;}

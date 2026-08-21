@@ -3988,8 +3988,11 @@ function renderContextBrief(brief, panel){
   if (llm && llm.text){
     const gen = llm.generated_at ? _ctxBriefTs(llm.generated_at) : '';
     const staleBadge = llm.stale ? `<span class="ctx-brief-badge-stale">${esc(t('context_brief_stale'))}</span>` : '';
+    // Stale badge gets an inline refresh button so regeneration is reachable
+    // without scrolling the whole narrative (mobile case).
+    const staleRefresh = llm.stale ? `<button type="button" class="ctx-brief-btn ctx-brief-btn-inline" onclick="_contextBriefRefresh(this)" title="${esc(t('context_brief_regenerate'))}" aria-label="${esc(t('context_brief_regenerate'))}">↻</button>` : '';
     const fallbackNote = llm.source === 'fallback-template' ? ` · ${esc(t('context_brief_fallback'))}` : '';
-    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))} ${staleBadge}<span class="ctx-brief-dim ctx-brief-gen-date">${esc(gen)}${fallbackNote}</span></div><div class="ctx-brief-md">${_ctxBriefMdLite(llm.text)}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_regenerate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
+    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))} ${staleBadge}${staleRefresh}<span class="ctx-brief-dim ctx-brief-gen-date">${esc(gen)}${fallbackNote}</span></div><div class="ctx-brief-md">${_ctxBriefMdLite(llm.text)}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_regenerate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
   } else {
     parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))}</div><div class="ctx-brief-dim ctx-brief-summary-hint">${esc(t('context_brief_summary_hint'))}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_generate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
   }
@@ -4078,6 +4081,38 @@ async function _contextBriefRefresh(btn){
     if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
   }
 }
+
+
+// Refresh visible brief panels when the background worker publishes a newer generation.
+let _contextBriefAutoTimer = null;
+function _startContextBriefAutoRefresh(){
+  if (_contextBriefAutoTimer) return;
+  _contextBriefAutoTimer = setInterval(async () => {
+    const panels = Array.from(document.querySelectorAll('[data-brief-sid]'))
+      .filter(p => p.dataset.briefLoaded === '1' && p.offsetParent !== null);
+    if (!panels.length) return;
+    const sid = _contextBriefSid();
+    if (!sid) return;
+    let data;
+    try {
+      const res = await fetch('/api/session/context-brief', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sid}),
+      });
+      data = await res.json();
+    } catch(_) { return; }
+    if (!data || !data.ok || !data.brief) return;
+    const newGen = ((data.brief.llm_brief || {}).generated_at) || 0;
+    for (const p of panels){
+      if (p.dataset.briefSid !== sid) continue;
+      const oldGen = (((p._briefData || {}).llm_brief || {}).generated_at) || 0;
+      if (newGen !== oldGen){
+        renderContextBrief(data.brief, p);
+      }
+    }
+  }, 45000);
+}
+_startContextBriefAutoRefresh();
 
 // Compose a /goal from the brief's remaining (pending + in_progress) todos and
 // send it to the conversation, so the agent finishes the "reste à faire" work.
@@ -9049,6 +9084,8 @@ function _preferencesPayloadFromUi(){
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showQuotaChipCb=$('settingsShowQuotaChip');
   if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
+  const contextBriefAutoCb=$('settingsContextBriefAuto');
+  if(contextBriefAutoCb) payload.context_brief_auto=contextBriefAutoCb.checked;
   const showConversationOutlineCb=$('settingsShowConversationOutline');
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
@@ -9700,6 +9737,11 @@ async function loadSettingsPanel(){
         if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
         _schedulePreferencesAutosave();
       },{once:false});
+    }
+    const contextBriefAutoCb=$('settingsContextBriefAuto');
+    if(contextBriefAutoCb){
+      contextBriefAutoCb.checked=settings.context_brief_auto===true;
+      contextBriefAutoCb.addEventListener('change',()=>{_schedulePreferencesAutosave();});
     }
     const hideSuggestionsCb=$('settingsHideSuggestions');
     if(hideSuggestionsCb){
