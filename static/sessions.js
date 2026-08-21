@@ -3359,9 +3359,8 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
 // The authoritative boundary is `pending_started_at`: every row belonging to a
 // PREVIOUS turn carries a timestamp strictly older than it. So scan backwards
 // for the newest definitively-older row; the active turn starts right after it.
-// Exception: a same-text user row whose timestamp is only a sub-second earlier
-// than `pending_started_at` is this turn's own drifted row, not history — return
-// its index so the merge adopts it instead of inserting a duplicate.
+// There is no text/proximity exception: visible text and timestamp closeness are
+// not turn identity, so even a same-text row 0.4s earlier remains history.
 //
 // Every compared timestamp is normalized through _timestampSeconds /
 // _firstValidTimestampSeconds (static/ui.js), so ISO-string and millisecond
@@ -3376,7 +3375,7 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
 // `_live` rows (this turn's own streaming placeholders) are skippable. Index 0
 // is returned only when EVERY settled row is demonstrably at/after the
 // boundary; an empty or live-only window proves nothing and also returns -1.
-function _activeTurnInsertionIndex(messages,session,pendingMsg){
+function _activeTurnInsertionIndex(messages,session){
   if(typeof _timestampSeconds!=='function'||typeof _firstValidTimestampSeconds!=='function') return -1;
   const startedAt=_timestampSeconds(session&&session.pending_started_at);
   if(startedAt===null) return -1;
@@ -3389,21 +3388,7 @@ function _activeTurnInsertionIndex(messages,session,pendingMsg){
     const ts=_firstValidTimestampSeconds(msg._ts,msg.timestamp,msg.created_at);
     if(ts===null) return -1;
     sawSettledRow=true;
-    if(ts<startedAt){
-      // Sub-second earlier drift on the current prompt is still this turn.
-      // Hour-old (or even 1s-old) same-text rows stay history: return i+1.
-      const olderDrift=startedAt-ts;
-      if(
-        pendingMsg
-        && String(msg.role||'')==='user'
-        && typeof _sameTranscriptMessage==='function'
-        && _sameTranscriptMessage(msg,pendingMsg)
-        && olderDrift<1
-      ){
-        return i;
-      }
-      return i+1;
-    }
+    if(ts<startedAt) return i+1;
   }
   // Every settled row is demonstrably at/after the boundary: the whole visible
   // window belongs to the active turn, so the prompt precedes all of it.
@@ -3422,7 +3407,7 @@ function _mergePendingSessionMessage(session,messages){
   if(!pendingMsg) return false;
   if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
   const boundaryIdx=typeof _activeTurnInsertionIndex==='function'
-    ? _activeTurnInsertionIndex(messages,session,pendingMsg)
+    ? _activeTurnInsertionIndex(messages,session)
     : -1;
   if(boundaryIdx>=0){
     // A same-text user row at/after the boundary IS this turn's own row: rows
