@@ -1773,11 +1773,6 @@ async function loadSession(sid){
   const _loadGeneration = _beginSessionNavigationRequest(sid);
   const _isCurrentLoad = () => _sessionNavigationRequestIsCurrent(sid,_loadGeneration);
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
-  // #6704 P1: the 'squash-running' pulse lives on SHARED desktop/mobile
-  // controls; re-sync it against the session being displayed so a job running
-  // on another conversation doesn't leak its indicator here (and re-asserts
-  // when navigating back to the owner). Same pattern as the upload bar above.
-  if(typeof _squashSyncRunningIndicatorForSession==='function')_squashSyncRunningIndicatorForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.
@@ -2024,6 +2019,14 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  // #6704 P1: the squash pulse lives on shared desktop/mobile controls. Project
+  // only the session whose CURRENT generation has successfully supplied
+  // metadata and is now authoritative for the visible UI. Projecting the
+  // requested destination before this point clears A's running state when a B
+  // load fails (or returns stale), even though A remains the visible session.
+  if(typeof _squashSyncRunningIndicatorForSession==='function'){
+    _squashSyncRunningIndicatorForSession(S.session.session_id);
+  }
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override

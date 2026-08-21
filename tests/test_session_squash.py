@@ -402,11 +402,15 @@ def test_squash_running_indicator_is_owner_scoped_wiring():
     assert "classList.add('squash-running')" not in body
     assert "classList.remove('squash-running')" not in body
 
-    # loadSession re-syncs the shared controls against the displayed session
-    # on switch, alongside the existing upload-bar owner resync.
+    # loadSession re-syncs the shared controls only after the current
+    # destination's metadata is accepted as the displayed session. A pending,
+    # failed, or stale destination must not overwrite the still-visible owner.
     ls_start = sessions.index("async function loadSession")
     ls_body = sessions[ls_start : sessions.index("\nasync function", ls_start + 10)]
-    assert "_squashSyncRunningIndicatorForSession(sid)" in ls_body
+    assign_pos = ls_body.index("S.session=data.session;")
+    sync_pos = ls_body.index("_squashSyncRunningIndicatorForSession(S.session.session_id)")
+    assert sync_pos > assign_pos
+    assert ls_body.count("_squashSyncRunningIndicatorForSession(") == 1
 
 
 def test_squash_running_indicator_does_not_leak_across_sessions_runtime():
@@ -509,7 +513,9 @@ def test_squash_completion_obeys_requested_navigation_runtime():
     load_body = sessions[load_start:load_end]
     assert "const _loadGeneration = _beginSessionNavigationRequest(sid);" in load_body
     assert "_sessionNavigationRequestIsCurrent(sid,_loadGeneration)" in load_body
-    assert "_squashSyncRunningIndicatorForSession(sid)" in load_body
+    assign_pos = load_body.index("S.session=data.session;")
+    sync_pos = load_body.index("_squashSyncRunningIndicatorForSession(S.session.session_id)")
+    assert sync_pos > assign_pos
     assert "if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid))" in load_body
     squash_start = panels.index("const _squashRunningSessions")
     squash_end = panels.index("// ── Skills panel", squash_start)
@@ -583,13 +589,13 @@ def test_squash_completion_obeys_requested_navigation_runtime():
               if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)) return;
               const generation=_beginSessionNavigationRequest(sid);
               _loads.push({sid, force:!!opts.force, generation});
-              if(typeof _squashSyncRunningIndicatorForSession==='function'){
-                _squashSyncRunningIndicatorForSession(sid);
-              }
               try{
                 const data=await _requestMetadata(sid);
                 if(!_sessionNavigationRequestIsCurrent(sid,generation)) return;
                 S.session=data.session;
+                if(typeof _squashSyncRunningIndicatorForSession==='function'){
+                  _squashSyncRunningIndicatorForSession(S.session.session_id);
+                }
                 _loadingSessionId=null;
               }catch(error){
                 _loadErrors.push({sid,message:String(error&&error.message||error)});
@@ -690,6 +696,7 @@ def test_squash_completion_obeys_requested_navigation_runtime():
             await settle();
             requestFor(rt,'sess-B').request.reject(new Error('B metadata failed'));
             await navB;
+            const beforeCompletionButtons=rt.buttons();
             rt.status.resolve(done());
             await settle();
             const unexpectedA=requestFor(rt,'sess-A');
@@ -699,6 +706,7 @@ def test_squash_completion_obeys_requested_navigation_runtime():
               active:rt.ctx.S.session.session_id,
               loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
               errors:rt.loadErrors.map(x=>x.sid),
+              beforeCompletionButtons,
             };
           }
 
@@ -731,7 +739,7 @@ def test_squash_completion_obeys_requested_navigation_runtime():
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert out["pending_b_buttons"] == [False, False]
+    assert out["pending_b_buttons"] == [True, True]
     assert out["pending_b"] == {
         "active": "sess-B", "loads": ["sess-B:false"], "buttons": [False, False],
     }
@@ -746,7 +754,10 @@ def test_squash_completion_obeys_requested_navigation_runtime():
         "buttons": [False, False],
     }
     assert out["failed_b"] == {
-        "active": "sess-A", "loads": ["sess-B:false"], "errors": ["sess-B"],
+        "active": "sess-A",
+        "loads": ["sess-B:false"],
+        "errors": ["sess-B"],
+        "beforeCompletionButtons": [True, True],
     }
     assert out["wrong_owner"] == {
         "loads": [], "buttons": [False, False], "failed": True,
