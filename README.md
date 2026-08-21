@@ -270,7 +270,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
-- Optional HSTS (`HERMES_WEBUI_HSTS=1`) for permanently HTTPS deployments; it is emitted only on actual HTTPS requests
+- Optional HSTS (`HERMES_WEBUI_HSTS_MAX_AGE=86400`) for permanently HTTPS deployments; it is emitted only on actual HTTPS requests. To roll back, serve `HERMES_WEBUI_HSTS_MAX_AGE=0` over HTTPS before switching the hostname back to HTTP. HSTS applies across all ports on the hostname; Firefox does not exempt `localhost`. `includeSubDomains` and `preload` are intentionally not enabled.
 - 20MB POST body size limit
 - CDN resources pinned with SRI integrity hashes
 

@@ -1229,6 +1229,26 @@ def _is_secure_transport(handler=None) -> bool:
     return False
 
 
+def hsts_header_value(handler=None) -> str | None:
+    """Return the configured HSTS value for a verified HTTPS request.
+
+    HSTS is opt-in through ``HERMES_WEBUI_HSTS_MAX_AGE``. An unset, empty, or
+    invalid value disables emission. ``0`` is intentionally valid: serving
+    ``max-age=0`` over HTTPS removes a previously cached browser policy before
+    an operator switches the hostname back to plain HTTP.
+    """
+    raw = os.getenv("HERMES_WEBUI_HSTS_MAX_AGE", "").strip()
+    if not raw or not raw.isascii() or not raw.isdigit():
+        return None
+    try:
+        max_age = int(raw)
+    except ValueError:
+        return None
+    if not _is_secure_transport(handler):
+        return None
+    return f"max-age={max_age}"
+
+
 def _is_secure_context(handler=None) -> bool:
     """Return True if cookies should carry the Secure flag.
 
