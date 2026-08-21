@@ -65,6 +65,7 @@ from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
+    StateDBSessionMessagesSnapshot,
     _is_empty_partial_activity_message,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -156,6 +157,29 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     attach_todo_state(raw, messages)
     if tool_calls is not None:
         raw['tool_calls'] = tool_calls
+    try:
+        from api.session_ops import (
+            regeneration_authority,
+            regeneration_state,
+        )
+        canonical_messages, canonical_context = regeneration_state(session)
+        revision = regeneration_authority(
+            session,
+            rows=canonical_messages,
+            context=canonical_context,
+            full_transcript=True,
+            canonical_state=(canonical_messages, canonical_context),
+        )
+        if revision:
+            messages = list(canonical_messages)
+            raw['messages'] = messages
+            raw['message_count'] = len(messages)
+            attach_todo_state(raw, messages)
+            raw['regeneration_revision'] = revision
+        else:
+            raw.pop('regeneration_revision', None)
+    except Exception:
+        raw.pop('regeneration_revision', None)
     return raw
 
 
@@ -526,6 +550,7 @@ def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
+    profile_name: str | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Return provider/key/base_url overrides for ``custom:*`` endpoints.
 
@@ -534,11 +559,24 @@ def _resolve_custom_provider_runtime_overrides(
     without authentication, so a missing key should not fail before the first
     request; pass a harmless placeholder to the SDK and let the endpoint accept
     it or return its own auth error.
+
+    ``profile_name`` binds the SESSION's own profile while
+    ``resolve_custom_provider_connection`` reads the endpoint AND the credential.
+    That helper resolves both from ONE ``get_config()``/env snapshot, so binding
+    the profile here keeps them from splitting across profiles: on a detached
+    worker thread (which doesn't inherit the request-profile TLS/env) an unbound
+    call would read the DEFAULT profile and pair a named profile's endpoint with
+    the default profile's API key (finding #3). No-op for the default/root
+    profile; when ``profile_name`` is None the ambient scope (if any) is used.
     """
     if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
         return resolved_provider, resolved_api_key, resolved_base_url
 
-    _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+    from api import profiles as _profiles_api
+    with _profiles_api.profile_scope_for_detached_worker(
+        profile_name, "custom provider connection", logger_override=logger
+    ):
+        _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
     if not resolved_api_key and _cp_key:
         resolved_api_key = _cp_key
     if not resolved_base_url and _cp_base:
@@ -787,17 +825,82 @@ def _is_quota_error_text(err_text: str) -> bool:
     )
 
 
-def _clarify_timeout_seconds(default: int = 120) -> int:
-    """Resolve clarify timeout from config, with bounded fallback."""
+def _clarify_session_config(sid: str) -> dict | None:
+    """Config dict for the clarify session's profile, or None to use ambient.
+
+    The agent runs on a detached worker thread that does not inherit the
+    per-request TLS profile context, so the ambient ``get_config()`` would
+    resolve to the process-global profile (usually ``default``) even for a
+    session running under a named profile (issue #3294 pattern).  Resolve the
+    session's own profile home instead, mirroring how the rest of the run is
+    configured.
+    """
     try:
-        cfg = get_config()
-        raw = cfg.get("clarify", {}).get("timeout", default)
-        timeout_seconds = int(raw)
-        if timeout_seconds <= 0:
-            return default
-        return timeout_seconds
+        from api.models import _get_profile_home
+        from api.config import get_config_for_profile_home
+        session = get_session(sid)
+        if session is None:
+            return None
+        return get_config_for_profile_home(_get_profile_home(getattr(session, "profile", None)))
     except Exception:
-        return default
+        return None
+
+
+def _clarify_timeout_seconds(config: dict | None = None, default: int = 3600) -> int:
+    """Resolve the clarify timeout (seconds) for WebUI clarify prompts.
+
+    Uses the agent core's canonical resolver when available
+    (``tools.clarify_gateway.resolve_clarify_timeout`` — the same function the
+    CLI and messaging gateways use), falling back to an inline mirror of its
+    resolution order when the agent package is not importable.  Resolution:
+    legacy top-level ``clarify.timeout`` if explicitly set, else the canonical
+    ``agent.clarify_timeout``, else 3600.  ``<= 0`` is preserved verbatim and
+    means *unlimited*: the prompt waits until the user answers or the run is
+    cancelled — it is never auto-skipped.
+
+    ``config`` may be an explicit profile config dict (see
+    :func:`_clarify_session_config`); when None, the ambient ``get_config()``
+    is used.
+    """
+    cfg = config if config is not None else (get_config() or {})
+    try:
+        from tools.clarify_gateway import resolve_clarify_timeout
+        return int(resolve_clarify_timeout(cfg))
+    except Exception:
+        pass
+    try:
+        raw = (cfg.get("clarify") or {}).get("timeout")
+        if raw is None:
+            raw = (cfg.get("agent") or {}).get("clarify_timeout", 3600)
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def _await_clarify_response(entry, timeout, cancel_evt) -> tuple[str, bool]:
+    """Block until a clarify entry resolves, or (finite timeout only) expires.
+
+    ``timeout <= 0`` means *unlimited*: no deadline — the prompt waits until
+    the user answers or the run is cancelled.  Polls the entry's event in ~1s
+    slices so a cancelled run unblocks promptly, and still honours the
+    ``is_interrupted``-style cancel check each slice.
+
+    Returns ``(response, expired)``: ``expired`` is True when it returned
+    because of cancellation or a finite timeout without a user response (the
+    caller should clear pending and fall back), False when the user answered.
+    """
+    deadline = None if timeout <= 0 else time.monotonic() + timeout
+    while True:
+        if cancel_evt.is_set():
+            return "", True
+        wait_for = 1.0
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "", True
+            wait_for = min(1.0, remaining)
+        if entry.event.wait(timeout=wait_for):
+            return str(entry.result or "").strip(), False
 
 
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
@@ -856,6 +959,7 @@ _STREAM_DEAD_LETTER_MAX_ATTEMPTS = 3
 # flags (e.g. _cancel_claimed) are stripped at every writer to prevent
 # dirty data leaking into session JSON.
 _FALLBACK_NOTICE_KEYS = ('message', 'to_model', 'to_provider')
+_FALLBACK_NOTICE_GENERATION_KEY = '_notice_generation'
 
 
 def _current_notice_generation(stream_id: str) -> int:
@@ -1042,14 +1146,24 @@ def _publish_fallback_notice(stream_id, notice) -> bool:
     post-CAS notice would be deleted unsaved by the finalizers
     (gate-certifier blocker #1: post-CAS loss).
 
+    When the caller passes the pending-notice dict that will later be stamped
+    onto a terminal row, this function also writes the minted monotonic
+    generation into that dict under an internal key.  Save commit sites then
+    carry THIS source-order token forward from the selected row instead of
+    re-identifying a publication by public content after another status
+    callback may have appended/published a newer same-content notice.
+
     Returns True if the notice was published, False if it was rejected because
     the stream is terminal.
     """
     with STREAMS_LOCK:
         if stream_id in _STREAM_SETTLEMENT_TERMINAL:
             return False
-        _STREAM_NOTICE_GENERATION[stream_id] = _current_notice_generation(stream_id) + 1
+        _generation = _current_notice_generation(stream_id) + 1
+        _STREAM_NOTICE_GENERATION[stream_id] = _generation
         clean = _clean_fallback_notice(notice)
+        if isinstance(notice, dict):
+            notice[_FALLBACK_NOTICE_GENERATION_KEY] = int(_generation)
         if isinstance(clean, dict) and stream_id in _STREAM_CANCEL_CLAIMED:
             clean['_cancel_claimed'] = True
         _STREAM_FALLBACK_NOTICES[stream_id] = clean
@@ -1185,6 +1299,10 @@ def _snapshot_fallback_notice_for_commit(stream_id, notice):
     clean = _clean_fallback_notice(notice)
     if clean is None:
         return None, None
+    if isinstance(notice, dict):
+        _source_generation = notice.get(_FALLBACK_NOTICE_GENERATION_KEY)
+        if _source_generation is not None:
+            return int(_source_generation), clean
     if stream_id is None:
         return None, clean
     with STREAMS_LOCK:
@@ -1880,7 +1998,24 @@ def _provider_error_probe_text(value) -> tuple[str, int | None]:
     return ' '.join(t for t in _texts if t).strip(), _status_code
 
 
-def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
+def _result_reports_compression_snapshot_stale(result) -> bool:
+    """Return whether an Agent result carries an exact stale-snapshot marker."""
+    return (
+        isinstance(result, dict)
+        and (
+            result.get('error') == 'compression_snapshot_stale'
+            or result.get('compression_snapshot_stale') is True
+        )
+    )
+
+
+def _classify_provider_error(
+    err_str: str,
+    exc=None,
+    *,
+    silent_failure: bool = False,
+    result=None,
+) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
     Keep this string-based until hermes-agent exposes stable structured
@@ -1896,6 +2031,33 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
     err_str = str(_probe_text or err_str or '')
     _err_lower = err_str.lower()
     _exc_name = type(exc).__name__ if exc is not None else ''
+    _result_is_compression_snapshot_stale = (
+        _result_reports_compression_snapshot_stale(result)
+    )
+    try:
+        from agent.conversation_compression import CompressionSnapshotStaleError  # type: ignore[attr-defined]
+    except ImportError:
+        # Paired deployments export the typed exception. The name-only fallback
+        # keeps a rolling WebUI/Agent upgrade actionable without text matching.
+        _is_compression_snapshot_stale = (
+            _result_is_compression_snapshot_stale
+            or _exc_name == 'CompressionSnapshotStaleError'
+        )
+    else:
+        _is_compression_snapshot_stale = (
+            _result_is_compression_snapshot_stale
+            or isinstance(exc, CompressionSnapshotStaleError)
+        )
+    if _is_compression_snapshot_stale:
+        return {
+            'label': 'Conversation changed during compression',
+            'type': 'compression_snapshot_stale',
+            'hint': (
+                'The durable conversation changed while compression was being prepared. '
+                'No automatic retry was attempted. Send your next message to reload and '
+                'reconcile the latest conversation state.'
+            ),
+        }
     _is_cancelled = (
         'cancelled by user' in _err_lower
         or 'canceled by user' in _err_lower
@@ -2119,12 +2281,29 @@ def _clean_synthetic_control_messages_with_provenance(messages):
 def _active_turn_authority(session, stream_id, msg_text):
     """Capture the stream-owned pending turn before settlement mutates it."""
     pending_text = getattr(session, 'pending_user_message', None)
+    token = build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None))
+    checkpoint = (
+        next(
+            (
+                copy.deepcopy(message)
+                for message in reversed(list(getattr(session, 'messages', None) or []))
+                if isinstance(message, dict)
+                and message.get('role') == 'user'
+                and message.get('_active_turn_token') == token
+            ),
+            None,
+        )
+        if token
+        else None
+    )
     return {
-        'token': build_active_turn_token(stream_id, getattr(session, 'pending_started_at', None)),
+        'session_id': getattr(session, 'session_id', None),
+        'token': token,
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
         'source': getattr(session, 'pending_user_source', None) or 'webui',
         'attachments': copy.deepcopy(getattr(session, 'pending_attachments', None) or []),
+        'checkpoint': checkpoint,
         'current_turn_user_idx': None,
         'turn_id': '',
     }
@@ -2144,24 +2323,38 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
     if not isinstance(identity, dict):
         return identity
     resolved = dict(identity)
+    resolved.pop('agent_turn_boundary_resolved', None)
+    resolved.pop('agent_turn_boundary_source', None)
+
+    # Treat the boundary as one coherent pair. In particular, do not retain the
+    # failed Agent instance's index/turn when credential self-heal creates a
+    # fresh Agent whose compacted projection has a different current-user index.
+    # The returned-result pair is authoritative when exported; current paired
+    # Agents keep the same pair on the instance instead.
+    _boundary_idx = None
+    _boundary_turn_id = ''
+    _boundary_source = ''
     if isinstance(result, dict):
         _result_idx = _coerce_current_turn_user_idx(result.get('current_turn_user_idx'))
-        if _result_idx is not None:
-            resolved['current_turn_user_idx'] = _result_idx
         _result_turn_id = str(result.get('turn_id') or '').strip()
-        if _result_turn_id:
-            resolved['turn_id'] = _result_turn_id
+        if _result_idx is not None and _result_turn_id:
+            _boundary_idx = _result_idx
+            _boundary_turn_id = _result_turn_id
+            _boundary_source = 'result'
     if agent is not None:
-        if resolved.get('current_turn_user_idx') is None:
-            _agent_idx = _coerce_current_turn_user_idx(
-                getattr(agent, '_persist_user_message_idx', None)
-            )
-            if _agent_idx is not None:
-                resolved['current_turn_user_idx'] = _agent_idx
-        if not resolved.get('turn_id'):
-            _agent_turn_id = str(getattr(agent, '_current_turn_id', '') or '').strip()
-            if _agent_turn_id:
-                resolved['turn_id'] = _agent_turn_id
+        _agent_idx = _coerce_current_turn_user_idx(
+            getattr(agent, '_persist_user_message_idx', None)
+        )
+        _agent_turn_id = str(getattr(agent, '_current_turn_id', '') or '').strip()
+        if _agent_idx is not None and _agent_turn_id and not _boundary_source:
+            _boundary_idx = _agent_idx
+            _boundary_turn_id = _agent_turn_id
+            _boundary_source = 'agent'
+    if _boundary_source:
+        resolved['current_turn_user_idx'] = _boundary_idx
+        resolved['turn_id'] = _boundary_turn_id
+        resolved['agent_turn_boundary_resolved'] = True
+        resolved['agent_turn_boundary_source'] = _boundary_source
     return resolved
 
 
@@ -2170,7 +2363,10 @@ def _active_turn_boundary_is_valid(identity):
         return False
     if not str(identity.get('turn_id') or '').strip():
         return False
-    return isinstance(identity.get('current_turn_user_idx'), int)
+    return (
+        identity.get('agent_turn_boundary_resolved') is True
+        and isinstance(identity.get('current_turn_user_idx'), int)
+    )
 
 
 def _active_turn_token_matches(message, identity):
@@ -2217,7 +2413,7 @@ def _mark_active_turn_checkpoint_in_history(messages, identity, msg_text, *, all
     if (
         not isinstance(message, dict)
         or message.get('role') != 'user'
-        or _normalize_user_text(message.get('content')) != _normalize_user_text(expected_text)
+        or _normalize_user_text(_message_text(message.get('content'))) != _normalize_user_text(expected_text)
     ):
         return messages, False
     _mark_active_turn_checkpoint(message, identity)
@@ -2235,6 +2431,22 @@ def _owner_projection_current_turn_row(messages, identity):
 
 
 def _find_active_turn_checkpoint_index(result_messages, previous_context, identity, msg_text):
+    """Locate the current turn's user row inside ``result_messages``.
+
+    Exactly one declared index domain is supported. The WebUI token is the
+    strongest proof and wins when it survives the Agent projection. Otherwise
+    the Agent-resolved ``current_turn_user_idx`` addresses ``result["messages"]``
+    directly, so only that exact index is validated. With a repeated prompt a
+    shifted probe (``current_turn_user_idx - len(previous_context)``) can land
+    on an identical historical user row and leak historical assistant prose
+    into the current turn, so no alternative projection is ever probed. If a
+    shifted projection is ever genuinely required, the Agent must carry an
+    explicit projection-origin/base-length discriminator instead.
+
+    ``previous_context`` is retained for call-site compatibility only; it does
+    not participate in index resolution.
+    """
+    del previous_context  # single declared index domain: result_messages only
     result_messages = list(result_messages or [])
     if not isinstance(identity, dict):
         return None
@@ -2245,38 +2457,32 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
     if not _active_turn_boundary_is_valid(identity):
         return None
     expected_text = identity.get('text') if identity.get('text') is not None else msg_text
-    candidates = []
-    current_turn_user_idx = identity['current_turn_user_idx']
-    previous_context = list(previous_context or [])
-    if _messages_have_prefix(result_messages, previous_context):
-        candidates.append(current_turn_user_idx)
-    else:
-        offset = current_turn_user_idx - len(previous_context)
-        candidates.extend([offset, current_turn_user_idx])
-    seen = set()
-    for idx in candidates:
-        if idx in seen or idx is None:
-            continue
-        seen.add(idx)
-        if idx < 0 or idx >= len(result_messages):
-            continue
-        message = result_messages[idx]
-        if (
-            isinstance(message, dict)
-            and message.get('role') == 'user'
-            and _normalize_user_text(message.get('content')) == _normalize_user_text(expected_text)
-        ):
-            return idx
+    idx = identity['current_turn_user_idx']
+    if idx < 0 or idx >= len(result_messages):
+        return None
+    message = result_messages[idx]
+    if (
+        isinstance(message, dict)
+        and message.get('role') == 'user'
+        and _normalize_user_text(_message_text(message.get('content')))
+        == _normalize_user_text(expected_text)
+    ):
+        return idx
     return None
 
 
 def _materialize_active_turn_user(identity, msg_text, source):
-    message = {
-        'role': 'user',
-        'content': identity.get('text') if isinstance(identity, dict) else msg_text,
-    }
+    checkpoint = identity.get('checkpoint') if isinstance(identity, dict) else None
+    message = (
+        copy.deepcopy(checkpoint)
+        if isinstance(checkpoint, dict) and checkpoint.get('role') == 'user'
+        else {
+            'role': 'user',
+            'content': identity.get('text') if isinstance(identity, dict) else msg_text,
+        }
+    )
     if isinstance(identity, dict):
-        if identity.get('timestamp') is not None:
+        if identity.get('timestamp') is not None and message.get('timestamp') is None:
             message['timestamp'] = identity['timestamp']
         if identity.get('attachments'):
             message['attachments'] = copy.deepcopy(identity['attachments'])
@@ -2285,8 +2491,15 @@ def _materialize_active_turn_user(identity, msg_text, source):
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
         )
+        if str(identity.get('source') or source or '').strip().lower() == 'fork':
+            child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
     else:
-        stamp_message_source(message, source)
+        stamp_message_source(
+            message,
+            source,
+        )
     return message
 
 
@@ -2302,7 +2515,18 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
         msg_text,
     )
     if _checkpoint_idx is not None:
-        _mark_active_turn_checkpoint(result_messages[_checkpoint_idx], identity)
+        existing_checkpoint = result_messages[_checkpoint_idx]
+        if isinstance(identity.get('checkpoint'), dict):
+            retained_checkpoint = _materialize_active_turn_user(identity, msg_text, source)
+            if (
+                retained_checkpoint.get('id') is None
+                and isinstance(existing_checkpoint, dict)
+                and existing_checkpoint.get('id') is not None
+            ):
+                retained_checkpoint['id'] = existing_checkpoint['id']
+            result_messages[_checkpoint_idx] = retained_checkpoint
+        else:
+            _mark_active_turn_checkpoint(existing_checkpoint, identity)
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
@@ -6983,6 +7207,51 @@ def _save_streaming_checkpoint(session):
         session.save(skip_index=True)
 
 
+# A checkpoint rewrite re-serializes the whole session (messages included) while
+# holding the GIL, so its cost grows with transcript size: ~100 ms for a 1.8 MB
+# sidecar, ~300 ms for a 36 MB one. Because the HTTP server and the agent workers
+# share one interpreter, every one of those milliseconds is added latency for all
+# concurrent requests. Skip the rewrite when it would persist byte-identical state.
+_CHECKPOINT_IDLE_REFRESH_SECONDS = 300
+
+
+def _streaming_checkpoint_fingerprint(session):
+    """Return a cheap fingerprint of the state a streaming checkpoint persists.
+
+    The periodic checkpoint fires on tool completion, but a completed tool call
+    does not by itself mutate the session: ``run_conversation()`` works on an
+    internal copy of ``messages`` and the turn bookkeeping fields are written
+    once before the run starts. So the recurring rewrite normally re-persists
+    state that is already on disk.
+
+    This fingerprint covers every field the checkpoint can legitimately advance
+    mid-run — session identity (compression rotation), turn bookkeeping, and the
+    length of the persisted message projections — without serializing anything.
+    Comparing it lets the checkpoint thread skip redundant work while still
+    writing within one interval of any real change.
+
+    Fails closed: if a field cannot be read, return ``None`` so the caller keeps
+    the unconditional write.
+    """
+    try:
+        return (
+            getattr(session, 'session_id', None),
+            getattr(session, 'parent_session_id', None),
+            getattr(session, 'profile', None),
+            getattr(session, 'active_stream_id', None),
+            getattr(session, 'pending_user_message', None),
+            getattr(session, 'pending_started_at', None),
+            getattr(session, 'pending_user_source', None),
+            len(getattr(session, 'pending_attachments', None) or ()),
+            len(getattr(session, 'messages', None) or ()),
+            len(getattr(session, 'context_messages', None) or ()),
+            getattr(session, 'compression_anchor_visible_idx', None),
+            bool(getattr(session, 'pre_compression_snapshot', None)),
+        )
+    except Exception:  # pragma: no cover - defensive: never block a checkpoint
+        return None
+
+
 def _normalize_fresh_chat_text(text):
     text = _strip_workspace_prefix(str(text or ''), include_legacy=True)
     text = re.sub(r"\s+", " ", text).strip().lower()
@@ -7682,6 +7951,74 @@ def _agent_result_terminal_failure(result) -> bool:
     return False
 
 
+def _self_heal_result_succeeded(
+    result,
+    previous_context,
+    active_turn_identity,
+    msg_text,
+) -> bool:
+    """Accept a credential retry only after authoritative turn success."""
+    if not isinstance(result, dict):
+        return False
+    if _result_reports_compression_snapshot_stale(result):
+        return False
+    if _agent_result_terminal_failure(result):
+        return False
+    result_error = result.get('error')
+    if isinstance(result_error, str):
+        if result_error.strip():
+            return False
+    elif result_error:
+        return False
+    if result.get('completed') is False:
+        return False
+    messages = result.get('messages') or []
+    previous_context = list(previous_context or [])
+    if _messages_have_prefix(messages, previous_context):
+        current_turn_rows = list(messages[len(previous_context):])
+        current_user_idx = next(
+            (
+                index
+                for index, row in enumerate(current_turn_rows)
+                if isinstance(row, dict)
+                and row.get('role') == 'user'
+                and _normalize_user_text(_message_text(row.get('content')))
+                == _normalize_user_text(msg_text)
+            ),
+            None,
+        )
+        if current_user_idx is not None:
+            current_turn_rows = current_turn_rows[current_user_idx + 1:]
+    else:
+        current_user_idx = _find_active_turn_checkpoint_index(
+            messages,
+            previous_context,
+            active_turn_identity,
+            msg_text,
+        )
+        if current_user_idx is None:
+            current_turn_rows = []
+        else:
+            current_turn_rows = list(messages[current_user_idx + 1:])
+    next_user_idx = next(
+        (
+            index
+            for index, row in enumerate(current_turn_rows)
+            if isinstance(row, dict) and row.get('role') == 'user'
+        ),
+        None,
+    )
+    if next_user_idx is not None:
+        current_turn_rows = current_turn_rows[:next_user_idx]
+    return any(
+        isinstance(row, dict)
+        and row.get('role') == 'assistant'
+        and not row.get('_error')
+        and _assistant_message_has_final_visible_text(row)
+        for row in current_turn_rows
+    )
+
+
 _TOOL_RESULT_SNIPPET_MAX = 4000
 
 # Tool-arg keys whose values are card content / diff-reconstruction inputs.
@@ -7943,6 +8280,125 @@ def _partial_marker_already_present(messages, candidate: dict, *, before_idx: in
     return False
 
 
+def _partial_snapshot_prefers_candidate_text(current, candidate) -> bool:
+    """Choose the later-looking monotonic snapshot without dropping a suffix."""
+    current_text = str(current or '').strip()
+    candidate_text = str(candidate or '').strip()
+    if not candidate_text:
+        return False
+    if not current_text or candidate_text.startswith(current_text):
+        return True
+    if current_text.startswith(candidate_text):
+        return False
+    # Provider adapters can normalize a partial between the callback and the
+    # returned result. They are no longer prefix-comparable; retain whichever
+    # carries more delivered text, preferring the later result on an exact tie.
+    return len(candidate_text) >= len(current_text)
+
+
+def _merge_partial_snapshots(current: dict, candidate: dict) -> dict:
+    """Merge two sources for one partial response into ``current`` in place."""
+    if _partial_snapshot_prefers_candidate_text(
+        current.get('content'), candidate.get('content')
+    ):
+        current['content'] = candidate.get('content') or ''
+    if _partial_snapshot_prefers_candidate_text(
+        current.get('reasoning'), candidate.get('reasoning')
+    ):
+        current['reasoning'] = candidate.get('reasoning')
+    candidate_tools = candidate.get('_partial_tool_calls') or []
+    current_tools = current.get('_partial_tool_calls') or []
+    if candidate_tools and len(candidate_tools) >= len(current_tools):
+        current['_partial_tool_calls'] = copy.deepcopy(candidate_tools)
+    current['_partial'] = True
+    current.setdefault('role', 'assistant')
+    current.setdefault('timestamp', candidate.get('timestamp') or int(time.time()))
+    return current
+
+
+def _upsert_current_turn_partial(
+    messages,
+    candidate: dict,
+    *,
+    active_turn_identity=None,
+) -> dict | None:
+    """Persist exactly one partial assistant snapshot in the current turn.
+
+    Live callback buffers and ``result["messages"]`` are two observations of
+    the same Agent response. Their bytes can differ when one observation is a
+    slightly newer prefix. Reconcile them into one row rather than treating
+    content inequality as proof of two assistant turns.
+    """
+    if not isinstance(messages, list) or not isinstance(candidate, dict):
+        return None
+
+    current_user_idx = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if _active_turn_token_matches(messages[index], active_turn_identity)
+        ),
+        None,
+    )
+    if current_user_idx is None:
+        # Error settlement materializes the pending WebUI user row before this
+        # helper, but that recovered row intentionally has no provider-facing
+        # token. The last user row is therefore the display boundary.
+        current_user_idx = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[index], dict)
+                and messages[index].get('role') == 'user'
+            ),
+            None,
+        )
+    start = (current_user_idx + 1) if current_user_idx is not None else 0
+    end = len(messages)
+    for index in range(start, len(messages)):
+        if isinstance(messages[index], dict) and messages[index].get('role') == 'user':
+            end = index
+            break
+
+    candidate_content = str(candidate.get('content') or '')
+    canonical_idx = next(
+        (
+            index
+            for index in range(start, end)
+            if isinstance(messages[index], dict)
+            and messages[index].get('role') == 'assistant'
+            and not messages[index].get('_error')
+            and str(messages[index].get('content') or '') == candidate_content
+        ),
+        None,
+    )
+    partial_indices = [
+        index
+        for index in range(start, end)
+        if isinstance(messages[index], dict)
+        and messages[index].get('role') == 'assistant'
+        and messages[index].get('_partial') is True
+        and not messages[index].get('_error')
+    ]
+    if canonical_idx is None and partial_indices:
+        canonical_idx = partial_indices[-1]
+    if canonical_idx is None:
+        messages.append(dict(candidate))
+        return messages[-1]
+
+    canonical = messages[canonical_idx]
+    for partial_idx in partial_indices:
+        if partial_idx != canonical_idx:
+            _merge_partial_snapshots(canonical, messages[partial_idx])
+    _merge_partial_snapshots(canonical, candidate)
+    # Collapse any partials left by an earlier source while preserving ordinary
+    # assistant/tool history in the same turn.
+    for index in reversed(partial_indices):
+        if index != canonical_idx:
+            del messages[index]
+    return canonical
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -8000,7 +8456,11 @@ def _sse_set_write_deadline(handler, seconds=None):
         logger.debug("Failed to arm SSE write deadline", exc_info=True)
 
 
-def _materialize_pending_user_turn_before_error(session) -> bool:
+def _materialize_pending_user_turn_before_error(
+    session,
+    *,
+    active_turn_identity=None,
+) -> bool:
     """Persist the pending user prompt before clearing runtime stream state.
 
     Error paths often clear ``pending_user_message`` before appending an assistant
@@ -8019,6 +8479,43 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
+    # A returned Agent result is settled into ``session.messages`` before its
+    # terminal classification runs.  In that path the current user row can
+    # already own a result assistant while no longer being the final row.  Do
+    # not append a second recovered copy: that artificial user boundary would
+    # split the live-buffer and result partial snapshots into two turns and
+    # defeat exact-once consolidation below.  Only the unforgeable WebUI turn
+    # token is accepted here; matching repeated prompt text is not authority.
+    active_turn_token = (
+        active_turn_identity.get('token')
+        if isinstance(active_turn_identity, dict)
+        else build_active_turn_token(
+            getattr(session, 'active_stream_id', None),
+            pending_started_at,
+        )
+    )
+    session_messages = getattr(session, 'messages', None)
+    if active_turn_token and isinstance(session_messages, list):
+        for index in range(len(session_messages) - 1, -1, -1):
+            message = session_messages[index]
+            if not (
+                isinstance(message, dict)
+                and message.get('role') == 'user'
+                and message.get('_active_turn_token') == active_turn_token
+            ):
+                continue
+            normalized_user = _normalize_user_text(
+                _message_text(message.get('content'))
+            )
+            if normalized_user != _normalize_user_text(pending_text):
+                break
+            if not any(
+                isinstance(later, dict) and later.get('role') == 'user'
+                for later in session_messages[index + 1 :]
+            ):
+                return False
+            break
+
     def is_exact_checkpoint(messages):
         if not isinstance(messages, list) or not messages:
             return False
@@ -8031,7 +8528,7 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         except (TypeError, ValueError):
             return False
         return (
-            _normalize_user_text(existing.get('content')) == _normalize_user_text(pending_text)
+            _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
             and existing_ts == recovered_ts
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
@@ -8045,6 +8542,8 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
         'timestamp': recovered_ts,
         '_recovered': True,
     }
+    if str(pending_source or '').strip().lower() == 'fork':
+        recovered['_fork_child_turn'] = session.session_id
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
@@ -8124,7 +8623,12 @@ def _build_partial_message(content_text, reasoning_text, tool_calls) -> dict | N
     return _msg
 
 
-def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
+def _snapshot_and_append_partial_on_error(
+    session,
+    stream_id,
+    *,
+    active_turn_identity=None,
+) -> dict | None:
     """Snapshot streaming buffers under STREAMS_LOCK and append a _partial message.
 
     Uses _build_partial_message() for the shared thinking-strip + dict-build logic.
@@ -8187,10 +8691,110 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
         return None
     if not isinstance(session.messages, list):
         session.messages = []
-    if not _partial_marker_already_present(session.messages, _partial_msg):
-        session.messages.append(_partial_msg)
-        return _partial_msg
-    return None
+    return _upsert_current_turn_partial(
+        session.messages,
+        _partial_msg,
+        active_turn_identity=active_turn_identity,
+    )
+
+
+def _append_result_partial_on_error(
+    session,
+    result,
+    pre_call_context,
+    msg_text,
+    *,
+    active_turn_identity=None,
+) -> dict | None:
+    """Retain only a current-turn partial assistant row from an Agent result."""
+    if not isinstance(result, dict) or result.get('partial') is not True:
+        return None
+    messages = result.get('messages')
+    if not isinstance(messages, list) or not isinstance(pre_call_context, list):
+        return None
+    normalized_msg_text = _normalize_user_text(msg_text)
+    if _messages_have_prefix(messages, pre_call_context):
+        # Append-only result: only rows after the pre-call baseline can
+        # belong to this call.
+        current_turn_rows = messages[len(pre_call_context):]
+        baseline_has_current_user = bool(
+            pre_call_context
+            and isinstance(pre_call_context[-1], dict)
+            and pre_call_context[-1].get('role') == 'user'
+            and _normalize_user_text(_message_text(pre_call_context[-1].get('content')))
+            == normalized_msg_text
+        )
+        if not baseline_has_current_user:
+            current_user_index = next(
+                (
+                    index
+                    for index, row in enumerate(current_turn_rows)
+                    if isinstance(row, dict)
+                    and row.get('role') == 'user'
+                    and _normalize_user_text(_message_text(row.get('content')))
+                    == normalized_msg_text
+                ),
+                None,
+            )
+            if current_user_index is None:
+                return None
+            current_turn_rows = current_turn_rows[current_user_index + 1:]
+    else:
+        # Compacted/replayed results can REPLACE the pre-call baseline instead
+        # of appending to it; a numeric suffix slice can then expose a
+        # historical assistant row as this turn's partial. Require the unique
+        # Agent-resolved turn boundary.  WebUI's private token is preferred when
+        # it survives, but compacted Agent projections legitimately omit it.
+        # In that case require the authoritative Agent turn id/index and validate
+        # that the indexed row is this normalized current user prompt.
+        current_user_idx = _find_active_turn_checkpoint_index(
+            messages,
+            pre_call_context,
+            active_turn_identity,
+            msg_text,
+        )
+        if current_user_idx is None:
+            return None
+        current_turn_rows = messages[current_user_idx + 1:]
+    # A later user row starts another turn. Never cross that boundary while
+    # selecting a partial assistant response for the current turn.
+    next_user_idx = next(
+        (
+            index
+            for index, row in enumerate(current_turn_rows)
+            if isinstance(row, dict) and row.get('role') == 'user'
+        ),
+        None,
+    )
+    if next_user_idx is not None:
+        current_turn_rows = current_turn_rows[:next_user_idx]
+    assistant_row = next(
+        (
+            row
+            for row in reversed(current_turn_rows)
+            if isinstance(row, dict)
+            and row.get('role') == 'assistant'
+            and row.get('content')
+            and not row.get('_error')
+        ),
+        None,
+    )
+    if assistant_row is None:
+        return None
+    partial_msg = _build_partial_message(
+        str(assistant_row.get('content') or ''),
+        None,
+        None,
+    )
+    if partial_msg is None:
+        return None
+    if not isinstance(session.messages, list):
+        session.messages = []
+    return _upsert_current_turn_partial(
+        session.messages,
+        partial_msg,
+        active_turn_identity=active_turn_identity,
+    )
 
 
 def _last_resort_sync_from_core(session, stream_id, agent_lock):
@@ -8353,6 +8957,64 @@ def _replace_session_db_in_kwargs(agent_kwargs, state_db_path):
             logger.debug("Failed to close previous session_db handle during self-heal")
     agent_kwargs["session_db"] = _next_session_db
     return _next_session_db
+
+
+def _add_supported_run_conversation_kwarg(callable_obj, kwargs, name, value):
+    """Add a run-conversation kwarg only when the live Agent accepts it."""
+    if not isinstance(kwargs, dict):
+        return False
+    try:
+        import inspect
+
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        kwargs[name] = value
+        return True
+    return False
+
+
+def _build_run_conversation_kwargs(
+    callable_obj,
+    *,
+    user_message,
+    system_message,
+    conversation_history,
+    conversation_history_revision,
+    task_id,
+    persist_user_message,
+    persist_user_timestamp,
+):
+    """Build one rolling-compatible Agent invocation contract.
+
+    ``persist_user_timestamp`` is signature-gated (#6935): an older
+    hermes-agent whose ``run_conversation()`` predates the kwarg must not
+    receive it, or the call trips a TypeError before the turn starts.
+    """
+    kwargs = {
+        "user_message": user_message,
+        "system_message": system_message,
+        "conversation_history": conversation_history,
+        "task_id": task_id,
+        "persist_user_message": persist_user_message,
+    }
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "persist_user_timestamp",
+        persist_user_timestamp,
+    )
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "conversation_history_revision",
+        conversation_history_revision,
+    )
+    return kwargs
 
 
 def _attempt_credential_self_heal(
@@ -8732,6 +9394,8 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    result = None
+    _result_partial_pre_call_context = []
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -9144,19 +9808,21 @@ def _run_agent_streaming(
             # Capture for session-persisted metadata. Stamped onto the turn's
             # final assistant message before s.save() so it survives
             # renderMessages() rebuilds and session switches.
-            _pending_fallback_notices.append({
+            _notice_to_publish = {
                 'message': _fallback_data['message'],
                 'to_model': _fallback_data.get('to_model', ''),
                 'to_provider': _fallback_data.get('to_provider', ''),
-            })
+            }
+            _pending_fallback_notices.append(_notice_to_publish)
             # Also mirror to the stream-scoped dict so cancel_stream() — which
             # runs outside this closure — can stamp the notice before its own
             # s.save() (gate-certifier blocking finding #2).  Routed through
             # the single publication gate _publish_fallback_notice, which holds
-            # STREAMS_LOCK and rejects post-terminal publications (the fence):
-            # once cancel_stream's settlement has retired a generation, a
-            # newer notice B would be deleted unsaved by the finalizers.
-            _publish_fallback_notice(stream_id, _pending_fallback_notices[-1])
+            # STREAMS_LOCK, rejects post-terminal publications, and stamps the
+            # minted source-order generation onto _notice_to_publish: once
+            # cancel_stream's settlement has retired a generation, a newer
+            # notice B would be deleted unsaved by the finalizers.
+            _publish_fallback_notice(stream_id, _notice_to_publish)
             put('warning', _fallback_data)
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
@@ -9420,22 +10086,27 @@ def _run_agent_streaming(
         try:
             try:
                 from api.route_approvals import (
-                    submit_gateway_pending_mirror as _submit_pending_for_polling,
+                    settle_gateway_pending_local_notification as _settle_pending_for_polling,
                     retire_gateway_pending_mirror as _retire_gateway_pending_mirror,
                 )
                 def _cleanup_gateway_pending_mirror():
                     _retire_gateway_pending_mirror(session_id)
             except ImportError:
-                _submit_pending_for_polling = None
+                _settle_pending_for_polling = None
                 _cleanup_gateway_pending_mirror = None
             from tools.approval import (
                 register_gateway_notify as _reg_notify,
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
-                if _submit_pending_for_polling is not None:
+                if _settle_pending_for_polling is not None:
                     try:
-                        head, total = _submit_pending_for_polling(session_id, approval_data)
+                        auto_resolved, head, total = _settle_pending_for_polling(
+                            session_id,
+                            approval_data,
+                        )
+                        if auto_resolved and head is None:
+                            return
                         approval_data = {**(head or approval_data), "pending_count": total}
                     except Exception:
                         logger.warning("Failed to mirror approval into WebUI polling state", exc_info=True)
@@ -9463,7 +10134,7 @@ def _run_agent_streaming(
 
         def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
             """Bridge Hermes clarify prompts to the WebUI."""
-            timeout = _clarify_timeout_seconds()
+            timeout = _clarify_timeout_seconds(_clarify_session_config(sid))
             choices_list = [str(choice) for choice in (choices or [])]
             data = {
                 'question': str(question or ''),
@@ -9482,28 +10153,14 @@ def _run_agent_streaming(
                 )
 
             entry = _submit_clarify_pending(sid, data)
-            deadline = time.monotonic() + timeout
-            while True:
-                if cancel_evt.is_set():
-                    _clear_clarify_pending(sid)
-                    return (
-                        "The user did not provide a response within the time limit. "
-                        "Use your best judgement to make the choice and proceed."
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    _clear_clarify_pending(sid)
-                    return (
-                        "The user did not provide a response within the time limit. "
-                        "Use your best judgement to make the choice and proceed."
-                    )
-                if entry.event.wait(timeout=min(1.0, remaining)):
-                    response = str(entry.result or "").strip()
-                    return (
-                        response
-                        or "The user did not provide a response within the time limit. "
-                           "Use your best judgement to make the choice and proceed."
-                    )
+            response, expired = _await_clarify_response(entry, timeout, cancel_evt)
+            if expired:
+                _clear_clarify_pending(sid)
+            return (
+                response
+                or "The user did not provide a response within the time limit. "
+                   "Use your best judgement to make the choice and proceed."
+            )
 
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
@@ -10051,46 +10708,54 @@ def _run_agent_streaming(
             _sig_provider = getattr(s, "model_provider", None) or provider_context
             _current_sig = _mk_sig(_sig_model, _sig_provider)
             _explicitly_picked = bool(_picked_sig) and _picked_sig == _current_sig
+            # Resolve the endpoint AND the credential inside ONE profile scope so
+            # they always come from the same profile-owned snapshot. Previously
+            # only resolve_model_provider() ran under the scope; the runtime-key
+            # and custom-provider resolution below ran after it closed, so a
+            # detached worker for a NAMED profile paired that profile's endpoint
+            # with the DEFAULT profile's API key (finding #3). No-op for the
+            # default/root profile.
             with profiles_api.profile_scope_for_detached_worker(
-                _resolved_profile_name, "model resolution", logger_override=logger
+                _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
                 warm_models_catalog_provenance_if_cold()
                 resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                     model_with_provider_context(model, provider_context),
                     explicitly_picked=_explicitly_picked,
                 )
-            configured_base_url = resolved_base_url
+                configured_base_url = resolved_base_url
 
-            # Resolve API key via Hermes runtime provider (matches gateway behaviour).
-            # Pass the resolved provider so non-default providers get their own credentials.
-            resolved_api_key = None
-            try:
-                from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                    resolve_runtime_provider,
-                    requested=resolved_provider,
-                    target_model=resolved_model,
-                )
-                resolved_api_key = _rt.get("api_key")
-                if not resolved_provider:
-                    resolved_provider = _rt.get("provider")
-                resolved_base_url = _runtime_preferred_base_url(
-                    _rt, resolved_provider, configured_base_url
-                )
-            except Exception as _e:
-                print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+                # Resolve API key via Hermes runtime provider (matches gateway behaviour).
+                # Pass the resolved provider so non-default providers get their own credentials.
+                resolved_api_key = None
+                try:
+                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                        resolve_runtime_provider,
+                        requested=resolved_provider,
+                        target_model=resolved_model,
+                    )
+                    resolved_api_key = _rt.get("api_key")
+                    if not resolved_provider:
+                        resolved_provider = _rt.get("provider")
+                    resolved_base_url = _runtime_preferred_base_url(
+                        _rt, resolved_provider, configured_base_url
+                    )
+                except Exception as _e:
+                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
-            # Named custom providers (custom:slug) may not be resolvable by
-            # hermes_cli.runtime_provider directly. Fall back to config.yaml
-            # custom_providers[] so WebUI can pass explicit creds/base_url.
-            # Preserve the pre-canonicalization identity so image routing can
-            # still select the exact custom_providers entry after the rewrite
-            # to "custom" below.
-            _session_requested_provider = resolved_provider
-            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                resolved_provider, resolved_api_key, resolved_base_url
-            )
+                # Named custom providers (custom:slug) may not be resolvable by
+                # hermes_cli.runtime_provider directly. Fall back to config.yaml
+                # custom_providers[] so WebUI can pass explicit creds/base_url.
+                # Preserve the pre-canonicalization identity so image routing can
+                # still select the exact custom_providers entry after the rewrite
+                # to "custom" below.
+                _session_requested_provider = resolved_provider
+                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
+                    resolved_provider, resolved_api_key, resolved_base_url,
+                    profile_name=_resolved_profile_name,
+                )
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
@@ -10589,31 +11254,68 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
-            _external_state_messages = get_state_db_session_messages(getattr(s, 'session_id', None))
+            _external_state_snapshot = get_state_db_session_messages(
+                session_id,
+                profile=getattr(s, 'profile', None),
+                with_revision=True,
+            )
+
+            def _context_and_revision_from_state_snapshot(state_snapshot):
+                reconciled_snapshot = reconciled_state_db_messages_for_session(
+                    s,
+                    prefer_context=True,
+                    state_messages=state_snapshot,
+                    with_revision=True,
+                )
+                if not isinstance(reconciled_snapshot, StateDBSessionMessagesSnapshot):
+                    raise TypeError(
+                        "state.db context reconciliation did not return a revision snapshot"
+                    )
+                context_messages = _new_turn_context_from_messages(
+                    reconciled_snapshot.messages,
+                    msg_text,
+                )
+                return (
+                    _deduplicate_context_messages(context_messages),
+                    reconciled_snapshot.revision,
+                )
+
+            def _refresh_context_and_revision_from_state_db():
+                fresh_state_snapshot = get_state_db_session_messages(
+                    session_id,
+                    profile=getattr(s, 'profile', None),
+                    with_revision=True,
+                )
+                return _context_and_revision_from_state_snapshot(fresh_state_snapshot)
+
             _previous_messages = list(
                 reconciled_state_db_messages_for_session(
                     s,
-                    state_messages=_external_state_messages,
+                    state_messages=_external_state_snapshot,
                 ) or []
             )
+            # Keep the owner/context projection distinct from the display projection.
+            # Settlement and stale-result attribution require the exact pre-run owner
+            # context even when state.db reconciliation changes the visible transcript.
             _previous_owner_context_messages = list(
                 reconciled_state_db_messages_for_session(
                     s,
                     prefer_context=True,
-                    state_messages=_external_state_messages,
+                    state_messages=_external_state_snapshot,
                 ) or []
             )
             _previous_owner_context_messages = _deduplicate_context_messages(
                 _previous_owner_context_messages
             )
-            _previous_context_messages = _new_turn_context_from_messages(
-                _previous_owner_context_messages,
-                msg_text,
+            (
+                _previous_context_messages,
+                _conversation_history_revision,
+            ) = _context_and_revision_from_state_snapshot(
+                _external_state_snapshot,
             )
             # Dedup before feeding to agent — merge_session_messages_append_only
             # can produce duplicates when context_messages and state.db share
             # messages with different timestamps.
-            _previous_context_messages = _deduplicate_context_messages(_previous_context_messages)
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,
@@ -10636,12 +11338,33 @@ def _run_agent_streaming(
 
             def _periodic_checkpoint():
                 last_saved_activity = 0
+                last_fingerprint = None
+                last_write_at = 0.0
                 while not _checkpoint_stop.wait(15):
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
                             with _agent_lock:
-                                _save_streaming_checkpoint(s)
+                                fingerprint = _streaming_checkpoint_fingerprint(s)
+                                # A completed tool call is the trigger, but not
+                                # proof that anything the checkpoint persists
+                                # actually changed. Rewriting a multi-megabyte
+                                # sidecar to re-persist identical bytes stalls
+                                # every concurrent HTTP request behind the GIL,
+                                # so only write when the persisted state moved.
+                                # Fail closed: an unreadable fingerprint (None)
+                                # always writes, and a periodic refresh keeps
+                                # updated_at from going stale on a long turn.
+                                now = time.time()
+                                stale = (now - last_write_at) >= _CHECKPOINT_IDLE_REFRESH_SECONDS
+                                if (
+                                    fingerprint is None
+                                    or fingerprint != last_fingerprint
+                                    or stale
+                                ):
+                                    _save_streaming_checkpoint(s)
+                                    last_fingerprint = fingerprint
+                                    last_write_at = now
                             last_saved_activity = cur
                     except Exception as e:
                         logger.debug("Periodic checkpoint save failed: %s", e)
@@ -10668,7 +11391,8 @@ def _run_agent_streaming(
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
-            _run_conversation_kwargs = dict(
+            _run_conversation_kwargs = _build_run_conversation_kwargs(
+                agent.run_conversation,
                 user_message=user_message,
                 system_message=workspace_system_msg,
                 conversation_history=_sanitize_messages_for_agent(
@@ -10679,11 +11403,11 @@ def _run_agent_streaming(
                     effective_base_url=resolved_base_url,
                     requested_provider=(_session_requested_provider or ""),
                 ),
+                conversation_history_revision=_conversation_history_revision,
                 task_id=session_id,
                 persist_user_message=msg_text,
+                persist_user_timestamp=getattr(s, 'pending_started_at', None),
             )
-            if _supports_kwarg(agent.run_conversation, 'persist_user_timestamp'):
-                _run_conversation_kwargs['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
             # run_conversation() predates the moa_config kwarg.
@@ -10720,6 +11444,7 @@ def _run_agent_streaming(
                     requested_provider=(_session_requested_provider or ""),
                 )
                 _run_conversation_kwargs["user_message"] = user_message
+            _result_partial_pre_call_context = list(_previous_context_messages)
             result = agent.run_conversation(**_run_conversation_kwargs)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
@@ -11038,6 +11763,7 @@ def _run_agent_streaming(
                     str(_last_err) if _last_err else '',
                     _last_err,
                     silent_failure=not bool(_last_err),
+                    result=result,
                 )
                 _is_quota = _classification['type'] == 'quota_exhausted'
                 _is_auth = _classification['type'] == 'auth_mismatch'
@@ -11129,10 +11855,19 @@ def _run_agent_streaming(
                         # Before emitting the error, try re-reading credentials
                         # and retrying once with a fresh agent.
                         _heal_result = None
-                        _heal_rt = _attempt_credential_self_heal(
-                            resolved_provider or '', session_id, _agent_lock,
-                            target_model=resolved_model,
-                        )
+                        _heal_stale_classification = None
+                        # Bind the session's profile so the self-heal re-resolve
+                        # AND the custom-provider override below read one
+                        # profile-owned snapshot (finding #3): otherwise a named
+                        # profile's endpoint pairs with the default profile's key.
+                        from api import profiles as _profiles_api
+                        with _profiles_api.profile_scope_for_detached_worker(
+                            _resolved_profile_name, "credential self-heal", logger_override=logger
+                        ):
+                            _heal_rt = _attempt_credential_self_heal(
+                                resolved_provider or '', session_id, _agent_lock,
+                                target_model=resolved_model,
+                            )
                         if _heal_rt is not None:
                             logger.info('[webui] self-heal: retrying stream after credential refresh')
                             # Rebuild runtime variables from the refreshed resolve
@@ -11151,7 +11886,8 @@ def _run_agent_streaming(
                             if not _session_requested_provider:
                                 _session_requested_provider = resolved_provider
                             resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                                resolved_provider, resolved_api_key, resolved_base_url
+                                resolved_provider, resolved_api_key, resolved_base_url,
+                                profile_name=_resolved_profile_name,
                             )
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
@@ -11173,32 +11909,52 @@ def _run_agent_streaming(
                             _self_healed = True
                             _token_sent = False
                             try:
-                                _heal_kwargs = dict(
+                                (
+                                    _heal_context_messages,
+                                    _heal_conversation_history_revision,
+                                ) = _refresh_context_and_revision_from_state_db()
+                                _heal_kwargs = _build_run_conversation_kwargs(
+                                    agent.run_conversation,
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
                                     conversation_history=_sanitize_messages_for_agent(
-                                        _previous_context_messages,
+                                        _heal_context_messages,
                                         cfg=_cfg,
                                         effective_model=resolved_model,
                                         effective_provider=resolved_provider,
                                         effective_base_url=resolved_base_url,
                                         requested_provider=(_session_requested_provider or ""),
                                     ),
+                                    conversation_history_revision=(
+                                        _heal_conversation_history_revision
+                                    ),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
+                                    persist_user_timestamp=getattr(s, 'pending_started_at', None),
                                 )
-                                if _supports_kwarg(agent.run_conversation, 'persist_user_timestamp'):
-                                    _heal_kwargs['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
+                                _result_partial_pre_call_context = list(
+                                    _heal_context_messages
+                                )
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
                                     result=_heal_result,
                                     agent=agent,
                                 )
-                                _heal_all_msgs = _heal_result.get('messages') or []
-                                _heal_ok = _has_new_assistant_reply(_heal_all_msgs, _prev_len) or _token_sent
+                                if _result_reports_compression_snapshot_stale(_heal_result):
+                                    _heal_stale_classification = _classify_provider_error(
+                                        '',
+                                        result=_heal_result,
+                                    )
+                                    result = _heal_result
+                                _heal_ok = _self_heal_result_succeeded(
+                                    _heal_result,
+                                    _heal_context_messages,
+                                    _active_turn_identity,
+                                    msg_text,
+                                )
                             except Exception as _retry_exc:
                                 logger.warning(
                                     '[webui] self-heal: retry also failed: %s', _retry_exc,
@@ -11237,14 +11993,19 @@ def _run_agent_streaming(
                                 # leaving _assistant_added truthy (set below).
                                 _assistant_added = True  # prevent re-entering guard
                         if not _assistant_added:
-                            # Self-heal didn't apply or retry failed — emit error
-                            _err_label = 'Authentication failed'
-                            _err_type = 'auth_mismatch'
-                            _err_hint = (
-                                'The selected model may not be supported by your configured provider or '
-                                'your API key is invalid. Run `hermes model` in your terminal to '
-                                'update credentials, then restart the WebUI.'
-                            )
+                            # Self-heal didn't apply or retry failed — emit error.
+                            if _heal_stale_classification is not None:
+                                _err_label = _heal_stale_classification['label']
+                                _err_type = _heal_stale_classification['type']
+                                _err_hint = _heal_stale_classification['hint']
+                            else:
+                                _err_label = 'Authentication failed'
+                                _err_type = 'auth_mismatch'
+                                _err_hint = (
+                                    'The selected model may not be supported by your configured provider or '
+                                    'your API key is invalid. Run `hermes model` in your terminal to '
+                                    'update credentials, then restart the WebUI.'
+                                )
                     elif _is_auth:
                         _err_label = 'Authentication failed'
                         _err_type = 'auth_mismatch'
@@ -11275,8 +12036,13 @@ def _run_agent_streaming(
                         # fall through to normal post-result persistence below.
                         pass
                     else:
+                        _result_public_error = _err_str or f'{_err_label}.'
+                        if _err_type == 'compression_snapshot_stale':
+                            _result_public_error = (
+                                'The conversation changed while context compression was being prepared.'
+                            )
                         _error_payload = _provider_error_payload(
-                            _err_str or f'{_err_label}.',
+                            _result_public_error,
                             _err_type,
                             _err_hint,
                         )
@@ -11301,14 +12067,28 @@ def _run_agent_streaming(
                                 )
                                 _error_payload['hint'] = _err_hint
                         _turn_duration = _terminal_turn_duration(s)
-                        _materialize_pending_user_turn_before_error(s)
+                        _materialize_pending_user_turn_before_error(
+                            s,
+                            active_turn_identity=_active_turn_identity,
+                        )
                         s.active_stream_id = None
                         s.pending_user_message = None
                         s.pending_attachments = []
                         s.pending_started_at = None
                         s.pending_user_source = None
                         try:
-                            _snapshot_and_append_partial_on_error(s, stream_id)
+                            _snapshot_and_append_partial_on_error(
+                                s,
+                                stream_id,
+                                active_turn_identity=_active_turn_identity,
+                            )
+                            _append_result_partial_on_error(
+                                s,
+                                result,
+                                _result_partial_pre_call_context,
+                                msg_text,
+                                active_turn_identity=_active_turn_identity,
+                            )
                         except Exception:
                             logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
                         _error_content = (
@@ -11345,17 +12125,19 @@ def _run_agent_streaming(
                         # (greptile P1: error saves drop notices). Every s.save()
                         # path that finalizes an assistant turn must flush
                         # _pending_fallback_notices.
+                        _notice_to_commit = None
                         if _pending_fallback_notices:
-                            _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                            _notice_to_commit = _pending_fallback_notices[-1]
+                            _error_message['_fallbackNotice'] = _clean_fallback_notice(_notice_to_commit)
                         s.messages.append(_error_message)
                         try:
-                            # Bind the durable-generation token to the notice
-                            # captured for THIS row-stamp — never re-infer it
-                            # from the global map at wrapper entry (a B
-                            # published between stamp and save must stay
-                            # unsaved; only the stamped A is durable).
+                            # Bind the durable-generation token to the exact
+                            # notice object selected for THIS row-stamp — never
+                            # re-read _pending_fallback_notices[-1] after the
+                            # stamp because a later status callback can append
+                            # a newer same-content notice in that gap.
                             _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                                stream_id, _pending_fallback_notices[-1] if _pending_fallback_notices else None,
+                                stream_id, _notice_to_commit,
                             )
                             with _turn_final_save_commit(
                                 stream_id, s,
@@ -11604,6 +12386,7 @@ def _run_agent_streaming(
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
+                _notice_to_commit = _pending_fallback_notices[-1] if _pending_fallback_notices else None
                 if s.messages:
                     for _dm in reversed(s.messages):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
@@ -11620,22 +12403,20 @@ def _run_agent_streaming(
                             # Persist fallback notices on the turn's final
                             # assistant message so they survive renderMessages()
                             # rebuilds, session switches, and page reloads.
-                            if _pending_fallback_notices:
-                                _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                            if _notice_to_commit is not None:
+                                _dm['_fallbackNotice'] = _clean_fallback_notice(_notice_to_commit)
                             break
                 # Capture the exact (generation, notice) pair being stamped on
-                # the terminal row, lock-atomically at the stamp point.  The
-                # pre-save metadata below (compressor/context-length work) is a
-                # wide window in which the status callback can publish a NEWER
-                # notice B into the map — re-inferring the durable generation
-                # at wrapper entry would then record B (never stamped, never
-                # saved) as durable and let teardown retire it unsaved
-                # (gate-certifier blocker: stamp→wrapper generation drift).
+                # the terminal row.  Carry the same selected object used for
+                # _fallbackNotice stamping; do NOT re-read
+                # _pending_fallback_notices[-1] after the stamp because the
+                # status callback can append/publish a newer same-content notice
+                # in the stamp→save gap.
                 _commit_gen = None
                 _commit_notice = None
-                if _pending_fallback_notices:
+                if _notice_to_commit is not None:
                     _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                        stream_id, _pending_fallback_notices[-1],
+                        stream_id, _notice_to_commit,
                     )
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -12398,6 +13179,9 @@ def _run_agent_streaming(
         _exc_is_cancelled = _classification['type'] == 'cancelled'
         _exc_is_interrupted = _classification['type'] == 'interrupted'
         _exc_is_compression_exhausted = _classification['type'] == 'compression_exhausted'
+        _exc_is_compression_snapshot_stale = (
+            _classification['type'] == 'compression_snapshot_stale'
+        )
 
         # The user hint still points to Settings / `hermes model` from _classify_provider_error().
         if _exc_is_quota:
@@ -12413,12 +13197,21 @@ def _run_agent_streaming(
                 _classification['label'], _classification['type'], _classification['hint'],
             )
         elif _exc_is_auth:
+            _heal_stale_classification = None
             if not _self_healed:
                 # ── Credential self-heal on 401 (#1401) ──
-                _heal_rt = _attempt_credential_self_heal(
-                    resolved_provider or '', session_id, _agent_lock,
-                    target_model=resolved_model,
-                )
+                # Bind the session's profile so the self-heal re-resolve AND the
+                # custom-provider override below read one profile-owned snapshot
+                # (finding #3): otherwise a named profile's endpoint pairs with
+                # the default profile's key.
+                from api import profiles as _profiles_api
+                with _profiles_api.profile_scope_for_detached_worker(
+                    _resolved_profile_name, "credential self-heal", logger_override=logger
+                ):
+                    _heal_rt = _attempt_credential_self_heal(
+                        resolved_provider or '', session_id, _agent_lock,
+                        target_model=resolved_model,
+                    )
                 if _heal_rt is not None:
                     logger.info('[webui] self-heal (except path): retrying stream after credential refresh')
                     _self_healed = True
@@ -12437,7 +13230,8 @@ def _run_agent_streaming(
                     if not _session_requested_provider:
                         _session_requested_provider = resolved_provider
                     resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url
+                        resolved_provider, resolved_api_key, resolved_base_url,
+                        profile_name=_resolved_profile_name,
                     )
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
@@ -12462,102 +13256,162 @@ def _run_agent_streaming(
                     # Retry the conversation
                     _token_sent = False
                     try:
-                        _heal_kwargs2 = dict(
+                        (
+                            _heal_context_messages,
+                            _heal_conversation_history_revision,
+                        ) = _refresh_context_and_revision_from_state_db()
+                        _heal_kwargs2 = _build_run_conversation_kwargs(
+                            _heal_agent.run_conversation,
                             user_message=user_message,
                             system_message=workspace_system_msg,
                             conversation_history=_sanitize_messages_for_agent(
-                                _previous_context_messages,
+                                _heal_context_messages,
                                 cfg=_cfg,
                                 effective_model=resolved_model,
                                 effective_provider=resolved_provider,
                                 effective_base_url=resolved_base_url,
                                 requested_provider=(_session_requested_provider or ""),
                             ),
+                            conversation_history_revision=(
+                                _heal_conversation_history_revision
+                            ),
                             task_id=session_id,
                             persist_user_message=msg_text,
+                            persist_user_timestamp=getattr(s, 'pending_started_at', None),
                         )
-                        if _supports_kwarg(_heal_agent.run_conversation, 'persist_user_timestamp'):
-                            _heal_kwargs2['persist_user_timestamp'] = getattr(s, 'pending_started_at', None)
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
+                        _result_partial_pre_call_context = list(
+                            _heal_context_messages
+                        )
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         _active_turn_identity = _resolve_active_turn_authority(
                             _active_turn_identity,
                             result=_heal_result,
                             agent=_heal_agent,
                         )
-                        # Retry succeeded — persist the result normally
-                        if s is not None:
-                            if _checkpoint_stop is not None:
-                                _checkpoint_stop.set()
-                            if _ckpt_thread is not None:
-                                _ckpt_thread.join(timeout=15)
-                            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                            with _lock_ctx:
-                                if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                                    logger.info(
-                                        "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
-                                        getattr(s, 'session_id', session_id),
-                                        stream_id,
-                                        getattr(s, 'active_stream_id', None),
+                        _heal_stale_classification = None
+                        if _result_reports_compression_snapshot_stale(_heal_result):
+                            _heal_stale_classification = _classify_provider_error(
+                                '',
+                                result=_heal_result,
+                            )
+                            result = _heal_result
+                        elif _self_heal_result_succeeded(
+                            _heal_result,
+                            _heal_context_messages,
+                            _active_turn_identity,
+                            msg_text,
+                        ):
+                            # Retry succeeded — persist the result normally.
+                            _done_session_payload = None
+                            if s is not None:
+                                if _checkpoint_stop is not None:
+                                    _checkpoint_stop.set()
+                                if _ckpt_thread is not None:
+                                    _ckpt_thread.join(timeout=15)
+                                _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+                                with _lock_ctx:
+                                    if not ephemeral and not _stream_writeback_is_current(s, stream_id):
+                                        logger.info(
+                                            "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
+                                            getattr(s, 'session_id', session_id),
+                                            stream_id,
+                                            getattr(s, 'active_stream_id', None),
+                                        )
+                                        return
+                                    _result_messages = _heal_result.get('messages')
+                                    if _result_messages is None:
+                                        _result_messages = _previous_context_messages
+                                    _result_messages = _settle_result_messages(
+                                        s,
+                                        _previous_messages,
+                                        _previous_owner_context_messages,
+                                        _result_messages,
+                                        msg_text,
+                                        _turn_pending_source,
+                                        _active_turn_identity,
                                     )
-                                    return
-                                _result_messages = _heal_result.get('messages')
-                                if _result_messages is None:
-                                    _result_messages = _previous_context_messages
-                                _result_messages = _settle_result_messages(
-                                    s,
-                                    _previous_messages,
-                                    _previous_owner_context_messages,
-                                    _result_messages,
-                                    msg_text,
-                                    _turn_pending_source,
-                                    _active_turn_identity,
-                                )
-                                _compact_session_image_parts_for_persistence(s)
-                                _advance_truncation_watermark_after_commit(s)  # #3831
-                                # Persist fallback notices on the final
-                                # assistant message so they survive
-                                # renderMessages() rebuilds, session switches,
-                                # and page reloads (greptile P1: heal notices
-                                # not saved). The heal-success path has its
-                                # own save block that returns before the normal
-                                # pre-save metadata block runs, so flush
-                                # _pending_fallback_notices here too.
-                                if _pending_fallback_notices:
-                                    for _dm in reversed(s.messages):
-                                        if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
-                                            _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
-                                            break
-                                # Bind the durable token to the notice stamped on
-                                # THIS row — a B published between stamp and save
-                                # must stay unsaved (see gate-certifier blocker on
-                                # stamp→wrapper generation drift).
-                                _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                                    stream_id, _pending_fallback_notices[-1] if _pending_fallback_notices else None,
-                                )
-                                with _turn_final_save_commit(
-                                    stream_id, s,
-                                    committed_generation=_commit_gen,
-                                    committed_notice=_commit_notice,
-                                ):
-                                    s.save()
-                        logger.info('[webui] self-heal (except path): retry succeeded')
-                        return  # skip error emission
+                                    _compact_session_image_parts_for_persistence(s)
+                                    _advance_truncation_watermark_after_commit(s)  # #3831
+                                    # Persist fallback notices on the final
+                                    # assistant message so they survive
+                                    # renderMessages() rebuilds, session switches,
+                                    # and page reloads (greptile P1: heal notices
+                                    # not saved). The heal-success path has its
+                                    # own save block that returns before the normal
+                                    # pre-save metadata block runs, so flush
+                                    # _pending_fallback_notices here too.
+                                    _notice_to_commit = _pending_fallback_notices[-1] if _pending_fallback_notices else None
+                                    if _notice_to_commit is not None:
+                                        for _dm in reversed(s.messages):
+                                            if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                                                _dm['_fallbackNotice'] = _clean_fallback_notice(_notice_to_commit)
+                                                break
+                                    # Terminal self-heal success must finalize the
+                                    # turn exactly once: clear the pending markers
+                                    # so the last-resort recovery sync in the outer
+                                    # ``finally`` cannot re-materialize this user
+                                    # turn and append a spurious "Response
+                                    # interrupted" marker after the settled answer.
+                                    s.tool_calls = _extract_tool_calls_from_messages(
+                                        s.messages,
+                                        live_tool_calls=_live_tool_calls,
+                                    )
+                                    s.active_stream_id = None
+                                    s.pending_user_message = None
+                                    s.pending_attachments = []
+                                    s.pending_started_at = None
+                                    s.pending_user_source = None
+                                    # Bind the durable token to the exact notice stamped on
+                                    # THIS row — a B published between stamp and save
+                                    # (even with identical public content) must stay unsaved.
+                                    _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
+                                        stream_id, _notice_to_commit,
+                                    )
+                                    with _turn_final_save_commit(
+                                        stream_id, s,
+                                        committed_generation=_commit_gen,
+                                        committed_notice=_commit_notice,
+                                    ):
+                                        s.save()
+                                    _done_session_payload = redact_session_data(
+                                        _session_payload_with_full_messages(
+                                            s, tool_calls=s.tool_calls
+                                        )
+                                    )
+                            if _done_session_payload is not None:
+                                put('done', {
+                                    'session': _done_session_payload,
+                                    'usage': {'input_tokens': 0, 'output_tokens': 0},
+                                })
+                                put('stream_end', {'session_id': session_id})
+                            logger.info('[webui] self-heal (except path): retry succeeded')
+                            return  # skip error emission
                     except Exception as _retry_exc2:
                         logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
                         # Fall through to emit the original error
-            # Self-heal didn't apply or retry failed — emit the auth error
-            _exc_label, _exc_type, _exc_hint = (
-                'Authentication error', 'auth_mismatch',
-                'The selected model may not be supported by your configured provider. '
-                'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
-            )
+            if _heal_stale_classification is not None:
+                _exc_label = _heal_stale_classification['label']
+                _exc_type = _heal_stale_classification['type']
+                _exc_hint = _heal_stale_classification['hint']
+                _exc_is_compression_snapshot_stale = True
+            else:
+                # Self-heal didn't apply or retry failed — emit the auth error.
+                _exc_label, _exc_type, _exc_hint = (
+                    'Authentication error', 'auth_mismatch',
+                    'The selected model may not be supported by your configured provider. '
+                    'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
+                )
         elif _exc_is_not_found:
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
         elif _exc_is_cancelled or _exc_is_interrupted:
+            _exc_label, _exc_type, _exc_hint = (
+                _classification['label'], _classification['type'], _classification['hint'],
+            )
+        elif _exc_is_compression_snapshot_stale:
             _exc_label, _exc_type, _exc_hint = (
                 _classification['label'], _classification['type'], _classification['hint'],
             )
@@ -12568,6 +13422,12 @@ def _run_agent_streaming(
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
 
+        if _exc_is_compression_snapshot_stale:
+            # The typed exception may carry expected/observed revision details for
+            # diagnostics. Keep those out of the persisted transcript and SSE UI.
+            err_str = (
+                'The conversation changed while context compression was being prepared.'
+            )
         _error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)
         if s is not None:
             if _checkpoint_stop is not None:
@@ -12618,6 +13478,11 @@ def _run_agent_streaming(
                         )
                         _error_payload['hint'] = _exc_hint
                 _turn_duration = _terminal_turn_duration(s)
+                # Keep the canonical one-argument error-settlement shape pinned
+                # by #1361/#2136. The helper derives the same stream-owned turn
+                # token from active_stream_id + pending_started_at when the
+                # explicit identity is omitted, so repeated prompts remain
+                # fenced without weakening pending-turn durability.
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -12625,7 +13490,18 @@ def _run_agent_streaming(
                 s.pending_started_at = None
                 s.pending_user_source = None
                 try:
-                    _snapshot_and_append_partial_on_error(s, stream_id)
+                    _snapshot_and_append_partial_on_error(
+                        s,
+                        stream_id,
+                        active_turn_identity=_active_turn_identity,
+                    )
+                    _append_result_partial_on_error(
+                        s,
+                        result,
+                        _result_partial_pre_call_context,
+                        msg_text,
+                        active_turn_identity=_active_turn_identity,
+                    )
                 except Exception:
                     logger.debug("Failed to snapshot partials on error for %s", stream_id, exc_info=True)
                 _error_message = {
@@ -12655,14 +13531,16 @@ def _run_agent_streaming(
                 # they survive session switches / page reloads (greptile P1:
                 # error saves drop notices). Every s.save() path that finalizes
                 # an assistant turn must flush _pending_fallback_notices.
+                _notice_to_commit = None
                 if _pending_fallback_notices:
-                    _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                    _notice_to_commit = _pending_fallback_notices[-1]
+                    _error_message['_fallbackNotice'] = _clean_fallback_notice(_notice_to_commit)
                 s.messages.append(_error_message)
                 try:
-                    # Bind the durable token to the notice stamped on THIS row —
-                    # a B published between stamp and save must stay unsaved.
+                    # Bind the durable token to the exact notice stamped on THIS row —
+                    # a newer same-content B published between stamp and save must stay unsaved.
                     _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                        stream_id, _pending_fallback_notices[-1] if _pending_fallback_notices else None,
+                        stream_id, _notice_to_commit,
                     )
                     with _turn_final_save_commit(
                         stream_id, s,

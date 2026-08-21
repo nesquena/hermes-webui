@@ -9899,7 +9899,18 @@ function _extensionSettingsControls(entry){
   </div>`;
 }
 
-function _extensionInstalledList(extensions,extensionDirConfigured){
+function _extensionConfigureButton(entry,surface){
+  if(surface!=='installed'||!(entry&&entry.effective_enabled)) return '';
+  const id=(entry&&entry.id)||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._configureStateForExtension!=='function') return '';
+  const state=runtime._configureStateForExtension(id);
+  if(!state||!state.available) return '';
+  const pending=state.pending===true;
+  return `<button class="sm-btn extension-configure-btn" type="button" data-extension-configure-id="${esc(id)}" aria-busy="${pending?'true':'false'}"${pending?' disabled':''}>${pending?'Opening…':'Configure'}</button>`;
+}
+
+function _extensionInstalledList(extensions,extensionDirConfigured,surface){
   const list=Array.isArray(extensions)?extensions:[];
   if(!list.length){
     if(!extensionDirConfigured) return '<div class="extension-url-empty">No extension directory is configured.</div>';
@@ -9916,6 +9927,7 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
     const note=canToggle
       ? 'Toggles the WebUI-managed override for the next app load.'
       : 'Manifest-disabled entries cannot be enabled from WebUI.';
+    const configureButton=_extensionConfigureButton(entry,surface);
     return `<div class="extension-installed-row" data-extension-id="${esc(id)}">
       <div class="extension-installed-main">
         <div class="extension-installed-title-row">
@@ -9925,7 +9937,10 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
         <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
         ${_extensionSettingsControls(entry)}
       </div>
-      <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      <div class="extension-installed-actions">
+        ${configureButton}
+        <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      </div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -10133,6 +10148,7 @@ function _renderExtensionsPanel(data,seq){
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
   _extensionsStatusData=data||null;
+  if(_extensionsGalleryData) _extensionsGalleryData.statusData=data||null;
   _configureExtensionSettingsFromStatus(data);
   if(copyBtn) copyBtn.disabled=!data;
   const manifest=(data&&data.manifest)||{};
@@ -10183,7 +10199,7 @@ function _renderExtensionsPanel(data,seq){
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
-        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))}
+        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured),'diagnostics')}
       </div>
     </div>
     <div class="provider-card extension-assets-card">
@@ -10217,6 +10233,37 @@ function _renderExtensionsPanel(data,seq){
   _bindExtensionSidecarProxyButtons(target);
   _bindExtensionSettingsButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
+}
+
+function _bindExtensionConfigureButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionConfigure(btn));
+  });
+}
+
+function _syncExtensionConfigureButtonState(id){
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._configureStateForExtension!=='function') return;
+  const state=runtime._configureStateForExtension(id);
+  document.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    if(!btn.dataset||btn.dataset.extensionConfigureId!==id) return;
+    const pending=!!(state&&state.available&&state.pending);
+    btn.disabled=pending;
+    btn.setAttribute('aria-busy',pending?'true':'false');
+    btn.textContent=pending?'Opening…':'Configure';
+  });
+}
+
+function handleExtensionConfigure(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionConfigureId||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._invokeConfigure!=='function') return;
+  runtime._invokeConfigure(id,{
+    opener:btn,
+    onError:()=>showToast('Extension configuration failed.',4200,'error'),
+  });
 }
 
 function _bindExtensionToggleButtons(root){
@@ -10380,6 +10427,21 @@ function switchExtensionsTab(tab){
   if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
 }
 
+function _handleExtensionConfigureChange(change){
+  if(!change||!change.id) return;
+  if(change.reason==='pending'){
+    _syncExtensionConfigureButtonState(change.id);
+    return;
+  }
+  if(_extensionsGalleryData&&_extensionsGalleryData.statusData){
+    _renderInstalledExtensionsSurface(_extensionsGalleryData.statusData);
+  }
+}
+
+if(window.HermesExtensionSettings&&typeof window.HermesExtensionSettings._onConfigureChange==='function'){
+  window.HermesExtensionSettings._onConfigureChange(_handleExtensionConfigureChange);
+}
+
 function _extensionSafeHttpUrl(value){
   if(!value) return '';
   const raw=String(value).trim();
@@ -10535,6 +10597,19 @@ function _extensionPostInstallNote(entry,isInstalled){
   </div>`;
 }
 
+function _renderInstalledExtensionsSurface(statusData){
+  const installedEl=$('extensionsInstalled');
+  if(!installedEl) return;
+  installedEl.innerHTML=_extensionInstalledList(
+    statusData&&statusData.extensions,
+    !!(statusData&&statusData.extension_dir_configured),
+    'installed'
+  );
+  _bindExtensionToggleButtons(installedEl);
+  _bindExtensionSettingsButtons(installedEl);
+  _bindExtensionConfigureButtons(installedEl);
+}
+
 async function loadExtensionsGallery(){
   _extensionsGalleryLoaded=true;
   const galleryEl=$('extensionsGallery');
@@ -10558,7 +10633,6 @@ async function loadExtensionsGallery(){
 
 function _renderExtensionsGallery(entries,statusData){
   const galleryEl=$('extensionsGallery');
-  const installedEl=$('extensionsInstalled');
   _configureExtensionSettingsFromStatus(statusData);
   const installedIds=new Set();
   if(statusData&&statusData.gallery_installed){
@@ -10569,11 +10643,7 @@ function _renderExtensionsGallery(entries,statusData){
   }
   if(!Array.isArray(entries)||entries.length===0){
     if(galleryEl) galleryEl.innerHTML='<div class="extensions-empty">No extensions found in the registry.</div>';
-    if(installedEl){
-      installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-      _bindExtensionToggleButtons(installedEl);
-      _bindExtensionSettingsButtons(installedEl);
-    }
+    _renderInstalledExtensionsSurface(statusData);
     return;
   }
   const galleryCards=[];
@@ -10617,11 +10687,7 @@ function _renderExtensionsGallery(entries,statusData){
     galleryCards.push(card);
   }
   if(galleryEl) galleryEl.innerHTML=galleryCards.length?galleryCards.join(''):'<div class="extensions-empty">No extensions found.</div>';
-  if(installedEl){
-    installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-    _bindExtensionToggleButtons(installedEl);
-    _bindExtensionSettingsButtons(installedEl);
-  }
+  _renderInstalledExtensionsSurface(statusData);
   _bindExtensionGalleryButtons(entries);
 }
 
@@ -12146,7 +12212,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -12642,7 +12708,13 @@ async function _applyAuxModels(){
     saved++;
    }catch(e){
     console.warn('[settings] failed to save aux task',task.task,e);
-    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
+    // Surface the server's actionable message (e.g. an ambiguous custom-provider
+    // slug collision: rename one provider so its slug is unique) instead of a
+    // generic failure, and abort the loop so the dirty selection is retained for
+    // the user to fix and retry — the reload that would clear it is skipped.
+    const _msg=(e&&e.message)?e.message:'';
+    const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';
+    if(typeof showToast==='function') showToast(_msg?(_base+': '+_msg):_base,6000,'error');
     return;
    }
   }
@@ -12757,11 +12829,17 @@ async function saveSettings(andClose){
       const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
-          await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
-          body.default_model=model;
-          body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+        body.default_model=model;
+        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
         }catch(_modelErr){
-          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
         }
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
@@ -12790,9 +12868,15 @@ async function saveSettings(andClose){
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
         body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
-      }catch(_modelErr){
-        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
-      }
+        }catch(_modelErr){
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
+        }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));

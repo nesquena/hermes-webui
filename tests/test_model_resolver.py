@@ -253,6 +253,405 @@ def test_custom_provider_model_with_slash_routes_to_named_custom_provider():
     assert base_url == 'http://lmstudio.local:1234/v1'
 
 
+# ── Overlapping custom_providers[] model ids — active endpoint wins ─────────
+
+def test_overlapping_custom_providers_active_base_url_wins_not_config_order():
+    """When two custom_providers[] list the SAME bare model id, routing must
+    follow the ACTIVE provider (resolved from model.base_url → named slug), NOT
+    config write order.
+
+    Real-world repro: dogapi and packyapi both advertise 'claude-sonnet-5';
+    dogapi is written FIRST in config. A plain first-match scan hijacked the
+    model to dogapi even though model.base_url pointed at packyapi. The active
+    endpoint the user configured must win.
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['claude-sonnet-5', 'gpt-5.6-sol', 'musk-4.5']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['claude-sonnet-5', 'claude-opus-5']},
+    ]
+    # Active endpoint is packyapi (bare 'custom' + base_url resolves to the slug).
+    model, provider, base_url = _resolve_with_config(
+        'claude-sonnet-5',
+        provider='custom',
+        base_url='https://www.packyapi.ai/v1',
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:packyapi', (
+        f"shared model must route to the ACTIVE packyapi endpoint, got {provider!r}"
+    )
+    assert base_url == 'https://www.packyapi.ai/v1'
+
+
+def test_overlapping_custom_providers_unique_model_still_routes_by_ownership():
+    """A model that only ONE overlapping provider lists still routes to that
+    provider even when the active endpoint is the other one — the active-slug
+    guard only claims models the active provider actually owns, then falls
+    through to the ordered ownership scan.
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['claude-sonnet-5', 'gpt-5.6-sol', 'musk-4.5']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['claude-sonnet-5', 'claude-opus-5']},
+    ]
+    # Active endpoint packyapi, but 'gpt-5.6-sol' is dogapi-only → must go dogapi.
+    model, provider, base_url = _resolve_with_config(
+        'gpt-5.6-sol',
+        provider='custom',
+        base_url='https://www.packyapi.ai/v1',
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:dogapi', (
+        f"dogapi-only model must still route to dogapi, got {provider!r}"
+    )
+    assert base_url == 'https://www.dogapi.cc/v1'
+
+
+def test_overlapping_custom_providers_bare_custom_no_base_url_keeps_order():
+    """With a bare 'custom' provider and NO base_url to disambiguate, the active
+    slug can't be resolved, so the legacy config-order first-match behaviour is
+    preserved (no regression for users who never set a base_url).
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['claude-sonnet-5']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['claude-sonnet-5']},
+    ]
+    model, provider, base_url = _resolve_with_config(
+        'claude-sonnet-5',
+        provider='custom',
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:dogapi', (
+        f"with no base_url to disambiguate, first-match order is preserved, got {provider!r}"
+    )
+
+
+def test_overlapping_custom_providers_normalized_slug_collision_fails_closed():
+    """Two DISTINCT provider names that normalize to the SAME slug must fail
+    closed, even when the active base_url pins one exact entry.
+
+    'Foo Bar' and 'foo-bar' both normalize to slug custom:foo-bar. Even with the
+    active base_url pointing at the SECOND entry (B), resolve_model_provider can
+    only return the shared slug custom:foo-bar. The downstream credential lookup
+    (resolve_custom_provider_connection) then resolves the API key from the FIRST
+    same-slug entry (A) regardless of base_url — so endpoint B would be paired
+    with credential A. Rather than emit that broken pairing, resolution must
+    raise so the collision surfaces to the user.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            base_url='https://b.example/v1',
+            custom_providers=custom_providers,
+        )
+
+
+def test_overlapping_custom_providers_slug_collision_no_base_url_fails_closed():
+    """When two same-slug entries exist and there is NO base_url to disambiguate,
+    resolution must fail closed rather than silently guessing the first entry.
+    The ordered scan would return the shared slug custom:foo-bar, whose credential
+    lookup can't be pinned to a single entry — so it raises instead.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    # Active provider is bare 'custom' with no base_url: nothing disambiguates.
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            custom_providers=custom_providers,
+        )
+
+
+def test_overlapping_custom_providers_explicit_slug_wins_over_stale_base_url():
+    """An explicitly selected named custom provider with a UNIQUE slug must win
+    even when model.base_url is stale and points at neither entry.
+
+    A (dogapi) is written first; B (packyapi) is explicitly selected. Both own
+    'shared-model'. model.base_url is set to a THIRD, stale URL that matches no
+    entry. The explicit, unambiguous provider B must be authoritative — a stale
+    URL is not evidence to demote it to config order (which would return A).
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['shared-model']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['shared-model']},
+    ]
+    model, provider, base_url = _resolve_with_config(
+        'shared-model',
+        provider='custom:packyapi',
+        base_url='https://stale.example/v1',  # stale: matches neither entry
+        custom_providers=custom_providers,
+    )
+    assert provider == 'custom:packyapi', (
+        f"explicit provider must win over stale base_url + config order, got {provider!r}"
+    )
+    assert base_url == 'https://www.packyapi.ai/v1', (
+        f"must use the selected provider's own base_url, got {base_url!r}"
+    )
+
+
+def test_session_provider_context_routes_handoff_to_session_endpoint_not_active():
+    """Handoff-summary sibling fix: a session pinned to custom:A must resolve
+    through A, not the active custom:B, when both list the same model id.
+
+    The handoff summary path reads s_obj.model + s_obj.model_provider and passes
+    model_with_provider_context(model, model_provider) into resolve_model_provider.
+    This pins the routing behavior that fix relies on: encoding the SESSION's own
+    provider overrides the active endpoint. (The handoff path then backfills
+    base_url from resolve_custom_provider_connection, so base_url=None here is
+    expected and fine.)
+    """
+    custom_providers = [
+        {'name': 'dogapi', 'base_url': 'https://www.dogapi.cc/v1',
+         'models': ['shared-model']},
+        {'name': 'packyapi', 'base_url': 'https://www.packyapi.ai/v1',
+         'models': ['shared-model']},
+    ]
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {
+        'default': 'shared-model', 'provider': 'custom',
+        'base_url': 'https://www.dogapi.cc/v1',  # active endpoint = dogapi
+    }
+    config.cfg['custom_providers'] = custom_providers
+    try:
+        # Session is pinned to packyapi even though dogapi is active.
+        encoded = config.model_with_provider_context('shared-model', 'custom:packyapi')
+        model, provider, _base = config.resolve_model_provider(encoded)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+    assert provider == 'custom:packyapi', (
+        f"session's own provider must win over the active endpoint, got {provider!r}"
+    )
+
+
+def test_overlapping_custom_providers_asymmetric_collision_fails_closed():
+    """ASYMMETRIC normalized-slug collision must fail closed too.
+
+    Reviewer-reproduced shape: entry A ('Foo Bar') appears FIRST and does NOT
+    list 'shared-model'; entry B ('foo-bar') lists it and is the active endpoint.
+    Both normalize to custom:foo-bar. Ownership-only collision detection would
+    see just B and happily return B's endpoint + custom:foo-bar — but the
+    credential lookup scans by slug and first-matches A, pairing B's endpoint
+    with A's credential. Membership must be built from ALL named entries
+    (ownership-independent), so this raises.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1'},  # first, NON-owner
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            base_url='https://b.example/v1',  # active endpoint = B
+            custom_providers=custom_providers,
+        )
+
+
+def test_overlapping_custom_providers_asymmetric_collision_bare_custom_fails_closed():
+    """Same asymmetric collision on the bare-'custom', no-base_url ordered-scan
+    path: the owning entry B is returned as custom:foo-bar, but non-owner A
+    shares the slug, so the ordered scan must also fail closed.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1'},  # first, NON-owner
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            custom_providers=custom_providers,
+        )
+
+
+def test_provider_qualified_custom_hint_collision_fails_closed():
+    """The @custom:<slug>:model qualified path (session/send/handoff shape via
+    model_with_provider_context) must apply the same all-entry uniqueness check.
+
+    Without it, the qualified return hands back custom:foo-bar and the credential
+    backfill first-matches the wrong entry. Uses the asymmetric shape so the
+    check cannot rely on model ownership of the encoded string.
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1'},  # first, NON-owner
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+    ]
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {
+        'default': 'shared-model', 'provider': 'custom',
+        'base_url': 'https://a.example/v1',
+    }
+    config.cfg['custom_providers'] = custom_providers
+    try:
+        encoded = config.model_with_provider_context('shared-model', 'custom:foo-bar')
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.resolve_model_provider(encoded)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_resolve_custom_provider_connection_collision_fails_closed(monkeypatch):
+    """The credential boundary itself must fail closed on a slug collision so an
+    endpoint and API key can never be resolved from different entries — even when
+    called directly (e.g. the handoff/context-length credential backfill).
+    """
+    custom_providers = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'api_key': 'key-A'},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'api_key': 'key-B'},
+    ]
+    monkeypatch.setattr(config, 'get_config', lambda: {'custom_providers': custom_providers})
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        config.resolve_custom_provider_connection('custom:foo-bar')
+
+
+# ── Finding #1: one canonical slug identity (_custom_provider_slug_from_name) ──
+# The collision key MUST match the slug PRODUCER. A parenthesized / punctuated
+# name is where a looser key diverged: 'Foo (Bar)' is produced as custom:foo-bar
+# but a naive lower+space/underscore key yields 'foo-(bar)' — so the collision
+# with a literal 'foo-bar' entry was MISSED, reintroducing the original bug
+# (endpoint A + credential B) for these names. These regressions collide two
+# names ONLY via the producer.
+
+def test_slug_key_matches_producer_for_parenthesized_name():
+    """The collision key derives from the SAME producer that mints the returned
+    slug, so genuinely-colliding names are seen as identical."""
+    assert config._custom_provider_slug_from_name('Foo (Bar)') == 'custom:foo-bar'
+    assert config._custom_provider_slug_from_name('foo-bar') == 'custom:foo-bar'
+    # Both map to the same bare collision key.
+    assert config._custom_provider_slug_key('Foo (Bar)') == config._custom_provider_slug_key('foo-bar')
+    assert config._custom_provider_slug_key('custom:foo-bar') == 'foo-bar'
+
+
+def _parenthesized_collision_providers():
+    # 'Foo (Bar)' and 'foo-bar' BOTH produce custom:foo-bar, but only collide
+    # under the producer's normalization (a looser key would miss them).
+    return [
+        {'name': 'Foo (Bar)', 'base_url': 'https://a.example/v1', 'api_key': 'key-A',
+         'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'api_key': 'key-B',
+         'models': ['shared-model']},
+    ]
+
+
+def test_parenthesized_name_collision_fails_closed_bare_resolution():
+    """Finding #1: bare resolution must fail closed on a producer-level collision
+    that a looser key missed ('Foo (Bar)' vs 'foo-bar')."""
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        _resolve_with_config(
+            'shared-model',
+            provider='custom',
+            base_url='https://b.example/v1',
+            custom_providers=_parenthesized_collision_providers(),
+        )
+
+
+def test_parenthesized_name_collision_fails_closed_qualified_hint():
+    """Finding #1: the @custom:<slug>:model qualified path must also catch the
+    parenthesized-name collision."""
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {'default': 'shared-model', 'provider': 'custom',
+                           'base_url': 'https://a.example/v1'}
+    config.cfg['custom_providers'] = _parenthesized_collision_providers()
+    try:
+        encoded = config.model_with_provider_context('shared-model', 'custom:foo-bar')
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.resolve_model_provider(encoded)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_parenthesized_name_collision_fails_closed_credential_boundary(monkeypatch):
+    """Finding #1: the credential lookup must fail closed on the parenthesized
+    collision so endpoint and key can never split."""
+    monkeypatch.setattr(
+        config, 'get_config',
+        lambda: {'custom_providers': _parenthesized_collision_providers()},
+    )
+    with pytest.raises(config.AmbiguousCustomProviderError):
+        config.resolve_custom_provider_connection('custom:foo-bar')
+
+
+# ── Finding #2: the ambiguity check runs only at the point of return, so an
+# unrelated collision never blocks a request that resolves to a DIFFERENT
+# provider. With a colliding slug ACTIVE, unrelated lanes must still route.
+
+def _collision_plus_safe_lane_config():
+    old_cfg = dict(config.cfg)
+    config.cfg['model'] = {
+        'default': 'shared-model',
+        'provider': 'custom:foo-bar',  # the ACTIVE provider is the colliding slug
+        'base_url': 'https://b.example/v1',
+    }
+    # 'Foo Bar' + 'foo-bar' collide under BOTH the old and new normalizers, so
+    # the PRE-FIX up-front check reproduces the over-block (every lane raises);
+    # the fix moves the check to the point of return so only the colliding lane
+    # fails. (Parenthesized-name collisions are covered by the finding #1 tests.)
+    config.cfg['custom_providers'] = [
+        {'name': 'Foo Bar', 'base_url': 'https://a.example/v1', 'models': ['shared-model']},
+        {'name': 'foo-bar', 'base_url': 'https://b.example/v1', 'models': ['shared-model']},
+        {'name': 'safe-provider', 'base_url': 'https://safe.example/v1',
+         'models': ['safe-model']},
+    ]
+    return old_cfg
+
+
+def test_unrelated_openrouter_lane_not_blocked_by_active_collision():
+    """Finding #2: an @openrouter hint must resolve even though the ACTIVE custom
+    slug (custom:foo-bar) is ambiguous — the check must not run up front."""
+    old_cfg = _collision_plus_safe_lane_config()
+    try:
+        model, provider, _base = config.resolve_model_provider('@openrouter:gpt-x')
+        assert provider == 'openrouter', provider
+        assert model == 'gpt-x', model
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_unrelated_custom_lane_not_blocked_by_active_collision():
+    """Finding #2: a DIFFERENT, non-colliding @custom:safe-provider hint must
+    resolve even though the active slug collides."""
+    old_cfg = _collision_plus_safe_lane_config()
+    try:
+        encoded = config.model_with_provider_context('safe-model', 'custom:safe-provider')
+        model, provider, base_url = config.resolve_model_provider(encoded)
+        assert provider == 'custom:safe-provider', provider
+        assert model == 'safe-model', model
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
+def test_active_collision_still_fails_closed_for_owned_model():
+    """Finding #2 counterpart: when the request DOES resolve to the colliding
+    active slug (its owned default model), it must still fail closed — the
+    point-of-return check fires exactly when the slug is consumed."""
+    old_cfg = _collision_plus_safe_lane_config()
+    try:
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.resolve_model_provider('shared-model')
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+
 # ── #3872: bare ``custom`` provider is a vendor-routing proxy — preserve the
 #    full model id (the prefix is intrinsic). #433's redundant-prefix strip is
 #    scoped to real first-party providers (provider=openai + proxy base_url),

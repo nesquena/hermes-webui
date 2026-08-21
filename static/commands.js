@@ -1232,12 +1232,39 @@ async function cmdGoal(args){
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
   try{
+    // #6703: re-assert the explicit-pick marker on /api/goal the same way
+    // /api/chat/start does. Without it the server's model resolver treats a
+    // persisted cross-provider pick as stale and silently reverts the session
+    // to the profile default mid-session (e.g. while /goal is running).
+    const _goalModel=S.session.model||($('modelSelect')&&$('modelSelect').value)||'';
+    const _goalProvider=S.session.model_provider||null;
+    const _pendingPick=(typeof _readPendingSessionModel==='function')
+      ? _readPendingSessionModel(activeSid)
+      : null;
+    const _pendingPickMatch=_pendingPick
+      && _pendingPick.model===_goalModel
+      && String(_pendingPick.model_provider||'')===String(_goalProvider||'');
+    const _defaultModel=(typeof window!=='undefined' && window._defaultModel)||'';
+    const _activeProvider=(typeof window!=='undefined' && window._activeProvider)||null;
+    const _isCrossProviderPick=_goalModel
+      && _goalProvider
+      && _defaultModel
+      && _activeProvider
+      && _goalModel !== _defaultModel
+      && String(_goalProvider||'') !== String(_activeProvider||'');
+    const _explicitPick=(_pendingPickMatch||_isCrossProviderPick)||undefined;
+    // Do NOT consume the pending explicit-pick marker here: a control-only
+    // invocation (e.g. /goal status) skips server-side model resolution, so a
+    // pre-request clear would drop the pick without using it. Consume it below,
+    // only after a successful kickoff (r.stream_id), re-checking that the stored
+    // marker still matches the model/provider captured for this kickoff (#6705).
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
       workspace:S.session.workspace,
-      model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
-      model_provider:S.session.model_provider||null,
+      model:_goalModel,
+      model_provider:_goalProvider,
+      explicit_model_pick:_explicitPick,
       profile:S.activeProfile||S.session.profile||'default',
     })});
     const msg = (() => {
@@ -1257,6 +1284,19 @@ async function cmdGoal(args){
       showToast(msg.split('\n')[0],2600);
     }
     if(!r||!r.stream_id)return;
+    // #6705: consume the one-shot pending explicit-pick marker only after a
+    // successful kickoff. Re-read the stored marker and clear it only if it
+    // still matches the model/provider captured above — a control command (no
+    // stream_id) must leave the marker intact for the next real send, and a
+    // marker re-recorded mid-flight (newer onchange) must not be clobbered.
+    if(_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'){
+      const _stillPending=_readPendingSessionModel(activeSid);
+      if(_stillPending
+        && _stillPending.model===_goalModel
+        && String(_stillPending.model_provider||'')===String(_goalProvider||'')){
+        _clearPendingSessionModel(activeSid);
+      }
+    }
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
     appendThinking();setBusy(true);
@@ -1901,22 +1941,50 @@ function cmdVoice(){
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  const generation=_loadSessionGeneration;
+  const viewIsCurrent=()=>!!(
+    S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
+  );
+  let approvalOwner=null;
   try{
-    // Check current state first to toggle
+    // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
+    if(!viewIsCurrent())return;
     const enable=!status.yolo_enabled;
-    await api('/api/session/yolo',{
+    // A visible approval must belong to this exact session load before any
+    // command handler may POST through it. Otherwise fail closed.
+    const card=$('approvalCard');
+    if(card&&card.classList.contains('visible')){
+      approvalOwner=typeof _captureApprovalResponseOwner==='function'
+        ?_captureApprovalResponseOwner()
+        :null;
+      if(!approvalOwner)return;
+      if(enable&&typeof toggleYoloFromApproval==='function'){
+        await toggleYoloFromApproval();
+        return;
+      }
+    }
+    const result=await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable}),
     });
-    _yoloEnabled=enable;
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
+    _yoloEnabled=settled;
     _updateYoloPill();
-    showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
-    if(enable){
-      // Dismiss any visible approval card
-      hideApprovalCard(true);
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+  }catch(e){
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
-  }catch(e){showToast('YOLO: '+e.message);}
+    if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
+      _yoloEnabled=errorPayload.yolo_enabled;
+      _updateYoloPill();
+    }
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }
 }
 
 // ── Branch / fork command ──

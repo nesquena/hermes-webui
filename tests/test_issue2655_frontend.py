@@ -22,10 +22,20 @@ def test_workspace_artifacts_tab_collects_session_files_and_previews_them():
     assert "Prose mentions" in WORKSPACE_JS
     assert "/(?:created|wrote|updated|edited|saved|modified)" not in WORKSPACE_JS
     assert "panel.dataset.activeTab = _workspacePanelActiveTab" in WORKSPACE_JS
-    assert "renderSessionArtifacts();" in SESSIONS_JS
+    assert "projectSessionArtifactsForOwner(sid);" in SESSIONS_JS
     assert "typeof scheduleRenderSessionArtifacts==='function'" in MESSAGES_JS
     assert "S.toolCalls=d.session.tool_calls.map" in MESSAGES_JS
+    assert "projectSessionArtifactsForOwner(completedSid);" in MESSAGES_JS
     assert ".workspace-artifact-item" in STYLE_CSS
+
+
+def test_artifact_snapshot_consumers_route_through_owner():
+    assert "function projectSessionArtifactsForOwner(sessionId)" in WORKSPACE_JS
+    assert "projectSessionArtifactsForOwner(completedSid);" in MESSAGES_JS
+    assert "projectSessionArtifactsForOwner(sid);" in SESSIONS_JS
+    assert MESSAGES_JS.count("projectSessionArtifactsForOwner(completedSid);") >= 2
+    assert "if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();" not in MESSAGES_JS
+    assert "if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();" not in SESSIONS_JS
 
 
 def test_workspace_artifacts_structured_args_are_mutation_gated():

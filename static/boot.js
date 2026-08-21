@@ -2122,9 +2122,17 @@ $('btnDownload').onclick=()=>{
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
 };
+function _buildSessionExportUrl(sessionId,params){
+  const url=new URL('api/session/export',document.baseURI||location.href);
+  url.searchParams.set('session_id',String(sessionId||''));
+  Object.entries(params||{}).forEach(([key,value])=>{
+    if(value!==undefined&&value!==null)url.searchParams.set(key,String(value));
+  });
+  return url.href;
+}
 $('btnExportJSON').onclick=()=>{
   if(!S.session)return;
-  const url=`/api/session/export?session_id=${encodeURIComponent(S.session.session_id)}`;
+  const url=_buildSessionExportUrl(S.session.session_id);
   const a=document.createElement('a');a.href=url;
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
@@ -2201,7 +2209,7 @@ function exportSessionHTML(session){
   // Drop empties so the inlined fallback keeps working for anything we couldn't read.
   const clean={};for(const k in palette){if(palette[k])clean[k]=palette[k];}
   const paletteB64=btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
-  const url=`/api/session/export?session_id=${encodeURIComponent(sid)}&format=html&theme=${theme}&palette=${encodeURIComponent(paletteB64)}`;
+  const url=_buildSessionExportUrl(sid,{format:'html',theme,palette:paletteB64});
   const a=document.createElement('a');a.href=url;
   a.download=`hermes-${sid}.html`;a.click();
 }
@@ -3533,7 +3541,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';

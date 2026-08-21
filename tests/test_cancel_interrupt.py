@@ -2129,6 +2129,90 @@ class TestCancelInterrupt:
             _STREAM_NOTICE_GENERATION.pop(stream_id, None)
             _STREAM_CANCEL_CLAIMED.discard(stream_id)
 
+    def test_stamp_to_wrapper_same_content_B_uses_source_order_generation(self):
+        """Regression: same-content B cannot steal A's durable generation.
+
+        This mirrors the production status-callback source order:
+        append pending notice A, publish A (which stamps A's internal generation),
+        select A for the row, then append/publish a newer same-public-content B
+        before the save wrapper commits.  Content equality is intentionally
+        useless here; only the generation minted onto the selected pending dict
+        proves which publication the row actually saved.
+        """
+        from unittest.mock import Mock
+        from api.streaming import (
+            _FALLBACK_NOTICE_GENERATION_KEY,
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED,
+            _publish_fallback_notice, _current_notice_generation,
+            _snapshot_fallback_notice_for_commit, _turn_final_save_commit,
+            _retire_worker_cancelled_state,
+        )
+
+        stream_id = "seam_same_content_AB"
+        pending = []
+        try:
+            notice_a = {"message": "same fallback", "to_model": "m", "to_provider": "p"}
+            pending.append(notice_a)
+            assert _publish_fallback_notice(stream_id, notice_a) is True
+            assert notice_a[_FALLBACK_NOTICE_GENERATION_KEY] == 1
+
+            # ROW-STAMP SOURCE ORDER: production selected A before B existed.
+            notice_selected_for_row = pending[-1]
+            stamped_notice = {
+                "message": notice_selected_for_row["message"],
+                "to_model": notice_selected_for_row["to_model"],
+                "to_provider": notice_selected_for_row["to_provider"],
+            }
+
+            # A later status callback reports the exact same public notice text.
+            # Without the source-order generation on notice_selected_for_row,
+            # _snapshot_fallback_notice_for_commit would match by content and
+            # incorrectly bind this save to B's current generation.
+            notice_b = {"message": "same fallback", "to_model": "m", "to_provider": "p"}
+            pending.append(notice_b)
+            assert _publish_fallback_notice(stream_id, notice_b) is True
+            assert notice_b[_FALLBACK_NOTICE_GENERATION_KEY] == 2
+            assert _current_notice_generation(stream_id) == 2
+            b_obj = _STREAM_FALLBACK_NOTICES[stream_id]
+
+            commit_gen, commit_notice = _snapshot_fallback_notice_for_commit(
+                stream_id, notice_selected_for_row,
+            )
+            assert commit_gen == 1
+            assert commit_notice == stamped_notice
+
+            ws = Mock()
+            ws.session_id = "sess_same_content_AB"
+            ws.profile = None
+            saved = [False]
+            ws.save = lambda: saved.__setitem__(0, True)
+            with _turn_final_save_commit(
+                stream_id, ws,
+                committed_generation=commit_gen,
+                committed_notice=commit_notice,
+            ):
+                ws.save()
+
+            assert saved[0] is True
+            assert _STREAM_WORKER_SAVED.get(stream_id) == 1
+            assert _STREAM_FALLBACK_NOTICES[stream_id] is b_obj
+            assert _current_notice_generation(stream_id) == 2
+            _retire_worker_cancelled_state(stream_id)
+            assert _STREAM_FALLBACK_NOTICES.get(stream_id) is b_obj
+            assert _current_notice_generation(stream_id) == 2
+            assert _STREAM_WORKER_SAVED.get(stream_id) != 2
+        finally:
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            _STREAM_WORKER_SAVED.pop(stream_id, None)
+            _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
+            _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
+            _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+            _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+            _STREAM_CANCEL_CLAIMED.discard(stream_id)
+
     def test_cancel_registration_first_lock_no_worker_retirement_gap(self):
         """Worker-first and cancel-first schedules both return every settlement
         registry to baseline: cancel installs participants+claim INSIDE the

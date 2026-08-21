@@ -35,6 +35,7 @@ from api.config import (
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
     MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
 )
+from api.subprocess_utils import windows_hide_flags
 
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
@@ -165,7 +166,14 @@ def _remote_terminal_cwd() -> str | None:
 
 
 def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
-    """Return a non-stat'ed target-side Path when it is under terminal.cwd."""
+    """Return a non-stat'ed target-side Path when it is under terminal.cwd.
+
+    Remote workspace paths live on the target host (e.g., remote SSH/Docker
+    backend). For valid target-side POSIX paths under ``terminal.cwd``, the
+    normalized target path is preserved as a ``Path`` object without invoking
+    local host-filesystem resolution (avoiding host-specific firmlink rewriting
+    such as macOS synthetic ``/home`` -> ``/System/Volumes/Data/home``).
+    """
     cwd = _remote_terminal_cwd()
     if not cwd:
         return None
@@ -182,7 +190,7 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
         if _is_blocked_workspace_path(Path(normalized_raw), normalized_raw) or _is_blocked_workspace_path(Path(normalized_cwd), normalized_cwd):
             return None
         if posix_candidate == posix_base or _posix_is_within(posix_candidate, posix_base):
-            return _resolve_path(normalized_raw)
+            return Path(normalized_raw)
         return None
     candidate = _resolve_path(raw)
     base = _resolve_path(cwd)
@@ -245,6 +253,8 @@ def _profile_default_workspace() -> str:
 
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
+    - Preserve target-side remote terminal workspace paths (SSH/Docker) without
+      resolving them against the local WebUI host filesystem.
     - Preserve saved paths even when they are currently missing or inaccessible;
       picker state must not be destroyed by a transient stat/permission failure.
     - Remove entries whose paths live inside another profile's directory
@@ -260,7 +270,11 @@ def _clean_workspace_list(workspaces: list) -> list:
         name = w.get('name', '')
         if not path:
             continue
-        p = _safe_resolve(_expanduser_path(path))
+        remote_cand = _remote_terminal_workspace_candidate(path)
+        if remote_cand is not None:
+            p = remote_cand
+        else:
+            p = _safe_resolve(_expanduser_path(path))
         # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
         # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
         # created under ~/.hermes/profiles/webui/webui-mvp-test/).
@@ -1016,6 +1030,7 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
 _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
 
 
 def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
@@ -1037,7 +1052,11 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         # Windows / no openat: fall back to a plain pathname open. No new race
         # protection, but no regression vs the prior path-based behaviour, and
         # symlink creation needs admin on Windows anyway.
-        flags = os.O_RDONLY | (_O_DIRECTORY if want_dir else 0) | _O_NOFOLLOW
+        flags = (
+            os.O_RDONLY
+            | (_O_DIRECTORY if want_dir else _O_BINARY)
+            | _O_NOFOLLOW
+        )
         try:
             return os.open(str(target), flags)
         except OSError:
@@ -1052,7 +1071,11 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0)
+            flags = (
+                os.O_RDONLY
+                | _O_NOFOLLOW
+                | (_O_DIRECTORY if want_directory else _O_BINARY)
+            )
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:
@@ -1770,6 +1793,7 @@ def _run_git(args, cwd, timeout=3):
         r = subprocess.run(
             ['git'] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
+            creationflags=windows_hide_flags(),
         )
         return r.stdout.strip() if r.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
