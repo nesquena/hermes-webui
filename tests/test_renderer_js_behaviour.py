@@ -282,6 +282,29 @@ class TestMediaTokenBoundaries:
         assert "<strong>" in out
         assert out.endswith(".</p>")
 
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_balanced_prose_quotes_stay_outside_local_media_ref(self, driver_path, quote):
+        ref = "/workspace/report.xlsx"
+        out = _render(driver_path, f"{quote}MEDIA:{ref}{quote}.")
+        assert "path=%2Fworkspace%2Freport.xlsx" in out
+        assert "%22" not in out
+        assert "path=%2Fworkspace%2Freport.xlsx'" not in out
+        assert out.endswith(f"{quote}.</p>")
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "https://example.com/report.png?signature=value!",
+            "https://example.com/report.png#preview!",
+        ],
+    )
+    def test_balanced_quotes_detach_without_truncating_remote_query_or_fragment(
+        self, driver_path, ref
+    ):
+        out = _render(driver_path, f'"MEDIA:{ref}".')
+        assert f'src="{ref}"' in out
+        assert out.endswith('".</p>')
+
     def test_multiple_tokens_and_following_prose_keep_their_boundaries(self, driver_path):
         out = _render(
             driver_path,

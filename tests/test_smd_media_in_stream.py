@@ -71,6 +71,7 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
             _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTokenParts"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
@@ -208,6 +209,10 @@ def _run_real_smd_media_cases() -> dict:
         "  bareMarker:renderModes(['`MEDIA:` ']),\n"
         "  queryFragment:renderModes(['MEDIA:https://example.com/a.png?size=1#preview ']),\n"
         "  wrappedRemoteQueryPunctuation:renderModes(['**MEDIA:https://example.com/a.png?signature=value.**. ']),\n"
+        "  quotedDouble:renderModes(['\"MEDIA:/tmp/report.xlsx\". ']),\n"
+        "  quotedSingleSplit:renderModes([\"'MEDIA:/tmp/report.\", \"xlsx'.\"]),\n"
+        "  quotedRemoteQuery:renderModes(['\"MEDIA:https://example.com/a.png?signature=value!\". ']),\n"
+        "  quotedRemoteFragment:renderModes(['\"MEDIA:https://example.com/a.png#preview!\". ']),\n"
         "  windowsPath:renderModes(['MEDIA:C:\\\\Temp\\\\report.xlsx ']),\n"
         "  unmatchedDelimiter:renderModes(['MEDIA:/tmp/report.xlsx* ']),\n"
         "  multiple:renderModes(['MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after']),\n"
@@ -618,6 +623,26 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
         for mode, result in self.cases["boundaries"]["unmatchedDelimiter"].items():
             with self.subTest(mode=mode):
                 self.assertIn('data-ref="/tmp/report.xlsx*"', result["html"])
+
+    def test_real_smd_parser_detaches_balanced_quotes_in_safe_fade_split_and_tail_paths(self):
+        for case_name in ("quotedDouble", "quotedSingleSplit"):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx%22"', result["html"])
+                    self.assertNotIn("data-ref=\"/tmp/report.xlsx'\"", result["html"])
+                    self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_quoted_remote_query_and_fragment_values(self):
+        expected = {
+            "quotedRemoteQuery": "https://example.com/a.png?signature=value!",
+            "quotedRemoteFragment": "https://example.com/a.png#preview!",
+        }
+        for case_name, ref in expected.items():
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
+                    self.assertIn(".", result["text"])
 
     def test_real_smd_parser_preserves_remote_query_and_fragment_punctuation(self):
         for suffix_kind, punctuation_cases in self.cases["remoteSuffixPunctuation"].items():

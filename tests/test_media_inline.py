@@ -620,7 +620,12 @@ class TestMediaEndpointUnit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpd:
             image = pathlib.Path(tmpd) / "card.png"
             image.write_bytes(b"\x89PNG\r\n\x1a\n")
-            for content in (f"**MEDIA:{image}**", f"MEDIA:{image}."):
+            for content in (
+                f"**MEDIA:{image}**",
+                f"MEDIA:{image}.",
+                f'"MEDIA:{image}".',
+                f"'MEDIA:{image}'.",
+            ):
                 with self.subTest(content=content):
                     session = SimpleNamespace(
                         messages=[{"role": "assistant", "content": content}]

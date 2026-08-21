@@ -4730,11 +4730,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const ref=raw.split(/[?#]/,1)[0];
     return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
   }
+  function _smdMediaTokenParts(source, matchOffset, rawRef, parent){
+    const value=String(source||'');
+    const offset=Number(matchOffset)||0;
+    const before=value.slice(0,offset);
+    if(before.endsWith('"')||before.endsWith("'")||/(?:&quot;|&#39;)$/.test(before)){
+      return _mediaTokenParts(value,offset,rawRef);
+    }
+    const prior=parent&&typeof parent.textContent==='string'?parent.textContent.slice(-1):'';
+    return _mediaTokenParts(prior+value,prior.length+offset,rawRef);
+  }
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
     const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const parts=m&&typeof _mediaTokenParts==='function'?_mediaTokenParts(String(chunk),0,m[1]):null;
+    const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
     const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
     if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
     else if(!emitted&&entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
@@ -4792,7 +4802,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      const parts=typeof _mediaTokenParts==='function'?_mediaTokenParts(combined,m.index,m[1]):null;
+      const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,m[1],parent):null;
       const hasDetachedSuffix=!!(parts&&parts[1]);
       if(matchEnd===combined.length && !hasDetachedSuffix && !_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])){
         const candidate = combined.slice(m.index);
