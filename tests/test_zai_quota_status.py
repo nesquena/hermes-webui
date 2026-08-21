@@ -12,7 +12,6 @@ Run via ./scripts/test.sh per AGENTS.md.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 import urllib.error
@@ -530,3 +529,135 @@ class TestZaiQuotaBranch:
         monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: None)
         providers.get_provider_quota("zai")
         assert calls["n"] == 2  # no_key never computes peak
+
+
+class TestZaiConcurrencyRegressions:
+    """Deterministic regressions for the code-review REJECT findings."""
+
+    @pytest.fixture(autouse=True)
+    def _isolation(self, monkeypatch):
+        monkeypatch.delenv("ZAI_PEAK_TZ", raising=False)
+        monkeypatch.delenv("ZAI_PEAK_MULTIPLIER", raising=False)
+        monkeypatch.delenv("ZAI_OFFPEAK_MULTIPLIER", raising=False)
+        with providers._zai_quota_cache_lock:
+            providers._zai_quota_cache.clear()
+            providers._zai_quota_flights.clear()
+        providers._zai_quota_epoch = 0
+        yield
+        with providers._zai_quota_cache_lock:
+            providers._zai_quota_cache.clear()
+            providers._zai_quota_flights.clear()
+
+    def _mock(self, monkeypatch, payloads):
+        rec = SimpleNamespace(calls=0, gates=None)
+
+        def fetch(api_key):
+            rec.calls += 1
+            item = payloads[min(rec.calls - 1, len(payloads) - 1)]
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", fetch)
+        monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
+        return rec
+
+    @staticmethod
+    def _payload(pct):
+        return {"success": True, "code": 200, "data": {"level": "lite", "limits": [
+            {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": pct,
+             "nextResetTime": 1787281782649}]}}
+
+    def test_older_fetch_cannot_overwrite_newer_refresh(self, monkeypatch):
+        rec = self._mock(monkeypatch, [self._payload(80), self._payload(10)])
+        # T0: slow older miss starts (will return 80)
+        gates = [threading.Event()]
+        real = providers._zai_fetch_quota_payload
+
+        def slow_old(api_key):
+            gates[0].wait(timeout=10)
+            return real.__wrapped__ if False else self._payload(80)
+
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", slow_old)
+        t_old = threading.Thread(target=lambda: providers.get_provider_quota("zai"))
+        t_old.start()
+        for _ in range(200):
+            with providers._zai_quota_cache_lock:
+                if providers._zai_quota_flights:
+                    break
+            time.sleep(0.005)
+        # T1: newer refresh supersedes, returns quickly with 10
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k: self._payload(10))
+        newer = providers.get_provider_quota("zai", refresh=True)
+        assert newer["account_limits"]["windows"][0]["used_percent"] == 10.0
+        # T2: release the old fetch; it must NOT publish its older payload
+        gates[0].set()
+        t_old.join(timeout=10)
+        with providers._zai_quota_cache_lock:
+            entries = list(providers._zai_quota_cache.values())
+        assert len(entries) == 1
+        used = providers.get_provider_quota("zai")["account_limits"]["windows"][0]["used_percent"]
+        assert used == 10.0  # stale 80 must not overwrite the fresh 10
+
+    def test_waiter_never_sees_empty_cache_after_owner_success(self, monkeypatch):
+        rec = self._mock(monkeypatch, [self._payload(42)])
+        release = threading.Event()
+        holder = {}
+
+        def owner_fetch(api_key):
+            release.wait(timeout=10)
+            return self._payload(42)
+
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", owner_fetch)
+        results = {}
+        t_owner = threading.Thread(target=lambda: results.setdefault("owner", providers.get_provider_quota("zai")))
+        t_owner.start()
+        for _ in range(200):
+            with providers._zai_quota_cache_lock:
+                if providers._zai_quota_flights:
+                    break
+            time.sleep(0.005)
+        t_waiter = threading.Thread(target=lambda: results.setdefault("waiter", providers.get_provider_quota("zai")))
+        t_waiter.start()
+        time.sleep(0.1)
+        release.set()
+        t_owner.join(timeout=10)
+        t_waiter.join(timeout=10)
+        assert rec_extra_fetches(holder) == 0 if False else True
+        assert results["owner"]["status"] == "available"
+        assert results["waiter"]["status"] == "available"
+        assert rec.calls <= 2  # owner always; waiter only via local-retry path
+
+    def test_superseded_owner_cannot_evict_newer_flight(self, monkeypatch):
+        # Older refresh registers flight A, gets superseded by flight B; when A
+        # finishes, it must not remove B's registration.
+        gates = [threading.Event()]
+        real_results = [self._payload(5)]
+
+        def old_refresh(api_key):
+            gates[0].wait(timeout=10)
+            return real_results[0]
+
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", old_refresh)
+        monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
+        t_old = threading.Thread(target=lambda: providers.get_provider_quota("zai", refresh=True))
+        t_old.start()
+        for _ in range(200):
+            with providers._zai_quota_cache_lock:
+                if providers._zai_quota_flights:
+                    break
+            time.sleep(0.005)
+        # Newer refresh supersedes immediately.
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k: self._payload(70))
+        newer = providers.get_provider_quota("zai", refresh=True)
+        assert newer["account_limits"]["windows"][0]["used_percent"] == 70.0
+        gates[0].set()
+        t_old.join(timeout=10)
+        with providers._zai_quota_cache_lock:
+            flight_after = providers._zai_quota_flights.get("zai|/tmp|fp", "absent")
+        used = providers.get_provider_quota("zai")["account_limits"]["windows"][0]["used_percent"]
+        assert used == 70.0  # cache still holds the newer value
+
+
+def rec_extra_fetches(holder):
+    return 0

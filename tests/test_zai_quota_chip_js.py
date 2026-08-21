@@ -161,6 +161,8 @@ def test_no_peak_field_for_other_providers():
 
 
 def test_malformed_multiplier_safe_fallback():
+    # Peak state must stay visible, but the rate is never invented: an
+    # unreadable multiplier renders a bare ⚡, not a fabricated 3×.
     for bad in ("null", "''", "'   '", "0", "-1", "NaN", "Infinity", "'abc'"):
         out = _harness(
             "(()=>{const status={status:'available',display_name:'X',message:'m',"
@@ -168,7 +170,7 @@ def test_malformed_multiplier_safe_fallback():
             "account_limits:{windows:[{label:'5-hour',remaining_percent:91}]}};"
             "return _providerQuotaIndicatorText(status);})()"
         )
-        assert out["label"] == "91% ⚡3×", f"multiplier={bad!r} produced {out['label']!r}"
+        assert out["label"] == "91% ⚡", f"multiplier={bad!r} produced {out['label']!r}"
 
 
 def test_numeric_string_multiplier_accepted():

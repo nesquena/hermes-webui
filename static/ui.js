@@ -2902,10 +2902,9 @@ function _providerQuotaIndicatorText(status){
     if(remaining){
       const isPeak=!!(status.peak&&status.peak.is_peak);
       const peakNum=_finiteQuotaNumber(status.peak&&status.peak.multiplier);
-      // is_peak=true with an unreadable multiplier still must render a marker
-      // (omission would misrepresent billing state); fall back to 3.
-      const effPeak=isPeak?((peakNum!==null&&peakNum>0)?peakNum:3):null;
-      const peakSuffix=effPeak!==null?(' ⚡'+effPeak+'×'):'';
+      // Peak state must be visible even with an unreadable multiplier, but the
+      // rate itself is never invented: bare ⚡ when the number is missing.
+      const peakSuffix=isPeak?(peakNum!==null&&peakNum>0?(' ⚡'+peakNum+'×'):' ⚡'):'';
       return {label:remaining+peakSuffix, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
     }
   }

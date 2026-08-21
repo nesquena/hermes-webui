@@ -181,8 +181,6 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from zoneinfo import ZoneInfo
-from zoneinfo import ZoneInfoNotFoundError
 from urllib import request as urllib_request
 
 from agent.account_usage import fetch_account_usage
@@ -765,6 +763,9 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     # show the groups as configured while chat fails the no-key path.
     "opencode-zen": ("OPENCODE_API_KEY",),
     "opencode-go": ("OPENCODE_API_KEY",),
+    # Z.AI: GLM_API_KEY is canonical (agent runtime), but z.ai's own console
+    # and community tooling call it ZAI_API_KEY — read both.
+    "zai": ("ZAI_API_KEY",),
 }
 
 _SELF_HOSTED_PROVIDER_IDS = frozenset({"ollama", "lmstudio"})
@@ -2172,10 +2173,15 @@ def _zai_peak_status(now_utc: datetime | None = None, display_tz=None) -> dict:
     """
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
-    if now_utc.tzinfo is None:
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
         raise ValueError("now_utc must be timezone-aware")
-    if display_tz is not None and not hasattr(display_tz, "utcoffset"):
-        raise TypeError("display_tz must be a tzinfo object, not a string")
+    if display_tz is not None:
+        # Duck-typed check: a usable tzinfo answers utcoffset(None) safely
+        # (ZoneInfo returns None; fixed-offset returns an offset; strings raise).
+        try:
+            display_tz.utcoffset(None)
+        except Exception:
+            raise TypeError("display_tz must be a tzinfo object, not a string") from None
     billing_tz = _zai_billing_tz()
     local = now_utc.astimezone(billing_tz)
     is_peak = local.weekday() < 5 and _ZAI_PEAK_START_HOUR <= local.hour < _ZAI_PEAK_END_HOUR
@@ -2290,11 +2296,13 @@ def _sanitize_zai_quota(payload: Any, *, fetched_at: datetime | None = None) -> 
         return (priority, reset_key)
 
     windows.sort(key=_sort_key)
+    level = data.get("level") if isinstance(data, dict) else None
+    plan = (str(level).strip() or None) if level is not None else None
     return SimpleNamespace(
         provider="zai",
         source="zai_monitor_api",
         title="Account limits",
-        plan=(str(data.get("level")).strip() or None) if isinstance(data, dict) else None,
+        plan=plan,
         windows=windows,
         details=[],
         available=not reason and bool(windows),
@@ -2347,7 +2355,8 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
 
     payload: dict | None = None
     fetched_at: datetime | None = None
-    acquired_flight = False
+    my_event: threading.Event | None = None
+    join_target = None
     with _zai_quota_cache_lock:
         epoch_at_start = _zai_quota_epoch
         cached = _zai_quota_cache.get(cache_key)
@@ -2355,17 +2364,18 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
             ts, cached_payload, cached_at = cached
             if time.monotonic() - ts <= _ZAI_QUOTA_CACHE_TTL_SECONDS:
                 payload, fetched_at = cached_payload, cached_at
-        flight = _zai_quota_flights.get(cache_key)
-        if payload is None and refresh:
-            flight = None  # refresh supersedes any in-flight fetch
         if payload is None:
-            if flight is None:
-                _zai_quota_flights[cache_key] = _zai_flight_placeholder = threading.Event()
-                acquired_flight = True
+            flight = _zai_quota_flights.get(cache_key)
+            if flight is None or refresh:
+                # Registering a NEW flight object supersedes any older
+                # in-flight fetch: the old owner's cleanup/publish is
+                # identity-checked against this registration.
+                my_event = threading.Event()
+                _zai_quota_flights[cache_key] = my_event
             else:
                 join_target = flight
 
-    if payload is None and not acquired_flight:
+    if payload is None and join_target is not None:
         waiter = getattr(join_target, "wait", None) or getattr(join_target, "join", None)
         if callable(waiter):
             waiter(timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0)
@@ -2374,6 +2384,24 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
         if cached is not None:
             ts, cached_payload, cached_at = cached
             payload, fetched_at = cached_payload, cached_at
+
+    if payload is None and my_event is None:
+        # Waiter whose owner failed (or timed out): fetch without publishing.
+        # Only the registered flight owner may write the cache; a retried
+        # waiter's result is used locally and the next fresh caller re-fetches.
+        try:
+            payload = _zai_fetch_quota_payload(api_key)
+            fetched_at = datetime.now(timezone.utc)
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code in (401, 403) else "unavailable"
+            message = ("Z.AI rejected the configured API key." if status == "invalid_key"
+                       else "Z.AI quota status is temporarily unavailable.")
+            return {"ok": False, "provider": provider, "display_name": display_name,
+                    "supported": True, "status": status, "quota": None, "message": message}
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+            return {"ok": False, "provider": provider, "display_name": display_name,
+                    "supported": True, "status": "unavailable", "quota": None,
+                    "message": "Z.AI quota status is temporarily unavailable."}
 
     if payload is None:
         try:
@@ -2390,22 +2418,20 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
                     "supported": True, "status": "unavailable", "quota": None,
                     "message": "Z.AI quota status is temporarily unavailable."}
         finally:
-            if acquired_flight:
+            # Publish decision + flight removal happen atomically under one
+            # lock acquisition, BEFORE any waiter is signaled: a woken waiter
+            # can never observe "flight gone, cache empty" from a successful
+            # owner. Identity check: a superseded owner neither publishes its
+            # (older) payload nor removes the newer registration.
+            if my_event is not None:
                 with _zai_quota_cache_lock:
-                    _zai_quota_flights.pop(cache_key, None)
-                _zai_flight_placeholder_set = getattr(_zai_flight_placeholder, "set", None)
-                if callable(_zai_flight_placeholder_set):
-                    _zai_flight_placeholder_set()
-        # Publish only if the cache was not invalidated (or superseded by a
-        # newer refresh) while our fetch was in flight.
-        publish = True
-        with _zai_quota_cache_lock:
-            current_epoch = _zai_quota_epoch
-            if current_epoch != epoch_at_start:
-                publish = False
-            if publish:
-                _zai_quota_cache[cache_key] = (time.monotonic(), payload, fetched_at)
-                _zai_quota_cache_limit()
+                    still_owner = _zai_quota_flights.get(cache_key) is my_event
+                    if still_owner and payload is not None and _zai_quota_epoch == epoch_at_start:
+                        _zai_quota_cache[cache_key] = (time.monotonic(), payload, fetched_at)
+                        _zai_quota_cache_limit()
+                    if still_owner:
+                        _zai_quota_flights.pop(cache_key, None)
+                my_event.set()
 
     snapshot = _sanitize_zai_quota(payload, fetched_at=fetched_at)
     account_limits = _serialize_account_usage_snapshot(snapshot)
