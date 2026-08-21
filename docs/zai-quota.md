@@ -30,7 +30,7 @@ Two facts about the multiplier worth knowing:
 | `ZAI_PEAK_MULTIPLIER` | `3` | Peak-hour rate multiplier annotation. Any positive number. |
 | `ZAI_OFFPEAK_MULTIPLIER` | `2` | Off-peak rate multiplier annotation. Any positive number. |
 | `ZAI_PEAK_TZ` | `Asia/Shanghai` | Billing-window timezone (IANA name). **Dangerous override**: setting e.g. `UTC` deliberately moves the peak window; invalid values warn once and fall back to Asia/Shanghai. |
-| `ZAI_API_KEY` | — | Read-only alias for `GLM_API_KEY` (the canonical name the agent runtime reads). Either works; removing the provider key in Settings clears both. |
+| `ZAI_API_KEY` / `Z_AI_API_KEY` | — | Read-only aliases for `GLM_API_KEY` (all three names are accepted by Hermes Agent). Removing the provider key in Settings clears every Z.AI key name. |
 
 Invalid multiplier values (non-numeric, zero, negative, NaN) are ignored —
 the defaults apply independently per variable. Quota availability is never

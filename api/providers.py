@@ -763,9 +763,9 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     # show the groups as configured while chat fails the no-key path.
     "opencode-zen": ("OPENCODE_API_KEY",),
     "opencode-go": ("OPENCODE_API_KEY",),
-    # Z.AI: GLM_API_KEY is canonical (agent runtime), but z.ai's own console
-    # and community tooling call it ZAI_API_KEY — read both.
-    "zai": ("ZAI_API_KEY",),
+    # Z.AI: GLM_API_KEY is canonical (agent runtime); both compact spellings
+    # are established Agent aliases (hermes_cli/auth.py + providers.py).
+    "zai": ("ZAI_API_KEY", "Z_AI_API_KEY"),
 }
 
 _SELF_HOSTED_PROVIDER_IDS = frozenset({"ollama", "lmstudio"})
@@ -2325,13 +2325,19 @@ def invalidate_zai_quota_cache(provider_id: str | None = None) -> None:
     """Clear cached z.ai quota data (called on credential mutation)."""
     from api.config import _resolve_provider_alias
 
+    canonical = None
+    if provider_id is not None:
+        canonical = _resolve_provider_alias(str(provider_id).strip().lower())
+        if canonical != "zai":
+            return  # unrelated credentials cannot invalidate in-flight Z.AI work
+
     global _zai_quota_epoch
     with _zai_quota_cache_lock:
         _zai_quota_epoch += 1
-        if provider_id is None:
+        if canonical is None:
             _zai_quota_cache.clear()
         else:
-            prefix = f"{_resolve_provider_alias(str(provider_id).strip().lower())}|"
+            prefix = f"{canonical}|"
             for key in [k for k in _zai_quota_cache if k.startswith(prefix)]:
                 _zai_quota_cache.pop(key, None)
 

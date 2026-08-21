@@ -713,6 +713,7 @@ class TestSetProviderKeyAliasClearing:
         env = self._write_scratch_env(tmp_path, [
             "GLM_API_KEY=abc123def456",
             "ZAI_API_KEY=abc123def456",
+            "Z_AI_API_KEY=abc123def456",
             "OPENCODE_ZEN_API_KEY=zen-key-123456",
             "OPENCODE_GO_API_KEY=go-key-123456",
             "OPENCODE_API_KEY=bridge-key-123456",
@@ -721,6 +722,7 @@ class TestSetProviderKeyAliasClearing:
         monkeypatch.setattr(prov.os, "environ", {k: v for k, v in {
             "GLM_API_KEY": "abc123def456",
             "ZAI_API_KEY": "abc123def456",
+            "Z_AI_API_KEY": "abc123def456",
             "OPENCODE_API_KEY": "bridge-key-123456",
         }.items()})
         # Remove zai: ZAI_API_KEY (own alias) must clear; OPENCODE_API_KEY is
@@ -729,7 +731,8 @@ class TestSetProviderKeyAliasClearing:
         assert result["ok"] is True
         text = env.read_text(encoding="utf-8")
         assert "GLM_API_KEY=abc123def456" not in text, "canonical key not removed"
-        assert "ZAI_API_KEY=abc123def456" not in text, "own alias not removed"
+        assert "ZAI_API_KEY=abc123def456" not in text, "first alias not removed"
+        assert "Z_AI_API_KEY=abc123def456" not in text, "Agent alias not removed"
         # Now remove opencode-zen: the shared OPENCODE_API_KEY bridge must SURVIVE
         result2 = prov.set_provider_key("opencode-zen", None)
         assert result2["ok"] is True
@@ -743,3 +746,36 @@ class TestSetProviderKeyAliasClearing:
             assert len(providers._zai_quota_cache) == 1
             cfg.invalidate_credential_pool_cache("glm")  # alias form
             assert len(providers._zai_quota_cache) == 0
+
+    def test_agent_z_ai_alias_reaches_quota_fetch(self, monkeypatch, tmp_path):
+        """Hermes Agent's established Z_AI_API_KEY alias works end-to-end."""
+        import api.providers as prov
+
+        self._write_scratch_env(tmp_path, ["Z_AI_API_KEY=agent-alias-key-123456"])
+        monkeypatch.setattr(prov, "_get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(prov.os, "environ", {})
+        calls = []
+
+        def fake_fetch(api_key):
+            calls.append(api_key)
+            return _LITE_FIXTURE
+
+        monkeypatch.setattr(prov, "_zai_fetch_quota_payload", fake_fetch)
+        prov.invalidate_zai_quota_cache()
+        result = prov.get_provider_quota("zai", refresh=True)
+
+        assert result["status"] == "available"
+        assert calls == ["agent-alias-key-123456"]
+
+    def test_unrelated_provider_invalidation_keeps_zai_epoch_and_cache(self):
+        """Unrelated credential changes must not suppress Z.AI publication."""
+        with providers._zai_quota_cache_lock:
+            providers._zai_quota_cache.clear()
+            providers._zai_quota_cache["zai|/tmp/x|fp"] = (0.0, {"data": {}}, None)
+            before_epoch = providers._zai_quota_epoch
+
+        providers.invalidate_zai_quota_cache("openai")
+
+        with providers._zai_quota_cache_lock:
+            assert providers._zai_quota_epoch == before_epoch
+            assert "zai|/tmp/x|fp" in providers._zai_quota_cache

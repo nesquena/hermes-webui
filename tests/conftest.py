@@ -981,7 +981,7 @@ def test_server():
         'GROQ_API_KEY', 'TOGETHER_API_KEY', 'PERPLEXITY_API_KEY',
         'CEREBRAS_API_KEY', 'COHERE_API_KEY', 'FIREWORKS_API_KEY',
         'NOUS_API_KEY', 'NOVITA_API_KEY', 'TENCENT_API_KEY',
-        'BIGMODEL_API_KEY', 'GLM_API_KEY', 'ZAI_API_KEY', 'STEPFUN_API_KEY',
+        'BIGMODEL_API_KEY', 'GLM_API_KEY', 'ZAI_API_KEY', 'Z_AI_API_KEY', 'STEPFUN_API_KEY',
         'MINIMAX_API_KEY', 'LM_API_KEY', 'LMSTUDIO_API_KEY',
         'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT',
         # AWS — must be stripped or botocore probes IMDS / picks up real creds
