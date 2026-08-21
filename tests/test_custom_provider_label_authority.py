@@ -210,6 +210,49 @@ def test_prewarmed_row_honors_explicit_label_equal_to_id(live_endpoint, _sync_re
     )
 
 
+def test_prewarmed_row_ignores_label_from_ignored_later_duplicate(live_endpoint, _sync_rebuild):
+    """Deep-review 2026-08-20, hot path: a later labeled dict duplicating a
+    bare-string first occurrence is IGNORED by the ids walker, so its label
+    must not override the endpoint label of the accepted row."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg=_active_cfg(live_endpoint),
+        custom_providers=[
+            {
+                **_gateway_cfg(live_endpoint),
+                "models": ["model-a", {"id": "model-a", "label": "Later Duplicate"}],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == "Endpoint Label", (
+        "the label of an ignored later duplicate must not replace the endpoint "
+        f"label, got {row['label']!r}"
+    )
+
+
+def test_prewarmed_row_labeled_dict_then_bare_keeps_first_label(live_endpoint, _sync_rebuild):
+    """Deep-review 2026-08-20, hot path, reverse ordering: the labeled dict is
+    the accepted first occurrence, so its label wins; the bare-string
+    duplicate after it changes nothing."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg=_active_cfg(live_endpoint),
+        custom_providers=[
+            {
+                **_gateway_cfg(live_endpoint),
+                "models": [{"id": "model-a", "label": "Operator Label"}, "model-a"],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == "Operator Label", (
+        f"the first-occurrence label must win, got {row['label']!r}"
+    )
+
+
 # ── Cold path: network-free catalog ──────────────────────────────────────────
 
 def test_cold_catalog_takes_configured_label():
@@ -276,6 +319,48 @@ def test_cold_catalog_distinguishes_bare_string_from_explicit_label():
     assert bare_row["label"] != explicit_row["label"]
 
 
+def test_cold_catalog_ignores_label_from_ignored_later_duplicate():
+    """Deep-review 2026-08-20, cold path: `[\"model-a\", {id, label}]` accepts
+    the bare string and ignores the duplicate dict — the ignored row's label
+    must not surface on the displayed row, which falls through to the derived
+    label instead."""
+    result = _cold_catalog_with_cfg(
+        model_cfg=_active_cfg("https://gw.example.com/v1"),
+        custom_providers=[
+            {
+                **_gateway_cfg("https://gw.example.com/v1"),
+                "models": ["model-a", {"id": "model-a", "label": "Later Duplicate"}],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == config._get_label_for_model("model-a", []), (
+        "the accepted bare-string row must fall through to the derived label, "
+        f"got {row['label']!r}"
+    )
+    assert row["label"] != "Later Duplicate"
+
+
+def test_cold_catalog_labeled_dict_then_bare_keeps_first_label():
+    """Deep-review 2026-08-20, cold path, reverse ordering: the labeled dict is
+    the accepted first occurrence, so its label wins over the derived one."""
+    result = _cold_catalog_with_cfg(
+        model_cfg=_active_cfg("https://gw.example.com/v1"),
+        custom_providers=[
+            {
+                **_gateway_cfg("https://gw.example.com/v1"),
+                "models": [{"id": "model-a", "label": "Operator Label"}, "model-a"],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == "Operator Label", (
+        f"the first-occurrence label must win, got {row['label']!r}"
+    )
+
+
 # ── Provenance helper: the unit that carries the explicit-label bit ──────────
 
 
@@ -295,6 +380,23 @@ def test_label_overrides_only_carry_operator_supplied_labels():
     assert config._configured_model_label_overrides(
         [{"id": "model-a", "label": "First"}, {"id": "model-a", "label": "Second"}]
     ) == {"model-a": "First"}
+    # ...across shapes too (deep-review 2026-08-20): a bare-string first
+    # occurrence claims the id, so a later labeled duplicate is ignored —
+    # the ids walker accepted the bare string, and the label of an ignored
+    # row must not leak into the displayed row.
+    assert config._configured_model_label_overrides(
+        ["model-a", {"id": "model-a", "label": "Later Duplicate"}]
+    ) == {}
+    # Labeled dict first, bare-string duplicate after: the first occurrence
+    # carries the label and the later bare string changes nothing.
+    assert config._configured_model_label_overrides(
+        [{"id": "model-a", "label": "First"}, "model-a"]
+    ) == {"model-a": "First"}
+    # Unlabeled dict first also claims the id: a later labeled duplicate is
+    # ignored, so no override appears.
+    assert config._configured_model_label_overrides(
+        [{"id": "model-a"}, {"id": "model-a", "label": "Later Duplicate"}]
+    ) == {}
     # Unsupported shapes degrade to "no override", never to a synthesized one.
     assert config._configured_model_label_overrides({"model-a": {"label": "X"}}) == {}
     assert config._configured_model_label_overrides(None) == {}
