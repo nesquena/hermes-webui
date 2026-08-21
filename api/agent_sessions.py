@@ -49,6 +49,21 @@ MESSAGING_SOURCES = {
     'weixin',
 }
 
+# Hermes-owned foreign sessions that WebUI may continue against the same
+# state.db session id without taking sidecar ownership. Platformless
+# ``gateway`` is included; Claude Code / cron / subagent / unknown are not.
+CANONICAL_CONTINUATION_SOURCES = frozenset(MESSAGING_SOURCES) | {
+    'messaging',
+    'gateway',
+}
+CANONICAL_CONTINUATION_BLOCKED_SOURCES = frozenset({
+    'claude_code',
+    'cron',
+    'external_agent',
+    'subagent',
+    'unknown',
+})
+
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
@@ -69,6 +84,37 @@ SOURCE_LABELS = {
     'webui': 'WebUI',
     'weixin': 'Weixin',
 }
+
+
+def _canonical_continuation_source_tags(*values) -> set[str]:
+    tags = {str(value or '').strip().lower() for value in values}
+    tags.discard('')
+    return tags
+
+
+def is_canonical_continuable_source(
+    *,
+    session_source: str = '',
+    source_tag: str = '',
+    raw_source: str = '',
+    source: str = '',
+    state_db_source: str = '',
+    explicit_readonly: bool = False,
+) -> bool:
+    """Return True when a foreign Hermes session can accept a WebUI turn
+    against the same ``state.db`` session id without WebUI claiming a
+    writable sidecar.
+
+    Explicit foreign ``read_only`` and non-Hermes owners stay refused.
+    """
+    if explicit_readonly:
+        return False
+    tags = _canonical_continuation_source_tags(
+        session_source, source_tag, raw_source, source, state_db_source,
+    )
+    if tags & CANONICAL_CONTINUATION_BLOCKED_SOURCES:
+        return False
+    return bool(tags & CANONICAL_CONTINUATION_SOURCES)
 
 
 def normalize_agent_session_source(raw_source: str | None) -> dict:

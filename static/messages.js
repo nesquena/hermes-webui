@@ -1413,7 +1413,7 @@ async function send(){
     }
     return;
   }
-  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+  if(S.session&&(typeof _sessionBlocksComposer==='function'?_sessionBlocksComposer(S.session):((S.session.read_only||S.session.is_read_only)&&!S.session.canonical_continuation))){
     if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }

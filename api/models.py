@@ -36,6 +36,7 @@ from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
+    is_canonical_continuable_source,
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
@@ -1185,6 +1186,25 @@ def model_explicit_pick_signature(model, model_provider) -> str:
     return f"{_m}\x1f{_p}"
 
 
+def session_uses_canonical_continuation(session) -> bool:
+    """True when WebUI may send a turn without claiming sidecar ownership."""
+    if session is None:
+        return False
+    if bool(getattr(session, "canonical_continuation", False)):
+        return True
+    return is_canonical_continuable_source(
+        session_source=getattr(session, "session_source", "") or "",
+        source_tag=getattr(session, "source_tag", "") or "",
+        raw_source=getattr(session, "raw_source", "") or "",
+        source=getattr(session, "source", "") or "",
+    )
+
+
+def session_skips_sidecar_persist(session) -> bool:
+    """Skip JSON sidecar writes only for an explicit continuation turn."""
+    return bool(session is not None and getattr(session, "canonical_continuation", False))
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -1316,6 +1336,9 @@ class Session:
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
+        # Runtime-only: WebUI is the interaction surface for a Hermes-owned
+        # foreign session. Never persisted — derived from source tags on GET.
+        self.canonical_continuation = bool(kwargs.get('canonical_continuation', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
@@ -1346,6 +1369,12 @@ class Session:
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        if session_skips_sidecar_persist(self):
+            # Keep in-memory bookkeeping, but never persist a WebUI sidecar that
+            # would fork history from canonical ~/.hermes/state.db.
+            if touch_updated_at:
+                self.updated_at = time.time()
+            return
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
         # Such sessions have messages=[] (it's the whole point of the partial
@@ -1771,6 +1800,7 @@ class Session:
             'session_source': self.session_source,
             'source_label': self.source_label,
             'read_only': self.read_only,
+            'canonical_continuation': session_uses_canonical_continuation(self),
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},

@@ -42,6 +42,7 @@ from api.agent_runtime import (
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     _looks_like_default_cli_title,
+    is_canonical_continuable_source,
     is_cli_session_row,
     is_cli_session_row_visible,
     read_session_lineage_report,
@@ -4925,7 +4926,12 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
-def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
+def _get_or_materialize_session(
+    sid: str,
+    *,
+    refresh_cli_messages: bool = False,
+    for_chat_start: bool = False,
+):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
     Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
@@ -4992,13 +4998,21 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     if not cli_meta:
         raise KeyError(sid)
 
-    # Read-only guard: messaging sessions and Claude Code imports cannot be
-    # mutated. Reject BOTH an explicit read_only flag AND any messaging-source
-    # record — agent rows normalize messaging sources without setting read_only,
-    # and state.db (not a WebUI sidecar) is the source of truth for them, so
-    # materializing a writable sidecar would fork the title/state.
-    if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
+    # Read-only / ownership guard: never materialize a writable sidecar for
+    # messaging/gateway (canonical continuation) or explicit read_only.
+    # Chat start also refuses every other non-claimable owner (claude_code,
+    # cron, subagent, unknown) so those stay 403 instead of being claimed.
+    # Archive/rename still materialize cron identity sidecars (#4385).
+    if (
+        cli_meta.get("read_only")
+        or _is_messaging_session_record(cli_meta)
+        or _is_canonical_continuable_cli_source(cli_meta)
+    ):
         raise PermissionError("read-only imported session")
+    if for_chat_start:
+        _claimable, _unused_reason = _is_claimable_cli_source(cli_meta)
+        if not _claimable:
+            raise PermissionError("read-only imported session")
 
     # Preserve source metadata fields
     def _apply_source_meta(s):
@@ -7826,6 +7840,34 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     return src == "subagent"
 
 
+def _is_canonical_continuable_cli_source(cli_meta: dict, state_db_source: str = "") -> bool:
+    """True when a refused-claim source can still accept a canonical WebUI turn."""
+    cm = cli_meta or {}
+    return is_canonical_continuable_source(
+        session_source=cm.get("session_source") or "",
+        source_tag=cm.get("source_tag") or "",
+        raw_source=cm.get("raw_source") or "",
+        source=cm.get("source") or "",
+        state_db_source=state_db_source or "",
+        explicit_readonly=bool(cm.get("read_only")),
+    )
+
+
+def _activate_canonical_continuation(session):
+    """Keep the original session id in memory; never persist a writable sidecar."""
+    if session is None:
+        return None
+    session.canonical_continuation = True
+    session.read_only = True
+    try:
+        with LOCK:
+            SESSIONS[session.session_id] = session
+            SESSIONS.move_to_end(session.session_id)
+    except Exception:
+        pass
+    return session
+
+
 def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple[bool, str]:
     """Decide whether a foreign-origin session is safe to claim writeable
     in WebUI. Returns ``(claimable, reason_if_not)``.
@@ -7911,14 +7953,23 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
 
       ``'not_claimable'``
         The sid has recoverable state.db messages but the foreign
-        source is owned by a non-WebUI process (messaging channel,
-        claude_code, external_agent, or explicit read_only). ``session``
-        is still returned, but with ``read_only=True`` preserved and
-        the foreign source tag intact, so the GET stub continues to
-        render the original badge and the read-only banner. The POST
-        path must return 403 (not 404) so the user sees a clear
-        refusal instead of the empty-state self-heal that the 404
-        handler triggers (#4911 review).
+        source is owned by a non-WebUI process that WebUI must not
+        continue (claude_code, external_agent, cron, unknown, subagent,
+        or explicit read_only). ``session`` is still returned, but with
+        ``read_only=True`` preserved and the foreign source tag intact,
+        so the GET stub continues to render the original badge and the
+        read-only banner. The POST path must return 403 (not 404) so
+        the user sees a clear refusal instead of the empty-state
+        self-heal that the 404 handler triggers (#4911 review).
+
+      ``'canonical_continuation'``
+        Same recoverable state.db row as ``not_claimable``, but the
+        source is a Hermes-owned messaging/gateway session. WebUI may
+        execute a turn against the original session id in ``state.db``
+        without claiming a writable sidecar. ``session`` is read_only
+        for mutations (rename/branch) and carries
+        ``canonical_continuation=True``. The POST path must NOT call
+        ``session.save()``.
 
       ``'was_webui'``
         The sid is in the WebUI session index as a webui/fork origin row but
@@ -8107,11 +8158,12 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         # keeps narrow. Every other non-claimable foreign source keeps the
         # CLI classification so its source badge renders.
         _sa_child = _is_subagent_child_session_id(sid)
-        return (
-            build_session(sid, cli_meta, msgs, read_only_flag=True,
-                          is_cli_flag=not _sa_child),
-            "not_claimable",
-        )
+        sess = build_session(sid, cli_meta, msgs, read_only_flag=True,
+                             is_cli_flag=not _sa_child)
+        if not _sa_child and _is_canonical_continuable_cli_source(cli_meta, state_db_source):
+            sess.canonical_continuation = True
+            return sess, "canonical_continuation"
+        return sess, "not_claimable"
     return build_session(sid, cli_meta, msgs, read_only_flag=False), "materialized"
 
 
@@ -8148,7 +8200,7 @@ def _load_branch_source_or_refuse(handler, sid: str):
         _source_kind = str((getattr(_foreign_session, "source_tag", None) or getattr(_foreign_session, "raw_source", None) or getattr(_foreign_session, "source", None) or "")).strip().lower() if _foreign_session is not None else ""
         if _reason == "not_claimable" and _foreign_session is not None and _source_kind == "cron":
             _foreign_session._branch_source_readonly = True; return _foreign_session
-        if _reason == "not_claimable": bad(handler, "Read-only sessions cannot be branched from WebUI", 403); return None
+        if _reason in ("not_claimable", "canonical_continuation"): bad(handler, "Read-only sessions cannot be branched from WebUI", 403); return None
         bad(handler, "Session not found", 404)
         return None
     # A PERSISTED (stored) session can also be read-only (e.g. a cron-owned or
@@ -9312,6 +9364,7 @@ from api.models import (
     new_session,
     all_sessions,
     title_from,
+    session_uses_canonical_continuation,
     _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
@@ -12964,6 +13017,10 @@ def handle_get(handler, parsed) -> bool:
                 # sessions and the user only discovers the block at
                 # POST time with a confusing 403.
                 "read_only": bool(getattr(synth, "read_only", False)),
+                "canonical_continuation": bool(
+                    getattr(synth, "canonical_continuation", False)
+                    or reason == "canonical_continuation"
+                ),
                 "messages": msgs,
                 "tool_calls": [],
             }
@@ -21861,7 +21918,7 @@ def _handle_chat_start(handler, body, diag=None):
             return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
         try:
-            s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True)
+            s = _get_or_materialize_session(body["session_id"], refresh_cli_messages=True, for_chat_start=True)
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
@@ -21880,51 +21937,57 @@ def _handle_chat_start(handler, body, diag=None):
                 return bad(handler, "Session not found", 404)
             if reason == "not_claimable":
                 # Foreign store says this session is read-only / owned by
-                # a non-WebUI process (messaging, claude_code,
-                # external_agent, cron, gateway/unknown, or explicit
-                # read_only flag). The session is real and viewable, but
-                # the WebUI must not take write ownership of it — that
-                # would be an ownership-boundary violation (#4911 review).
-                # 403 (not 404) because 404 triggers the frontend's
-                # empty-state self-heal handler which strips the URL and
-                # clears localStorage; for a legitimately-listed read-only
-                # session the user should keep their URL and see a refusal,
-                # not have their session vanish.
+                # a non-WebUI process that cannot be continued here
+                # (claude_code, external_agent, cron, unknown, subagent,
+                # or explicit read_only). 403 (not 404) because 404
+                # triggers the frontend's empty-state self-heal handler.
                 return bad(
                     handler,
                     "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
                     403,
                 )
-            try:
-                synth.save()
-            except Exception as _save_err:
-                # Persisting the sidecar failed: surface a generic 500 to
-                # the client (paths sanitised, see _sanitize_error) and log
-                # the full exception server-side. Returning the raw str(exc)
-                # would leak /root/.hermes/webui/sessions/<sid>.json or any
-                # other absolute filesystem path the OSError happened to
-                # carry — #4911 review feedback.
-                logger.exception(
-                    "failed to persist materialised sidecar for foreign session %s",
-                    body["session_id"],
-                )
-                return bad(
-                    handler,
-                    f"failed to claim session: {_sanitize_error(_save_err)}",
-                    500,
-                )
-            s = synth
-            try:
-                with LOCK:
-                    SESSIONS[s.session_id] = s
-                    SESSIONS.move_to_end(s.session_id)
-            except Exception:
-                # If the in-memory LRU refuses the new session, fall through
-                # with the just-persisted sidecar; _start_run will load it
-                # from disk if needed.
-                pass
+            if reason == "canonical_continuation":
+                # Hermes-owned messaging/gateway session: execute the turn
+                # against the original state.db session id. Do not persist
+                # a writable WebUI sidecar — that would fork history.
+                s = _activate_canonical_continuation(synth)
+            else:
+                try:
+                    synth.save()
+                except Exception as _save_err:
+                    # Persisting the sidecar failed: surface a generic 500 to
+                    # the client (paths sanitised, see _sanitize_error) and log
+                    # the full exception server-side. Returning the raw str(exc)
+                    # would leak /root/.hermes/webui/sessions/<sid>.json or any
+                    # other absolute filesystem path the OSError happened to
+                    # carry — #4911 review feedback.
+                    logger.exception(
+                        "failed to persist materialised sidecar for foreign session %s",
+                        body["session_id"],
+                    )
+                    return bad(
+                        handler,
+                        f"failed to claim session: {_sanitize_error(_save_err)}",
+                        500,
+                    )
+                s = synth
+                try:
+                    with LOCK:
+                        SESSIONS[s.session_id] = s
+                        SESSIONS.move_to_end(s.session_id)
+                except Exception:
+                    # If the in-memory LRU refuses the new session, fall through
+                    # with the just-persisted sidecar; _start_run will load it
+                    # from disk if needed.
+                    pass
         except PermissionError:
-            return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+            synth, reason = _claim_or_synthesize_cli_session(body["session_id"])
+            if reason == "canonical_continuation" and synth is not None:
+                s = _activate_canonical_continuation(synth)
+            else:
+                return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        if session_uses_canonical_continuation(s):
+            s = _activate_canonical_continuation(s)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         active_profile = _get_active_profile_name()
@@ -25473,6 +25536,9 @@ def _handle_session_import_cli(handler, body):
                 (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
                 or _is_subagent_child_session_id(sid)
             )
+        if session_uses_canonical_continuation(existing) or _is_canonical_continuable_cli_source(cli_meta or {}):
+            existing.canonical_continuation = True
+            changed = False
         if changed:
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
@@ -25540,7 +25606,8 @@ def _handle_session_import_cli(handler, body):
     # can miss it (#5307 cross-profile edge).
     _cli_sa = (cli_source_tag or cli_raw_source or "").strip().lower() == "subagent"
     _sa_child = _sa_child or _cli_sa
-    _read_only_view = cli_read_only or _sa_child
+    _canonical = _is_canonical_continuable_cli_source(cli_meta or {})
+    _read_only_view = cli_read_only or _sa_child or _canonical
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
@@ -25575,6 +25642,7 @@ def _handle_session_import_cli(handler, body):
             "source_label": cli_source_label,
             "parent_session_id": cli_parent_session_id,
             "read_only": True,
+            "canonical_continuation": bool(_canonical),
             "messages": msgs,
             "tool_calls": [],
         }
