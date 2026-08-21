@@ -7496,7 +7496,7 @@ function _stripXmlToolCallsDisplay(s){
   s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
   // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
   s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
-  return s.trim();
+  return s.replace(/^\s+/, '');
 }
 
 function _sanitizeThinkingDisplayText(text){
