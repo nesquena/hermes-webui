@@ -147,6 +147,7 @@ def _pool_source(scenario: str, next_hop_protocol: str | None = "http/1.1") -> s
           "extractConstValue('LIVE_STREAM_POOL_MAX_MULTIPLEXED');\n"
         + "globalThis._liveStreamTransportUncertain = false;\n"
         + "eval(extractFunc('_liveStreamPoolMax'));\n"
+        + "eval(extractFunc('_markLiveStreamTransportUncertain'));\n"
         + "eval(extractFunc('_touchLiveStreamUse'));\n"
         + "eval(extractFunc('closeOtherLiveStreams'));\n"
         + scenario
@@ -381,6 +382,26 @@ def test_transport_uncertainty_guard_is_fail_closed():
     assert "closeOtherLiveStreams(keepSid)" in compact
     assert "addEventListener('online',_markLiveStreamTransportUncertain)" in compact
     assert "event.persisted" in source
+
+
+def test_marking_transport_uncertain_prunes_immediately_and_locks_budget():
+    out = json.loads(_run_node(_pool_source("""
+globalThis.S={sessionId:'a'};
+for (const sid of ['a','b','c','d']) {
+  LIVE_STREAMS[sid]={streamId:'s'+sid};
+  _touchLiveStreamUse(sid);
+}
+_markLiveStreamTransportUncertain();
+console.log(JSON.stringify({
+  cap:_liveStreamPoolMax(), open:Object.keys(LIVE_STREAMS).sort(),
+  closed:closed.slice().sort(), uncertain:_liveStreamTransportUncertain,
+}));
+""")))
+    assert out["uncertain"] is True
+    assert out["cap"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
+    assert "a" in out["open"]
+    assert len(out["open"]) == out["cap"]
+    assert len(out["closed"]) == 1
 
 
 def test_newest_resource_overrides_stale_navigation_transport():
