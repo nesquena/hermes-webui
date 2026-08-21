@@ -33,6 +33,7 @@ import re
 import shutil
 import sqlite3
 import threading
+from collections import Counter
 from contextlib import closing
 from pathlib import Path
 
@@ -64,10 +65,10 @@ def _is_valid_intentional_shrink_generation(value) -> bool:
     )
 
 
-def _msg_count(p: Path) -> int:
-    """Return the effective message count, or -1 on read/parse error.
+def _effective_messages(p: Path) -> list | None:
+    """Return the duplicate-normalized messages, or ``None`` on invalid input.
 
-    Returns -1 for any non-session-shape file:
+    Returns ``None`` for any non-session-shape file:
     - File can't be read (OSError)
     - Top-level isn't valid JSON or is invalid (JSONDecodeError, ValueError)
     - Top-level isn't a dict (AttributeError on .get) — e.g. ``_index.json``
@@ -78,12 +79,12 @@ def _msg_count(p: Path) -> int:
     try:
         data = json.loads(p.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError, ValueError):
-        return -1
+        return None
     if not isinstance(data, dict):
-        return -1
+        return None
     msgs = data.get('messages')
     if not isinstance(msgs, list):
-        return -1
+        return None
     # A shrink caused only by collapsing replayed empty ``incomplete`` rows is
     # an intentional repair, not data loss.  Compare live and backup using the
     # same narrow identity rule as Session.save() so startup recovery does not
@@ -94,9 +95,33 @@ def _msg_count(p: Path) -> int:
 
         msgs, _ = _collapse_duplicate_incomplete_message_ids(msgs)
     except Exception:
-        logger.debug("Failed to compute effective recovery message count for %s", p, exc_info=True)
-        return -1
-    return len(msgs)
+        logger.debug("Failed to compute effective recovery messages for %s", p, exc_info=True)
+        return None
+    return msgs
+
+
+def _msg_count(p: Path) -> int:
+    """Return the effective message count, or -1 on read/parse error."""
+    messages = _effective_messages(p)
+    return len(messages) if messages is not None else -1
+
+
+def _message_membership(messages: list) -> Counter[str]:
+    """Return a content-complete multiset for conservative recovery decisions."""
+    return Counter(
+        json.dumps(message, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        for message in messages
+    )
+
+
+def _membership_delta(live_messages: list, backup_messages: list) -> tuple[int, int]:
+    """Return effective ``(live_only, backup_only)`` message multiplicities."""
+    live_membership = _message_membership(live_messages)
+    backup_membership = _message_membership(backup_messages)
+    return (
+        sum((live_membership - backup_membership).values()),
+        sum((backup_membership - live_membership).values()),
+    )
 
 
 def _rebuild_recovery_session_index(session_dir: Path) -> None:
@@ -354,10 +379,17 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
       "session_id": "...",
       "live_messages": int,    # -1 if live file unreadable
       "bak_messages": int,     # -1 if no .bak or unreadable
-      "recommend": "restore" | "no_action" | "no_backup",
+      "recommend": "restore" | "manual_review" | "no_action" | "no_backup",
     }
+
+    A strictly larger normalized backup retains the established restore
+    authority. When normalized counts are equal but both files own unique rows,
+    neither count is authoritative; recovery fails closed for manual review and
+    leaves both files untouched.
     """
     bak_path = session_path.with_suffix('.json.bak')
+    # Keep count reads on the established helper: startup recovery deliberately
+    # uses this boundary to avoid reading clean live files without a backup.
     live_count = _msg_count(session_path)
     if not bak_path.exists():
         return {
@@ -367,6 +399,17 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
             "recommend": "no_backup",
         }
     bak_count = _msg_count(bak_path)
+    live_only = 0
+    backup_only = 0
+    membership_conflict = False
+    if live_count >= 0 and bak_count == live_count:
+        # Membership is needed only for the ambiguous equal-count case. Avoid
+        # the extra parse on the established strict-excess restore path.
+        live_messages = _effective_messages(session_path)
+        backup_messages = _effective_messages(bak_path)
+        if live_messages is not None and backup_messages is not None:
+            live_only, backup_only = _membership_delta(live_messages, backup_messages)
+            membership_conflict = live_only > 0 and backup_only > 0
     if bak_count > live_count:
         if (
             _session_records_clear_sentinel(session_path, bak_path)
@@ -403,6 +446,16 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
             "live_messages": live_count,
             "bak_messages": bak_count,
             "recommend": "restore",
+        }
+    if bak_count == live_count and membership_conflict:
+        return {
+            "session_id": session_path.stem,
+            "live_messages": live_count,
+            "bak_messages": bak_count,
+            "recommend": "manual_review",
+            "membership_conflict": True,
+            "live_only_messages": live_only,
+            "backup_only_messages": backup_only,
         }
     return {
         "session_id": session_path.stem,
@@ -881,6 +934,17 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
                 status.get('live_messages', -1),
                 status.get('bak_messages', -1),
             ))
+        elif status.get('recommend') == 'manual_review':
+            items.append(_new_audit_item(
+                status['session_id'],
+                "divergent_live_backup_membership",
+                "unsafe_to_repair",
+                "manual_review",
+                status.get('live_messages', -1),
+                status.get('bak_messages', -1),
+                live_only_messages=status.get('live_only_messages', 0),
+                backup_only_messages=status.get('backup_only_messages', 0),
+            ))
 
     # Track sids already classified as deleted-webui-tombstone from the orphan
     # .bak branch below, so the later state_db_missing_rows loop doesn't emit a
@@ -1098,6 +1162,15 @@ def recover_all_sessions_on_startup(
         if result.get("restored"):
             restored += 1
             details.append(result)
+        elif result.get("recommend") == "manual_review":
+            # Preserve both files and surface the conflict instead of silently
+            # treating equal normalized counts as a healthy backup pair.
+            details.append(result)
+            logger.warning(
+                "recover_all_sessions_on_startup: left %s untouched because live and backup "
+                "both contain unique messages; manual review required",
+                path.name,
+            )
     if restored:
         logger.warning(
             "recover_all_sessions_on_startup: restored %d/%d sessions from .bak. "

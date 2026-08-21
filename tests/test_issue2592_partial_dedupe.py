@@ -286,6 +286,124 @@ def test_recovery_still_restores_unique_backup_excess(tmp_path):
     assert status["recommend"] == "restore"
 
 
+def test_recovery_equal_normalized_counts_with_divergent_membership_requires_review(tmp_path):
+    from api.session_recovery import (
+        audit_session_recovery,
+        inspect_session_recovery_status,
+        recover_all_sessions_on_startup,
+        recover_session,
+    )
+
+    session_path = tmp_path / "membership-diverged.json"
+    backup_path = tmp_path / "membership-diverged.json.bak"
+    shared = _incomplete_reasoning_only(1701, reasoning="shared")
+    live_only = {"role": "user", "content": "new live row", "id": 1702}
+    backup_only = {"role": "assistant", "content": "backup-only information", "id": 1703}
+    live_payload = {"messages": [shared, live_only], "message_count": 2}
+    backup_payload = {
+        "messages": [shared, backup_only, dict(shared)],
+        "message_count": 3,
+    }
+    session_path.write_text(json.dumps(live_payload), encoding="utf-8")
+    backup_path.write_text(json.dumps(backup_payload), encoding="utf-8")
+
+    status = inspect_session_recovery_status(session_path)
+
+    assert status["live_messages"] == status["bak_messages"] == 2
+    assert status["recommend"] == "manual_review"
+    assert status["membership_conflict"] is True
+    assert status["live_only_messages"] == 1
+    assert status["backup_only_messages"] == 1
+    result = recover_session(session_path)
+    assert result["restored"] is False
+    # Fail closed: neither side is overwritten, so both the new live row and
+    # the otherwise-unrepresented backup row remain available for review.
+    assert json.loads(session_path.read_text(encoding="utf-8")) == live_payload
+    assert json.loads(backup_path.read_text(encoding="utf-8")) == backup_payload
+    startup = recover_all_sessions_on_startup(tmp_path)
+    assert startup["restored"] == 0
+    assert len(startup["details"]) == 1
+    assert startup["details"][0]["recommend"] == "manual_review"
+    assert startup["details"][0]["restored"] is False
+    audit = audit_session_recovery(tmp_path)
+    assert audit["status"] == "needs_manual_review"
+    assert audit["items"] == [
+        {
+            "session_id": "membership-diverged",
+            "kind": "divergent_live_backup_membership",
+            "category": "unsafe_to_repair",
+            "recommendation": "manual_review",
+            "live_messages": 2,
+            "bak_messages": 2,
+            "live_only_messages": 1,
+            "backup_only_messages": 1,
+        }
+    ]
+
+
+def test_owned_empty_generation_does_not_clear_tombstones_for_later_alias_append(
+    tmp_path, monkeypatch
+):
+    from api import models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    session = models.Session(session_id="owned-empty-generation", messages=[])
+    live_alias = session.messages
+    appended = {"role": "user", "content": "arrived after capture", "id": 1801}
+    snapshot_captured = threading.Event()
+    append_finished = threading.Event()
+    real_collapse = models._collapse_duplicate_incomplete_message_ids
+    cleared = []
+
+    def collapse_after_capture(messages):
+        assert messages == []
+        snapshot_captured.set()
+        assert append_finished.wait(timeout=2)
+        return real_collapse(messages)
+
+    def append_after_capture():
+        assert snapshot_captured.wait(timeout=2)
+        live_alias.append(appended)
+        append_finished.set()
+
+    monkeypatch.setattr(models, "_collapse_duplicate_incomplete_message_ids", collapse_after_capture)
+    monkeypatch.setattr(
+        models,
+        "_clear_webui_zero_message_orphan_tombstone",
+        lambda sid: cleared.append(("zero", sid)),
+    )
+    monkeypatch.setattr(
+        models,
+        "_clear_webui_deleted_session_tombstone",
+        lambda sid: cleared.append(("deleted", sid)),
+    )
+    worker = threading.Thread(target=append_after_capture)
+    worker.start()
+    session.save(skip_index=True, touch_updated_at=False)
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+    first_payload = json.loads(session.path.read_text(encoding="utf-8"))
+    assert first_payload["messages"] == []
+    assert session.messages is live_alias
+    assert session.messages == [appended]
+    assert cleared == []
+
+    monkeypatch.setattr(models, "_collapse_duplicate_incomplete_message_ids", real_collapse)
+    session.save(skip_index=True, touch_updated_at=False)
+
+    second_payload = json.loads(session.path.read_text(encoding="utf-8"))
+    assert second_payload["messages"] == [appended]
+    assert cleared == [
+        ("zero", session.session_id),
+        ("deleted", session.session_id),
+    ]
+
+
 def test_typed_incomplete_ids_round_trip_without_cross_type_collision():
     from api.models import (
         _collapse_duplicate_incomplete_message_ids,

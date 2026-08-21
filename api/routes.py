@@ -9123,7 +9123,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
     is_squashed_transcript = (
-        len(sidecar_messages) == 1
+        bool(sidecar_messages)
         and isinstance(sidecar_messages[0], dict)
         and sidecar_messages[0].get("_squash_summary") is True
         and getattr(session, "truncation_watermark", None) is not None

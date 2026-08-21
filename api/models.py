@@ -1578,7 +1578,10 @@ class Session:
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
         # row is alive (the #4985 "zero-message orphan" only ever exists
-        # when ``len(self.messages) == 0``). Clear the tombstone so the
+        # when the OWNED, persisted generation has no messages). Never
+        # re-read mutable ``self.messages`` here: a worker can append through a
+        # live alias after generation capture, and that later append is not proof
+        # that this save published a non-empty sidecar. Clear the tombstone so the
         # next ``/api/sessions`` poll does not need the prune helper to
         # run before the row re-appears — useful when the message-commit
         # happens on a poll that does not yet see state.db.messages rows
@@ -1588,7 +1591,7 @@ class Session:
         # save. The helper's self-healing branch in
         # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
         # fix; this is the belt.
-        if self.messages:
+        if messages_to_persist:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
                 _clear_webui_deleted_session_tombstone(self.session_id)
