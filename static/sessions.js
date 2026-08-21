@@ -1546,6 +1546,11 @@ async function newSession(flash, options={}){
     // binding's own model+provider are used as the effort context (falling
     // back to the session's model) so the effort is attached to the right
     // model family rather than the currently-selected one.
+    // Authority: this intentionally mutates the profile-default preference
+    // (agent.reasoning_effort per model family in config.yaml via
+    // /api/reasoning), not a session-local override. Nathan to decide if
+    // project/session-local scoping is desired — current contract matches
+    // the existing global reasoning_effort model.
     const boundEffort=(options&&options.reasoning_effort)||null;
     if(boundEffort&&typeof api==='function'){
       const effModel=boundModel||(data.session&&data.session.model)||null;
@@ -9785,15 +9790,29 @@ function _showProjectBindingsDialog(proj){
       if(!val) return;
       const label=(o.textContent||val).trim();
       const provider=(o.dataset&&o.dataset.provider)||'';
-      if(!modelOptions.some(x=>x.value===val)){
+      if(!modelOptions.some(x=>x.value===val&&x.sub===provider)){
         modelOptions.push({value:val,name:label,sub:provider});
       }
     });
   }
+  // Provider-scoped key: same bare model id under multiple providers must not collapse.
+  // When duplicates exist, the synthetic key is "providervalue" for display/selection,
+  // wire value stays the bare model id (provider sent separately).
+  const _modelValueKeyFor=(val,prov)=>prov?(prov+""+val):val;
+  const _modelValueFor=(k)=>{const i=k.indexOf("");return i>=0?k.slice(i+1):k;};
+  const _modelProvFor=(k)=>{const i=k.indexOf("");return i>=0?k.slice(0,i):"";};
+  const _hasDuplicateModelValues=(()=>{const c={};for(const o of modelOptions){if(!o.value)continue;c[o.value]=(c[o.value]||0)+1;}return Object.values(c).some(n=>n>1);})();
+  if(_hasDuplicateModelValues){
+    // Rewrite options to use provider-scoped keys so each provider route is independently selectable.
+    modelOptions.forEach(o=>{ if(o.value) o._key=_modelValueKeyFor(o.value,o.sub||""); else o._key=""; });
+    // Preserve providers detail under _provider for clarity
+    modelOptions.forEach(o=>{ o._provider=o.sub||""; });
+  }
+  const _initialModelKey=(()=>{ if(!proj.model) return ""; if(_hasDuplicateModelValues){ const prov=(proj.model_provider||""); const k=_modelValueKeyFor(proj.model, prov); if(modelOptions.some(o=>o._key===k)) return k; const hit=modelOptions.find(o=>o.value===proj.model); return hit?hit._key||hit.value:""; } return proj.model; })();
   const modelCombo=_makeBindingsCombo({
     placeholder:'(none) — inherit default',
-    value:proj.model||'',
-    options:modelOptions,
+    value:_initialModelKey,
+    options:(()=>{ if(!_hasDuplicateModelValues) return modelOptions; return modelOptions.map(o=>({value:o._key, name:o.name, sub:o.sub})); })(),
   });
   dialog.appendChild(_field('Model',modelCombo.el));
 
@@ -9861,11 +9880,16 @@ function _showProjectBindingsDialog(proj){
     // must CLEAR any previously-bound provider, otherwise the server keeps the
     // stale one and quick-create submits an incompatible pair.
     if(modelVal){
-      fields.model=modelVal;
-      const hit=modelOptions.find(x=>x.value===modelVal);
-      fields.model_provider=(hit&&hit.sub)||null;
+      const _bare=_hasDuplicateModelValues?_modelValueFor(modelVal):modelVal;
+      fields.model=_bare;
+      const _prov=_hasDuplicateModelValues?_modelProvFor(modelVal):null;
+      const hit=modelOptions.find(x=>_hasDuplicateModelValues ? (x._key===modelVal) : (x.value===modelVal));
+      fields.model_provider=(_hasDuplicateModelValues ? (_prov||null) : (hit&&hit.sub)||null);
+      // Fallback: if synthetic key unexpectedly missing provider, read from hit
+      if(_hasDuplicateModelValues && !fields.model_provider && hit) fields.model_provider=(hit.sub||null);
     }else{
       fields.model=null;
+      fields.model_provider=null;
     }
     fields.reasoning_effort=effortVal||null;
     overlay.remove();

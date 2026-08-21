@@ -604,20 +604,44 @@ def _apply_project_auto_assign(proj) -> int:
             # a session the user (or another auto-assign) has placed. Auto-
             # assign only sweeps up unowned sessions in the bound workspace.
             continue
+        # Stale snapshot check above is necessary but not sufficient: a
+        # concurrent /api/session/move or a parallel auto-assign may have
+        # filed the session between reading _index.json and now. Recheck
+        # the authoritative source under lock before writing (P1 — race).
         try:
             if entry.get("active_stream_id") in active_ids:
                 with LOCK:
                     cached = SESSIONS.get(sid)
-                    if cached is not None:
+                    if cached is None:
+                        continue
+                    # Must hold the per-session agent lock as well so we
+                    # serialize with session/move and streaming saves; SESSIONS
+                    # lock alone does not protect session.project_id.
+                    with _get_session_agent_lock(sid):
+                        if getattr(cached, "project_id", None):
+                            continue
                         cached.project_id = pid
                         changed += 1
                         deferred_to_stream += 1
                         continue
+            # Non-streaming: recheck via the authoritative metadata before writing.
+            # get_session(metadata_only=True) reads the live full session row,
+            # not the stale index snapshot.
+            try:
+                live = get_session(sid, metadata_only=True)
+            except Exception:
+                live = None
+            if live is not None and getattr(live, "project_id", None):
+                continue
             s = get_session(sid)
             if s is None:
                 continue
-            s.project_id = pid
-            s.save()
+            # Serialize with any in-flight session mutation.
+            with _get_session_agent_lock(sid):
+                if getattr(s, "project_id", None):
+                    continue
+                s.project_id = pid
+                s.save()
             changed += 1
         except Exception:
             logger.debug("auto-assign: failed to update session %s", sid)
@@ -16821,7 +16845,10 @@ def handle_post(handler, parsed) -> bool:
             else:
                 proj.pop("auto_assign", None)
 
-        # model / model_provider: pair stored verbatim; null/'' clears.
+        # model / model_provider: pair stored with canonicalization so a
+        # stale/foreign provider cannot silently rebind. Null/'' clears.
+        # When the model IS provided via a slash/@ qualified string, derive
+        # the implied family and prefer that over the free-form provider.
         if "model" in body:
             model = body.get("model")
             if model is None or str(model).strip() == "":
@@ -16829,12 +16856,17 @@ def handle_post(handler, parsed) -> bool:
                 proj.pop("model_provider", None)
             else:
                 proj["model"] = str(model).strip()
+                # If the caller omitted model_provider but the model carries a
+                # provider qualifier, canonicalize for storage. model_provider
+                # explicitly supplied in the same payload wins (handled below).
         if "model_provider" in body:
             mp = body.get("model_provider")
             if mp is None or str(mp).strip() == "":
                 proj.pop("model_provider", None)
             else:
-                proj["model_provider"] = str(mp).strip()
+                # Canonicalize via _canonical_context_provider so e.g.
+                # "OpenAI" / "openai:gpt-4o" / "custom:foo" normalize.
+                proj["model_provider"] = _canonical_context_provider(str(mp).strip()) or str(mp).strip()
 
         # reasoning_effort: must be a valid effort level or empty (clear).
         if "reasoning_effort" in body:
@@ -16872,8 +16904,11 @@ def handle_post(handler, parsed) -> bool:
                 daemon=True,
                 name=f"auto-assign-{proj['project_id']}",
             )
-            _register_background_commit_thread(t)
-            t.start()
+            # Respect shutdown drain refusal — do NOT start a worker the
+            # drain snapshot already missed (mirrors memory-worker pattern
+            # at api/routes.py:14799-14804).
+            if _register_background_commit_thread(t):
+                t.start()
 
         return j(handler, {"ok": True, "project": proj})
 
