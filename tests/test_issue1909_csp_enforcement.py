@@ -16,6 +16,27 @@ class _HeaderCapture:
         self.sent_headers.append((key, value))
 
 
+class _SecureRequest:
+    def getpeercert(self):
+        return {}
+
+
+def _headers_from_handler(monkeypatch, *, request=None, headers=None):
+    sent_headers = []
+    handler = Handler.__new__(Handler)
+    handler.__dict__.update(
+        {
+            "request": request if request is not None else object(),
+            "headers": headers if headers is not None else {},
+            "send_header": lambda key, value: sent_headers.append((key, value)),
+        }
+    )
+    monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", lambda self: None)
+
+    Handler.end_headers(handler)
+    return dict(sent_headers)
+
+
 def _headers_from_security_helper():
     handler = _HeaderCapture()
     _security_headers(handler)
@@ -121,6 +142,60 @@ def test_report_only_csp_headers_still_point_to_collector(monkeypatch):
     )
     assert "report-uri /api/csp-report" in headers["Content-Security-Policy-Report-Only"]
     assert "report-to csp-endpoint" in headers["Content-Security-Policy-Report-Only"]
+
+
+def test_hsts_is_opt_in(monkeypatch):
+    monkeypatch.delenv("HERMES_WEBUI_HSTS", raising=False)
+
+    headers = _headers_from_handler(monkeypatch, request=_SecureRequest())
+
+    assert "Strict-Transport-Security" not in headers
+
+
+def test_hsts_requires_secure_transport_even_when_opted_in(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_HSTS", "1")
+    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_PROTO", raising=False)
+
+    headers = _headers_from_handler(monkeypatch)
+
+    assert "Strict-Transport-Security" not in headers
+
+
+def test_hsts_emits_for_direct_tls_when_opted_in(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_HSTS", "1")
+
+    headers = _headers_from_handler(monkeypatch, request=_SecureRequest())
+
+    assert headers["Strict-Transport-Security"] == "max-age=86400"
+
+
+def test_hsts_emits_for_trusted_forwarded_https_when_opted_in(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_HSTS", "true")
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_PROTO", "1")
+
+    headers = _headers_from_handler(monkeypatch, headers={"X-Forwarded-Proto": "https"})
+
+    assert headers["Strict-Transport-Security"] == "max-age=86400"
+
+
+def test_hsts_does_not_trust_forwarded_https_without_proxy_opt_in(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_HSTS", "1")
+    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_PROTO", raising=False)
+
+    headers = _headers_from_handler(monkeypatch, headers={"X-Forwarded-Proto": "https"})
+
+    assert "Strict-Transport-Security" not in headers
+
+
+def test_hsts_does_not_follow_cookie_secure_override_on_plain_http(monkeypatch):
+    monkeypatch.setenv("HERMES_WEBUI_HSTS", "1")
+    monkeypatch.setenv("HERMES_WEBUI_SECURE", "1")
+    monkeypatch.delenv("HERMES_WEBUI_TRUST_FORWARDED_PROTO", raising=False)
+
+    headers = _headers_from_handler(monkeypatch)
+
+    assert "Strict-Transport-Security" not in headers
+
 
 
 def test_end_headers_reuses_cached_extra_connect_validation(monkeypatch, caplog):

@@ -1203,6 +1203,32 @@ def _is_loopback(addr: str) -> bool:
         return False
 
 
+def _is_secure_transport(handler=None) -> bool:
+    """Return True only when the request arrived over an HTTPS transport.
+
+    Direct TLS is identified from the wrapped socket. Reverse-proxy TLS
+    termination is accepted only when the operator explicitly trusts
+    ``X-Forwarded-Proto``. This deliberately does not honor
+    ``HERMES_WEBUI_SECURE``: that setting controls cookie attributes and may be
+    used for compatibility behind a proxy, but it must not make HSTS appear on
+    a plain-HTTP response.
+    """
+    if handler is None:
+        return False
+
+    request = getattr(handler, "request", None)
+    if callable(getattr(request, "getpeercert", None)):
+        return True
+
+    trust_fwd = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_PROTO", "").strip().lower()
+    if trust_fwd in ("1", "true", "yes", "on"):
+        headers = getattr(handler, "headers", None)
+        forwarded_proto = headers.get("X-Forwarded-Proto", "") if headers is not None else ""
+        return forwarded_proto.strip().lower() == "https"
+
+    return False
+
+
 def _is_secure_context(handler=None) -> bool:
     """Return True if cookies should carry the Secure flag.
 
@@ -1224,14 +1250,7 @@ def _is_secure_context(handler=None) -> bool:
         return True
     if env in ('0', 'false', 'no'):
         return False
-    if handler is not None:
-        if getattr(handler.request, 'getpeercert', None) is not None:
-            return True
-        trust_fwd = os.getenv('HERMES_WEBUI_TRUST_FORWARDED_PROTO', '').strip().lower()
-        if trust_fwd in ('1', 'true', 'yes'):
-            if handler.headers.get('X-Forwarded-Proto', '') == 'https':
-                return True
-    return False
+    return _is_secure_transport(handler)
 
 
 def set_auth_cookie(handler, cookie_value) -> None:

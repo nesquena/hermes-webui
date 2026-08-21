@@ -270,6 +270,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)
+- Optional HSTS (`HERMES_WEBUI_HSTS=1`) for permanently HTTPS deployments; it is emitted only on actual HTTPS requests
 - 20MB POST body size limit
 - CDN resources pinned with SRI integrity hashes
 

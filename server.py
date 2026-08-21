@@ -99,7 +99,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth, reset_trusted_auth_request_state
+from api.auth import _is_secure_transport, check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -112,6 +112,15 @@ from api.routes import handle_delete, handle_get, handle_patch, handle_post, han
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
+
+
+_HSTS_HEADER_VALUE = "max-age=86400"
+_HSTS_TRUTHY_VALUES = frozenset(("1", "true", "yes", "on"))
+
+
+def _hsts_enabled() -> bool:
+    """Return whether the operator explicitly enabled HSTS emission."""
+    return os.getenv("HERMES_WEBUI_HSTS", "").strip().lower() in _HSTS_TRUTHY_VALUES
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -327,6 +336,8 @@ class Handler(BaseHTTPRequestHandler):
         return _build_csp_report_only_policy(extra_connect_src, extra_frame_src)
 
     def end_headers(self) -> None:
+        if _hsts_enabled() and _is_secure_transport(self):
+            self.send_header("Strict-Transport-Security", _HSTS_HEADER_VALUE)
         extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
