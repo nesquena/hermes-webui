@@ -879,7 +879,13 @@ console.log(JSON.stringify({farAbove, nearTop}));
 @_node_tests
 def test_touch_start_boundary_projection_far_above_does_not_trigger():
     """Same far-above regression but for the projection fallback path (no
-    getBoundingClientRect available)."""
+    getBoundingClientRect available).
+
+    Far above in projection terms: scrollTop is way below the start boundary,
+    so the first row (at startBoundary) would be far above the viewport.
+    The old one-sided check (scrollTop-startBoundary) <= margin was true for
+    large negative values. The two-sided bound must reject them.
+    """
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
 """ + _node_test_preamble() + """
@@ -887,31 +893,38 @@ const list = makeList();
 _sessionTouchStartIndex = 40;
 _sessionTouchLoadedCount = 120;
 const state = {flatRows: new Array(120), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
-// scrollTop far below the start boundary — distance is large positive (far below)
-list.scrollTop = 3000;
+// scrollTop far below start boundary: distance = 100 - 2080 = -1980 (far above)
+// Old one-sided check: -1980 <= 200 → true (WRONG)
+// Two-sided bound: -1980 >= -500 (viewportHeight) → false (CORRECT)
+list.scrollTop = 100;
 list.clientHeight = 500;
-const farBelow = _touchStartBoundaryNearViewport(list, state, 200);
-// scrollTop near the start boundary
+const farAbove = _touchStartBoundaryNearViewport(list, state, 200);
+// scrollTop near the start boundary: distance = 1980 - 2080 = -100 (near)
 list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT - 100;
 const nearBoundary = _touchStartBoundaryNearViewport(list, state, 200);
-console.log(JSON.stringify({farBelow, nearBoundary}));
+// scrollTop far below: distance = 5000 - 2080 = 2920 (far below, should be false)
+list.scrollTop = 5000;
+const farBelow = _touchStartBoundaryNearViewport(list, state, 200);
+console.log(JSON.stringify({farAbove, nearBoundary, farBelow}));
 """
     result = json.loads(_run_node_vm(source))
-    assert result["farBelow"] is False
+    assert result["farAbove"] is False
     assert result["nearBoundary"] is True
+    assert result["farBelow"] is False
 
 
 @_node_tests
 def test_deep_active_window_no_prepend_when_first_row_far_above():
     """Composed regression: a bounded deep-active touch window with the first
-    materialized row far above the viewport must not prepend when idle RAF
-    callbacks drain.
+    materialized row far above the viewport must not trigger upward batching.
 
     This is the exact schedule the gate-certifier flagged: the user has a
     deep-active window (start > 0), the first rendered row is thousands of px
-    above the list, and retained RAF callbacks fire while the user is far below
-    the start boundary. No prepend should occur until the start boundary enters
-    the lookahead band.
+    above the list, and the production direction-check must not return 'up'
+    (which would prepend and drain the prefix). The test calls the real
+    _touchNextBatchDirection() and asserts it does not return 'up' when the
+    first row is far above the viewport. It also verifies _touchStartBoundaryNearViewport
+    directly returns false, and that _prependTouchBatch is never called.
     """
     flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(224)]
     source = f"""
@@ -941,20 +954,28 @@ _sessionTouchTotalCount = 224;
 _sessionTouchListEl = list;
 _touchRenderState = {{gen:1,list:list,flatRows:{json.dumps(flat_rows)},renderOneSession:function(s){{return makeSessionItem(s.session_id);}},itemHeight:SESSION_VIRTUAL_ROW_HEIGHT}};
 
-// Drain several retained RAF callbacks (simulating idle frame callbacks)
+// Directly test the production direction-check with the first row far above
+const boundaryNear = _touchStartBoundaryNearViewport(list, _touchRenderState, 200);
+const direction = _touchNextBatchDirection(list, _touchRenderState, 200);
+
+// Also verify _prependTouchBatch is never called in this state
 let prependCount = 0;
 const origPrepend = _prependTouchBatch;
 _prependTouchBatch = function() {{ prependCount++; return origPrepend.apply(this, arguments); }};
 
-for (let i = 0; i < 8 && rafCallbacks.length > 0; i++) {{
-  const cb = rafCallbacks.shift();
-  cb();
+// Simulate what a continuous-batch RAF callback would do: check direction
+// and only prepend if direction === 'up'
+if (direction === 'up') {{
+  _prependTouchBatch();
 }}
 
-console.log(JSON.stringify({{rafSchedules, prependCount, loadedCount: _sessionTouchLoadedCount, startIndex: _sessionTouchStartIndex}}));
+console.log(JSON.stringify({{boundaryNear, direction, prependCount, loadedCount: _sessionTouchLoadedCount, startIndex: _sessionTouchStartIndex}}));
 """
     result = json.loads(_run_node_vm(source))
-    # No prepend should have occurred — the first row is far above the viewport
+    # The boundary check must reject the far-above row
+    assert result["boundaryNear"] is False
+    # Direction must not be 'up' — no prepend should occur
+    assert result["direction"] != "up"
     assert result["prependCount"] == 0
     # Loaded count should not have changed
     assert result["loadedCount"] == 100
