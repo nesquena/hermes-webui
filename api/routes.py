@@ -9174,15 +9174,18 @@ def _state_db_session_signature(session_id, profile=None):
     if not sid or not is_safe_session_id(sid):
         return None
     try:
+        db_path = _agent_state_db_path(profile=profile)
+        if not db_path or not Path(db_path).exists():
+            return None
+    except Exception:
+        return None
+    try:
         streaming_marker = _cli_sessions_streaming_freeze_marker()
     except Exception:
         streaming_marker = None
     if streaming_marker is not None:
         return streaming_marker
     try:
-        db_path = _agent_state_db_path(profile=profile)
-        if not db_path or not Path(db_path).exists():
-            return None
         signature = _sqlite_file_stat_cache_key(Path(db_path))
     except Exception:
         return None

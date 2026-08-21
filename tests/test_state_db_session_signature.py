@@ -189,6 +189,11 @@ def test_signature_returns_none_when_db_missing(tmp_path, monkeypatch):
     missing = tmp_path / "absent.db"
     monkeypatch.setattr(
         "api.models._agent_state_db_path", lambda profile=None: missing, raising=False)
+    monkeypatch.setattr(
+        "api.models._cli_sessions_streaming_freeze_marker",
+        lambda: ("streaming", ("other-active-run",)),
+        raising=False,
+    )
     assert routes._state_db_session_signature(SID, None) is None
 
 
