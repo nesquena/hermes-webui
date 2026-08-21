@@ -2144,19 +2144,25 @@ def _zai_rate_multipliers() -> tuple[float, float]:
     return peak, offpeak
 
 
+_ZAI_TZ_WARNED = False
+
+
 def _zai_billing_tz():
     """Resolve z.ai's billing timezone.
 
     ZAI_PEAK_TZ deliberately overrides billing-window membership (dangerous by
-    design, operator's choice); invalid values warn and fall back to
+    design, operator's choice); invalid values warn once and fall back to
     Asia/Shanghai, then to a fixed UTC+8 offset on tzdata-less hosts.
     """
+    global _ZAI_TZ_WARNED
     configured = (os.environ.get("ZAI_PEAK_TZ") or "").strip()
     name = configured or _ZAI_DEFAULT_BILLING_TZ
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
-        logger.warning("Invalid ZAI_PEAK_TZ %r; falling back to %s", configured, _ZAI_DEFAULT_BILLING_TZ)
+        if not _ZAI_TZ_WARNED:
+            logger.warning("Invalid ZAI_PEAK_TZ %r; falling back to %s (warning once)", configured, _ZAI_DEFAULT_BILLING_TZ)
+            _ZAI_TZ_WARNED = True
     try:
         return ZoneInfo(_ZAI_DEFAULT_BILLING_TZ)
     except (ZoneInfoNotFoundError, ValueError):
@@ -2261,7 +2267,7 @@ def _sanitize_zai_quota(payload: Any, *, fetched_at: datetime | None = None) -> 
     data = payload.get("data")
     if reason is None and not isinstance(data, dict):
         reason = "Malformed response data."
-    if reason is None and payload.get("success") is False:
+    if reason is None and payload.get("success") is not True and "success" in payload:
         reason = "z.ai reported failure for the quota request."
     if reason is None and payload.get("code") not in (None, 200):
         reason = f"z.ai returned code {payload.get('code')}."
@@ -3339,8 +3345,15 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     env_updates: dict[str, str | None] = {env_var: api_key}
     if not api_key:
         # Key removal must also clear read-only legacy aliases, otherwise
-        # _get_provider_api_key keeps resolving a "removed" key.
-        env_updates.update({alias: None for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ()})
+        # _get_provider_api_key keeps resolving a "removed" key. Aliases
+        # shared by other providers (e.g. the OPENCODE_API_KEY bridge) are
+        # preserved — clearing them would destroy the sibling provider's key.
+        mine = set(_PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ())
+        shared = set()
+        for other, aliases in _PROVIDER_ENV_VAR_ALIASES.items():
+            if other != provider_id:
+                shared.update(aliases or ())
+        env_updates.update({alias: None for alias in mine - shared})
     try:
         _write_env_file(env_path, env_updates)
     except ValueError as exc:

@@ -1,6 +1,6 @@
-"""Z.AI quota status + peak-rate helper tests (plan v4, Tasks 2-4).
+"""Behavioral tests for the z.ai quota integration.
 
-Behavioral tests for the z.ai monitor-endpoint integration:
+Covers the z.ai monitor-endpoint integration:
 - peak window membership (billing timezone anchored)
 - env-overridable multipliers (plan-doc annotation, not API fact)
 - timezone resolution fallbacks and display rendering
@@ -361,17 +361,6 @@ class TestZaiQuotaBranch:
 
     def _mock_fetch(self, monkeypatch, payloads):
         """Payloads: list returned per call; records call count on .calls."""
-        state = {"calls": 0, "gate": None}
-
-        def fake_fetch(api_key):
-            if state["gate"] is not None:
-                state["gate"].wait(timeout=10)
-            state["calls"] += 1
-            item = payloads[min(state["calls"] - 1, len(payloads) - 1)]
-            if isinstance(item, Exception):
-                raise item
-            return item
-
         recorder = SimpleNamespace(calls=0, gate=None)
 
         def tracked_fetch(api_key):
@@ -573,11 +562,10 @@ class TestZaiConcurrencyRegressions:
         monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
         # T0: slow older miss starts (will return 80)
         gates = [threading.Event()]
-        real = providers._zai_fetch_quota_payload
 
         def slow_old(api_key):
             gates[0].wait(timeout=10)
-            return real.__wrapped__ if False else self._payload(80)
+            return self._payload(80)
 
         monkeypatch.setattr(providers, "_zai_fetch_quota_payload", slow_old)
         t_old = threading.Thread(target=lambda: providers.get_provider_quota("zai"))
@@ -650,13 +638,16 @@ class TestZaiConcurrencyRegressions:
         monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
         t_old = threading.Thread(target=lambda: providers.get_provider_quota("zai", refresh=True))
         t_old.start()
-        for _ in range(200):
+        old_event = None
+        for _ in range(400):
             with providers._zai_quota_cache_lock:
-                if providers._zai_quota_flights:
+                flights_now = list(providers._zai_quota_flights.values())
+                if flights_now:
+                    old_event = flights_now[0]
                     break
             time.sleep(0.005)
+        assert old_event is not None, "older refresh never registered a flight"
         monkeypatch.setattr(providers, "_zai_fetch_quota_payload", new_refresh)
-        t_new = threading.Thread(target=lambda: None if False else None)  # placeholder
         # Newer refresh registers its own flight while still gated.
         newer_result = {}
 
@@ -673,16 +664,18 @@ class TestZaiConcurrencyRegressions:
                     if newer_event is not None:
                         break
             time.sleep(0.005)
-        # Wait until the newer flight object actually replaced the older one.
+        # Wait until the newer flight object actually REPLACED the older one
+        # (identity change, not mere presence — robust on free-threaded builds).
         cache_key = f"zai|{providers._get_hermes_home()}|{hashlib.sha256(b'k').hexdigest()}"
         newer_event = None
         for _ in range(400):
             with providers._zai_quota_cache_lock:
                 current = providers._zai_quota_flights.get(cache_key)
-                if current is not None:
+                if current is not None and current is not old_event:
                     newer_event = current
                     break
             time.sleep(0.005)
+        assert newer_event is not None, "newer refresh never superseded the older flight"
         # Old owner completes while the newer flight is still registered.
         old_release.set()
         t_old.join(timeout=10)
@@ -694,3 +687,59 @@ class TestZaiConcurrencyRegressions:
         t_new.join(timeout=10)
         used = providers.get_provider_quota("zai")["account_limits"]["windows"][0]["used_percent"]
         assert used == 70.0  # newer refresh's payload, not the older 5
+
+
+class _ProvCtx:
+    """null context manager for tests that patch module state."""
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestSetProviderKeyAliasClearing:
+    """Key removal must clear own aliases but never aliases shared with
+    other providers (e.g. the OPENCODE_API_KEY bridge used by both opencode
+    providers)."""
+
+    def _write_scratch_env(self, tmp_path, lines):
+        env = tmp_path / ".env"
+        env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return env
+
+    def test_removal_clears_own_alias_not_shared_bridge(self, monkeypatch, tmp_path):
+        import api.providers as prov
+        env = self._write_scratch_env(tmp_path, [
+            "GLM_API_KEY=abc123def456",
+            "ZAI_API_KEY=abc123def456",
+            "OPENCODE_ZEN_API_KEY=zen-key-123456",
+            "OPENCODE_GO_API_KEY=go-key-123456",
+            "OPENCODE_API_KEY=bridge-key-123456",
+        ])
+        monkeypatch.setattr(prov, "_get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(prov.os, "environ", {k: v for k, v in {
+            "GLM_API_KEY": "abc123def456",
+            "ZAI_API_KEY": "abc123def456",
+            "OPENCODE_API_KEY": "bridge-key-123456",
+        }.items()})
+        # Remove zai: ZAI_API_KEY (own alias) must clear; OPENCODE_API_KEY is
+        # not a zai alias at all, but prove the shared-bridge logic via opencode-zen.
+        result = prov.set_provider_key("zai", None)  # route normalizes "" -> None
+        assert result["ok"] is True
+        text = env.read_text(encoding="utf-8")
+        assert "GLM_API_KEY=abc123def456" not in text, "canonical key not removed"
+        assert "ZAI_API_KEY=abc123def456" not in text, "own alias not removed"
+        # Now remove opencode-zen: the shared OPENCODE_API_KEY bridge must SURVIVE
+        result2 = prov.set_provider_key("opencode-zen", None)
+        assert result2["ok"] is True
+        text2 = env.read_text(encoding="utf-8")
+        assert "OPENCODE_API_KEY=bridge-key-123456" in text2, "shared bridge was clobbered"
+
+    def test_config_invalidate_credential_pool_clears_zai_cache(self, monkeypatch):
+        import api.config as cfg
+        with _ProvCtx():
+            providers._zai_quota_cache["zai|/tmp/x|fp"] = (0.0, {"data": {}}, None)
+            assert len(providers._zai_quota_cache) == 1
+            cfg.invalidate_credential_pool_cache("glm")  # alias form
+            assert len(providers._zai_quota_cache) == 0
