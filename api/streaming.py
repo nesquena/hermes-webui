@@ -9049,28 +9049,30 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
-        event_id = None
-        if run_journal is not None:
+        def _publish_journaled(journaled):
+            event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
             try:
-                journaled = run_journal.append_sse_event(event, data)
-                # Carry the exact journal id for this queued frame. A global
-                # "latest event" side channel is still kept for legacy queues,
-                # but StreamChannel subscribers need the per-item id so a
-                # queued backlog cannot advance the browser cursor past an
-                # undelivered event.
-                event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
+                queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+                q.put_nowait(queue_item)
                 if event_id:
+                    # StreamChannel records the per-item id atomically with its
+                    # queue mutation. Advance the legacy side channel only after
+                    # that publication succeeds; never advertise an unseen frame.
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
-                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
-        if event_id and hasattr(q, "note_last_event_id"):
+                logger.debug("Failed to put event to queue")
+
+        if run_journal is not None:
             try:
-                q.note_last_event_id(event_id)
+                # Journal append and queue publication share the per-run lock.
+                # Otherwise a concurrent Steer can append N+1 and queue before
+                # this already-appended N, reversing live order vs replay.
+                run_journal.append_and_publish_sse_event(event, data, _publish_journaled)
+                return
             except Exception:
-                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
+                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
-            q.put_nowait(queue_item)
+            q.put_nowait((event, data))
         except Exception:
             logger.debug("Failed to put event to queue")
 
@@ -12965,16 +12967,14 @@ def _accept_and_publish_steer_event(
         payload["created_at"] = journaled.get("created_at", created_at)
         if stream is None or not callable(getattr(stream, "put_nowait", None)):
             raise RuntimeError("active stream channel unavailable during steer publication")
-        if event_id:
-            STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
-            if hasattr(stream, "note_last_event_id"):
-                stream.note_last_event_id(str(event_id))
         item = (
             ("steer_delivered", payload, event_id)
             if event_id
             else ("steer_delivered", payload)
         )
         stream.put_nowait(item)
+        if event_id:
+            STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
 
     accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
         "steer_delivered",

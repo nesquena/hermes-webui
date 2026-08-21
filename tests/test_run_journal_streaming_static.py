@@ -13,16 +13,27 @@ def test_streaming_initializes_one_run_journal_writer_per_stream():
     assert register_idx < writer_idx < cancel_idx
 
 
-def test_streaming_journals_sse_events_before_queue_delivery():
+def test_streaming_uses_one_transaction_for_journal_and_queue_delivery():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     put_idx = src.index("def put(event, data):")
-    journal_idx = src.index("run_journal.append_sse_event(event, data)", put_idx)
-    queue_idx = src.index("q.put_nowait(queue_item)", put_idx)
-    block = src[put_idx:queue_idx]
+    block = src[put_idx:src.index("# #5940", put_idx)]
 
-    assert put_idx < journal_idx < queue_idx
+    assert "def _publish_journaled(journaled):" in block
+    assert "run_journal.append_and_publish_sse_event(event, data, _publish_journaled)" in block
+    assert "q.put_nowait(queue_item)" in block
     assert "Failed to append run journal event" in block
     assert "queue_item = (event, data, event_id) if event_id and hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
+
+
+def test_gateway_uses_same_transaction_for_journal_and_queue_delivery():
+    src = Path("api/gateway_chat.py").read_text(encoding="utf-8")
+    put_idx = src.index("def put_gateway_event(event, data):")
+    block = src[put_idx:src.index("\n    s = None", put_idx)]
+
+    assert "def _publish_journaled(journaled):" in block
+    assert "run_journal.append_and_publish_sse_event(event, data, _publish_journaled)" in block
+    assert "q.put_nowait(queue_item)" in block
+    assert "Failed to append gateway event" in block
 
 
 

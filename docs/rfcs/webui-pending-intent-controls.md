@@ -389,8 +389,11 @@ the existing `stream_dead` recovery signal, so the browser restores the user's
 draft instead of claiming delivery. If Steer
 wins the lock, acceptance and `steer_delivered` persistence finish before a
 terminal writer can append. The Steer row is fsynced before durable success is
-returned, and its queue publication occurs under the same per-run ordering lock,
-so live SSE order and journal/replay order cannot disagree. The accepted HTTP
+returned. Every local and gateway SSE producer appends and queue-publishes through
+the same `RunJournalWriter.append_and_publish_sse_event()` transaction used as
+the Steer ordering domain. A sequence-N event therefore cannot release the lock
+until its live frame is queued, so Steer N+1 cannot overtake it and live SSE order
+cannot disagree with journal/replay order. The accepted HTTP
 response carries the same `event_id`, `seq`, and event payload as SSE/replay;
 the originating browser may project it immediately and dedupe the later SSE by
 that identity. If journal persistence fails after runtime

@@ -962,23 +962,24 @@ def _run_gateway_chat_streaming(
         if event == "apperror" and isinstance(data, dict):
             data = data.copy()
             data.setdefault("session_id", session_id)
-        event_id = None
-        if run_journal is not None:
+        def _publish_journaled(journaled):
+            event_id = (journaled or {}).get("event_id") if isinstance(journaled, dict) else None
             try:
-                journaled = run_journal.append_sse_event(event, data)
-                event_id = (journaled or {}).get("event_id") if isinstance(journaled, dict) else None
+                queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+                q.put_nowait(queue_item)
                 if event_id:
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
-                logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
-        if event_id and hasattr(q, "note_last_event_id"):
+                logger.debug("Failed to put gateway event to queue")
+
+        if run_journal is not None:
             try:
-                q.note_last_event_id(event_id)
+                run_journal.append_and_publish_sse_event(event, data, _publish_journaled)
+                return
             except Exception:
-                logger.debug("Failed to note gateway event_id %s for stream %s", event_id, stream_id, exc_info=True)
+                logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
-            q.put_nowait(queue_item)
+            q.put_nowait((event, data))
         except Exception:
             logger.debug("Failed to put gateway event to queue")
 

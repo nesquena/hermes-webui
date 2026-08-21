@@ -241,8 +241,9 @@ def test_frontend_warns_when_accepted_steer_is_not_durable():
     assert "result.published===false&&!responseRecorded" in body
     assert "showToast(t('steer_delivery_live_delayed'),5000,'warning')" in body
     assert "else showToast(t('cmd_steer_delivered'),2500)" in body
-    assert i18n.count("steer_delivery_not_durable:") >= 15
-    assert i18n.count("steer_delivery_live_delayed:") >= 15
+    assert i18n.count("steer_delivery_not_durable:") == 1
+    assert i18n.count("steer_delivery_live_delayed:") == 1
+    assert "const val = _locale[key] ?? LOCALES.en[key];" in i18n
 
 
 def test_publication_failure_keeps_durable_event_in_http_response(isolated_steer_state):

@@ -229,6 +229,91 @@ def test_accept_transaction_publishes_before_concurrent_terminal(tmp_path):
     assert terminal_finished.wait(timeout=10)
 
 
+def test_normal_sse_publish_cannot_be_overtaken_by_steer(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter(
+        "sess_total_order", "run_total_order", session_dir=tmp_path
+    )
+    normal_publish_started = threading.Event()
+    release_normal_publish = threading.Event()
+    steer_finished = threading.Event()
+    published = []
+    errors: list[BaseException] = []
+
+    def publish_normal(event):
+        published.append(event["event_id"])
+        normal_publish_started.set()
+        if not release_normal_publish.wait(timeout=10):
+            raise TimeoutError("normal SSE publication was not released")
+
+    def write_normal():
+        try:
+            writer.append_and_publish_sse_event(
+                "token",
+                {"text": "before steer"},
+                publish_normal,
+            )
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    def write_steer():
+        try:
+            accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+                "steer_delivered",
+                {"text": "correct course"},
+                lambda: True,
+                publish=lambda item: published.append(item["event_id"]),
+            )
+            assert accepted is True and event is not None and reason is None and error is None
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+        finally:
+            steer_finished.set()
+
+    normal_thread = threading.Thread(target=write_normal)
+    normal_thread.start()
+    assert normal_publish_started.wait(timeout=10)
+
+    steer_thread = threading.Thread(target=write_steer)
+    steer_thread.start()
+    assert not steer_finished.wait(timeout=0.1), "Steer overtook normal SSE publication"
+
+    release_normal_publish.set()
+    normal_thread.join(timeout=10)
+    steer_thread.join(timeout=10)
+
+    assert not normal_thread.is_alive() and not steer_thread.is_alive()
+    assert errors == []
+    journal = run_journal.read_run_events(
+        "sess_total_order", "run_total_order", session_dir=tmp_path
+    )
+    journal_ids = [event["event_id"] for event in journal["events"]]
+    assert published == journal_ids == ["run_total_order:1", "run_total_order:2"]
+
+    # The replay projection must expose the same order the live queue observed.
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "find_run_summary",
+        lambda _stream_id: {
+            "session_id": "sess_total_order",
+            "run_id": "run_total_order",
+            "last_seq": 2,
+            "last_event_id": "run_total_order:2",
+        },
+    )
+    monkeypatch.setattr(routes, "read_run_events", lambda _sid, _run: journal)
+    snapshot = routes._run_journal_live_snapshot("run_total_order")
+    projected = [
+        (row.get("source_event_type"), row.get("seq"))
+        for row in snapshot["anchor_activity_scene"]["activity_rows"]
+    ]
+    assert projected == [
+        ("token", 1),
+        ("steer_delivered", 2),
+    ]
+
+
 def test_steer_delivery_fsyncs_before_durable_success(tmp_path, monkeypatch):
     writer = run_journal.RunJournalWriter(
         "sess_fsync", "run_fsync", session_dir=tmp_path
