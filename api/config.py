@@ -6519,7 +6519,12 @@ def invalidate_credential_pool_cache(provider_id: str):
         from api.providers import invalidate_account_usage_status_cache
 
         invalidate_account_usage_status_cache(provider_id)
-        invalidate_account_usage_status_cache(_resolve_provider_alias(provider_id))
+        try:
+            from api.providers import invalidate_zai_quota_cache as _invalidate_zai
+            _invalidate_zai(provider_id)
+            _invalidate_zai(_resolve_provider_alias(provider_id))
+        except Exception:
+            logger.debug("Failed to invalidate zai quota cache", exc_info=True)
     except Exception:
         logger.debug("Failed to invalidate account usage status cache", exc_info=True)
 

@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -26,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:  # POSIX-only; Windows-style environments fall back to process-local locking.
     import fcntl
@@ -179,6 +181,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 from urllib import request as urllib_request
 
 from agent.account_usage import fetch_account_usage
@@ -2087,6 +2091,361 @@ def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = 
         return None
 
 
+# ── Z.AI (GLM Coding Plan) quota status ─────────────────────────────────────
+# Community-documented monitor endpoint (same one the Z.AI subscription
+# dashboard uses; reverse-engineered by CodexBar / zai-status). Unofficial:
+# parsed defensively, fails soft, fixture-tested.
+
+_ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+_ZAI_UNIT_NAMES = {1: "day", 3: "hour", 5: "minute", 6: "week"}
+_ZAI_PEAK_START_HOUR = 14  # local billing time, inclusive
+_ZAI_PEAK_END_HOUR = 18  # local billing time, exclusive
+_ZAI_DEFAULT_BILLING_TZ = "Asia/Shanghai"
+# Window priority for chip/card ordering: most actionable first. The 5-hour
+# window is the plan's headline limit; Monthly is the long-horizon budget.
+_ZAI_WINDOW_PRIORITY = {"5-hour": 0, "Daily": 1, "Weekly": 2, "Monthly": 3}
+
+# z.ai exposes no billing-rule API (verified by full response dump 2026-08-20):
+# multipliers are plan-doc annotations, env-overridable per install, and drift
+# by plan generation (V1: 3x/1x; current docs: 3x/2x for advanced models).
+_ZAI_DEFAULT_PEAK_MULTIPLIER = 3
+_ZAI_DEFAULT_OFFPEAK_MULTIPLIER = 2
+
+_ZAI_QUOTA_CACHE_TTL_SECONDS = 60.0
+_ZAI_QUOTA_CACHE_MAX_ENTRIES = 64
+_zai_quota_cache: dict[str, tuple[float, Any, Any]] = {}
+_zai_quota_flights: dict[str, object] = {}
+_zai_quota_epoch = 0
+_zai_quota_cache_lock = threading.Lock()
+
+
+def _zai_positive_float_env(name: str) -> float | None:
+    """Read a strictly positive finite float from an env override."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _zai_rate_multipliers() -> tuple[float, float]:
+    """(peak, offpeak) multipliers from env, else current-docs defaults.
+
+    Plan-doc annotation only -- z.ai exposes no billing API.
+    """
+    peak = _zai_positive_float_env("ZAI_PEAK_MULTIPLIER") or _ZAI_DEFAULT_PEAK_MULTIPLIER
+    offpeak = _zai_positive_float_env("ZAI_OFFPEAK_MULTIPLIER") or _ZAI_DEFAULT_OFFPEAK_MULTIPLIER
+    return peak, offpeak
+
+
+def _zai_billing_tz():
+    """Resolve z.ai's billing timezone.
+
+    ZAI_PEAK_TZ deliberately overrides billing-window membership (dangerous by
+    design, operator's choice); invalid values warn and fall back to
+    Asia/Shanghai, then to a fixed UTC+8 offset on tzdata-less hosts.
+    """
+    configured = (os.environ.get("ZAI_PEAK_TZ") or "").strip()
+    name = configured or _ZAI_DEFAULT_BILLING_TZ
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning("Invalid ZAI_PEAK_TZ %r; falling back to %s", configured, _ZAI_DEFAULT_BILLING_TZ)
+    try:
+        return ZoneInfo(_ZAI_DEFAULT_BILLING_TZ)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone(timedelta(hours=8), name="CST")
+
+
+def _zai_peak_status(now_utc: datetime | None = None, display_tz=None) -> dict:
+    """Compute z.ai peak-rate window membership from the clock.
+
+    Membership is anchored to z.ai's billing timezone (never the server's
+    local clock: the window is defined in UTC+8). All user-facing times are
+    rendered in display_tz (tzinfo) or the server's local timezone.
+    Multipliers are plan-doc annotations, env-overridable.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        raise ValueError("now_utc must be timezone-aware")
+    if display_tz is not None and not hasattr(display_tz, "utcoffset"):
+        raise TypeError("display_tz must be a tzinfo object, not a string")
+    billing_tz = _zai_billing_tz()
+    local = now_utc.astimezone(billing_tz)
+    is_peak = local.weekday() < 5 and _ZAI_PEAK_START_HOUR <= local.hour < _ZAI_PEAK_END_HOUR
+    if is_peak:
+        boundary = local.replace(hour=_ZAI_PEAK_END_HOUR, minute=0, second=0, microsecond=0)
+    else:
+        boundary = local.replace(hour=_ZAI_PEAK_START_HOUR, minute=0, second=0, microsecond=0)
+        for _ in range(8):
+            if boundary.weekday() < 5 and boundary > local:
+                break
+            boundary = (boundary + timedelta(days=1)).replace(
+                hour=_ZAI_PEAK_START_HOUR, minute=0, second=0, microsecond=0)
+    peak_mult, offpeak_mult = _zai_rate_multipliers()
+    multiplier = peak_mult if is_peak else offpeak_mult
+    label = f"Peak {multiplier:g}x" if is_peak else f"Off-peak {multiplier:g}x"
+    render_tz = display_tz if display_tz is not None else boundary.astimezone().tzinfo
+    local_str = boundary.astimezone(render_tz).strftime("%a %H:%M %Z")
+    tz_name = getattr(billing_tz, "key", None) or "UTC+8"
+    return {
+        "is_peak": is_peak,
+        "multiplier": multiplier,
+        "window": f"weekdays 14:00-18:00 {tz_name}",
+        "next_change": boundary.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "next_change_local": local_str,
+        "summary": f"{label} (weekdays 14:00-18:00 {tz_name}); switches {local_str}",
+        "source": "plan_docs",
+    }
+
+
+def _zai_window_label(limit: dict) -> str:
+    if limit.get("type") == "TIME_LIMIT" and limit.get("unit") == 5 and limit.get("number") == 1:
+        return "Monthly"  # z.ai monthly-reset sentinel row
+    unit = _ZAI_UNIT_NAMES.get(limit.get("unit"))
+    if not unit:
+        return ""
+    label = f"{limit.get('number')}-{unit}"
+    if label == "1-day":
+        return "Daily"
+    if label == "1-week":
+        return "Weekly"
+    return label
+
+
+def _zai_used_percent(limit: dict) -> float | None:
+    pct = _quota_number(limit.get("percentage"))
+    if pct is not None and math.isfinite(pct):
+        return max(0.0, min(100.0, float(pct)))
+    usage = _quota_number(limit.get("usage"))
+    remaining = _quota_number(limit.get("remaining"))
+    if usage is not None and remaining is not None and math.isfinite(usage) and math.isfinite(remaining) and usage > 0:
+        return max(0.0, min(100.0, 100.0 * (usage - remaining) / usage))
+    return None
+
+
+def _zai_reset_at(limit: dict) -> datetime | None:
+    raw = limit.get("nextResetTime")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if not math.isfinite(raw):
+        return None
+    try:
+        return datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _sanitize_zai_quota(payload: Any, *, fetched_at: datetime | None = None) -> Any:
+    """Parse the z.ai monitor response into a serializer-compatible snapshot.
+
+    Pure: never reads the clock and never computes peak state. Defensive:
+    malformed shapes are skipped (or the whole payload marked unavailable)
+    rather than raising.
+    """
+    reason = None
+    if not isinstance(payload, dict):
+        payload, reason = {}, "Malformed response payload."
+    data = payload.get("data")
+    if reason is None and not isinstance(data, dict):
+        reason = "Malformed response data."
+    if reason is None and payload.get("success") is False:
+        reason = "z.ai reported failure for the quota request."
+    if reason is None and payload.get("code") not in (None, 200):
+        reason = f"z.ai returned code {payload.get('code')}."
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if reason is None and not isinstance(limits, (list, tuple)):
+        reason = "Malformed limits list."
+
+    windows: list[Any] = []
+    if reason is None:
+        seen: set[str] = set()
+        for limit in limits:
+            if not isinstance(limit, dict):
+                continue
+            label = _zai_window_label(limit)
+            used = _zai_used_percent(limit)
+            if not label or used is None or label in seen:
+                continue
+            seen.add(label)
+            windows.append(SimpleNamespace(
+                label=label,
+                used_percent=used,
+                reset_at=_zai_reset_at(limit),
+                detail=None,
+            ))
+    if reason is None and not windows:
+        reason = "No supported quota windows were returned."
+
+    def _sort_key(window):
+        priority = _ZAI_WINDOW_PRIORITY.get(window.label, 4)
+        reset = window.reset_at
+        reset_key = reset.timestamp() if reset is not None else float("inf")
+        return (priority, reset_key)
+
+    windows.sort(key=_sort_key)
+    return SimpleNamespace(
+        provider="zai",
+        source="zai_monitor_api",
+        title="Account limits",
+        plan=(str(data.get("level")).strip() or None) if isinstance(data, dict) else None,
+        windows=windows,
+        details=[],
+        available=not reason and bool(windows),
+        unavailable_reason=reason,
+        fetched_at=fetched_at or datetime.now(timezone.utc),
+    )
+
+
+def invalidate_zai_quota_cache(provider_id: str | None = None) -> None:
+    """Clear cached z.ai quota data (called on credential mutation)."""
+    from api.config import _resolve_provider_alias
+
+    global _zai_quota_epoch
+    with _zai_quota_cache_lock:
+        _zai_quota_epoch += 1
+        if provider_id is None:
+            _zai_quota_cache.clear()
+        else:
+            prefix = f"{_resolve_provider_alias(str(provider_id).strip().lower())}|"
+            for key in [k for k in _zai_quota_cache if k.startswith(prefix)]:
+                _zai_quota_cache.pop(key, None)
+
+
+def _zai_fetch_quota_payload(api_key: str) -> dict | None:
+    """Fetch the raw z.ai monitor payload (single-flight per key not here)."""
+    request = urllib.request.Request(
+        _ZAI_QUOTA_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as response:
+        raw = response.read()
+    text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    return json.loads(text)
+
+
+def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: bool = False) -> dict[str, Any]:
+    """Quota status for the z.ai GLM Coding Plan (monitor endpoint + peak)."""
+    from api.config import _resolve_provider_alias
+
+    api_key = _get_provider_api_key("zai")
+    if not api_key:
+        return {
+            "ok": False, "provider": provider, "display_name": display_name,
+            "supported": True, "status": "no_key", "quota": None,
+            "message": "Z.AI quota status needs a ZAI_API_KEY/GLM_API_KEY configured on the server.",
+        }
+    home = str(_get_hermes_home())
+    key_fp = hashlib.sha256(api_key.encode("utf-8", "replace")).hexdigest()
+    cache_key = f"{_resolve_provider_alias(provider)}|{home}|{key_fp}"
+
+    payload: dict | None = None
+    fetched_at: datetime | None = None
+    acquired_flight = False
+    with _zai_quota_cache_lock:
+        epoch_at_start = _zai_quota_epoch
+        cached = _zai_quota_cache.get(cache_key)
+        if not refresh and cached is not None:
+            ts, cached_payload, cached_at = cached
+            if time.monotonic() - ts <= _ZAI_QUOTA_CACHE_TTL_SECONDS:
+                payload, fetched_at = cached_payload, cached_at
+        flight = _zai_quota_flights.get(cache_key)
+        if payload is None and refresh:
+            flight = None  # refresh supersedes any in-flight fetch
+        if payload is None:
+            if flight is None:
+                _zai_quota_flights[cache_key] = _zai_flight_placeholder = threading.Event()
+                acquired_flight = True
+            else:
+                join_target = flight
+
+    if payload is None and not acquired_flight:
+        waiter = getattr(join_target, "wait", None) or getattr(join_target, "join", None)
+        if callable(waiter):
+            waiter(timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0)
+        with _zai_quota_cache_lock:
+            cached = _zai_quota_cache.get(cache_key)
+        if cached is not None:
+            ts, cached_payload, cached_at = cached
+            payload, fetched_at = cached_payload, cached_at
+
+    if payload is None:
+        try:
+            payload = _zai_fetch_quota_payload(api_key)
+            fetched_at = datetime.now(timezone.utc)
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code in (401, 403) else "unavailable"
+            message = ("Z.AI rejected the configured API key." if status == "invalid_key"
+                       else "Z.AI quota status is temporarily unavailable.")
+            return {"ok": False, "provider": provider, "display_name": display_name,
+                    "supported": True, "status": status, "quota": None, "message": message}
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+            return {"ok": False, "provider": provider, "display_name": display_name,
+                    "supported": True, "status": "unavailable", "quota": None,
+                    "message": "Z.AI quota status is temporarily unavailable."}
+        finally:
+            if acquired_flight:
+                with _zai_quota_cache_lock:
+                    _zai_quota_flights.pop(cache_key, None)
+                _zai_flight_placeholder_set = getattr(_zai_flight_placeholder, "set", None)
+                if callable(_zai_flight_placeholder_set):
+                    _zai_flight_placeholder_set()
+        # Publish only if the cache was not invalidated (or superseded by a
+        # newer refresh) while our fetch was in flight.
+        publish = True
+        with _zai_quota_cache_lock:
+            current_epoch = _zai_quota_epoch
+            if current_epoch != epoch_at_start:
+                publish = False
+            if publish:
+                _zai_quota_cache[cache_key] = (time.monotonic(), payload, fetched_at)
+                _zai_quota_cache_limit()
+
+    snapshot = _sanitize_zai_quota(payload, fetched_at=fetched_at)
+    account_limits = _serialize_account_usage_snapshot(snapshot)
+    if account_limits and account_limits.get("available"):
+        peak = _zai_peak_status()  # exactly once per available response
+        snapshot.details = [peak["summary"]]
+        account_limits["details"] = [peak["summary"]]
+        return {
+            "ok": True, "provider": provider, "display_name": display_name,
+            "supported": True, "status": "available", "label": "Account limits",
+            "quota": None, "account_limits": account_limits, "peak": peak,
+            "message": f"{display_name} quota loaded. {peak['summary']}.",
+        }
+    reason = ""
+    if account_limits:
+        reason = str(account_limits.get("unavailable_reason") or "").strip()
+    message = f"{display_name} quota is unavailable. {reason}" if reason else \
+        f"{display_name} quota is unavailable. Confirm the API key and try again."
+    return {
+        "ok": False, "provider": provider, "display_name": display_name,
+        "supported": True, "status": "unavailable", "quota": None,
+        "account_limits": account_limits,
+        "message": message,
+    }
+
+
+def _zai_quota_cache_limit() -> None:
+    """Bound the z.ai quota cache (expired cleanup + LRU trim)."""
+    if len(_zai_quota_cache) <= _ZAI_QUOTA_CACHE_MAX_ENTRIES:
+        now = time.monotonic()
+        expired = [k for k, (ts, _, _) in _zai_quota_cache.items() if now - ts > _ZAI_QUOTA_CACHE_TTL_SECONDS]
+        for key in expired:
+            _zai_quota_cache.pop(key, None)
+        return
+    ordered = sorted(_zai_quota_cache.items(), key=lambda kv: kv[1][0])
+    excess = len(_zai_quota_cache) - _ZAI_QUOTA_CACHE_MAX_ENTRIES
+    for key, _ in ordered[:excess]:
+        _zai_quota_cache.pop(key, None)
+
+
 def _provider_account_usage_status(provider: str, display_name: str, *, refresh: bool = False) -> dict[str, Any]:
     snapshot = _fetch_account_usage_with_profile_context(provider, refresh=refresh)
     account_limits = _serialize_account_usage_snapshot(snapshot)
@@ -2206,6 +2565,11 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
                 "quota": None,
                 "message": "OpenRouter quota status is temporarily unavailable.",
             }
+
+    from api.config import _resolve_provider_alias as _zai_resolve_alias
+    if _zai_resolve_alias(provider) == "zai":
+        canonical_name = _PROVIDER_DISPLAY.get("zai", "Z.AI / GLM")
+        return _provider_zai_quota_status(provider, canonical_name, refresh=refresh)
 
     local_snapshot = _local_pool_snapshot(provider)
     if local_snapshot is not None:
@@ -2951,6 +3315,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     # disrupting active streaming sessions that may be reading config.cfg.
     invalidate_models_cache()
     invalidate_account_usage_status_cache(provider_id)
+    invalidate_zai_quota_cache(provider_id)
     invalidate_providers_cache()
 
     return {
