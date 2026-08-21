@@ -15266,14 +15266,6 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
-            # Remove the derivable context-brief cache with the session it
-            # summarizes (best-effort; never blocks the durable deletion).
-            try:
-                from api.context_brief import delete_stored_brief
-
-                delete_stored_brief(SESSION_DIR.parent, sid)
-            except Exception:
-                logger.debug("context brief cleanup failed for deleted session %s", sid, exc_info=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -15282,6 +15274,14 @@ def handle_post(handler, parsed) -> bool:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            # Remove the derivable context-brief cache with the session it
+            # summarizes (best-effort; never blocks the durable deletion).
+            try:
+                from api.context_brief import delete_stored_brief
+
+                delete_stored_brief(SESSION_DIR.parent, sid)
+            except Exception:
+                logger.debug("context brief cleanup failed for deleted session %s", sid, exc_info=True)
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)

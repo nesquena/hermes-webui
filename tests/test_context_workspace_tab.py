@@ -85,8 +85,10 @@ def test_goal_finish_hydrates_via_cmd_goal_not_raw_post():
 
 def test_goal_finish_guards_stale_session():
     # Never post todos from a stale panel into a different conversation.
-    body = PANELS.split("async function _contextBriefGoalFinish", 1)[1]
+    body = _extract_goal_finish_fns()
     assert "host.dataset.briefSid !== sid" in body
+    assert "host.isConnected === false" in body
+    assert "host.id === 'workspaceContextPanel' && host.hidden" in body
     assert "context_goal_finish_stale" in body
 
 
@@ -117,6 +119,97 @@ def _extract_hydrate_fn() -> str:
     start = PANELS.index("async function _hydrateContextBriefGoalFinish")
     end = PANELS.index("\nasync function _pollContextBriefJob")
     return PANELS[start:end]
+
+
+def _extract_goal_finish_fns() -> str:
+    start = PANELS.index("function _contextBriefGoalHostCurrent")
+    end = PANELS.index("\nasync function _pollContextBriefJob")
+    return PANELS[start:end]
+
+
+def _run_goal_finish_case(scenario: str) -> dict:
+    """Drive the production Goal-finish handler with a mutable fake modal."""
+    fn_src = _extract_goal_finish_fns()
+    script = f"""
+const vm = require('vm');
+const fnSrc = {json.dumps(fn_src)};
+const scenario = {json.dumps(scenario)};
+const calls = [];
+let workspaceTodos = [
+  {{status:'pending', content:'pre-confirm only'}},
+  {{status:'completed', content:'already done'}},
+];
+const host = {{
+  id: 'workspaceContextPanel',
+  hidden: false,
+  isConnected: true,
+  dataset: {{briefSid:'sid-1', briefLoaded:'1'}},
+  _briefData: null,
+}};
+const btn = {{closest: () => host}};
+const S = {{session:{{session_id:'sid-1'}}, messages:[]}};
+async function _loadBriefInto(panel, force) {{
+  calls.push({{cmd:'load', force, todos:workspaceTodos.map(it => it.content)}});
+  panel.dataset.briefSid = S.session.session_id;
+  panel.dataset.briefLoaded = '1';
+  panel._briefData = {{todos:{{
+    items: workspaceTodos.map(it => ({{...it}})),
+    counts: workspaceTodos.reduce((acc, it) => {{
+      acc[it.status] = (acc[it.status] || 0) + 1;
+      return acc;
+    }}, {{}}),
+  }}}};
+}}
+async function showConfirmDialog() {{
+  calls.push({{cmd:'confirm'}});
+  if (scenario === 'cancel') return false;
+  if (scenario === 'teardown') host.hidden = true;
+  workspaceTodos = [
+    {{status:'completed', content:'pre-confirm only'}},
+    {{status:'in_progress', content:'post-confirm current'}},
+    {{status:'pending', content:'post-confirm new'}},
+  ];
+  return true;
+}}
+async function cmdGoal(args) {{ calls.push({{cmd:'cmdGoal', args}}); }}
+const ctx = {{
+  S, Date, btn, host,
+  _contextBriefSid: () => S.session && S.session.session_id,
+  _loadBriefInto, showConfirmDialog, cmdGoal,
+  renderMessages: () => calls.push({{cmd:'renderMessages'}}),
+  showToast: msg => calls.push({{cmd:'toast', msg}}),
+  t: key => (key === 'context_goal_finish_prefix'
+    ? 'Finish fresh todos'
+    : key === 'context_goal_finish_confirm'
+      ? 'Confirm latest {{n}} todos'
+      : key),
+}};
+vm.createContext(ctx);
+vm.runInContext(fnSrc, ctx);
+(async () => {{
+  await vm.runInContext(`_contextBriefGoalFinish(btn)`, ctx);
+  process.stdout.write(JSON.stringify({{calls, host}}));
+}})().catch(err => {{
+  console.error(err && err.stack || err);
+  process.exit(1);
+}});
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["node", str(script_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"node goal-finish driver failed: {proc.stderr}")
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
 
 
 def test_hydrate_context_brief_goal_finish_echoes_prompt_and_calls_cmd_goal():
@@ -179,16 +272,41 @@ vm.runInContext(fnSrc, ctx);
     assert len(result["messages"]) == 1
 
 
+def test_goal_finish_dispatches_only_post_confirmation_todos():
+    result = _run_goal_finish_case("mutate")
+    loads = [call for call in result["calls"] if call["cmd"] == "load"]
+    goals = [call for call in result["calls"] if call["cmd"] == "cmdGoal"]
+
+    assert len(loads) == 2, "the confirmed action must revalidate after the modal resolves"
+    assert goals == [
+        {
+            "cmd": "cmdGoal",
+            "args": "Finish fresh todos\n- post-confirm current\n- post-confirm new",
+        }
+    ]
+    assert "pre-confirm only" not in goals[0]["args"]
+
+
+def test_goal_finish_cancel_and_workspace_teardown_do_not_dispatch():
+    cancelled = _run_goal_finish_case("cancel")
+    torn_down = _run_goal_finish_case("teardown")
+
+    assert not any(call["cmd"] == "cmdGoal" for call in cancelled["calls"])
+    assert not any(call["cmd"] == "cmdGoal" for call in torn_down["calls"])
+    assert len([call for call in cancelled["calls"] if call["cmd"] == "load"]) == 1
+    assert len([call for call in torn_down["calls"] if call["cmd"] == "load"]) == 1
+
+
 def test_goal_finish_force_refreshes_brief_before_composing():
-    # Review #7000 finding 2: the cached brief can predate same-session todo
-    # changes; the handler must force-fetch before reading actionable todos.
-    m = re.search(r"async function _contextBriefGoalFinish\(btn\)\{(.*?)\n\}", PANELS, re.S)
-    assert m, "handler not found"
-    body = m.group(1)
-    assert "await _loadBriefInto(host, true);" in body, "no forced refresh before composing the goal"
+    # Review #7000 finding 2: parse actionable todos only from a force-fetch
+    # performed after the asynchronous confirmation has resolved.
+    body = _extract_goal_finish_fns()
+    confirm = body.index("const ok = await showConfirmDialog")
+    refresh = body.index("if (!await _preflightContextWorkspace(host, sid))", confirm)
     compose = body.index("const brief = host._briefData;")
-    refresh = body.index("await _loadBriefInto(host, true);")
-    assert refresh < compose, "refresh must happen before reading _briefData"
+    assert confirm < refresh < compose
+    assert body.count("if (!await _preflightContextWorkspace(host, sid))") == 2
+    assert "host.dataset.briefLoaded === '1'" in body
 
 
 def test_loader_drops_brief_data_at_load_start():
@@ -208,9 +326,22 @@ def test_goal_finish_revalidates_session_after_confirm_dialog():
     m = re.search(r"async function _contextBriefGoalFinish\(btn\)\{(.*?)\n\}", PANELS, re.S)
     body = m.group(1)
     dialog = body.index("await showConfirmDialog(")
-    reval = body.index("_contextBriefSid() !== sid", dialog)
+    reval = body.index("_contextBriefGoalHostCurrent(host, sid)", dialog)
+    reload = body.index("_preflightContextWorkspace(host, sid)", reval)
     call = body.index("_hydrateContextBriefGoalFinish(sid, goalText)")
-    assert dialog < reval < call, "missing post-dialog session revalidation"
+    assert dialog < reval < reload < call, "missing post-dialog workspace revalidation"
+
+
+def test_context_brief_escapes_rpc_status_and_background_task_markup():
+    # Status/prompt values come from RPC data and are interpolated into the
+    # sidebar's innerHTML. Keep both on the escaped path.
+    m = re.search(r"function renderContextBrief\(brief, panel\)\{(.*?)\n\}", PANELS, re.S)
+    assert m, "context brief renderer not found"
+    body = m.group(1)
+    assert "${esc(g.status||'')}" in body
+    assert "${esc(bt.prompt || bt.task_id || '')}" in body
+    assert "${g.status||''}" not in body
+    assert "${bt.prompt || bt.task_id || ''}" not in body
 
 
 def test_context_tab_hides_preview_area():

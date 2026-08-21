@@ -4079,6 +4079,22 @@ async function _contextBriefRefresh(btn){
   }
 }
 
+function _contextBriefGoalHostCurrent(host, sid){
+  if (!host || host.dataset.briefSid !== sid || host.isConnected === false) return false;
+  // The workspace panel remains connected when another tab replaces Context.
+  // Treat that replacement as teardown for the pending modal action.
+  if (host.id === 'workspaceContextPanel' && host.hidden) return false;
+  return _contextBriefSid() === sid;
+}
+
+async function _preflightContextWorkspace(host, sid){
+  if (!_contextBriefGoalHostCurrent(host, sid)) return false;
+  await _loadBriefInto(host, true);
+  return _contextBriefGoalHostCurrent(host, sid)
+    && host.dataset.briefLoaded === '1'
+    && !!host._briefData;
+}
+
 // Compose a /goal from the brief's remaining (pending + in_progress) todos and
 // send it to the conversation, so the agent finishes the "reste à faire" work.
 async function _contextBriefGoalFinish(btn){
@@ -4086,7 +4102,7 @@ async function _contextBriefGoalFinish(btn){
   if (!sid) return;
   const host = btn && btn.closest ? btn.closest('[data-brief-sid]') : null;
   // Never post todos from a stale panel into a different conversation.
-  if (!host || host.dataset.briefSid !== sid){
+  if (!_contextBriefGoalHostCurrent(host, sid)){
     if (host) _loadBriefInto(host, true);
     if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
     return;
@@ -4095,8 +4111,29 @@ async function _contextBriefGoalFinish(btn){
   // conversation (the render hooks intentionally reuse the briefLoaded
   // dedupe). Force-fetch the brief now so the action is built from the live
   // todo state and never relaunches work that is already completed.
-  await _loadBriefInto(host, true);
-  if (_contextBriefSid() !== sid || host.dataset.briefSid !== sid || host.dataset.briefLoaded !== '1'){
+  if (!await _preflightContextWorkspace(host, sid)){
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  const counts = (host._briefData.todos && host._briefData.todos.counts) || {};
+  const estimatedCount = Math.max(0, Number(counts.pending) || 0)
+    + Math.max(0, Number(counts.in_progress) || 0);
+  const question = t('context_goal_finish_confirm').replace('{n}', String(estimatedCount));
+  const ok = await showConfirmDialog({
+    title: t('context_goal_finish'),
+    message: question,
+    confirmLabel: t('context_goal_finish'),
+    focusCancel: true,
+  });
+  if (!ok) return;
+  // The dialog is async: the session, workspace panel instance, or todos may
+  // have changed while it was open. Re-fetch first, then parse the payload
+  // that will actually be dispatched; never reuse the pre-dialog list.
+  if (!_contextBriefGoalHostCurrent(host, sid)){
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  if (!await _preflightContextWorkspace(host, sid)){
     if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
     return;
   }
@@ -4112,22 +4149,6 @@ async function _contextBriefGoalFinish(btn){
   const capped = items.slice(0, 12);
   const list = capped.map(s => `- ${s}`).join('\n');
   const goalText = `${t('context_goal_finish_prefix')}\n${list}`;
-  const question = t('context_goal_finish_confirm').replace('{n}', String(capped.length));
-  const ok = await showConfirmDialog({
-    title: t('context_goal_finish'),
-    message: question,
-    confirmLabel: t('context_goal_finish'),
-    focusCancel: true,
-  });
-  if (!ok) return;
-  // The dialog is async: the user may have switched conversations while it
-  // was open. Re-validate before acting so the goal never starts in a
-  // different session than the brief it was built from.
-  if (_contextBriefSid() !== sid || host.dataset.briefSid !== sid){
-    _loadBriefInto(host, true);
-    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
-    return;
-  }
   // A raw POST /api/goal starts the kickoff on the server but leaves this tab
   // idle: no user bubble, no busy state, no SSE. Reload then hydrates via
   // loadSession. Reuse cmdGoal (composer /goal) so the prompt and first

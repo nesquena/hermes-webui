@@ -9,9 +9,10 @@ duplicate, status polling, fallback when the auxiliary model is absent).
 """
 
 import json
+import sys
 import time
 from pathlib import Path  # noqa: F401  (kept for fixture parity with the auto layer)
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -164,7 +165,7 @@ def test_requests_exclude_runtime_injected_user_messages(tmp_path):
     plumbing. Older wakeups predate the `_source` marker, so the text
     prefix must be enough on its own.
     """
-    ws = "[Workspace::v1: /a0/usr/projects/MES]\n"
+    ws = "[Workspace::v1: /workspace/project]\n"
     messages = [
         {"role": "user", "content": ws + "déploie la nouvelle version", "timestamp": 1.0},
         {
@@ -207,7 +208,7 @@ def test_requests_strip_workspace_tag_and_dedupe(tmp_path):
     drifted timestamps, so dedupe is by TEXT alone (user report 2026-08-18):
     identical asks collapse to one entry keeping the first timestamp.
     """
-    ws = "[Workspace::v1: /a0/usr/projects/MES]\n"
+    ws = "[Workspace::v1: /workspace/project]\n"
     messages = [
         {"role": "user", "content": ws + "corrige le brief", "timestamp": 10.0},
         {"role": "user", "content": "corrige le brief", "timestamp": 10.0},
@@ -331,9 +332,18 @@ def test_legacy_brief_without_transcript_digest_is_always_unverifiable(tmp_path)
 
 def test_brief_job_generates_fallback_without_aux_model(tmp_path):
     sess = _make_session(tmp_path)
-    with _patch_resolution(sess), patch(
-        "agent.auxiliary_client.call_llm",
-        side_effect=RuntimeError("auxiliary model unavailable in unit test"),
+    agent_pkg = ModuleType("agent")
+    agent_pkg.__path__ = []
+    aux_module = ModuleType("agent.auxiliary_client")
+
+    def unavailable_aux_model(*_args, **_kwargs):
+        raise RuntimeError("auxiliary model unavailable in unit test")
+
+    aux_module.call_llm = unavailable_aux_model
+    agent_pkg.auxiliary_client = aux_module
+    with _patch_resolution(sess), patch.dict(
+        sys.modules,
+        {"agent": agent_pkg, "agent.auxiliary_client": aux_module},
     ):
         job = context_brief.start_brief_job(SID)
         assert job["status"] == "running"
