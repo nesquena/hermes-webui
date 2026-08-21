@@ -3940,6 +3940,14 @@ def _append_journaled_partial_output(
     # text-only backward scan walks PAST the current turn and pins the boundary
     # at the older duplicate, letting that older turn's assistant row consume
     # the current journal output (the CORE#1 data loss).
+    #
+    # Among CONSECUTIVE provably-owned user rows keep the EARLIEST: the WebUI
+    # can persist the same turn twice (an eager checkpoint plus a ``_recovered``
+    # echo), and rows between those copies still belong to this turn.  Stopping
+    # at the latest copy would exclude a legitimate same-turn core row from
+    # reasoning backfill.  Any older DUPLICATE prompt is separated from this run
+    # by an intervening assistant/user turn that is not owned, so the walk stops
+    # before reaching it.
     for idx in range(initial_message_count - 1, -1, -1):
         msg = messages_list[idx]
         if not isinstance(msg, dict) or msg.get('role') != 'user':
@@ -3947,8 +3955,12 @@ def _append_journaled_partial_output(
         if _message_owns_current_turn(msg, session):
             current_turn_min_idx = idx
             current_turn_boundary_authoritative = True
+            continue
+        if current_turn_boundary_authoritative:
+            # Walked off the top of the owned run: previous idx was the start.
             break
-    else:
+        break
+    if not current_turn_boundary_authoritative:
         # No provable current-turn user row.  Fall back to the latest user row
         # as a non-authoritative hint so an in-turn match can still collapse,
         # but leave ``current_turn_boundary_authoritative`` False so callers
