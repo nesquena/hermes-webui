@@ -559,6 +559,56 @@ def test_no_followup_queries_when_the_global_window_is_not_saturated(
     assert probes == [], "the GROUP BY probe is only paid on a saturated window"
 
 
+def test_short_global_projection_still_refills_a_starved_project(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A fully consumed raw window can project short without exhausting state.db.
+
+    Three 64-segment busy lineages fill the final ``6 * 32`` raw candidate
+    window for a two-project, three-conversation budget.  They collapse to only
+    three logical conversations, while an older quiet-project conversation sits
+    just beyond that raw window.  A gate based only on ``len(global_rows)``
+    mistakes that projection shortfall for a small database and leaves the quiet
+    project unreachable.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 4)
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+    per_project_limit = 3
+    global_limit = per_project_limit * 2
+    raw_window = global_limit * max(agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS)
+    assert raw_window % 3 == 0
+
+    rows = [_session("quiet-old", BASE_TS, project_id="project-quiet")]
+    for index in range(3):
+        rows.extend(_lineage(
+            f"busy-chain-{index}",
+            BASE_TS + 10_000 + index * 1_000,
+            raw_window // 3,
+            project_id="project-busy",
+            step=1.0,
+        ))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((kwargs["project_ids"][0], kwargs["limit"]))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=per_project_limit,
+    )
+
+    assert "quiet-old" in {session["session_id"] for session in sessions}
+    assert scoped_queries == [("project-quiet", per_project_limit)]
+
+
 def test_saturated_window_pays_one_query_per_starved_project(
     fake_hermes_home, tmp_path, monkeypatch
 ):
