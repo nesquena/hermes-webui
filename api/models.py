@@ -3826,9 +3826,18 @@ def _append_journaled_partial_output(
 
     messages_list = session.messages or []
     current_turn_min_idx = 0
+    pending_text = _normalize_journal_recovery_text(session.pending_user_message)
+    found_pending_turn = False
     for idx in range(initial_message_count - 1, -1, -1):
         msg = messages_list[idx]
         if isinstance(msg, dict) and msg.get('role') == 'user':
+            msg_text = _normalize_journal_recovery_text(msg.get('content'))
+            if pending_text and msg_text == pending_text:
+                current_turn_min_idx = idx
+                found_pending_turn = True
+                continue
+            if found_pending_turn:
+                break
             current_turn_min_idx = idx
             break
 
@@ -5192,16 +5201,27 @@ def _apply_core_sync_or_error_marker(
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
             _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
+            # #7167: resolve the timestamp through master's helper, then
+            # walk back to the nearest user row rather than assuming the
+            # tail IS one. On master this was session.messages[-1], which
+            # silently misses a checkpointed prompt that is no longer last
+            # (a tool card or assistant row can follow it) — that is the
+            # dangling-prompt case the review asked to fix.
             _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
+            _last_user = None
+            for _m in reversed(session.messages or []):
+                if isinstance(_m, dict) and _m.get('role') == 'user':
+                    _last_user = _m
+                    break
             _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
+                _last_user,
                 session.pending_user_message,
                 _recovered_ts,
                 session.pending_user_source,
                 session.pending_attachments,
             )
             _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
+                _last_user,
                 session.pending_user_message,
             )
             if (

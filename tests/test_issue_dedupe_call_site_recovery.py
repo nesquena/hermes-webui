@@ -160,7 +160,7 @@ def test_repair_preserves_current_turn_recovered_rows_when_older_identical_histo
         {"role": "assistant", "content": "identical response"},
     ]
     session = _make_repair_session(sid, stream_id, previous_messages=older_history)
-    session.tool_calls = [{"name": "terminal", "preview": "ls -la"}]
+    session.tool_calls = [{"name": "terminal", "preview": "ls -la", "_recovered_stream_id": "older-stream"}]
 
     result = _apply_core_sync_or_error_marker(
         session,
