@@ -111,30 +111,30 @@ const assert = require('assert');
 assert.deepStrictEqual(
   _selectCompactionCardPlacements([3, 11, 49, 50, 88], 50),
   {{
+    preWindowMarkers: [3, 11, 49],
     inlineMarkers: [50, 88],
-    latestPreWindowMarker: 49,
     taskOwner: {{kind: 'inline', rawIdx: 88}},
   }},
 );
 assert.deepStrictEqual(
   _selectCompactionCardPlacements([3, 11, 49], 50),
   {{
+    preWindowMarkers: [3, 11, 49],
     inlineMarkers: [],
-    latestPreWindowMarker: 49,
     taskOwner: {{kind: 'pre-window', rawIdx: 49}},
   }},
 );
 assert.deepStrictEqual(
   _selectCompactionCardPlacements([50, 88], 50),
   {{
+    preWindowMarkers: [],
     inlineMarkers: [50, 88],
-    latestPreWindowMarker: null,
     taskOwner: {{kind: 'inline', rawIdx: 88}},
   }},
 );
 assert.deepStrictEqual(
   _selectCompactionCardPlacements([], 50),
-  {{inlineMarkers: [], latestPreWindowMarker: null, taskOwner: null}},
+  {{preWindowMarkers: [], inlineMarkers: [], taskOwner: null}},
 );
 """
     _run_node(script)

@@ -684,7 +684,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _formatTurnDuration() {{ return ''; }}
         function _loadedCompactionMarkerRawIdxs() {{ return []; }}
         function _selectCompactionCardPlacements() {{
-          return {{ inlineMarkers: [], latestPreWindowMarker: null, taskOwner: null }};
+          return {{ preWindowMarkers: [], inlineMarkers: [], taskOwner: null }};
         }}
         function _insertCompactionCardNodes() {{
           return {{ insertedNodes: [], taskOwnerNode: null }};

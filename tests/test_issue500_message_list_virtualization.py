@@ -120,18 +120,35 @@ const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
 const MESSAGE_VIRTUAL_BUFFER_PX = 0;
 eval(extractFunc('_messageVirtualDefaultHeightForRole'));
 eval(extractFunc('_messageVirtualWindow'));
+eval(extractFunc('_compactionDigestText'));
+eval(extractFunc('_compactionCardPreview'));
+eval(extractFunc('_compressionReferenceCardHtml'));
 eval(extractFunc('_selectCompactionCardPlacements'));
 eval(extractFunc('_pinCompactionCardAtTop'));
 eval(extractFunc('_insertCompactionCardNodes'));
 eval(extractFunc('_insertPreservedCompressionTaskFallback'));
 eval(extractFunc('_insertCompressionLikeNodeByRawIdx'));
 
+class MiniClassList {
+  constructor(...names) { this.names = new Set(names); }
+  add(...names) { names.forEach(name => this.names.add(name)); }
+  contains(name) { return this.names.has(name); }
+  toggle(name) {
+    if (this.names.has(name)) {
+      this.names.delete(name);
+      return false;
+    }
+    this.names.add(name);
+    return true;
+  }
+}
 class MiniNode {
   constructor(label, rawIdx = null) {
     this.label = label;
     this.rawIdx = rawIdx;
     this.children = [];
     this.parentElement = null;
+    this.classList = new MiniClassList();
   }
   appendChild(node) {
     if (node.parentElement) node.remove();
@@ -153,18 +170,59 @@ class MiniNode {
     if (index >= 0) this.parentElement.children.splice(index, 1);
     this.parentElement = null;
   }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector === '.tool-card' && node.classList.contains('tool-card')) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
 }
 function _assistantTurnBlocks() { return null; }
+function _engineAwareCompressionCopy() {
+  return {label: 'Context compacted', preview: 'Reference only'};
+}
+function esc(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+function li(name) { return `<i data-icon="${name}"></i>`; }
+function t(key) { return key; }
 function taskCount(node) {
   return (node.label === 'task' ? 1 : 0)
     + node.children.reduce((total, child) => total + taskCount(child), 0);
 }
 function card(kind, rawIdx, taskOwner) {
   const node = new MiniNode(`${kind}:${rawIdx}`, rawIdx);
+  const marker = `[CONTEXT COMPACTION — REFERENCE ONLY]\n## Goal\nDigest ${rawIdx}`;
+  const html = _compressionReferenceCardHtml(marker, false);
+  const handler = html.match(/class="tool-card-header" onclick="([^"]+)"/);
+  assert.ok(handler, `card ${rawIdx} must expose its disclosure handler`);
+  const disclosure = new MiniNode(`disclosure:${rawIdx}`);
+  disclosure.classList.add('tool-card');
+  const header = new MiniNode(`header:${rawIdx}`);
+  header.click = () => Function(handler[1]).call(header);
+  disclosure.appendChild(header);
+  node.appendChild(disclosure);
+  node.disclosure = disclosure;
+  node.markerHtml = html;
   if (taskOwner && taskOwner.kind === kind && taskOwner.rawIdx === rawIdx) {
     node.appendChild(new MiniNode('task'));
   }
   return {kind, rawIdx, node};
+}
+function compactionCards(node) {
+  return node.children.filter(child => /^pre-window:|^inline:/.test(child.label));
+}
+function reopen(cardNode) {
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), false);
+  cardNode.children[0].children[0].click();
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), true);
+  cardNode.children[0].children[0].click();
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), false);
+  cardNode.children[0].children[0].click();
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), true);
+  assert.ok(cardNode.markerHtml.includes(`Digest ${cardNode.rawIdx}`));
 }
 
 const visible = Array.from({length: 100}, (_, index) => ({
@@ -196,10 +254,12 @@ function renderScenario(markers) {
   userRows = new Map();
   let taskOwnerNode = null;
 
-  if (placements.latestPreWindowMarker !== null) {
-    const entry = card('pre-window', placements.latestPreWindowMarker, placements.taskOwner);
+  if (placements.preWindowMarkers.length) {
+    const entries = placements.preWindowMarkers.map(rawIdx =>
+      card('pre-window', rawIdx, placements.taskOwner)
+    );
     const mounted = _insertCompactionCardNodes(
-      [entry],
+      entries,
       placements.taskOwner,
       node => _pinCompactionCardAtTop(inner, node),
     );
@@ -234,20 +294,35 @@ function renderScenario(markers) {
 
 const mixed = renderScenario([1, 79, 159, 170]);
 assert.deepStrictEqual(mixed.placements, {
+  preWindowMarkers: [1, 79, 159],
   inlineMarkers: [170],
-  latestPreWindowMarker: 159,
   taskOwner: {kind: 'inline', rawIdx: 170},
 });
-assert.strictEqual(mixed.inner.children[0].label, 'pre-window:159');
+const mixedCards = compactionCards(mixed.inner);
+assert.deepStrictEqual(mixedCards.map(node => node.rawIdx), [1, 79, 159, 170]);
+reopen(mixedCards[0]);
+assert.strictEqual(mixedCards[1].disclosure.classList.contains('open'), false);
+reopen(mixedCards[1]);
 assert.ok(
   mixed.inner.children.indexOf(mixed.taskOwnerNode)
     < mixed.inner.children.findIndex(node => node.rawIdx > 170),
+);
+assert.deepStrictEqual(
+  mixedCards.filter(node => node.children.some(child => child.label === 'task')).map(node => node.rawIdx),
+  [170],
 );
 assert.strictEqual(taskCount(mixed.inner), 1);
 assert.strictEqual(mixed.fallbackInserted, false);
 
 const preWindowOnly = renderScenario([1, 79, 159]);
+assert.deepStrictEqual(compactionCards(preWindowOnly.inner).map(node => node.rawIdx), [1, 79, 159]);
 assert.strictEqual(preWindowOnly.taskOwnerNode.label, 'pre-window:159');
+assert.deepStrictEqual(
+  compactionCards(preWindowOnly.inner)
+    .filter(node => node.children.some(child => child.label === 'task'))
+    .map(node => node.rawIdx),
+  [159],
+);
 assert.strictEqual(taskCount(preWindowOnly.inner), 1);
 assert.strictEqual(preWindowOnly.fallbackInserted, false);
 
