@@ -53,7 +53,6 @@ MESSAGING_SOURCES = {
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
-COMPRESSION_ROTATION_OVERLAP_TOLERANCE_SECONDS = 1.0
 
 SOURCE_LABELS = {
     'acp': 'ACP',
@@ -358,9 +357,9 @@ def _model_config_lineage_marker(row: dict | None) -> tuple[str, str | None]:
 def _is_model_config_branch_boundary(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child``'s ``model_config`` identity forbids stitching.
 
-    Genuine Agent branches must stay separate lineages even when the parent's
-    compression boundary overlaps their start timestamp, so this is consulted
-    before the rotation tolerance is applied.
+    Genuine Agent branches must stay separate lineages even when their direct
+    parent ended by compression, so this is consulted before that durable edge
+    is accepted as a continuation.
 
     Compression copies ``model_config`` verbatim onto the replacement session
     (``publish_compression_child`` callers pass
@@ -393,8 +392,10 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     Compression rotates session ids automatically. A manual CLI close followed
     by ``hermes -c`` also records a new child session; for sidebar projection it
     should continue the same visible conversation rather than becoming a
-    separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    separate child-session row. Agent compression publication creates the child
+    before closing the parent, and that transaction has no duration ceiling, so
+    a guarded direct compression edge is authoritative without a timestamp test.
+    Manual ``cli_close`` continuations retain the exact timestamp boundary.
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
@@ -415,8 +416,11 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     child_source = str(child.get('source') or '').strip().lower()
     if parent_source and child_source and parent_source != child_source:
         return False
-    if parent.get('end_reason') not in {'compression', 'cli_close'}:
+    end_reason = parent.get('end_reason')
+    if end_reason not in {'compression', 'cli_close'}:
         return False
+    if end_reason == 'compression':
+        return True
     ended_at = parent.get('ended_at')
     if ended_at is None:
         # Older state.db rows/tests may not have ended_at populated. Preserve
@@ -424,14 +428,7 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        child_started_at = float(child.get('started_at') or 0)
-        parent_ended_at = float(ended_at)
-        tolerance = (
-            COMPRESSION_ROTATION_OVERLAP_TOLERANCE_SECONDS
-            if parent.get('end_reason') == 'compression'
-            else 0.0
-        )
-        return child_started_at + tolerance >= parent_ended_at
+        return float(child.get('started_at') or 0) >= float(ended_at)
     except (TypeError, ValueError):
         return False
 

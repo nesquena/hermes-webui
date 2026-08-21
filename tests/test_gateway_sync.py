@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
 
@@ -500,106 +502,188 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         post('/api/settings', {'show_cli_sessions': False})
 
 
-def test_compression_lineage_tolerates_subsecond_rotation_overlap_without_hiding_real_child():
-    """Clock-order jitter at rotation stays one conversation; real children stay distinct."""
-    from api.agent_sessions import _project_agent_session_rows
+def test_publish_compression_child_over_one_second_stays_one_lineage_across_readers(
+    tmp_path, monkeypatch
+):
+    """WebUI follows the Agent's durable compression edge, not a time cutoff."""
+    hermes_state = pytest.importorskip('hermes_state')
+    import api.models as models
+    from api.agent_sessions import (
+        read_importable_agent_session_rows,
+        read_session_lineage_metadata,
+        read_session_lineage_report,
+    )
+    from api.models import get_state_db_session_messages
 
-    rows = [
-        {
-            'id': 'overlap_root_001',
-            'title': 'Rétablissement MES',
-            'source': 'webui',
-            'started_at': 100.0,
-            'parent_session_id': None,
-            'ended_at': 200.0,
-            'end_reason': 'compression',
-            'actual_message_count': 3,
-            'actual_user_message_count': 1,
-            'message_count': 3,
-            'last_activity': 199.0,
-        },
-        {
-            'id': 'overlap_tip_001',
-            'title': 'Rétablissement MES',
-            'source': 'webui',
-            'started_at': 199.7,
-            'parent_session_id': 'overlap_root_001',
-            'ended_at': None,
-            'end_reason': None,
-            'actual_message_count': 2,
-            'actual_user_message_count': 1,
-            'message_count': 2,
-            'last_activity': 201.0,
-        },
-        {
-            'id': 'real_child_001',
-            'title': 'Independent child work',
-            'source': 'webui',
-            'started_at': 195.0,
-            'parent_session_id': 'overlap_root_001',
-            'ended_at': None,
-            'end_reason': None,
-            'actual_message_count': 2,
-            'actual_user_message_count': 1,
-            'message_count': 2,
-            'last_activity': 202.0,
-        },
+    parent_id = 'slow_publish_parent'
+    child_id = 'slow_publish_child'
+    db_path = tmp_path / 'state.db'
+    db = hermes_state.SessionDB(db_path=db_path)
+    try:
+        db.create_session(parent_id, source='cli', model='test-model')
+        db.append_messages_batch(
+            parent_id,
+            [
+                {'role': 'user', 'content': 'parent request', 'timestamp': 950.0},
+                {'role': 'assistant', 'content': 'parent answer', 'timestamp': 960.0},
+            ],
+        )
+
+        # publish_compression_child stamps the child before inserting its handoff
+        # and closes the parent afterwards. Model a production-valid slow insert
+        # without adding wall-clock sleep to the suite: the durable gap is 2.5s.
+        publish_clock = iter((1000.0, 1001.0, 1002.5))
+        monkeypatch.setattr(hermes_state.time, 'time', lambda: next(publish_clock))
+        db.publish_compression_child(
+            parent_session_id=parent_id,
+            child_session_id=child_id,
+            source='cli',
+            messages=[
+                {
+                    'role': 'assistant',
+                    'content': '[CONTEXT COMPACTION] slow handoff',
+                    'timestamp': 1001.0,
+                }
+            ],
+            model='test-model',
+            require_compression_lease=False,
+        )
+
+        parent = db.get_session(parent_id)
+        child = db.get_session(child_id)
+        assert child['started_at'] == 1000.0
+        assert parent['ended_at'] == 1002.5
+        assert parent['ended_at'] - child['started_at'] > 1.0
+        assert db._is_compression_child_row(child) is True
+    finally:
+        db.close()
+
+    # Titles are a WebUI projection concern rather than an argument accepted by
+    # SessionDB.create_session/publish_compression_child. Shape them as the live
+    # readers see them while retaining the producer-authored edge and timestamps.
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE sessions SET title = ?, started_at = ? WHERE id = ?",
+            ('Slow compression conversation', 900.0, parent_id),
+        )
+        conn.execute(
+            "UPDATE sessions SET title = ? WHERE id = ?",
+            ('Slow compression continuation', child_id),
+        )
+
+    projected = read_importable_agent_session_rows(
+        db_path, limit=None, exclude_sources=None
+    )
+    lineage_rows = [row for row in projected if row.get('id') in {parent_id, child_id}]
+    assert len(lineage_rows) == 1
+    sidebar = lineage_rows[0]
+    assert sidebar['id'] == child_id
+    assert sidebar['title'] == 'Slow compression conversation'
+    assert sidebar['started_at'] == 900.0
+    assert sidebar['last_activity'] == 1001.0
+    assert sidebar['_lineage_root_id'] == parent_id
+    assert sidebar['_lineage_tip_id'] == child_id
+    assert sidebar['_compression_segment_count'] == 2
+
+    report = read_session_lineage_report(db_path, child_id)
+    assert report['lineage_key'] == parent_id
+    assert report['tip_session_id'] == child_id
+    assert report['total_segments'] == 2
+    assert [segment['session_id'] for segment in report['segments']] == [
+        child_id,
+        parent_id,
     ]
 
-    projected = _project_agent_session_rows(rows)
-    projected_by_id = {row['id']: row for row in projected}
+    metadata = read_session_lineage_metadata(db_path, {parent_id, child_id})
+    assert metadata[child_id]['_lineage_root_id'] == parent_id
+    assert metadata[child_id]['_lineage_tip_id'] == child_id
+    assert metadata[child_id]['_compression_segment_count'] == 2
 
-    assert set(projected_by_id) == {'overlap_tip_001', 'real_child_001'}
-    assert projected_by_id['overlap_tip_001']['_lineage_root_id'] == 'overlap_root_001'
-    assert projected_by_id['overlap_tip_001']['_compression_segment_count'] == 2
-    assert projected_by_id['real_child_001']['relationship_type'] == 'child_session'
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db_path)
+    stitched = get_state_db_session_messages(child_id, stitch_continuations=True)
+    assert [message['content'] for message in stitched] == [
+        'parent request',
+        'parent answer',
+        '[CONTEXT COMPACTION] slow handoff',
+    ]
 
 
-def test_compression_overlap_tolerance_is_bounded_and_keeps_exclusions():
-    """The rotation allowance must not weaken explicit lineage boundaries."""
+def test_compression_lineage_keeps_source_mismatch_separate():
     from api.agent_sessions import _is_continuation_session
 
     parent = {
-        'id': 'bounded_parent',
+        'id': 'guarded_parent',
         'source': 'webui',
         'ended_at': 200.0,
         'end_reason': 'compression',
     }
+    assert not _is_continuation_session(
+        parent,
+        {'id': 'different_source', 'source': 'cli', 'started_at': 150.0},
+    )
 
-    assert _is_continuation_session(
-        parent,
-        {'id': 'at_boundary', 'source': 'webui', 'started_at': 199.0},
-    )
+
+def test_compression_lineage_keeps_legacy_fork_separate():
+    from api.agent_sessions import _is_continuation_session
+
     assert not _is_continuation_session(
-        parent,
-        {'id': 'past_boundary', 'source': 'webui', 'started_at': 198.999},
-    )
-    assert not _is_continuation_session(
-        parent,
-        {'id': 'different_source', 'source': 'cli', 'started_at': 199.7},
-    )
-    assert not _is_continuation_session(
-        parent,
+        {
+            'id': 'guarded_parent',
+            'source': 'webui',
+            'ended_at': 200.0,
+            'end_reason': 'compression',
+        },
         {
             'id': 'explicit_fork',
             'source': 'webui',
             'session_source': 'fork',
-            'started_at': 199.7,
+            'started_at': 150.0,
         },
     )
+
+
+def test_cli_close_keeps_exact_timestamp_boundary():
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'cli_closed_parent',
+        'source': 'cli',
+        'ended_at': 200.0,
+        'end_reason': 'cli_close',
+    }
+    assert _is_continuation_session(
+        parent,
+        {'id': 'cli_at_boundary', 'source': 'cli', 'started_at': 200.0},
+    )
     assert not _is_continuation_session(
-        {**parent, 'end_reason': 'cli_close'},
-        {'id': 'cli_overlap', 'source': 'webui', 'started_at': 199.7},
+        parent,
+        {'id': 'cli_before_boundary', 'source': 'cli', 'started_at': 199.999},
     )
 
 
-def test_compression_overlap_tolerance_rejects_model_config_branch_identity():
-    """Fork/delegate identity in model_config wins over the 1s compression tolerance.
+def test_continuation_lineage_preserves_missing_ended_at_compatibility():
+    from api.agent_sessions import _is_continuation_session
+
+    child = {'id': 'old_schema_child', 'source': 'cli', 'started_at': 100.0}
+    for end_reason in ('compression', 'cli_close'):
+        assert _is_continuation_session(
+            {
+                'id': 'old_schema_parent',
+                'source': 'cli',
+                'ended_at': None,
+                'end_reason': end_reason,
+            },
+            child,
+        )
+
+
+def test_compression_lineage_rejects_model_config_branch_identity():
+    """Fork/delegate identity in model_config wins over a compression parent link.
 
     Production rows carry branch/delegate lineage in model_config
     (_delegate_from authoritative, _branched_from for manual branches), not in
-    session_source. A child whose parent compressed within the tolerance window
-    must stay a boundary. Malformed model_config fails closed (boundary).
+    session_source. A direct branch of a compression parent must stay a
+    boundary. Malformed model_config fails closed (boundary).
     """
     from api.agent_sessions import _is_continuation_session
 
@@ -611,7 +695,7 @@ def test_compression_overlap_tolerance_rejects_model_config_branch_identity():
     }
     base_child = {'id': 'mc_child', 'source': 'webui', 'started_at': 199.7}
 
-    # Plain continuation inside the tolerance still collapses (containment).
+    # A marker-free direct compression child still collapses (containment).
     assert _is_continuation_session(parent, base_child)
 
     # Delegate identity (authoritative) — JSON string as stored in state.db.
@@ -698,12 +782,12 @@ def test_model_config_branch_identity_is_fail_closed_on_hostile_payloads():
     )
 
 
-def test_model_config_fork_child_survives_tolerance_without_session_source():
-    """The exact review vector: fork identity ONLY in model_config, inside 1s.
+def test_model_config_fork_child_stays_separate_without_session_source():
+    """The review vector: fork identity only in model_config stays separate.
 
     The legacy ``session_source == 'fork'`` guard cannot see this child, so
-    before the model_config identity check the 1s compression tolerance would
-    stitch a genuine branch into the parent's lineage.
+    the model_config identity check must reject the durable compression-parent
+    edge before it can stitch a genuine branch into the parent's lineage.
     """
     from api.agent_sessions import _is_continuation_session
 
@@ -715,7 +799,7 @@ def test_model_config_fork_child_survives_tolerance_without_session_source():
     }
 
     for marker in ('_delegate_from', '_branched_from'):
-        # Deep inside the tolerance window, and with NO session_source at all.
+        # The timestamp cannot override identity, and session_source is absent.
         child = {
             'id': f'tol_child_{marker}',
             'source': 'webui',
@@ -732,7 +816,7 @@ def test_model_config_fork_child_survives_tolerance_without_session_source():
 
 
 def test_model_config_branch_child_stays_separate_lineage_in_sidebar_projection():
-    """A fork/delegate child inside the overlap window keeps its own sidebar row."""
+    """A direct fork/delegate child keeps its own sidebar row after compression."""
     from api.agent_sessions import _project_agent_session_rows
 
     rows = [
