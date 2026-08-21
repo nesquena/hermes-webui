@@ -3932,7 +3932,6 @@ def _append_journaled_partial_output(
     messages_list = session.messages or []
     current_turn_min_idx = 0
     current_turn_boundary_authoritative = False
-    pending_text = _normalize_journal_recovery_text(session.pending_user_message)
     # Derive the current-turn boundary from an AUTHORITATIVE ownership signal
     # first (active-turn token, else the full pending checkpoint identity:
     # text + timestamp + source + attachments).  Plain text equality is NOT an
