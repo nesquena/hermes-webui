@@ -141,3 +141,50 @@ def test_repair_dedupe_is_stream_scoped(hermes_home):
         stream_id_for_recheck="stream-Y",
     )
     assert _empty_recovered_count(session2) == 1
+
+
+def test_repair_preserves_current_turn_recovered_rows_when_older_identical_history_exists(hermes_home):
+    """Recovery must preserve current turn's recovered content and tool cards even
+    if an older turn in session history contained identical text/tool calls.
+    """
+    sid = "dedupe_identical_history"
+    stream_id = "stream-Z"
+
+    # Write journal for stream-Z with assistant text and a tool card
+    append_run_event(sid, stream_id, "token", {"text": "identical response"})
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls -la"})
+
+    # Session with older history containing identical text & tool call
+    older_history = [
+        {"role": "user", "content": "same prompt"},
+        {"role": "assistant", "content": "identical response"},
+    ]
+    session = _make_repair_session(sid, stream_id, previous_messages=older_history)
+    session.tool_calls = [{"name": "terminal", "preview": "ls -la"}]
+
+    result = _apply_core_sync_or_error_marker(
+        session,
+        hermes_home / "sessions" / f"session_{sid}.json",
+        stream_id_for_recheck=stream_id,
+    )
+    assert result is True
+
+    # Assert that current turn's recovered assistant text is retained
+    assistant_contents = [
+        m.get("content")
+        for m in session.messages
+        if isinstance(m, dict) and m.get("role") == "assistant"
+    ]
+    assert assistant_contents.count("identical response") == 2, (
+        "Current turn's identical recovered assistant text was dropped due to session-wide dedupe"
+    )
+
+    # Assert that current turn's recovered tool card is retained in tool_calls
+    recovered_tools = [
+        tc for tc in (session.tool_calls or [])
+        if tc.get("_recovered_stream_id") == stream_id
+    ]
+    assert len(recovered_tools) == 1, (
+        "Current turn's identical recovered tool card was dropped due to session-wide dedupe"
+    )
+

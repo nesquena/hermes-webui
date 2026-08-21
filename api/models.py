@@ -3340,6 +3340,7 @@ def _find_existing_assistant_for_journal_content(
     min_index: int | None = None,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
+    stream_id: str | None = None,
 ) -> int | None:
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
@@ -3356,6 +3357,10 @@ def _find_existing_assistant_for_journal_content(
             continue
         if message.get('_error'):
             continue
+        if stream_id:
+            msg_stream = message.get('_recovered_stream_id') or message.get('_stream_id')
+            if msg_stream and str(msg_stream) != str(stream_id):
+                continue
         existing = _normalize_journal_recovery_text(message.get('content'))
         if not existing:
             continue
@@ -3380,16 +3385,13 @@ def _journal_tool_already_present(
 
     Matching rule:
 
-    * If the existing tool card carries ``_recovered_stream_id``, that means a
-      previous journal-recovery run materialized it.  The retry can safely
-      collapse against it only when both stream ids match — otherwise a
-      legitimately-repeated tool (e.g. a second ``terminal: ls`` in a
-      different turn) would be dropped.
-    * If the existing tool card has no ``_recovered_stream_id`` (a live tool
-      card, or a tool card carried over from a core transcript that pre-dates
-      stream-id tagging), the legacy name+preview match still wins.  This
-      preserves the "core transcript already has this tool, don't duplicate
-      it" invariant the original repair path established.
+    * If the existing tool card carries ``_recovered_stream_id`` or ``_stream_id``,
+      that means it belongs to a known stream. The retry can safely collapse
+      against it only when both stream ids match — otherwise a legitimately-repeated
+      tool (e.g. a second ``terminal: ls`` in a different turn) would be dropped.
+    * When ``stream_id`` is supplied and the existing tool card is untagged (e.g.
+      from an earlier completed turn), do not assume ownership across turns —
+      preserve the current turn's tool card instead of dropping it.
     * When ``stream_id`` is omitted, the helper degrades cleanly to its
       pre-fix session-wide behaviour.
     """
@@ -3414,7 +3416,9 @@ def _journal_tool_already_present(
             if existing_tool_id and existing_tool_id != candidate_tool_id:
                 continue
         if candidate_stream is not None:
-            existing_stream = tool_call.get('_recovered_stream_id')
+            # #7167: accept either identity source — a recovered card carries
+            # _recovered_stream_id, a live-recorded one carries _stream_id.
+            existing_stream = tool_call.get('_recovered_stream_id') or tool_call.get('_stream_id')
             # A tool card explicitly tagged with a recovered_stream_id that
             # differs from ours belongs to another retry's turn — don't let
             # it pre-empt this retry. An exact tagged retry remains globally
@@ -3818,6 +3822,14 @@ def _append_journaled_partial_output(
     initial_message_count = len(session.messages or [])
     claimed_existing_assistant_indexes: set[int] = set()
 
+    messages_list = session.messages or []
+    current_turn_min_idx = 0
+    for idx in range(initial_message_count - 1, -1, -1):
+        msg = messages_list[idx]
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            current_turn_min_idx = idx
+            break
+
     def content_match_can_receive_reasoning(existing_idx: int) -> bool:
         messages = session.messages or []
         owner_idx = None
@@ -3890,13 +3902,23 @@ def _append_journaled_partial_output(
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
-                    min_index=dedupe_min_index,
+                    # #7167 scope + master's parametrisation: the caller can
+                    # narrow the window via dedupe_min_index/dedupe_max_index;
+                    # when it does not, fall back to the current-turn window
+                    # (nearest preceding user row) instead of searching the
+                    # whole transcript and stealing another turn's assistant row.
+                    min_index=(
+                        dedupe_min_index
+                        if dedupe_min_index is not None
+                        else current_turn_min_idx
+                    ),
                     max_index=(
                         initial_message_count
                         if dedupe_max_index is None
                         else min(initial_message_count, dedupe_max_index)
                     ),
                     excluded_indexes=search_excluded,
+                    stream_id=stream_id,
                 )
                 if candidate_idx is None:
                     break
