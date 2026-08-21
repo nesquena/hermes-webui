@@ -2162,8 +2162,26 @@ function closeLiveStream(sessionId, streamId, source){
 // fetch/XHR traffic, and no measurement can widen it.
 const LIVE_STREAM_POOL_MAX_HTTP1=3;
 const LIVE_STREAM_POOL_MAX_MULTIPLEXED=30;
+let _liveStreamTransportUncertain=false;
+
+function _markLiveStreamTransportUncertain(){
+  if(_liveStreamTransportUncertain) return;
+  _liveStreamTransportUncertain=true;
+  // The replacement EventSource's transport is unknowable before it opens.
+  // Prune immediately and keep the HTTP/1.1-safe budget until the next reload.
+  const keepSid=(typeof S!=='undefined'&&S&&S.sessionId)?String(S.sessionId):'';
+  closeOtherLiveStreams(keepSid);
+}
+
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function'){
+  window.addEventListener('online', _markLiveStreamTransportUncertain);
+  window.addEventListener('pageshow', event=>{
+    if(event&&event.persisted) _markLiveStreamTransportUncertain();
+  });
+}
 
 function _liveStreamPoolMax(){
+  if(_liveStreamTransportUncertain) return LIVE_STREAM_POOL_MAX_HTTP1;
   // Re-evaluate whenever the pool is arbitrated. A service-worker-controlled
   // page can reconnect over a different transport without reloading, so a
   // page-lifetime h2 verdict could later exhaust an HTTP/1.1 connection budget.
@@ -2262,6 +2280,7 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  if(reconnecting) _markLiveStreamTransportUncertain();
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
     :Date.now()/1000;
@@ -6847,6 +6866,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      _markLiveStreamTransportUncertain();
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       if(_deferStreamErrorIfOffline()) return;

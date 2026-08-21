@@ -145,7 +145,7 @@ def _pool_source(scenario: str, next_hop_protocol: str | None = "http/1.1") -> s
           "extractConstValue('LIVE_STREAM_POOL_MAX_HTTP1');\n"
         + "globalThis.LIVE_STREAM_POOL_MAX_MULTIPLEXED = "
           "extractConstValue('LIVE_STREAM_POOL_MAX_MULTIPLEXED');\n"
-        + "globalThis._liveStreamPoolMaxCache = 0;\n"
+        + "globalThis._liveStreamTransportUncertain = false;\n"
         + "eval(extractFunc('_liveStreamPoolMax'));\n"
         + "eval(extractFunc('_touchLiveStreamUse'));\n"
         + "eval(extractFunc('closeOtherLiveStreams'));\n"
@@ -329,7 +329,7 @@ def _sw_pool_source(
           "extractConstValue('LIVE_STREAM_POOL_MAX_HTTP1');\n"
         + "globalThis.LIVE_STREAM_POOL_MAX_MULTIPLEXED = "
           "extractConstValue('LIVE_STREAM_POOL_MAX_MULTIPLEXED');\n"
-        + "globalThis._liveStreamPoolMaxCache = 0;\n"
+        + "globalThis._liveStreamTransportUncertain = false;\n"
         + "eval(extractFunc('_liveStreamPoolMax'));\n"
         + scenario
     )
@@ -370,6 +370,17 @@ def test_multiplexed_decision_is_revalidated_after_transport_change():
     )))
     assert out["first"] == _source_const("LIVE_STREAM_POOL_MAX_MULTIPLEXED")
     assert out["second"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
+
+
+def test_transport_uncertainty_guard_is_fail_closed():
+    source = MESSAGES_JS_PATH.read_text(encoding="utf-8")
+    compact = re.sub(r"\s+", "", source)
+    assert "let_liveStreamTransportUncertain=false" in compact
+    assert "function_markLiveStreamTransportUncertain()" in compact
+    assert "if(_liveStreamTransportUncertain)returnLIVE_STREAM_POOL_MAX_HTTP1" in compact
+    assert "closeOtherLiveStreams(keepSid)" in compact
+    assert "addEventListener('online',_markLiveStreamTransportUncertain)" in compact
+    assert "event.persisted" in source
 
 
 def test_newest_resource_overrides_stale_navigation_transport():
@@ -460,7 +471,7 @@ def test_missing_location_object_fails_closed():
           "extractConstValue('LIVE_STREAM_POOL_MAX_HTTP1');\n"
         + "globalThis.LIVE_STREAM_POOL_MAX_MULTIPLEXED = "
           "extractConstValue('LIVE_STREAM_POOL_MAX_MULTIPLEXED');\n"
-        + "globalThis._liveStreamPoolMaxCache = 0;\n"
+        + "globalThis._liveStreamTransportUncertain = false;\n"
         + "eval(extractFunc('_liveStreamPoolMax'));\n"
         + "console.log(JSON.stringify({ cap:_liveStreamPoolMax() }));"
     )
