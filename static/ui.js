@@ -2874,18 +2874,40 @@ function _formatQuotaMoneyShort(value){
   return '$'+n.toFixed(2);
 }
 function _formatQuotaPercentShort(value){
-  const n=Number(value);
-  if(!Number.isFinite(n)) return '';
+  const n=_finiteQuotaNumber(value);
+  if(n===null) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+function _finiteQuotaNumber(value){
+  // Strict numeric coercion: Number(null)/Number('')/Number('   ') all === 0,
+  // so nullish/blank must be rejected BEFORE coercion or "no data" renders as
+  // a confident 0%.
+  if(value===null||value===undefined) return null;
+  if(typeof value==='string'&&value.trim()==='') return null;
+  const n=Number(value);
+  return Number.isFinite(n)?n:null;
 }
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
+    const finite=x=>x&&_finiteQuotaNumber(x.remaining_percent)!==null;
+    // Prefer the labeled short-horizon window (z.ai 5-hour); fall back to the
+    // first finite window, then whatever exists.
+    const w=accountLimits.windows.find(x=>x&&x.label==='5-hour'&&_finiteQuotaNumber(x&&x.remaining_percent)!==null)
+      ||accountLimits.windows.find(finite)
+      ||accountLimits.windows[0];
     const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    if(remaining){
+      const isPeak=!!(status.peak&&status.peak.is_peak);
+      const peakNum=_finiteQuotaNumber(status.peak&&status.peak.multiplier);
+      // is_peak=true with an unreadable multiplier still must render a marker
+      // (omission would misrepresent billing state); fall back to 3.
+      const effPeak=isPeak?((peakNum!==null&&peakNum>0)?peakNum:3):null;
+      const peakSuffix=effPeak!==null?(' ⚡'+effPeak+'×'):'';
+      return {label:remaining+peakSuffix, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    }
   }
   const quota=status.quota||null;
   if(quota){
