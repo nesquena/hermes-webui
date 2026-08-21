@@ -2172,37 +2172,31 @@ function _liveStreamPoolMax(){
     if(typeof performance!=='undefined'&&performance.getEntriesByType){
       const nav=performance.getEntriesByType('navigation');
       if(nav&&nav.length) proto=String(nav[0].nextHopProtocol||'');
-      // A controlling service worker serves the navigation from its own fetch
-      // handler, and the resulting PerformanceNavigationTiming reports an EMPTY
-      // nextHopProtocol -- the real transport is not exposed on that entry. On
-      // an h2 origin that silently pinned the pool (and the nav cache sized off
-      // it) to the HTTP/1.1 budget on every visit after the first. Resource
-      // entries for same-origin subresources are not intercepted the same way
-      // and still carry the negotiated protocol, so use them as the fallback.
-      if(!proto){
-        const here=(typeof location!=='undefined'&&location.origin)?location.origin:'';
-        if(here){
-          const res=performance.getEntriesByType('resource')||[];
-          for(let i=res.length-1;i>=0;i--){
-            const entry=res[i];
-            if(!entry||!entry.name) continue;
-            // Same-origin only: a third-party CDN negotiating h2 says nothing
-            // about the connection this app's streams actually use, and
-            // trusting it would OVER-size the pool. Compare parsed origins --
-            // a prefix test would accept "https://host.evil.com" for the
-            // origin "https://host".
-            let sameOrigin=false;
-            try{ sameOrigin=(new URL(entry.name,here)).origin===here; }
-            catch(_){ sameOrigin=false; }
-            if(!sameOrigin) continue;
-            // Entries are chronological and we scan newest-first. The newest
-            // same-origin observation is therefore decisive even when its
-            // protocol is blank: continuing to an older h2 entry would turn a
-            // stale transport into a permanently cached multiplexed verdict.
-            // Leave `proto` blank in that case so the caller fails closed.
-            proto=String(entry.nextHopProtocol||'');
-            break;
-          }
+      // Navigation timing describes the page's initial transport. EventSources
+      // can reconnect later without a reload, while same-origin resource timing
+      // reflects a newer connection. Prefer that newest observation whenever it
+      // exists; it also covers service-worker navigations whose protocol is blank.
+      const here=(typeof location!=='undefined'&&location.origin)?location.origin:'';
+      if(here){
+        const res=performance.getEntriesByType('resource')||[];
+        for(let i=res.length-1;i>=0;i--){
+          const entry=res[i];
+          if(!entry||!entry.name) continue;
+          // Same-origin only: a third-party CDN negotiating h2 says nothing
+          // about the connection this app's streams actually use, and
+          // trusting it would OVER-size the pool. Compare parsed origins --
+          // a prefix test would accept "https://host.evil.com" for the
+          // origin "https://host".
+          let sameOrigin=false;
+          try{ sameOrigin=(new URL(entry.name,here)).origin===here; }
+          catch(_){ sameOrigin=false; }
+          if(!sameOrigin) continue;
+          // Entries are chronological and we scan newest-first. The newest
+          // same-origin observation is decisive even when its protocol is
+          // blank; in that case the caller fails closed instead of trusting an
+          // older h2 or h3 observation.
+          proto=String(entry.nextHopProtocol||'');
+          break;
         }
       }
     }

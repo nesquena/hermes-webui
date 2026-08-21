@@ -372,6 +372,16 @@ def test_multiplexed_decision_is_revalidated_after_transport_change():
     assert out["second"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
 
 
+def test_newest_resource_overrides_stale_navigation_transport():
+    """Fresh same-origin timing must override an old nonblank navigation h2."""
+    out = json.loads(_run_node(_sw_pool_source(
+        "console.log(JSON.stringify({ cap:_liveStreamPoolMax() }));",
+        resources=[("https://webui.example.net/new.js", "http/1.1")],
+        nav_protocol="h2",
+    )))
+    assert out["cap"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
+
+
 def test_cross_origin_resources_must_not_widen_the_pool():
     """A third-party CDN on h2 says nothing about this origin's connection.
 
@@ -429,11 +439,11 @@ def test_newest_blank_same_origin_resource_does_not_reuse_stale_h2():
     assert out["cap"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
 
 
-def test_navigation_protocol_still_wins_when_present():
-    """No behaviour change when the worker is not controlling the page."""
+def test_navigation_protocol_is_fallback_without_same_origin_resource():
+    """Navigation timing remains authoritative when no relevant resource exists."""
     out = json.loads(_run_node(_sw_pool_source(
         "console.log(JSON.stringify({ cap:_liveStreamPoolMax() }));",
-        resources=[("https://webui.example.net/x.js", "http/1.1")],
+        resources=[("https://cdn.example.com/x.js", "http/1.1")],
         nav_protocol="h2",
     )))
     assert out["cap"] == _source_const("LIVE_STREAM_POOL_MAX_MULTIPLEXED")
