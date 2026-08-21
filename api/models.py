@@ -3389,9 +3389,11 @@ def _journal_tool_already_present(
       that means it belongs to a known stream. The retry can safely collapse
       against it only when both stream ids match — otherwise a legitimately-repeated
       tool (e.g. a second ``terminal: ls`` in a different turn) would be dropped.
-    * When ``stream_id`` is supplied and the existing tool card is untagged (e.g.
-      from an earlier completed turn), do not assume ownership across turns —
-      preserve the current turn's tool card instead of dropping it.
+    * If the existing tool card has no stream tag (a live tool card, or a tool card
+      carried over from a core transcript that pre-dates stream-id tagging), the
+      legacy name+preview match still wins. This preserves the "core transcript
+      already has this tool, don't duplicate it" invariant the original repair
+      path established.
     * When ``stream_id`` is omitted, the helper degrades cleanly to its
       pre-fix session-wide behaviour.
     """
