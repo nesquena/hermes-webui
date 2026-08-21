@@ -366,16 +366,18 @@ def test_squash_job_recheck_refuses_ownership_registered_after_admission(tmp_pat
         api_config.clear_session_writeback_owner_if_owned(SID, "stream-old")
 
 
-def test_squash_completion_reload_is_conditional_on_current_session():
-    """The squash flow must use captured requested-navigation authority."""
+def test_squash_completion_reload_reconciles_same_session_navigation():
+    """Completion must reconcile a superseding same-session load without
+    bypassing requested-navigation authority for any other destination."""
     repo = Path(__file__).resolve().parent.parent
     js = (repo / "static" / "panels.js").read_text(encoding="utf-8")
     fn_start = js.index("async function squashConversation")
     fn_end = js.index("function _pollSquashJob")
     body = js[fn_start:fn_end]
     assert "const navigationAuthority = _captureSessionNavigationAuthority(sid);" in body
-    assert "if(_sessionNavigationAuthorityIsCurrent(navigationAuthority))" in body
-    assert "await loadSession(sid, {force: true});" in body
+    assert "await _refreshSessionAfterConcurrentSameSessionNavigation(" in body
+    assert "navigationAuthority" in body
+    assert "_squashTranscriptMatchesResult(sid, r)" in body
 
 
 def test_squash_running_indicator_is_owner_scoped_wiring():
@@ -495,8 +497,9 @@ def test_squash_completion_obeys_requested_navigation_runtime():
     Metadata requests are controlled promises so the production race is exact:
     session B has been requested, but ``S.session`` still points at A when A's
     squash status settles.  The newer requested-navigation generation must own
-    the view even when B is pending or fails.  An explicit B -> A request also
-    owns A without a second completion reload.
+    the view even when B is pending or fails.  A superseding A reload is instead
+    reconciled after it settles: stale pre-squash data gets exactly one durable
+    refresh, while data that already contains the squash result is not doubled.
     """
     node = shutil.which("node")
     if not node:  # pragma: no cover
@@ -513,6 +516,7 @@ def test_squash_completion_obeys_requested_navigation_runtime():
     load_body = sessions[load_start:load_end]
     assert "const _loadGeneration = _beginSessionNavigationRequest(sid);" in load_body
     assert "_sessionNavigationRequestIsCurrent(sid,_loadGeneration)" in load_body
+    assert "_settleSessionNavigationRequest(sid,_loadGeneration)" in load_body
     assign_pos = load_body.index("S.session=data.session;")
     sync_pos = load_body.index("_squashSyncRunningIndicatorForSession(S.session.session_id)")
     assert sync_pos > assign_pos
@@ -593,6 +597,7 @@ def test_squash_completion_obeys_requested_navigation_runtime():
                 const data=await _requestMetadata(sid);
                 if(!_sessionNavigationRequestIsCurrent(sid,generation)) return;
                 S.session=data.session;
+                S.messages=Array.isArray(data.session.messages)?data.session.messages:[];
                 if(typeof _squashSyncRunningIndicatorForSession==='function'){
                   _squashSyncRunningIndicatorForSession(S.session.session_id);
                 }
@@ -600,6 +605,8 @@ def test_squash_completion_obeys_requested_navigation_runtime():
               }catch(error){
                 _loadErrors.push({sid,message:String(error&&error.message||error)});
                 if(_sessionNavigationRequestIsCurrent(sid,generation)) _loadingSessionId=null;
+              }finally{
+                await _settleSessionNavigationRequest(sid,generation);
               }
             }
           `, ctx);
@@ -613,6 +620,14 @@ def test_squash_completion_obeys_requested_navigation_runtime():
           job_id:'job-A', session_id:sessionId, status:'done',
           result:{already_squashed:false,before:{message_count:4},after:{message_count:1}},
         }});
+        const preSquash={session:{
+          session_id:'sess-A', message_count:4,
+          messages:[{role:'assistant',content:'pre-squash transcript'}],
+        }};
+        const postSquash={session:{
+          session_id:'sess-A', message_count:1,
+          messages:[{role:'assistant',content:'durable squash summary',_squash_summary:true}],
+        }};
         const requestFor=(rt, sid, index=0)=>rt.metadata.filter(item=>item.sid===sid)[index];
         function startSquash(rt){
           return {promise:run(rt,'squashConversation()'), ready:settle()};
@@ -620,6 +635,102 @@ def test_squash_completion_obeys_requested_navigation_runtime():
 
         (async()=>{
           const out={};
+
+          // A forced reload of the SAME session captured the old transcript
+          // before squash committed, then finishes after the job. Completion
+          // must wait for it and issue exactly one post-squash refresh.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            const concurrent=run(rt,"loadSession('sess-A',{force:true})");
+            await settle();
+            rt.status.resolve(done());
+            await settle();
+            out.stale_same_buttons_while_pending=rt.buttons();
+            requestFor(rt,'sess-A',0).request.resolve(preSquash);
+            await settle();
+            const refresh=requestFor(rt,'sess-A',1);
+            if(refresh) refresh.request.resolve(postSquash);
+            await Promise.all([squash,concurrent]);
+            out.stale_same={
+              active:rt.ctx.S.session.session_id,
+              messages:rt.ctx.S.messages.map(m=>m.content),
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              buttons:rt.buttons(),
+            };
+          }
+
+          // The concurrent A load can itself observe the already-committed
+          // squash. Its marker satisfies reconciliation, so no second reload.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            const concurrent=run(rt,"loadSession('sess-A',{force:true})");
+            await settle();
+            rt.status.resolve(done());
+            await settle();
+            requestFor(rt,'sess-A',0).request.resolve(postSquash);
+            await Promise.all([squash,concurrent]);
+            out.current_same={
+              messages:rt.ctx.S.messages.map(m=>m.content),
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              buttons:rt.buttons(),
+            };
+          }
+
+          // A failed concurrent load still gets one bounded durable retry. If
+          // that retry also fails, the flow settles without a loop or a false
+          // squash-failure toast; controls stay running between both attempts.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            const concurrent=run(rt,"loadSession('sess-A',{force:true})");
+            await settle();
+            rt.status.resolve(done());
+            await settle();
+            requestFor(rt,'sess-A',0).request.reject(new Error('stale A load failed'));
+            await settle();
+            const retry=requestFor(rt,'sess-A',1);
+            out.failed_same_buttons_between_attempts=rt.buttons();
+            if(retry) retry.request.reject(new Error('post-squash refresh failed'));
+            await Promise.all([squash,concurrent]);
+            out.failed_same={
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              errors:rt.loadErrors.map(x=>x.sid),
+              buttons:rt.buttons(),
+              squashFailed:rt.toasts.some(args=>String(args[0]).includes('squash_failed')),
+            };
+          }
+
+          // If another destination is requested after the A marker is queued,
+          // that navigation cancels the marker. It must never linger and fire
+          // on a later A visit.
+          {
+            const rt=makeRuntime();
+            const started=startSquash(rt);
+            await started.ready;
+            const squash=started.promise;
+            const concurrentA=run(rt,"loadSession('sess-A',{force:true})");
+            await settle();
+            rt.status.resolve(done());
+            await settle();
+            const navB=run(rt,"loadSession('sess-B')");
+            await settle();
+            requestFor(rt,'sess-A',0).request.resolve(preSquash);
+            requestFor(rt,'sess-B',0).request.resolve({session:{session_id:'sess-B',messages:[]}});
+            await Promise.all([squash,concurrentA,navB]);
+            out.marker_cancelled_by_b={
+              active:rt.ctx.S.session.session_id,
+              loads:rt.loads.map(x=>`${x.sid}:${x.force}`),
+              buttons:rt.buttons(),
+            };
+          }
 
           // B metadata is pending when A completes: B remains authoritative.
           {
@@ -661,8 +772,8 @@ def test_squash_completion_obeys_requested_navigation_runtime():
             };
           }
 
-          // B -> explicit A: the explicit A request wins; completion must not
-          // start a duplicate A load while that metadata request is pending.
+          // B -> explicit A: the explicit A request already observes the
+          // post-squash transcript, so completion must not duplicate it.
           {
             const rt=makeRuntime();
             const started=startSquash(rt);
@@ -675,7 +786,7 @@ def test_squash_completion_obeys_requested_navigation_runtime():
             out.back_a_buttons=rt.buttons();
             rt.status.resolve(done());
             await settle();
-            requestFor(rt,'sess-A').request.resolve({session:{session_id:'sess-A'}});
+            requestFor(rt,'sess-A').request.resolve(postSquash);
             requestFor(rt,'sess-B').request.resolve({session:{session_id:'sess-B'}});
             await Promise.all([squash,navA,navB]);
             out.back_a={
@@ -738,6 +849,31 @@ def test_squash_completion_obeys_requested_navigation_runtime():
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert out["stale_same_buttons_while_pending"] == [True, True]
+    assert out["stale_same"] == {
+        "active": "sess-A",
+        "messages": ["durable squash summary"],
+        "loads": ["sess-A:true", "sess-A:true"],
+        "buttons": [False, False],
+    }
+    assert out["current_same"] == {
+        "messages": ["durable squash summary"],
+        "loads": ["sess-A:true"],
+        "buttons": [False, False],
+    }
+    assert out["failed_same_buttons_between_attempts"] == [True, True]
+    assert out["failed_same"] == {
+        "loads": ["sess-A:true", "sess-A:true"],
+        "errors": ["sess-A", "sess-A"],
+        "buttons": [False, False],
+        "squashFailed": False,
+    }
+    assert out["marker_cancelled_by_b"] == {
+        "active": "sess-B",
+        "loads": ["sess-A:true", "sess-B:false"],
+        "buttons": [False, False],
+    }
 
     assert out["pending_b_buttons"] == [True, True]
     assert out["pending_b"] == {

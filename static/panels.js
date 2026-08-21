@@ -4919,13 +4919,15 @@ async function squashConversation() {
       if(r.summary_source === 'fallback-template') note = ' — ' + t('squash_fallback_note');
       showToast(t('squash_done', (r.before && r.before.message_count) || 0, (r.after && r.after.message_count) || 1) + note, 7000);
     }
-    // P1 (#6704): refresh only while the exact requested-navigation authority
-    // captured above still owns the view. A newer B request supersedes this
-    // completion even before B metadata updates S.session, and remains newer
-    // if B fails. An explicit B -> A request owns its own load and must not be
-    // duplicated here.
-    if(_sessionNavigationAuthorityIsCurrent(navigationAuthority)){
-      await loadSession(sid, {force: true});
+    // P1 (#6704): a newer destination keeps navigation authority. If the newer
+    // request is a load of this same visible sid, let that request settle first
+    // and consume one owner-scoped post-squash refresh marker rather than
+    // superseding it here. A load that already observed the squash satisfies the
+    // marker without another request.
+    if(!_squashTranscriptMatchesResult(sid, r)){
+      await _refreshSessionAfterConcurrentSameSessionNavigation(
+        sid, navigationAuthority, r
+      );
     }
   } catch(e) {
     showToast(t('squash_failed') + e.message, 7000, 'error');
