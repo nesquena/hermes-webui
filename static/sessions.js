@@ -5439,8 +5439,12 @@ function _correctActiveTouchAnchor(list, activeSid){
   const rowRect=row.getBoundingClientRect();
   const listRect=list.getBoundingClientRect();
   if(!rowRect||!listRect) return false;
-  const intersects=rowRect.bottom>listRect.top&&rowRect.top<listRect.bottom;
-  if(intersects) return false;
+  // Preserve scroll only when the active row is FULLY contained in the list
+  // viewport. A partially clipped row (visible at the top or bottom edge but
+  // not fully visible) must receive a nearest-edge correction — otherwise the
+  // user sees a half-row and cannot tell which session is active.
+  const fullyContained=rowRect.top>=listRect.top&&rowRect.bottom<=listRect.bottom;
+  if(fullyContained) return false;
   const current=Math.max(0, Number(list.scrollTop)||0);
   const maxScroll=Math.max(0, (Number(list.scrollHeight)||0)-(Number(list.clientHeight)||0));
   let next=current;
@@ -5585,7 +5589,13 @@ function _touchStartBoundaryNearViewport(list, state, lookahead){
       // Use real container coordinates, not start*rowHeight projection: group
       // headers, controls, density, and wrapped titles can all shift the first
       // rendered row away from the projected virtual row boundary.
-      return (rowRect.top-listRect.top)<=margin;
+      // Two-sided bounded distance: the first row must be NEAR the top edge of
+      // the list viewport (within `margin` below it) to trigger an upward
+      // prepend. A row far ABOVE the viewport (large negative distance) must NOT
+      // trigger — otherwise the user deep-scrolling downward would drain the
+      // entire prefix via repeated prepends.
+      const distance=rowRect.top-listRect.top;
+      return distance<=margin && distance>=-(listRect.height||0);
     }
   }
   // The first rendered row lives after the before-spacer height. When the
@@ -5595,7 +5605,12 @@ function _touchStartBoundaryNearViewport(list, state, lookahead){
   const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
   const scrollTop=Math.max(0, Number(list.scrollTop)||0);
   const startBoundary=start*itemHeight;
-  return (scrollTop-startBoundary)<=margin;
+  const distance=scrollTop-startBoundary;
+  const viewportHeight=Math.max(0, Number(list.clientHeight)||0);
+  // Two-sided bound: true only when the viewport is near the start boundary
+  // (within `margin` above or below it). Far below (large positive distance)
+  // or far above (large negative) must not trigger.
+  return distance<=margin && distance>=-viewportHeight;
 }
 
 function _touchNextBatchDirection(list, state, lookahead){

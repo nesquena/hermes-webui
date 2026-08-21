@@ -651,7 +651,7 @@ def test_active_anchor_uses_real_row_container_geometry():
     The active row can be shifted by group headers and wrapped controls, so the
     post-render anchor must compare the actual row rect with the list rect. It
     should correct when the row is outside the viewport and preserve scroll when
-    the row already intersects it.
+    the row is fully contained.
     """
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
@@ -684,6 +684,138 @@ console.log(JSON.stringify({moved, afterMove, movedAgain, finalScrollTop: list.s
 
 
 @_node_tests
+def test_active_anchor_clipped_top_gets_nearest_edge_correction():
+    """A partially clipped active row (visible at top but not fully contained)
+    must receive a nearest-edge scroll correction, not be skipped.
+
+    The old intersects check accepted any overlap; a row with top=80, bottom=132
+    inside a list with top=100, bottom=600 was considered "visible" even though
+    only the bottom 32px was visible — the active session label was clipped.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 500;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Row top is ABOVE the list top (80 < 100) but bottom is inside (132 > 100) —
+// partially clipped at the top edge.
+row.getBoundingClientRect = function() { return {top: 80, bottom: 132, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    # Must correct: move scroll up by 20px so the row's top aligns with list top
+    assert result["moved"] is True
+    assert result["scrollTop"] == 480  # 500 - (100 - 80) = 480
+
+
+@_node_tests
+def test_active_anchor_clipped_bottom_gets_nearest_edge_correction():
+    """A partially clipped active row (visible at bottom but not fully contained)
+    must receive a nearest-edge scroll correction.
+
+    Row with top=580, bottom=632 inside list with top=100, bottom=600 — only the
+    top 20px of the row is visible, the session name is cut off at the bottom.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 1000;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Row bottom is BELOW the list bottom (632 > 600) but top is inside (580 < 600)
+// — partially clipped at the bottom edge.
+row.getBoundingClientRect = function() { return {top: 580, bottom: 632, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    # Must correct: move scroll down by 32px so row bottom aligns with list bottom
+    assert result["moved"] is True
+    assert result["scrollTop"] == 1032  # 1000 + (632 - 600) = 1032
+
+
+@_node_tests
+def test_active_anchor_fully_outside_above_gets_correction():
+    """A row fully above the viewport (bottom < list.top) must be corrected."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 500;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+row.getBoundingClientRect = function() { return {top: 20, bottom: 72, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is True
+    # 500 - (100 - 20) = 420
+    assert result["scrollTop"] == 420
+
+
+@_node_tests
+def test_active_anchor_fully_contained_preserves_scroll():
+    """A row fully inside the viewport (top >= list.top && bottom <= list.bottom)
+    must NOT be corrected — scroll is preserved."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 1000;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Fully contained: top=300 >= 100, bottom=352 <= 600
+row.getBoundingClientRect = function() { return {top: 300, bottom: 352, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is False
+    assert result["scrollTop"] == 1000  # unchanged
+
+
+@_node_tests
 def test_touch_start_boundary_uses_first_row_geometry():
     """Upward batch trigger must read the live first row, not start*height."""
     source = f"""
@@ -707,6 +839,126 @@ console.log(JSON.stringify({nearByGeometry, farByGeometry}));
     result = json.loads(_run_node_vm(source))
     assert result["nearByGeometry"] is True
     assert result["farByGeometry"] is False
+
+
+@_node_tests
+def test_touch_start_boundary_far_above_does_not_trigger():
+    """A first rendered row far ABOVE the viewport must not trigger upward
+    batching.
+
+    The old code used (rowRect.top - listRect.top) <= margin, which is true for
+    large negative values (rows far above the list). A user deep-scrolling
+    downward would then drain the entire prefix via repeated prepends.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 5000;
+list.clientHeight = 500;
+list.scrollHeight = 10000;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const first = makeSessionItem('s40');
+// First row is 2000px ABOVE the list viewport top (far above)
+first.getBoundingClientRect = function() { return {top: -1900, bottom: -1848, height: 52}; };
+list._items = [first];
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 120;
+const state = {flatRows: new Array(120), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+const farAbove = _touchStartBoundaryNearViewport(list, state, 200);
+// Now a row that IS near the top boundary (within margin)
+first.getBoundingClientRect = function() { return {top: 250, bottom: 302, height: 52}; };
+const nearTop = _touchStartBoundaryNearViewport(list, state, 200);
+console.log(JSON.stringify({farAbove, nearTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["farAbove"] is False
+    assert result["nearTop"] is True
+
+
+@_node_tests
+def test_touch_start_boundary_projection_far_above_does_not_trigger():
+    """Same far-above regression but for the projection fallback path (no
+    getBoundingClientRect available)."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 120;
+const state = {flatRows: new Array(120), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+// scrollTop far below the start boundary — distance is large positive (far below)
+list.scrollTop = 3000;
+list.clientHeight = 500;
+const farBelow = _touchStartBoundaryNearViewport(list, state, 200);
+// scrollTop near the start boundary
+list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT - 100;
+const nearBoundary = _touchStartBoundaryNearViewport(list, state, 200);
+console.log(JSON.stringify({farBelow, nearBoundary}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["farBelow"] is False
+    assert result["nearBoundary"] is True
+
+
+@_node_tests
+def test_deep_active_window_no_prepend_when_first_row_far_above():
+    """Composed regression: a bounded deep-active touch window with the first
+    materialized row far above the viewport must not prepend when idle RAF
+    callbacks drain.
+
+    This is the exact schedule the gate-certifier flagged: the user has a
+    deep-active window (start > 0), the first rendered row is thousands of px
+    above the list, and retained RAF callbacks fire while the user is far below
+    the start boundary. No prepend should occur until the start boundary enters
+    the lookahead band.
+    """
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(224)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+let rafCallbacks = [];
+let rafSchedules = 0;
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+const list = makeList();
+list.clientHeight = 520;
+// User is scrolled far below the start boundary
+list.scrollTop = 140 * SESSION_VIRTUAL_ROW_HEIGHT - list.clientHeight;
+list.scrollHeight = 224 * SESSION_VIRTUAL_ROW_HEIGHT;
+list.getBoundingClientRect = function() {{ return {{top: 0, bottom: 520, height: 520}}; }};
+// First rendered row (index 60) is far above the viewport
+const firstRow = makeSessionItem('s60');
+firstRow.getBoundingClientRect = function() {{ return {{top: -4160, bottom: -4108, height: 52}}; }};
+list._items = [firstRow];
+list.querySelector = function() {{ return null; }};
+list.querySelectorAll = function() {{ return [firstRow]; }};
+_sessionTouchGen = 1;
+_sessionTouchStartIndex = 60;
+_sessionTouchLoadedCount = 100;
+_sessionTouchTotalCount = 224;
+_sessionTouchListEl = list;
+_touchRenderState = {{gen:1,list:list,flatRows:{json.dumps(flat_rows)},renderOneSession:function(s){{return makeSessionItem(s.session_id);}},itemHeight:SESSION_VIRTUAL_ROW_HEIGHT}};
+
+// Drain several retained RAF callbacks (simulating idle frame callbacks)
+let prependCount = 0;
+const origPrepend = _prependTouchBatch;
+_prependTouchBatch = function() {{ prependCount++; return origPrepend.apply(this, arguments); }};
+
+for (let i = 0; i < 8 && rafCallbacks.length > 0; i++) {{
+  const cb = rafCallbacks.shift();
+  cb();
+}}
+
+console.log(JSON.stringify({{rafSchedules, prependCount, loadedCount: _sessionTouchLoadedCount, startIndex: _sessionTouchStartIndex}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    # No prepend should have occurred — the first row is far above the viewport
+    assert result["prependCount"] == 0
+    # Loaded count should not have changed
+    assert result["loadedCount"] == 100
+    assert result["startIndex"] == 60
 
 
 @_node_tests
