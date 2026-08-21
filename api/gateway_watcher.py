@@ -9,7 +9,6 @@ This enables real-time session list updates in the sidebar without
 requiring any changes to hermes-agent.
 """
 import hashlib
-import json
 import logging
 import os
 import queue
@@ -44,7 +43,7 @@ _WATCHER_EXCLUDED_SOURCES = ("cron", "webui")
 
 
 def _cheap_change_fingerprint(db_path: Path) -> str | None:
-    """Compute a cheap change-detection fingerprint without the messages JOIN.
+    """Compute a cheap fingerprint with an index-covered message aggregate.
 
     The expensive projection (``read_importable_agent_session_rows``) runs a CTE
     plus a per-session ``MAX(messages.timestamp)`` aggregation over an oversampled
@@ -53,25 +52,15 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
     scan, and the watcher runs it forever on a 5s timer even when nothing changed
     (issue #3506).
 
-    This computes a fingerprint from a ``sessions``-table-only scan (no messages
-    JOIN), scoped to the same non-cron/webui rows as the projection. To guarantee
-    it never skips a change the projection would reflect, it hashes **every
-    sessions-table column the projection reads or uses for visibility/collapse**
-    -- not just the columns surfaced to the sidebar. That matters because the
-    projection collapses compression lineage and hides/shows rows based on
-    ``parent_session_id`` / ``ended_at`` / ``end_reason`` / ``source``, so a change
-    to one of those alters *which rows* appear even when no displayed field on a
-    given row moved.
+    This hashes every sessions-table column the projection uses, plus a
+    per-session ``COUNT`` / ``MAX(messages.timestamp)`` aggregate scoped to the
+    same non-cron/webui rows. The message aggregate stays on the agent's existing
+    ``(session_id, timestamp)`` covering index, avoiding a table-page lookup for
+    every historical message.
 
-    The one projection input that does not live in the ``sessions`` table is the
-    per-session message aggregate (``COUNT`` / ``MAX(messages.timestamp)`` ->
-    ``last_activity``). That is fully proxied by ``sessions.message_count``: the
-    agent's state layer bumps ``message_count`` on every appended message and
-    rewrites it to the absolute count on truncate/rewind/compaction, so a message
-    insert or delete (the only events that can move ``MAX(timestamp)``) always
-    changes ``message_count``. The fingerprint is therefore a strict superset of
-    the projection's change surface (it also fires on out-of-order inserts that
-    would not raise ``MAX(timestamp)``).
+    ``role`` is intentionally absent because it is not in that index. A bounded
+    periodic full projection in ``GatewayWatcher._poll_once`` covers rare
+    role-only visibility mutations without restoring the five-second table scan.
 
     Returns the fingerprint string, or ``None`` on any error / a pre-source
     schema so the caller falls back to running the expensive projection rather
@@ -110,21 +99,17 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
             # timestamps but can leave sessions.message_count unchanged — so the
             # sessions-only scan above would miss it and the watcher would skip a
             # projection whose last_activity (MAX(messages.timestamp)) actually
-            # moved. Fold in a PER-SESSION message aggregate, scoped to the same
-            # non-excluded sessions as the projection. It must be per-session
-            # (grouped), NOT a single global MAX: rewriting an OLDER, non-newest
-            # session moves that session's last_activity but not the global max,
-            # so a global aggregate would still miss it (#3536 review round 2).
-            # cron/webui churn is excluded by the JOIN filter so it still does
-            # NOT trigger a re-projection. This is one GROUP BY over the already-
-            # filtered set — far cheaper than the projection's oversampled
-            # correlated CTE — so it preserves the cheap-fingerprint property.
+            # moved. Fold in a PER-SESSION COUNT/MAX aggregate, scoped to the same
+            # non-excluded sessions as the projection. COUNT preserves drift
+            # detection; MAX catches same-count rewrites because replacement rows
+            # receive fresh timestamps. Do not read ``role`` here: the normal
+            # (session_id, timestamp) index can then cover this five-second scan
+            # instead of forcing a table-page lookup for every historical row.
             if 'messages' in {r[0] for r in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}:
                 try:
                     msg_rows = conn.execute(
                         "SELECT s.id, COUNT(m.id), "
-                        "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END), "
                         "COALESCE(MAX(m.timestamp), 0) "
                         "FROM sessions s LEFT JOIN messages m ON m.session_id = s.id "
                         f"WHERE s.source IS NOT NULL AND s.source NOT IN ({placeholders}) "
@@ -157,9 +142,11 @@ def _get_state_db_path(hermes_home: Path | None = None) -> Path:
     return hermes_home / 'state.db'
 
 
-def _get_agent_sessions_from_db(db_path: Path | None = None) -> list:
+def _get_agent_sessions_from_db(db_path: Path | None = None) -> list | None:
     """Read all non-webui sessions from state.db.
-    Returns list of session dicts, or empty list on any error.
+
+    Returns a list of session dicts (including an empty list for a successful
+    empty projection), or ``None`` when the projection fails.
     """
     db_path = Path(db_path) if db_path is not None else _get_state_db_path()
     if not db_path.exists():
@@ -182,7 +169,7 @@ def _get_agent_sessions_from_db(db_path: Path | None = None) -> list:
             })
         return sessions
     except Exception:
-        return []
+        return None
 
 
 # ── GatewayWatcher ──────────────────────────────────────────────────────────
@@ -200,6 +187,11 @@ class GatewayWatcher:
     """
 
     POLL_INTERVAL = 5  # seconds between polls
+    # ``messages.role`` is not present in the agent's covering
+    # ``(session_id, timestamp)`` index, but the full projection uses it for CLI
+    # visibility. Keep the hot poll index-only and bound detection of rare
+    # role-only mutations with a periodic parity projection.
+    PROJECTION_PARITY_INTERVAL = 60.0
     SUBSCRIBER_TIMEOUT = 30  # seconds before sending keepalive comment
 
     def __init__(
@@ -226,6 +218,7 @@ class GatewayWatcher:
         # unchanged we skip the expensive messages-JOIN projection entirely
         # (issue #3506). Empty string forces the first poll to run the full read.
         self._last_cheap_fp: str = ''
+        self._last_full_projection_at: float | None = None
 
     def start(self):
         """Start the watcher daemon thread."""
@@ -317,34 +310,55 @@ class GatewayWatcher:
                 except Exception:
                     logger.debug("Failed to send sentinel to dead subscriber")
 
+    def _poll_once(self, *, now: float | None = None) -> bool:
+        """Run one change-detection pass and report whether projection ran.
+
+        Most passes stay on the covering fingerprint. A bounded parity pass
+        protects projection fields (notably role-derived CLI visibility) that
+        the agent's existing index cannot see.
+        """
+        db_path = self._state_db_path
+        # A watcher may start before the agent has created state.db. Publishing an
+        # empty first snapshot would make an already-rendered sidebar disappear;
+        # wait for the first real database instead. If a previously observed DB
+        # disappears, the normal projection path still publishes that change.
+        if (
+            not db_path.exists()
+            and self._last_full_projection_at is None
+            and not self._last_hash
+        ):
+            return False
+
+        cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
+        current_time = time.monotonic() if now is None else now
+        fingerprint_changed = cheap_fp is None or cheap_fp != self._last_cheap_fp
+        parity_due = (
+            self._last_full_projection_at is None
+            or current_time - self._last_full_projection_at
+            >= self.PROJECTION_PARITY_INTERVAL
+        )
+        if not fingerprint_changed and not parity_due:
+            return False
+
+        sessions = _get_agent_sessions_from_db(db_path)
+        if sessions is None:
+            return False
+        current_hash = _snapshot_hash(sessions)
+        if cheap_fp is not None:
+            self._last_cheap_fp = cheap_fp
+        self._last_full_projection_at = current_time
+
+        if current_hash != self._last_hash:
+            self._last_hash = current_hash
+            self._last_sessions = sessions
+            self._notify_subscribers(sessions)
+        return True
+
     def _poll_loop(self):
         """Main polling loop. Runs in a daemon thread."""
         while not self._stop_event.is_set():
             try:
-                # Phase 1: cheap sessions-only fingerprint. The expensive
-                # messages-JOIN projection (_get_agent_sessions_from_db) only
-                # runs when this fingerprint actually changes, so an idle server
-                # with a large state.db stops re-aggregating tens of thousands
-                # of message rows every 5 seconds (issue #3506). A None
-                # fingerprint (error / unreadable db) forces the full read so we
-                # never silently skip a real change.
-                db_path = self._state_db_path
-                cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
-                if cheap_fp is not None and cheap_fp == self._last_cheap_fp:
-                    # Nothing changed in the sidebar-visible session set; skip
-                    # the expensive projection and the notify entirely.
-                    pass
-                else:
-                    # Phase 2: only now pay for the full projection.
-                    sessions = _get_agent_sessions_from_db(db_path)
-                    current_hash = _snapshot_hash(sessions)
-                    if cheap_fp is not None:
-                        self._last_cheap_fp = cheap_fp
-
-                    if current_hash != self._last_hash:
-                        self._last_hash = current_hash
-                        self._last_sessions = sessions
-                        self._notify_subscribers(sessions)
+                self._poll_once()
             except Exception:
                 logger.debug("Error in gateway watcher poll loop", exc_info=True)
 

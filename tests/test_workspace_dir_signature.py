@@ -24,3 +24,11 @@ def test_directory_signature_can_be_computed_from_supplied_entries(tmp_path):
     entries = list_dir(tmp_path, ".")
 
     assert dir_signature(tmp_path, ".", entries) == dir_signature(tmp_path, ".", entries)
+
+
+def test_directory_signature_ignores_workspace_sort_rank(tmp_path):
+    (tmp_path / "alpha.txt").write_text("one", encoding="utf-8")
+    entries = list_dir(tmp_path, ".")
+    changed = [dict(entry, workspace_sort_rank=1) for entry in entries]
+
+    assert dir_signature(tmp_path, ".", entries) == dir_signature(tmp_path, ".", changed)

@@ -487,7 +487,17 @@ def test_extension_rail_actions_are_mirrored_to_mobile_nav():
             };
           }
           appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+          get nextElementSibling() {
+            if (!this.parentNode) return null;
+            const index = this.parentNode.children.indexOf(this);
+            return index >= 0 ? this.parentNode.children[index + 1] || null : null;
+          }
           insertBefore(child, anchor) {
+            if (child.parentNode) this.insertBeforeMoves = (this.insertBeforeMoves || 0) + 1;
+            if (child.parentNode) {
+              const currentIdx = child.parentNode.children.indexOf(child);
+              if (currentIdx >= 0) child.parentNode.children.splice(currentIdx, 1);
+            }
             const idx = anchor ? this.children.indexOf(anchor) : -1;
             child.parentNode = this;
             if (idx >= 0) this.children.splice(idx, 0, child);
@@ -532,6 +542,7 @@ def test_extension_rail_actions_are_mirrored_to_mobile_nav():
             return [];
           }
           querySelector(sel) {
+            if (sel.startsWith('.nav-tab[data-panel="')) return this.children.find(el => el.classList.contains('nav-tab') && el.getAttribute('data-panel') === sel.slice(21, -2)) || null;
             if (sel.startsWith('[data-nav-action-mirror="')) {
               const id = sel.slice(25, -2);
               return this.children.find(el => el.getAttribute('data-nav-action-mirror') === id) || null;
@@ -545,7 +556,10 @@ def test_extension_rail_actions_are_mirrored_to_mobile_nav():
         const rail = new El('nav');
         const sidebar = new El('div');
         const source = new El('button');
+        const source2 = new El('button');
         const dashboard = new El('button');
+        const chatPanel = new El('button');
+        const settingsPanel = new El('button');
         let clicked = 0;
         let sidebarClosed = 0;
         source.id = 'hwxThemeCreatorRailBtn';
@@ -555,8 +569,21 @@ def test_extension_rail_actions_are_mirrored_to_mobile_nav():
         source.onclick = () => { clicked += 100; };
         source.innerHTML = '<svg></svg>';
         source.click = () => { clicked += 1; };
+        source2.id = 'hwxTypographyRailBtn';
+        source2.classList.add('rail-btn', 'nav-tab', 'has-tooltip');
+        source2.setAttribute('data-tooltip', 'Typography');
+        source2.innerHTML = '<svg></svg>';
+        chatPanel.id = 'chatMobileBtn';
+        chatPanel.classList.add('nav-tab');
+        chatPanel.setAttribute('data-panel', 'chat');
+        settingsPanel.id = 'settingsMobileBtn';
+        settingsPanel.classList.add('nav-tab');
+        settingsPanel.setAttribute('data-panel', 'settings');
         dashboard.classList.add('dashboard-link');
+        dashboard.id = 'dashboardMobileBtn';
+        sidebar.appendChild(chatPanel);
         sidebar.appendChild(dashboard);
+        sidebar.appendChild(settingsPanel);
         let observerCallback = null;
         let observedRail = null;
         let observedOptions = null;
@@ -586,17 +613,53 @@ def test_extension_rail_actions_are_mirrored_to_mobile_nav():
         const helpers = Function(extractFn('_stripInlineEventHandlers') + '\\n' + extractFn('_syncNavActionMirrors') + '\\n' + extractFn('_initNavActionMirrors') + '; return { _initNavActionMirrors };')();
         helpers._initNavActionMirrors();
         rail.appendChild(source);
+        rail.appendChild(source2);
         observerCallback();
         const mirror = sidebar.children.find(el => el.getAttribute('data-nav-action-mirror') === 'hwxThemeCreatorRailBtn');
+        const mirror2 = sidebar.children.find(el => el.getAttribute('data-nav-action-mirror') === 'hwxTypographyRailBtn');
         source.hidden = true;
         observerCallback();
         const mirrorHiddenWhenSourceHidden = !mirror.classList.contains('nav-action-visible');
         source.hidden = false;
         observerCallback();
         mirror.click();
-        const mirrorBeforeDashboard = sidebar.children[0] === mirror;
+        const mirrorBeforeDashboard = sidebar.children[1] === mirror && sidebar.children[2] === mirror2 && sidebar.children[3] === dashboard;
+        const initialOrder = sidebar.children.map(el => el.id);
+        const tasksPanel = new El('button');
+        tasksPanel.id = 'tasksMobileBtn';
+        tasksPanel.classList.add('nav-tab');
+        tasksPanel.setAttribute('data-panel', 'tasks');
+        const logsPanel = new El('button');
+        logsPanel.id = 'logsMobileBtn';
+        logsPanel.classList.add('nav-tab');
+        logsPanel.setAttribute('data-panel', 'logs');
+        sidebar.appendChild(tasksPanel);
+        sidebar.appendChild(logsPanel);
+        ['tasks', 'logs'].forEach(panel => {
+          const node = sidebar.querySelector('.nav-tab[data-panel="' + panel + '"]');
+          if (node) sidebar.insertBefore(node, dashboard);
+        });
+        const preSyncOrder = sidebar.children.map(el => el.id);
+        const movesBeforeReconcile = sidebar.insertBeforeMoves || 0;
+        observerCallback();
+        const reconciledOrder = sidebar.children.map(el => el.id);
+        const reconciliationMoves = (sidebar.insertBeforeMoves || 0) - movesBeforeReconcile;
+        const movesBeforeNoOpSync = sidebar.insertBeforeMoves || 0;
+        observerCallback();
+        const noOpSyncMoves = (sidebar.insertBeforeMoves || 0) - movesBeforeNoOpSync;
         source.remove();
         observerCallback();
+        const mirrorRemoved = !sidebar.children.some(el => el.getAttribute('data-nav-action-mirror') === 'hwxThemeCreatorRailBtn');
+        dashboard.remove();
+        logsPanel.remove();
+        const source3 = new El('button');
+        source3.id = 'hwxNoAnchorRailBtn';
+        source3.classList.add('rail-btn', 'nav-tab');
+        source3.setAttribute('aria-label', 'No anchor');
+        rail.appendChild(source3);
+        observerCallback();
+        const noAnchorMirror = sidebar.children.find(el => el.getAttribute('data-nav-action-mirror') === 'hwxNoAnchorRailBtn');
+        const noAnchorMirrorAppended = noAnchorMirror?.parentNode === sidebar && sidebar.children.at(-1) === noAnchorMirror;
         console.log(JSON.stringify({
           observerArmed: observedRail === rail,
           observerAttributes: !!(observedOptions && observedOptions.attributes),
@@ -609,7 +672,13 @@ def test_extension_rail_actions_are_mirrored_to_mobile_nav():
           mirrorOnclickAttribute: mirror.getAttribute('onclick'),
           mirrorOnclickProperty: mirror.onclick === null,
           mirrorBeforeDashboard,
-          mirrorRemoved: !sidebar.children.some(el => el.getAttribute('data-nav-action-mirror') === 'hwxThemeCreatorRailBtn'),
+          initialOrder,
+          preSyncOrder,
+          reconciledOrder,
+          reconciliationMoves,
+          noOpSyncMoves,
+          mirrorRemoved,
+          noAnchorMirrorAppended,
           clicked,
           sidebarClosed,
         }));
@@ -635,7 +704,35 @@ def test_extension_rail_actions_are_mirrored_to_mobile_nav():
         "mirrorOnclickAttribute": None,
         "mirrorOnclickProperty": True,
         "mirrorBeforeDashboard": True,
+        "initialOrder": [
+            "chatMobileBtn",
+            "hwxThemeCreatorRailBtnMobile",
+            "hwxTypographyRailBtnMobile",
+            "dashboardMobileBtn",
+            "settingsMobileBtn",
+        ],
+        "preSyncOrder": [
+            "chatMobileBtn",
+            "hwxThemeCreatorRailBtnMobile",
+            "hwxTypographyRailBtnMobile",
+            "tasksMobileBtn",
+            "logsMobileBtn",
+            "dashboardMobileBtn",
+            "settingsMobileBtn",
+        ],
+        "reconciledOrder": [
+            "chatMobileBtn",
+            "tasksMobileBtn",
+            "logsMobileBtn",
+            "hwxThemeCreatorRailBtnMobile",
+            "hwxTypographyRailBtnMobile",
+            "dashboardMobileBtn",
+            "settingsMobileBtn",
+        ],
+        "reconciliationMoves": 2,
+        "noOpSyncMoves": 0,
         "mirrorRemoved": True,
+        "noAnchorMirrorAppended": True,
         "clicked": 1,
         "sidebarClosed": 1,
     }

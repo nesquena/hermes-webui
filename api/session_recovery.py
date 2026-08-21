@@ -29,9 +29,11 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 
 from api.turn_journal import (
@@ -42,6 +44,24 @@ from api.turn_journal import (
 )
 
 logger = logging.getLogger(__name__)
+
+_INTENTIONAL_SHRINK_GENERATION_RE = re.compile(
+    r"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+)
+
+
+def _is_valid_intentional_shrink_generation(value) -> bool:
+    """Return whether *value* has the exact ``uuid.uuid4().hex`` shape.
+
+    ``session_ops`` stamps generations with ``uuid.uuid4().hex``.  Recovery
+    must not treat arbitrary non-empty strings as provenance, because a
+    malformed live/backup marker must leave the original restore safeguard
+    enabled.
+    """
+    return (
+        isinstance(value, str)
+        and _INTENTIONAL_SHRINK_GENERATION_RE.fullmatch(value) is not None
+    )
 
 
 def _msg_count(p: Path) -> int:
@@ -283,6 +303,36 @@ def _live_supersedes_backup_by_clear_generation(session_path: Path, bak_path: Pa
     return True
 
 
+def _session_records_intentional_message_shrink(session_path: Path, bak_path: Path) -> bool:
+    """Return True when a live shrink generation supersedes an older backup.
+
+    The marker is deliberately narrow: an unreadable, malformed, or otherwise
+    invalid marker must leave the existing data-loss recovery path enabled.
+    """
+    try:
+        live = json.loads(session_path.read_text(encoding='utf-8'))
+        bak = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(live, dict) or not isinstance(bak, dict):
+        return False
+    live_generation = live.get('intentional_shrink_generation')
+    if not _is_valid_intentional_shrink_generation(live_generation):
+        return False
+    if 'intentional_shrink_generation' not in bak:
+        return True
+    backup_generation = bak.get('intentional_shrink_generation')
+    # Older backups persist the field as null (or omit it entirely) because
+    # the live session had not yet passed through a session_ops shrink. Keep
+    # that legacy provenance behavior; malformed non-empty values below must
+    # fail open to the original restore path.
+    if backup_generation is None:
+        return True
+    if not _is_valid_intentional_shrink_generation(backup_generation):
+        return False
+    return backup_generation != live_generation
+
+
 def inspect_session_recovery_status(session_path: Path) -> dict:
     """Return a status dict describing whether recovery is recommended.
 
@@ -325,6 +375,14 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
                 "bak_messages": bak_count,
                 "recommend": "no_action",
                 "intentional_compress_shrink": True,
+            }
+        if _session_records_intentional_message_shrink(session_path, bak_path):
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "intentional_message_shrink": True,
             }
         return {
             "session_id": session_path.stem,
@@ -381,7 +439,7 @@ def _state_db_has_session(session_id: str, state_db_path: Path | None) -> bool:
     if state_db_path is None or not state_db_path.exists():
         return True
     try:
-        with sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True) as conn:
+        with closing(sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True)) as conn:
             cur = conn.execute(
                 "select 1 from sqlite_master where type='table' and name='sessions'"
             )
@@ -446,7 +504,7 @@ def _read_state_db_missing_sidecar_rows(
     if state_db_path is None or not state_db_path.exists():
         return []
     try:
-        with sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True) as conn:
+        with closing(sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
             message_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}

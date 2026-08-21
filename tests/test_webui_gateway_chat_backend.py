@@ -1293,8 +1293,8 @@ def _install_fake_agent_routing(monkeypatch, *, decision, supports,
     import types
 
     img = types.ModuleType("agent.image_routing")
-    img.decide_image_input_mode = lambda p, m, cfg: decision
-    img._lookup_supports_vision = lambda p, m, cfg=None: supports
+    img.decide_image_input_mode = lambda p, m, cfg, **kw: decision
+    img._lookup_supports_vision = lambda p, m, cfg=None, **kw: supports
     aux = types.ModuleType("agent.auxiliary_client")
     aux._read_main_provider = lambda: provider
     aux._read_main_model = lambda: model

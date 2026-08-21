@@ -685,6 +685,18 @@ def test_mobile_sidebar_open_syncs_panel_from_visible_detail_view():
     assert "_currentPanel=panel" in sync_body
     assert "document.querySelectorAll('[data-panel]')" in sync_body
     assert "document.querySelectorAll('.panel-view')" in sync_body
+    assert "showing-x-" in sync_body, (
+        "Mobile sidebar sync must recognize an active extension panel instead of treating it as Chat"
+    )
+    assert "data-panel-token" in sync_body, (
+        "Mobile sidebar sync must restore the extension's matching sidebar view"
+    )
+    assert "const extensionPanel=`x-${extensionToken}`" in sync_body, (
+        "Extension nav buttons use x- tokens and must regain their active state on mobile"
+    )
+    assert "_currentPanel=extensionPanel" not in sync_body, (
+        "Extension tokens are not host panels and must not corrupt switchPanel's native state"
+    )
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
     toggle_body = _js_function_body(boot_js, "toggleMobileSidebar")
     assert "_syncMobileSidebarPanelFromMainView()" in toggle_body, (

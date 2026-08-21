@@ -271,6 +271,77 @@ def subscribe_to_session_channel(
         return ch, q
 
 
+# Bounded window a cancelling worker may stay lifecycle-busy before an entry
+# with no live SSE channel is treated as an orphan. Matches the unwind ceiling
+# used by the chat-start successor guard in ``api.routes``.
+_ACTIVE_RUN_CANCEL_UNWIND_SECONDS = 180.0
+
+
+def _active_run_ids_for_session(
+    session_id: str,
+    *,
+    attachable_only: bool,
+) -> list[str]:
+    """Return this session's run stream ids under the requested semantics.
+
+    ``attachable_only`` selects browser-recovery semantics and drops every
+    ``phase="cancelling"`` row: cancellation is already terminal for the client
+    even while the worker unwinds. Busy checks pass ``False`` so a freshly
+    cancelled run still blocks a successor for its bounded unwind window.
+
+    A cancelling row past that window with no live ``STREAMS`` channel is an
+    orphan: it is dropped from ``ACTIVE_RUNS`` and its stream-owner entry is
+    released, so a wedged worker cannot suppress background wakeups forever.
+    """
+    from api import config as _cfg
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        with _cfg.STREAMS_LOCK:
+            live_stream_ids = set((_cfg.STREAMS or {}).keys())
+        now = time.time()
+        matches: list[str] = []
+        stale_keys: list[str] = []
+        with _cfg.ACTIVE_RUNS_LOCK:
+            for run_key, meta in list((_cfg.ACTIVE_RUNS or {}).items()):
+                if not isinstance(meta, dict) or meta.get("session_id") != sid:
+                    continue
+                stream_id = str(meta.get("stream_id") or run_key or "").strip()
+                if not stream_id:
+                    continue
+                cancelling = not _cfg.active_run_is_attachable(meta)
+                stale_cancel = (
+                    cancelling
+                    and _cfg.active_run_cancel_is_stale(
+                        meta,
+                        grace_seconds=_ACTIVE_RUN_CANCEL_UNWIND_SECONDS,
+                        now=now,
+                    )
+                    and run_key not in live_stream_ids
+                    and stream_id not in live_stream_ids
+                )
+                if stale_cancel:
+                    stale_keys.append(run_key)
+                    continue
+                if attachable_only and cancelling:
+                    continue
+                matches.append(stream_id)
+            for run_key in stale_keys:
+                (_cfg.ACTIVE_RUNS or {}).pop(run_key, None)
+        for run_key in stale_keys:
+            _cfg.unregister_stream_owner(run_key)
+        return matches
+    except Exception:
+        logger.debug(
+            "ACTIVE_RUNS lookup failed for %s",
+            sid,
+            exc_info=True,
+        )
+        return []
+
+
 def active_stream_id_for_session(session_id: str) -> Optional[str]:
     """Return the stream_id of the live run for *session_id*, or None.
 
@@ -288,25 +359,14 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
 
     Keys on ACTIVE_RUNS (worker-lifecycle registry) — the same source
     ``_session_has_active_turn`` / ``_emit_to_session_streams`` already trust
-    to map a stream back to its owning session. Returns the first matching
-    stream_id (a session has at most one live run; cancel/reconnect can
-    briefly hold two — either is a valid attach target, the frontend dedupes
-    by stream_id).
+    to map a stream back to its owning session — but returns only rows that
+    are still ATTACHABLE. A ``phase="cancelling"`` row stays lifecycle-busy
+    while its worker unwinds, yet the client already reached a terminal state
+    for that run, so replaying ``server_turn_started`` for it makes the tab
+    attach, receive the terminal event, resubscribe, and loop forever.
     """
-    from api import config as _cfg
-
-    try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return str(_stream_id)
-    except Exception:
-        logger.debug(
-            "active_stream_id_for_session lookup failed for %s",
-            session_id,
-            exc_info=True,
-        )
-    return None
+    matches = _active_run_ids_for_session(session_id, attachable_only=True)
+    return matches[0] if matches else None
 
 
 def persisted_message_count_for_session(session_id: str) -> Optional[int]:
@@ -908,8 +968,19 @@ def _requeue_async_delegation_event(
     )
 
 
-def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> None:
-    """Retry durable routing, or one bounded best-effort legacy routing pass."""
+def _retry_unclaimed_async_delegation_event(
+    process_registry,
+    evt: dict,
+    *,
+    keep_legacy_retrying: bool = False,
+) -> None:
+    """Retry from durable state, or make a bounded legacy routing pass.
+
+    ``keep_legacy_retrying`` is reserved for a completion whose target session
+    is known but currently busy. That wait state is neither an unroutable event
+    nor a failed delivery attempt, so compatibility-mode delivery must keep
+    backing off until the session becomes idle.
+    """
     completion_queue = getattr(process_registry, "completion_queue", None)
     if schedule_async_delegation_claim_retry(
         evt,
@@ -917,10 +988,11 @@ def _retry_unmapped_async_delegation_event(process_registry, evt: dict) -> None:
         delay=ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     ):
         return
-    if evt.get("_webui_routing_retry_attempted"):
+    if not keep_legacy_retrying and evt.get("_webui_routing_retry_attempted"):
         return
     retry_evt = dict(evt)
-    retry_evt["_webui_routing_retry_attempted"] = True
+    if not keep_legacy_retrying:
+        retry_evt["_webui_routing_retry_attempted"] = True
     _requeue_async_delegation_event(
         process_registry,
         retry_evt,
@@ -988,7 +1060,9 @@ def _start_async_delegation_wakeup_turn(
                 return
 
             release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "async delegation wakeup paused for session %s; delivery remains retryable",
@@ -997,16 +1071,18 @@ def _start_async_delegation_wakeup_turn(
             else:
                 logger.debug(
                     "async delegation wakeup not accepted for session %s: "
-                    "status=%s err=%r; requeued",
+                    "status=%s err=%r; durable retry scheduled",
                     session_id,
                     status,
                     (resp or {}).get("error"),
                 )
         except Exception:
             release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt, claim=claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
             logger.warning(
-                "async delegation wakeup turn failed for session %s; requeued",
+                "async delegation wakeup turn failed for session %s; durable retry scheduled",
                 session_id,
                 exc_info=True,
             )
@@ -1027,6 +1103,17 @@ def _process_async_delegation_event(
 ) -> None:
     """Claim and route one async completion without private registry markers."""
 
+    # A durable claim has a finite attempt budget. A busy foreground turn is
+    # not a delivery attempt, so leave the record unclaimed and let the shared
+    # restore sweep retry after the session can accept a wakeup.
+    if _session_has_active_turn(session_id):
+        _retry_unclaimed_async_delegation_event(
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
+        )
+        return
+
     try:
         claim = claim_async_delegation_delivery(evt, "webui-background")
     except Exception:
@@ -1042,15 +1129,20 @@ def _process_async_delegation_event(
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if not wakeup_prompt:
             raise RuntimeError("async delegation completion could not be formatted")
+    except Exception:
+        # A formatting failure is a permanent, non-retryable defect (a malformed
+        # event will never format correctly), so it must stay on the bounded
+        # one-shot path — never keep_legacy_retrying, or it would loop forever.
+        release_async_delegation_delivery(evt, claim)
+        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        logger.warning(
+            "async delegation completion could not be formatted for session %s",
+            session_id,
+            exc_info=True,
+        )
+        return
 
-        # Do not persist async results in the process-local deferred list. If a
-        # foreground turn owns the session, release the durable claim and retry
-        # from the shared queue; the core record therefore remains restart-safe.
-        if _session_has_active_turn(session_id):
-            release_async_delegation_delivery(evt, claim)
-            _requeue_async_delegation_event(process_registry, evt, claim=claim)
-            return
-
+    try:
         _start_async_delegation_wakeup_turn(
             session_id,
             wakeup_prompt,
@@ -1060,8 +1152,13 @@ def _process_async_delegation_event(
             process_registry=process_registry,
         )
     except Exception:
+        # A post-format dispatch failure against a resolved target is transient
+        # (the target may accept on a later pass), so keep the legacy completion
+        # retrying rather than dropping it after one bounded attempt.
         release_async_delegation_delivery(evt, claim)
-        _requeue_async_delegation_event(process_registry, evt, claim=claim)
+        _retry_unclaimed_async_delegation_event(
+            process_registry, evt, keep_legacy_retrying=True
+        )
         logger.warning(
             "server-side async delegation dispatch failed for session %s",
             session_id,
@@ -1144,7 +1241,7 @@ def _process_one(evt: dict) -> None:
             process_id,
         )
         if evt.get("type") == "async_delegation":
-            _retry_unmapped_async_delegation_event(_process_registry, evt)
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     session_id = ""
     if session_key:
@@ -1157,7 +1254,7 @@ def _process_one(evt: dict) -> None:
         # registered shortly after process restore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
         if evt.get("type") == "async_delegation":
-            _retry_unmapped_async_delegation_event(_process_registry, evt)
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
     # First retain the process-registry spawn-owner cross-check for legacy
@@ -1186,7 +1283,7 @@ def _process_one(evt: dict) -> None:
         # the bounded retry instead (arms a durable retry / one best-effort
         # legacy requeue), so it stays retryable without a spurious ACK.
         if evt.get("type") == "async_delegation":
-            _retry_unmapped_async_delegation_event(_process_registry, evt)
+            _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
     # ── THE SEAM: async delegations take the durable-claim delivery path,
     # routed to the origin-resolved session. The claim/complete/release
@@ -1481,16 +1578,7 @@ def _session_has_active_turn(session_id: str) -> bool:
     ``_start_chat_stream_for_session``'s own active-stream guard — i.e. the
     same lock /api/chat/start uses is the authoritative race backstop.
     """
-    from api import config as _cfg
-
-    try:
-        with _cfg.ACTIVE_RUNS_LOCK:
-            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
-                if isinstance(meta, dict) and meta.get("session_id") == session_id:
-                    return True
-    except Exception:
-        logger.debug("ACTIVE_RUNS active-turn check failed", exc_info=True)
-    return False
+    return bool(_active_run_ids_for_session(session_id, attachable_only=False))
 
 
 def _start_server_side_wakeup_turn(

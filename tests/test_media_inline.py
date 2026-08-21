@@ -849,6 +849,12 @@ class TestMediaEndpointIntegration(unittest.TestCase):
                 any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
             )
             self.assertEqual(body, html_bytes)
+            # HTML responses must use no-store to prevent stale preview on
+            # re-send of the same MEDIA: link (attachment branch).
+            self.assertEqual(
+                headers.get("Cache-Control"), "no-store",
+                "HTML attachment must use Cache-Control: no-store"
+            )
 
             body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
             self.assertEqual(status, 200)
@@ -859,6 +865,11 @@ class TestMediaEndpointIntegration(unittest.TestCase):
                 any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
             )
             self.assertEqual(body, html_bytes)
+            # Inline HTML preview must also use no-store (inline branch).
+            self.assertEqual(
+                headers.get("Cache-Control"), "no-store",
+                "Inline HTML preview must use Cache-Control: no-store"
+            )
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
