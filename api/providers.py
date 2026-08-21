@@ -2275,15 +2275,19 @@ def _sanitize_zai_quota(payload: Any, *, fetched_at: datetime | None = None) -> 
         for limit in limits:
             if not isinstance(limit, dict):
                 continue
-            label = _zai_window_label(limit)
-            used = _zai_used_percent(limit)
+            try:
+                label = _zai_window_label(limit)
+                used = _zai_used_percent(limit)
+                reset_at = _zai_reset_at(limit)
+            except (TypeError, OverflowError, ValueError):
+                continue  # hostile shapes (unhashable units, huge ints) skipped
             if not label or used is None or label in seen:
                 continue
             seen.add(label)
             windows.append(SimpleNamespace(
                 label=label,
                 used_percent=used,
-                reset_at=_zai_reset_at(limit),
+                reset_at=reset_at,
                 detail=None,
             ))
     if reason is None and not windows:
@@ -2381,6 +2385,9 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
             waiter(timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0)
         with _zai_quota_cache_lock:
             cached = _zai_quota_cache.get(cache_key)
+            if cached is not None and time.monotonic() - cached[0] > _ZAI_QUOTA_CACHE_TTL_SECONDS:
+                _zai_quota_cache.pop(cache_key, None)  # expired: never serve stale
+                cached = None
         if cached is not None:
             ts, cached_payload, cached_at = cached
             payload, fetched_at = cached_payload, cached_at
@@ -2402,8 +2409,9 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
             return {"ok": False, "provider": provider, "display_name": display_name,
                     "supported": True, "status": "unavailable", "quota": None,
                     "message": "Z.AI quota status is temporarily unavailable."}
+        attempted_waiter_fetch = True
 
-    if payload is None:
+    if payload is None and (my_event is not None or not locals().get("attempted_waiter_fetch")):
         try:
             payload = _zai_fetch_quota_payload(api_key)
             fetched_at = datetime.now(timezone.utc)
@@ -3328,8 +3336,13 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
             return {"ok": False, "error": "API key appears too short."}
 
     env_path = _get_hermes_home() / ".env"
+    env_updates: dict[str, str | None] = {env_var: api_key}
+    if not api_key:
+        # Key removal must also clear read-only legacy aliases, otherwise
+        # _get_provider_api_key keeps resolving a "removed" key.
+        env_updates.update({alias: None for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ()})
     try:
-        _write_env_file(env_path, {env_var: api_key})
+        _write_env_file(env_path, env_updates)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:

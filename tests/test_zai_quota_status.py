@@ -15,6 +15,7 @@ from __future__ import annotations
 import threading
 import time
 import urllib.error
+import hashlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -569,7 +570,7 @@ class TestZaiConcurrencyRegressions:
              "nextResetTime": 1787281782649}]}}
 
     def test_older_fetch_cannot_overwrite_newer_refresh(self, monkeypatch):
-        rec = self._mock(monkeypatch, [self._payload(80), self._payload(10)])
+        monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
         # T0: slow older miss starts (will return 80)
         gates = [threading.Event()]
         real = providers._zai_fetch_quota_payload
@@ -600,15 +601,16 @@ class TestZaiConcurrencyRegressions:
         assert used == 10.0  # stale 80 must not overwrite the fresh 10
 
     def test_waiter_never_sees_empty_cache_after_owner_success(self, monkeypatch):
-        rec = self._mock(monkeypatch, [self._payload(42)])
+        calls = {"n": 0}
         release = threading.Event()
-        holder = {}
 
         def owner_fetch(api_key):
             release.wait(timeout=10)
+            calls["n"] += 1
             return self._payload(42)
 
         monkeypatch.setattr(providers, "_zai_fetch_quota_payload", owner_fetch)
+        monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
         results = {}
         t_owner = threading.Thread(target=lambda: results.setdefault("owner", providers.get_provider_quota("zai")))
         t_owner.start()
@@ -623,20 +625,26 @@ class TestZaiConcurrencyRegressions:
         release.set()
         t_owner.join(timeout=10)
         t_waiter.join(timeout=10)
-        assert rec_extra_fetches(holder) == 0 if False else True
         assert results["owner"]["status"] == "available"
         assert results["waiter"]["status"] == "available"
-        assert rec.calls <= 2  # owner always; waiter only via local-retry path
+        # The invariant: the waiter must NOT have needed its own transport
+        # call — the owner's publish happened before the flight was signaled.
+        assert calls["n"] == 1, f"extra fetches beyond the owner: {calls['n'] - 1}"
 
     def test_superseded_owner_cannot_evict_newer_flight(self, monkeypatch):
-        # Older refresh registers flight A, gets superseded by flight B; when A
-        # finishes, it must not remove B's registration.
-        gates = [threading.Event()]
-        real_results = [self._payload(5)]
+        # Older refresh holds flight A; newer refresh registers flight B.
+        # The newer owner is gated so flight B is still REGISTERED when the
+        # older owner finishes — asserting A's cleanup cannot remove B.
+        old_release = threading.Event()
+        new_release = threading.Event()
 
         def old_refresh(api_key):
-            gates[0].wait(timeout=10)
-            return real_results[0]
+            old_release.wait(timeout=10)
+            return self._payload(5)
+
+        def new_refresh(api_key):
+            new_release.wait(timeout=10)
+            return self._payload(70)
 
         monkeypatch.setattr(providers, "_zai_fetch_quota_payload", old_refresh)
         monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
@@ -647,17 +655,42 @@ class TestZaiConcurrencyRegressions:
                 if providers._zai_quota_flights:
                     break
             time.sleep(0.005)
-        # Newer refresh supersedes immediately.
-        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k: self._payload(70))
-        newer = providers.get_provider_quota("zai", refresh=True)
-        assert newer["account_limits"]["windows"][0]["used_percent"] == 70.0
-        gates[0].set()
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", new_refresh)
+        t_new = threading.Thread(target=lambda: None if False else None)  # placeholder
+        # Newer refresh registers its own flight while still gated.
+        newer_result = {}
+
+        def run_newer():
+            newer_result["r"] = providers.get_provider_quota("zai", refresh=True)
+
+        t_new = threading.Thread(target=run_newer)
+        t_new.start()
+        for _ in range(200):
+            with providers._zai_quota_cache_lock:
+                flights_now = list(providers._zai_quota_flights.values())
+                if len(flights_now) == 1:
+                    newer_event = flights_now[0]
+                    if newer_event is not None:
+                        break
+            time.sleep(0.005)
+        # Wait until the newer flight object actually replaced the older one.
+        cache_key = f"zai|{providers._get_hermes_home()}|{hashlib.sha256(b'k').hexdigest()}"
+        newer_event = None
+        for _ in range(400):
+            with providers._zai_quota_cache_lock:
+                current = providers._zai_quota_flights.get(cache_key)
+                if current is not None:
+                    newer_event = current
+                    break
+            time.sleep(0.005)
+        # Old owner completes while the newer flight is still registered.
+        old_release.set()
         t_old.join(timeout=10)
         with providers._zai_quota_cache_lock:
-            flight_after = providers._zai_quota_flights.get("zai|/tmp|fp", "absent")
+            still_registered = any(e is newer_event for e in providers._zai_quota_flights.values())
+        assert still_registered, "older owner evicted the newer flight"
+        # Now let the newer owner finish and confirm its payload wins.
+        new_release.set()
+        t_new.join(timeout=10)
         used = providers.get_provider_quota("zai")["account_limits"]["windows"][0]["used_percent"]
-        assert used == 70.0  # cache still holds the newer value
-
-
-def rec_extra_fetches(holder):
-    return 0
+        assert used == 70.0  # newer refresh's payload, not the older 5

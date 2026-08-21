@@ -2881,8 +2881,9 @@ function _formatQuotaPercentShort(value){
 function _finiteQuotaNumber(value){
   // Strict numeric coercion: Number(null)/Number('')/Number('   ') all === 0,
   // so nullish/blank must be rejected BEFORE coercion or "no data" renders as
-  // a confident 0%.
-  if(value===null||value===undefined) return null;
+  // a confident 0%. Booleans and arrays also coerce (true→1, [2]→2) and are
+  // rejected for the same reason.
+  if(value===null||value===undefined||typeof value==='boolean'||Array.isArray(value)) return null;
   if(typeof value==='string'&&value.trim()==='') return null;
   const n=Number(value);
   return Number.isFinite(n)?n:null;
