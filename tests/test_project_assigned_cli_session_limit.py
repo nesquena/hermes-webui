@@ -10,6 +10,8 @@ swing to the opposite failure, so these tests pin BOTH edges of the contract:
 * one busy project cannot starve the others: a per-project budget applied to a
   single global recency window is not a per-project bound, so a saturated window
   is followed by project-scoped, per-project-budgeted queries (greptile P1);
+* the follow-up is COMPLETE — every starved project is served, with no fixed
+  per-build project cap that would permanently skip the rest (greptile P1);
 * the recovered set is BOUNDED — per project, counting logical conversations —
   including assigned rows that arrive as imported WebUI sidecars and therefore
   never pass through any state.db cap;
@@ -615,18 +617,18 @@ def test_saturated_window_pays_one_query_per_starved_project(
     assert sum(counts.values()) <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
 
 
-def test_followup_queries_are_capped_and_serve_the_neediest_first(
+def test_followup_serves_every_starved_project_neediest_first(
     fake_hermes_home, tmp_path, monkeypatch
 ):
-    """The follow-up is bounded: at most PROJECT_ASSIGNED_CLI_REFILL_PROJECTS.
+    """Every starved project gets its follow-up, in neediest-first order.
 
-    With the cap forced to 1 and two equally starved projects, the single
-    follow-up goes to the lower-numbered project id (the deterministic
-    neediest-first order) and the other keeps the pre-fix behaviour. This pins
-    the documented residual limitation instead of pretending it is absent.
+    The first version of the follow-up was capped at a fixed number of projects
+    per build; with the cap forced to 1, only the lower-numbered project id was
+    served and the other stayed unreachable on every rebuild (greptile P1 on
+    #6659). The cap is gone: both starved projects are served, in the same
+    deterministic order the cap used to cut.
     """
     monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
-    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_REFILL_PROJECTS", 1)
     _register_projects(tmp_path, "project-busy", "project-quiet-a", "project-quiet-b")
 
     rows = [
@@ -640,6 +642,16 @@ def test_followup_queries_are_capped_and_serve_the_neediest_first(
     rows.extend(_session(f"plain-{index:02d}", BASE_TS + 500 + index) for index in range(25))
     _write_state_db(fake_hermes_home / "state.db", rows)
 
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((kwargs["project_ids"][0], kwargs.get("limit")))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+
     sessions = models._load_cli_sessions_uncached(
         fake_hermes_home,
         fake_hermes_home / "state.db",
@@ -647,10 +659,63 @@ def test_followup_queries_are_capped_and_serve_the_neediest_first(
         project_assigned_limit=3,
     )
 
+    # Neediest first: both projects are equally starved, so id order wins.
+    assert scoped_queries == [("project-quiet-a", 3), ("project-quiet-b", 3)]
     assert _assigned_counts(sessions) == {
         "project-busy": 3,
         "project-quiet-a": 1,
+        "project-quiet-b": 1,
     }
+
+
+def test_every_starved_project_is_served_past_the_old_refill_cap(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The refill has no project-count cap: all 39 starved projects are served.
+
+    greptile P1 on #6659: with more starved projects than the old fixed refill
+    cap (32), only the first 32 were served and every later project stayed
+    unreachable on each rebuild — the recovery is re-derived from the database
+    on every build, so the same 32 won every time. Ceiling 40 over 40 projects
+    is a share of 1, one busy project saturates the global window, and all 39
+    quieter projects must still get their scoped follow-up.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 40)
+    quiet = [f"quiet-{index:02d}" for index in range(39)]
+    _register_projects(tmp_path, "project-busy", *quiet)
+
+    rows = [
+        _session(f"{project}-old", BASE_TS + index, project_id=project)
+        for index, project in enumerate(quiet)
+    ]
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 1000 + index, project_id="project-busy")
+        for index in range(40)
+    )
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append(kwargs["project_ids"][0])
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+    )
+
+    counts = _assigned_counts(sessions)
+    assert set(counts) == {"project-busy", *quiet}
+    assert len(scoped_queries) == len(quiet)
+    assert set(scoped_queries) == set(quiet)
+    assert counts == {"project-busy": 5, **{project: 1 for project in quiet}}
 
 
 def test_scan_ceiling_is_shared_equally_between_projects(
