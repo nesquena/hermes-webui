@@ -407,3 +407,134 @@ def test_frontend_hides_handoff_when_canonical_continuation_available():
     sessions = SESSIONS_JS.read_text(encoding="utf-8")
     assert "!_sessionAllowsCanonicalContinuation(S.session)" in sessions
     assert "_checkAndShowHandoffHint(sid)" in sessions
+
+
+def test_explicit_readonly_messaging_is_not_advertised_as_continuable():
+    from api.models import Session, session_uses_canonical_continuation
+
+    sess = Session(
+        session_id="20260821_explicit_ro_compact",
+        title="Locked telegram",
+        workspace="/tmp",
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        source_tag="telegram",
+        raw_source="telegram",
+        session_source="messaging",
+        read_only=True,
+        explicit_foreign_readonly=True,
+    )
+    assert session_uses_canonical_continuation(sess) is False
+    assert sess.compact()["canonical_continuation"] is False
+
+
+def test_streamed_turn_persists_to_state_db_not_sidecar(monkeypatch, isolated_state_db):
+    """Real streaming worker writes the turn to state.db under the original id."""
+    import queue
+    from collections import OrderedDict
+
+    import api.config as config
+    import api.models as models
+    import api.profiles as profiles
+    import api.streaming as streaming
+    from api.models import Session, get_state_db_session_messages
+
+    sid = "20260821_telegram_stream_persist"
+    db = isolated_state_db["db"]
+    sessions_dir = isolated_state_db["sessions_dir"]
+    _make_state_db(
+        db, sid, message_count=2,
+        title="Telegram live", source="telegram", cwd="/tmp",
+    )
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
+    monkeypatch.setattr(config, "SESSION_DIR", sessions_dir, raising=False)
+    monkeypatch.setattr(streaming, "SESSION_DIR", sessions_dir, raising=False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: isolated_state_db["state_dir"], raising=False)
+    config.STREAMS.clear()
+    config.CANCEL_FLAGS.clear()
+
+    session = Session(
+        session_id=sid,
+        title="Telegram live",
+        workspace="/tmp",
+        model="test-model",
+        messages=[
+            {"role": "user", "content": "msg 0"},
+            {"role": "assistant", "content": "msg 1"},
+        ],
+        source_tag="telegram",
+        raw_source="telegram",
+        session_source="messaging",
+        canonical_continuation=True,
+        read_only=True,
+    )
+    models.SESSIONS[sid] = session
+    assert not (sessions_dir / f"{sid}.json").exists()
+
+    reply = "canonical-stream-reply"
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.session_id = sid
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+
+        def run_conversation(self, **kwargs):
+            import sqlite3
+            import time as _time
+
+            user_text = str(kwargs.get("persist_user_message") or "continue from webui")
+            now = _time.time()
+            conn = sqlite3.connect(str(db))
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (sid, "user", user_text, now),
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (sid, "assistant", reply, now + 0.01),
+            )
+            conn.execute(
+                "UPDATE sessions SET message_count = message_count + 2 WHERE id = ?",
+                (sid,),
+            )
+            conn.commit()
+            conn.close()
+            return {
+                "completed": True,
+                "final_response": reply,
+                "messages": [
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": reply},
+                ],
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda *a, **k: ("test-model", None, None))
+    monkeypatch.setattr(streaming, "get_config", lambda: {})
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *a, **k: [])
+
+    stream_id = "stream-canonical-persist"
+    session.active_stream_id = stream_id
+    session.pending_user_message = "continue from webui"
+    config.STREAMS[stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=sid,
+            msg_text="continue from webui",
+            model="test-model",
+            workspace="/tmp",
+            stream_id=stream_id,
+            attachments=[],
+        )
+    finally:
+        config.STREAMS.pop(stream_id, None)
+
+    assert not (sessions_dir / f"{sid}.json").exists()
+    persisted = get_state_db_session_messages(sid)
+    contents = [str(m.get("content") or "") for m in persisted]
+    assert "continue from webui" in contents
+    assert reply in contents
+    assert sid == session.session_id
+

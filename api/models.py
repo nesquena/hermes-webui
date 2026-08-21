@@ -1187,16 +1187,26 @@ def model_explicit_pick_signature(model, model_provider) -> str:
 
 
 def session_uses_canonical_continuation(session) -> bool:
-    """True when WebUI may send a turn without claiming sidecar ownership."""
+    """True when WebUI may send a turn without claiming sidecar ownership.
+
+    Fail closed on an explicit foreign ``read_only`` flag. A session that is
+    only marked ``read_only`` for mutation-gating must also carry
+    ``canonical_continuation=True`` before this returns True.
+    """
     if session is None:
+        return False
+    if bool(getattr(session, "explicit_foreign_readonly", False)):
         return False
     if bool(getattr(session, "canonical_continuation", False)):
         return True
+    if bool(getattr(session, "read_only", False)):
+        return False
     return is_canonical_continuable_source(
         session_source=getattr(session, "session_source", "") or "",
         source_tag=getattr(session, "source_tag", "") or "",
         raw_source=getattr(session, "raw_source", "") or "",
         source=getattr(session, "source", "") or "",
+        explicit_readonly=False,
     )
 
 
@@ -1339,6 +1349,7 @@ class Session:
         # Runtime-only: WebUI is the interaction surface for a Hermes-owned
         # foreign session. Never persisted — derived from source tags on GET.
         self.canonical_continuation = bool(kwargs.get('canonical_continuation', False))
+        self.explicit_foreign_readonly = bool(kwargs.get('explicit_foreign_readonly', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}

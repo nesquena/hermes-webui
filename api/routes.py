@@ -7857,6 +7857,8 @@ def _activate_canonical_continuation(session):
     """Keep the original session id in memory; never persist a writable sidecar."""
     if session is None:
         return None
+    if bool(getattr(session, "explicit_foreign_readonly", False)):
+        return None
     session.canonical_continuation = True
     session.read_only = True
     try:
@@ -8160,6 +8162,8 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         _sa_child = _is_subagent_child_session_id(sid)
         sess = build_session(sid, cli_meta, msgs, read_only_flag=True,
                              is_cli_flag=not _sa_child)
+        if bool((cli_meta or {}).get("read_only")):
+            sess.explicit_foreign_readonly = True
         if not _sa_child and _is_canonical_continuable_cli_source(cli_meta, state_db_source):
             sess.canonical_continuation = True
             return sess, "canonical_continuation"
