@@ -1564,17 +1564,19 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         _content_changed = False
-        messages = data.get('messages')
-        if isinstance(messages, list):
-            normalized_messages = []
-            for message in messages:
+        for field in ('messages', 'context_messages'):
+            values = data.get(field)
+            if not isinstance(values, list):
+                continue
+            normalized_values = []
+            for message in values:
                 if isinstance(message, dict):
                     decoded_content = _decode_state_db_content(message.get('content'))
                     if decoded_content != message.get('content'):
                         message = {**message, 'content': decoded_content}
                         _content_changed = True
-                normalized_messages.append(message)
-            data['messages'] = normalized_messages
+                normalized_values.append(message)
+            data[field] = normalized_values
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials or _content_changed:
@@ -4048,11 +4050,11 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
         cached_tail = _last_non_tool_message(cached_messages)
         disk_tail = _last_non_tool_message(disk_messages)
         cached_prefix = [
-            (_message_role(message), _message_content_text(message))
+            _session_message_visible_key(message, normalize_workspace_prefix=True)
             for message in cached_messages[:-1]
         ]
         disk_prefix = [
-            (_message_role(message), _message_content_text(message))
+            _session_message_visible_key(message, normalize_workspace_prefix=True)
             for message in disk_messages[:-1]
         ]
         if cached_prefix != disk_prefix:
@@ -4075,7 +4077,11 @@ def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
     # Only drop tails that look like a duplicated optimistic/recovered user row.
     # A genuinely new concurrent user edit must stay in memory so stale-session
     # guards can report and preserve it.
-    return _message_content_text(cached_tail) == _message_content_text(previous_disk_user)
+    return _session_message_visible_key(
+        cached_tail, normalize_workspace_prefix=True
+    ) == _session_message_visible_key(
+        previous_disk_user, normalize_workspace_prefix=True
+    )
 
 
 def _anchor_scene_index_from_records(records) -> dict:
@@ -9611,6 +9617,22 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
 _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
 
 
+def _visible_duplicate_shape_and_text(content: str) -> tuple[bool, str]:
+    try:
+        parsed = json.loads(content)
+    except (TypeError, ValueError):
+        return False, content
+    if not isinstance(parsed, (list, dict)):
+        return False, content
+    if isinstance(parsed, list):
+        return True, _message_content_text({"content": parsed})
+    return True, "".join(
+        parsed[key]
+        for key in ("text", "content", "input_text", "output_text")
+        if isinstance(parsed.get(key), str)
+    )
+
+
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
     if visible_key in visible_keys:
         return visible_key
@@ -9629,11 +9651,21 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         lookup = _build_visible_duplicate_lookup(visible_keys)
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
+    visible_structured, visible_text = _visible_duplicate_shape_and_text(content)
     for existing_key in lookup.get("by_role", {}).get(role, []):
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
         if role != existing_role or sidecar != existing_sidecar or not existing_content:
+            continue
+        existing_structured, existing_text = _visible_duplicate_shape_and_text(existing_content)
+        if visible_structured and existing_structured:
+            continue
+        if visible_structured != existing_structured:
+            if max(len(visible_text), len(existing_text)) <= 200_000 and visible_text and existing_text and (
+                visible_text in existing_text or existing_text in visible_text
+            ):
+                return existing_key
             continue
         # Exact visible-key equality was checked above. For very large payloads
         # (tool logs / request dumps), Python-in substring and fuzzy-token

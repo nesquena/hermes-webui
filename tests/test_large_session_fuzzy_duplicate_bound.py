@@ -121,3 +121,41 @@ def test_small_visible_set_preserves_fuzzy_recovery():
     fuzzy_only = ("assistant", "canonical answer with suffix", "")
 
     assert models._matching_visible_duplicate(fuzzy_only, keys) in keys
+
+
+def test_large_mixed_shape_reconciliation_preserves_image_identity():
+    import api.models as models
+
+    def rich(image, text):
+        return [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": image}},
+        ]
+
+    image_a = "data:image/png;base64," + "A" * 210_000
+    image_b = "data:image/png;base64," + "B" * 210_000
+    bare_text = "describe this image"
+    prefixed_text = "[Workspace::v1: /tmp/project]\n" + bare_text
+
+    merged = models.merge_session_messages_append_only(
+        [{"role": "user", "content": bare_text, "timestamp": 1000.0}],
+        [{
+            "role": "user",
+            "content": rich(image_a, prefixed_text),
+            "timestamp": 2000.0,
+        }],
+    )
+    users = [message for message in merged if message.get("role") == "user"]
+    assert len(users) == 1
+    assert users[0]["content"] == bare_text
+    assert "[Workspace::v1:" not in str(users[0]["content"])
+
+    structured = models.merge_session_messages_append_only(
+        [{"role": "user", "content": rich(image_a, bare_text), "timestamp": 1000.0}],
+        [{
+            "role": "user",
+            "content": rich(image_b, prefixed_text),
+            "timestamp": 2000.0,
+        }],
+    )
+    assert len([message for message in structured if message.get("role") == "user"]) == 2

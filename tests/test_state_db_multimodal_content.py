@@ -298,6 +298,9 @@ def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
                 "messages": [
                     {"role": "user", "content": encoded, "timestamp": 1000.0}
                 ],
+                "context_messages": [
+                    {"role": "user", "content": encoded, "timestamp": 1000.0}
+                ],
                 "tool_calls": [],
             }
         ),
@@ -308,16 +311,25 @@ def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
     merged = models.reconciled_state_db_messages_for_session(
         loaded,
         state_messages=models.get_state_db_session_messages(SESSION_ID),
+        prefer_context=True,
     )
     user_messages = [message for message in merged if message.get("role") == "user"]
 
+    assert isinstance(loaded.context_messages, list)
+    assert loaded.context_messages[0]["content"] == content
     assert len(user_messages) == 1
     assert user_messages[0]["content"] == content
     assert isinstance(user_messages[0]["content"], list)
     assert "\x00json:" not in json.dumps(user_messages[0]["content"])
 
+    from api.streaming import _sanitize_messages_for_agent
+
+    sanitized = _sanitize_messages_for_agent(merged)
+    assert "\x00json:" not in json.dumps(sanitized)
+
     persisted = json.loads(sidecar_path.read_text(encoding="utf-8"))
     assert persisted["messages"][0]["content"] == content
+    assert persisted["context_messages"][0]["content"] == content
 
 
 def test_missing_sidecar_recovery_decodes_rich_state_db_content(
@@ -486,3 +498,12 @@ def test_reconciled_model_context_preserves_structured_state_db_content(
     assert models._message_content_text(reconciled[2]) == "describe this image"
     sanitized = _sanitize_messages_for_agent(reconciled)
     assert sanitized[2]["content"] == rich_content
+
+
+def test_replay_key_keeps_scalar_and_image_turns_distinct():
+    from api.streaming import _message_replay_key
+
+    scalar = {"role": "user", "content": "describe this image"}
+    structured = {"role": "user", "content": _rich_content()}
+
+    assert _message_replay_key(scalar) != _message_replay_key(structured)

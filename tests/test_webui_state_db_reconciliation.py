@@ -1617,6 +1617,38 @@ def test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant(m
     assert handler.response_json["session"]["message_count"] == 2
 
 
+def test_cached_image_tail_with_distinct_image_is_not_stale():
+    import api.models as models
+
+    def rich(image):
+        return [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": image}},
+        ]
+
+    disk = models.Session(
+        messages=[
+            {"role": "user", "content": rich("data:image/png;base64,AA==")},
+            {"role": "assistant", "content": "final answer"},
+        ]
+    )
+    cached = models.Session(
+        messages=disk.messages + [
+            {"role": "user", "content": rich("data:image/png;base64,AQ==")},
+        ]
+    )
+
+    assert not models._cache_has_stale_unsaved_user_tail(cached, disk)
+
+    equal_length_cached = models.Session(
+        messages=[
+            {"role": "user", "content": rich("data:image/png;base64,AQ==")},
+            {"role": "user", "content": rich("data:image/png;base64,AA==")},
+        ]
+    )
+    assert not models._cache_has_stale_unsaved_user_tail(equal_length_cached, disk)
+
+
 def test_get_session_reloads_equal_count_cached_user_tail_after_saved_assistant(monkeypatch, tmp_path):
     import api.models as models
 
