@@ -112,6 +112,15 @@ def _restore_write_cleared_mode_bits(
     revert a permission change an administrator made while the write was in
     flight.
 
+    A concurrent *revocation* of one of these bits cannot be distinguished
+    from the kernel's own clearing — both leave the inode without it — so a
+    ``chmod g-s`` landing inside the write is still re-applied. Callers invoke
+    this immediately after the ``flush()`` that issues the clearing
+    ``write(2)``, which is the earliest correct point and leaves a window no
+    wider than the kernel's own. Closing it entirely would require the chmod
+    to be atomic with the write, which POSIX does not offer. On the atomic
+    path the question is moot: the temp inode is private until ``os.replace``.
+
     ``best_effort`` suppresses errors for callers that have already committed
     their content. Restoring the bit is secondary to the write itself, and a
     caller who may write the file without owning it (group-writable config)
@@ -239,21 +248,22 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 with fallback_file:
                     fallback_file.write(text)
                     fallback_file.flush()
-                    os.fsync(fallback_file.fileno())
-                    # This path writes the live config inode, so a cleared
-                    # setuid/setgid bit is lost from the real file rather than
-                    # from a discarded temp copy. Read the mode off the inode
-                    # actually opened above; the outer ``mode`` is ``None``
-                    # whenever the writability probe saw a non-regular file.
-                    # Best-effort: the content is already committed here, and
-                    # a group-writable config may be saved by a non-owner who
-                    # cannot chmod it at all.
+                    # ``flush()`` issues the write(2) that clears the bits, so
+                    # restore here rather than after the fsync below: it is the
+                    # earliest correct point and keeps the window in which a
+                    # concurrent chmod could be clobbered as small as the
+                    # kernel allows. This path writes the live config inode, so
+                    # a cleared bit is lost from the real file rather than from
+                    # a discarded temp copy. Best-effort, because the content is
+                    # already committed and a group-writable config may be saved
+                    # by a non-owner who cannot chmod it at all.
                     _restore_write_cleared_mode_bits(
                         fallback_file.fileno(),
                         stat.S_IMODE(opened_stat.st_mode),
                         path=write_path,
                         best_effort=True,
                     )
+                    os.fsync(fallback_file.fileno())
             finally:
                 if owns_fallback_fd:
                     os.close(fallback_fd)
@@ -308,11 +318,11 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         with f:
             f.write(text)
             f.flush()
-            os.fsync(f.fileno())
-            # The chmod above ran before these bytes existed, so the kernel
-            # has since stripped any setuid/setgid bit from the temp inode.
-            # Restore it before the rename carries the mode onto the target.
+            # Restore before the fsync for the same reason as the in-place
+            # path; here the temp inode is still private, so no third party
+            # can observe or race it before os.replace commits.
             _restore_write_cleared_mode_bits(f.fileno(), mode, path=tmp)
+            os.fsync(f.fileno())
         _verify_symlink_target()
         os.replace(tmp, write_path)
         _fsync_directory(write_path.parent)
