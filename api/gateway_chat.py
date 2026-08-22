@@ -1280,6 +1280,12 @@ def _run_gateway_chat_streaming(
             # same sort key; later transcript merges can then fall back to
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
+            # NOTE(rebased #6649): the persisted Gateway user row must be
+            # stamped with the turn's captured pending_started_at, not a fresh
+            # stamp — covered natively by _active_turn_authority() +
+            # _materialize_active_turn_user() below (identity.timestamp is
+            # session.pending_started_at; normalized to float at the
+            # user_msg["timestamp"] assignment).
             pending_source = getattr(s, "pending_user_source", None) or "webui"
             from api.streaming import _active_turn_authority, _materialize_active_turn_user
 
