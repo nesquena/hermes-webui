@@ -5069,7 +5069,114 @@ _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
-_available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
+_available_models_cache_lock = threading.RLock()
+
+# Provider auth-status enumeration cache. ``list_available_providers()``
+# (core) probes EVERY known provider's credential source serially — AWS IMDS
+# dial, gh CLI subprocess, token exchange, per-endpoint /models — and the
+# webui re-runs it on every catalog rebuild even though auth status only
+# changes when the user edits credentials. Cache the enumeration briefly
+# (keyed by profile) so a rebuild after the first one skips the probes
+# entirely. Credential edits must call ``invalidate_models_cache()`` so
+# the next rebuild does not keep serving the old snapshot for the rest of
+# the TTL. The caller still re-checks ``get_auth_status`` per authenticated
+# provider below.
+_PROVIDER_ENUM_CACHE: dict[str, tuple[float, list]] = {}
+_PROVIDER_ENUM_CACHE_INFLIGHT: dict[str, threading.Event] = {}
+_PROVIDER_ENUM_CACHE_TTL_SECONDS = 120.0
+_PROVIDER_ENUM_CACHE_LOCK = threading.Lock()
+# Bumped by invalidate_models_cache() so an in-flight probe that started
+# before invalidation cannot write its stale result back into the cache.
+_PROVIDER_ENUM_CACHE_EPOCH = 0
+
+
+def _clear_provider_enum_cache_locked() -> list[threading.Event]:
+    """Drop cached enumerations and take ownership of in-flight waiters.
+
+    Caller must hold ``_PROVIDER_ENUM_CACHE_LOCK``.  The returned events
+    must be ``.set()`` *after* the lock is released so waiters can re-check
+    the now-empty cache without nesting lock acquisitions.
+    """
+    global _PROVIDER_ENUM_CACHE_EPOCH
+    _PROVIDER_ENUM_CACHE.clear()
+    pending = list(_PROVIDER_ENUM_CACHE_INFLIGHT.values())
+    _PROVIDER_ENUM_CACHE_INFLIGHT.clear()
+    _PROVIDER_ENUM_CACHE_EPOCH += 1
+    return pending
+
+
+def _list_available_providers_cached(profile_key: str) -> list:
+    """Return ``list_available_providers()``, cached per profile for a short TTL.
+
+    The uncached core call can take seconds (serial per-provider probes).
+    Keep the cache small and TTL-bounded so memory stays flat.  Concurrent
+    misses for the same profile are coalesced so only one caller performs
+    the expensive probe.  ``invalidate_models_cache()`` drops this cache
+    immediately after credential edits.
+
+    Cached and returned values are isolated snapshots: the cache stores a
+    deep copy of each enumeration and every caller receives its own deep
+    copy, so mutating a returned list or nested row can never corrupt the
+    cached state.
+    """
+    while True:
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            now = time.monotonic()
+            hit = _PROVIDER_ENUM_CACHE.get(profile_key)
+            if hit is not None and now - hit[0] < _PROVIDER_ENUM_CACHE_TTL_SECONDS:
+                return copy.deepcopy(hit[1])
+            wait_for = _PROVIDER_ENUM_CACHE_INFLIGHT.get(profile_key)
+            if wait_for is None:
+                wait_for = threading.Event()
+                _PROVIDER_ENUM_CACHE_INFLIGHT[profile_key] = wait_for
+                epoch = _PROVIDER_ENUM_CACHE_EPOCH
+                am_owner = True
+            else:
+                am_owner = False
+        if not am_owner:
+            # A different caller owns this profile's cold refresh.  Do not
+            # hold the cache lock while waiting; unrelated profiles remain
+            # independent.
+            wait_for.wait()
+            continue
+
+        try:
+            from hermes_cli.models import list_available_providers as _lap
+
+            result = _lap()
+            completed_at = time.monotonic()
+        except BaseException:
+            # Never leave waiters blocked, and allow the next caller to retry
+            # after a failed probe rather than caching a partial/failed result.
+            # Identity guard: only pop/signal our exact event — never a
+            # replacement owner installed after an invalidation.
+            with _PROVIDER_ENUM_CACHE_LOCK:
+                if _PROVIDER_ENUM_CACHE_INFLIGHT.get(profile_key) is wait_for:
+                    _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key, None)
+                    wait_for.set()
+            raise
+
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            # A concurrent invalidate_models_cache() bumps the epoch and
+            # drops inflight waiters.  Do not republish the stale probe.
+            if epoch == _PROVIDER_ENUM_CACHE_EPOCH:
+                _PROVIDER_ENUM_CACHE[profile_key] = (completed_at, copy.deepcopy(result))
+            # Identity-owned cleanup: only the caller whose exact event is
+            # still installed may pop/signal it.  If an invalidation retired
+            # our event and a newer owner installed its own, popping/signaling
+            # that replacement would let a third caller launch yet another
+            # probe (ABA).
+            if _PROVIDER_ENUM_CACHE_INFLIGHT.get(profile_key) is wait_for:
+                _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key, None)
+                wait_for.set()
+            current_epoch = _PROVIDER_ENUM_CACHE_EPOCH
+        if epoch == current_epoch:
+            return copy.deepcopy(result)
+        # Epoch mismatch: an invalidation landed while we probed.  The result
+        # is stale — discard it and re-enter the lookup loop so this caller
+        # waits on (or becomes) the current generation's owner instead of
+        # returning a pre-invalidation snapshot to the outer catalog builder.
+        continue
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
@@ -6475,6 +6582,11 @@ def invalidate_models_cache():
     that call invalidate_models_cache() still get back the previous test's
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
+
+    Also drops the provider-enumeration cache. Credential edits and the
+    autouse test fixture both go through this function; leaving the 120s
+    provider-auth snapshot in place would serve stale list_available_providers()
+    results after the outer catalog cache was cleared.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
@@ -6491,6 +6603,19 @@ def invalidate_models_cache():
         # prior auth_store payload — the test_credential_pool_providers suite was
         # hitting this directly. A full reset is intentionally profile-wide.
         _CREDENTIAL_POOL_CACHE.clear()
+        # Drop the provider-enumeration cache while STILL holding the outer
+        # lock so the outer/inner freshness transition is atomic: a concurrent
+        # rebuild that lands between the two clears could otherwise reuse the
+        # pre-credential-change enumeration and publish a catalog missing the
+        # newly authenticated provider. Lock order stays outer→provider,
+        # matching the cold build path (get_available_models holds the outer
+        # lock while calling _list_available_providers_cached). The captured
+        # in-flight events are woken only after BOTH locks are released so
+        # waiters re-check the now-empty cache without nested acquisitions.
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            pending_provider_enum = _clear_provider_enum_cache_locked()
+    for _event in pending_provider_enum:
+        _event.set()
     # Also delete the disk cache so the next cold build starts fresh.
     # Disk delete is outside the lock — file I/O shouldn't block other readers.
     _delete_models_cache_on_disk()
@@ -7036,10 +7161,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         _hermes_auth_used = False
         try:
-            from hermes_cli.models import list_available_providers as _lap
             from hermes_cli.auth import get_auth_status as _gas
 
-            for _p in _lap():
+            for _p in _list_available_providers_cached(_active_profile_name or "default"):
                 if not _p.get("authenticated"):
                     continue
                 try:

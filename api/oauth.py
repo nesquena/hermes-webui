@@ -219,7 +219,22 @@ def _now_iso() -> str:
 
 
 def _invalidate_provider_state_caches(provider: str) -> None:
-    """Invalidate caches derived from provider credential state."""
+    """Invalidate caches derived from provider credential state.
+
+    Credential mutations (OAuth link/unlink, token persist) must route
+    through the full model/provider-enumeration invalidation boundary:
+    ``invalidate_models_cache()`` clears the outer models catalog cache AND
+    the profile-scoped provider-auth enumeration cache (plus the disk cache)
+    in one atomic transition, so the next catalog rebuild reflects the new
+    credential state instead of reusing a pre-mutation snapshot.
+    """
+    try:
+        from api.config import invalidate_models_cache
+
+        invalidate_models_cache()
+    except Exception:
+        logger.debug("Failed to invalidate models cache after %s credential change", provider, exc_info=True)
+
     try:
         from api.config import invalidate_credential_pool_cache
 
