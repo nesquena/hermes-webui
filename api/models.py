@@ -8271,9 +8271,26 @@ def get_state_db_session_messages(
                 cur.execute("PRAGMA table_info(sessions)")
                 session_cols = {str(row['name']) for row in cur.fetchall()}
                 if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    # session_source/model_config carry the fork/delegate boundary
+                    # identity consumed by _is_continuation_session (#6931/#7021).
+                    # Select them when present so the branch-marker guard applies
+                    # to the stitch path too; older schemas degrade to NULL.
+                    identity_cols = []
+                    if 'session_source' in session_cols:
+                        identity_cols.append('session_source')
+                    else:
+                        identity_cols.append('NULL AS session_source')
+                    if 'model_config' in session_cols:
+                        identity_cols.append('model_config')
+                    else:
+                        identity_cols.append('NULL AS model_config')
+                    lineage_select = (
+                        "id, source, started_at, parent_session_id, ended_at, end_reason"
+                        + ", " + ", ".join(identity_cols)
+                    )
                     cur.execute(
-                        """
-                        SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                        f"""
+                        SELECT {lineage_select}
                         FROM sessions
                         WHERE id = ?
                         """,
@@ -8291,8 +8308,8 @@ def get_state_db_session_messages(
                             if not parent_id or parent_id in seen:
                                 break
                             cur.execute(
-                                """
-                                SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                                f"""
+                                SELECT {lineage_select}
                                 FROM sessions
                                 WHERE id = ?
                                 """,

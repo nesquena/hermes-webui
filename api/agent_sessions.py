@@ -1,4 +1,5 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
+import json
 import logging
 import sqlite3
 from contextlib import closing
@@ -52,6 +53,15 @@ MESSAGING_SOURCES = {
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
+
+# Sub-second scheduling/write-order races during a compression/cli_close
+# handoff can persist the continuation row with ``started_at`` a few
+# milliseconds BEFORE the parent's ``ended_at`` lands (#6931). The tolerance
+# below lets those rows still classify as the next segment; the fork /
+# model_config branch-marker / cross-source / end_reason guards in
+# ``_is_continuation_session`` already rule out unrelated rows, so a small
+# window cannot collapse genuinely concurrently started children.
+CONTINUATION_STARTED_AT_TOLERANCE_SECONDS = 2.0
 
 SOURCE_LABELS = {
     'acp': 'ACP',
@@ -305,6 +315,30 @@ def is_cli_session_row_visible(row: dict) -> bool:
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
 
 
+def _branch_markers(row: dict | None) -> tuple[str | None, str | None]:
+    """Return ``(_branched_from, _delegate_from)`` from a row's ``model_config``.
+
+    Hermes Agent stamps explicit branches and delegate/subagent runs in the
+    ``model_config`` JSON column (``_branched_from`` / ``_delegate_from``);
+    ``session_source='fork'`` alone only covers WebUI-created forks. Missing,
+    empty, or unparsable ``model_config`` degrades to ``(None, None)``.
+    """
+    if not row:
+        return None, None
+    raw = row.get('model_config')
+    if isinstance(raw, dict):
+        config = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        config = parsed if isinstance(parsed, dict) else {}
+    else:
+        config = {}
+    return config.get('_branched_from'), config.get('_delegate_from')
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
@@ -312,16 +346,35 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     by ``hermes -c`` also records a new child session; for sidebar projection it
     should continue the same visible conversation rather than becoming a
     separate child-session row. Plain parent/child links that started before the
-    parent's ended boundary remain child sessions.
+    parent's ended boundary remain child sessions. A small scheduling/write-order
+    overlap between the handoff boundary timestamps is tolerated (#6931).
 
     Do not collapse lineage across raw sources. A WebUI session that continues
     from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
     conversation; otherwise the tip inherits the root's title/source metadata and
     can disappear under messaging/sidebar policies.
+
+    Explicit branches/delegates never continue: a child whose ``model_config``
+    ``_branched_from`` / ``_delegate_from`` points at this parent is a fork of
+    the conversation and must stay visible. Beyond the bounded tolerance window
+    there is no reliable continuation signal — titles are user-controlled and
+    non-unique, so they are never used to widen the window (#7021 re-gate).
     """
     if not parent or not child:
         return False
     if str(child.get('session_source') or '').strip().lower() == 'fork':
+        return False
+    # Real Agent branches/delegates are marked in model_config (not
+    # session_source, which only WebUI-created forks carry). The marker must
+    # reference THIS parent: compression continuations inherit the rotated
+    # agent's model_config verbatim, so presence alone (a delegate's
+    # continuation still carries the delegate's own ``_delegate_from``) would
+    # misclassify real continuations.
+    child_branched_from, child_delegate_from = _branch_markers(child)
+    parent_id = parent.get('id')
+    if parent_id and (
+        child_branched_from == parent_id or child_delegate_from == parent_id
+    ):
         return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
@@ -336,9 +389,16 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        child_started = float(child.get('started_at') or 0)
+        parent_ended = float(ended_at)
     except (TypeError, ValueError):
         return False
+    if child_started >= parent_ended - CONTINUATION_STARTED_AT_TOLERANCE_SECONDS:
+        return True
+    # Beyond the bounded early-side window the child is a genuine concurrent
+    # session — an exact title match is not evidence (titles are user-controlled
+    # and non-unique, so it cannot extend the tolerance).
+    return False
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:
@@ -572,6 +632,7 @@ def read_importable_agent_session_rows(
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
+        model_config_expr = _optional_col('model_config', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -693,6 +754,7 @@ def read_importable_agent_session_rows(
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
                    {session_source_expr},
+                   {model_config_expr},
                    {user_id_expr},
                    {chat_id_expr},
                    {chat_type_expr},
@@ -775,6 +837,11 @@ def read_importable_agent_session_rows(
                 params,
             )
         projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
+        # model_config is selected only so the continuation classifier can
+        # read the real _branched_from/_delegate_from markers; it is internal
+        # agent state and must not leak into the /api/sessions response.
+        for row in projected:
+            row.pop('model_config', None)
         projected = [_with_normalized_source(row) for row in projected]
         projected = [row for row in projected if is_cli_session_row_visible(row)]
         if limit is None:
@@ -877,6 +944,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
 
             source_expr = _optional_col('source', session_cols)
             session_source_expr = _optional_col('session_source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             title_expr = _optional_col('title', session_cols)
             started_expr = _optional_col('started_at', session_cols, '0')
             ended_expr = _optional_col('ended_at', session_cols)
@@ -891,6 +959,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -937,6 +1006,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                     SELECT s.id,
                            {source_expr},
                            {session_source_expr},
+                           {model_config_expr},
                            {title_expr},
                            {started_expr},
                            {parent_expr},
@@ -1014,6 +1084,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
             source_expr = _optional_col('source', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
@@ -1050,7 +1121,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1079,7 +1150,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,
