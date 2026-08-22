@@ -28258,18 +28258,25 @@ def _handle_session_import_cli(handler, body):
             profile=(cli_meta or {}).get("profile") or refresh_profile,
         )
         changed = False
-        if fresh_msgs and len(fresh_msgs) > len(existing.messages):
-            # Prefix-equality guard: only extend if existing messages are a prefix of
-            # the fresh CLI messages. Prevents silently dropping WebUI-added messages
-            # on hybrid sessions (user sent messages via WebUI while CLI continued).
-            if _is_messages_refresh_prefix_match(existing.messages, fresh_msgs):
-                existing.messages = fresh_msgs
-                changed = True
-        elif fresh_msgs and _is_cli_tool_metadata_enrichment(existing.messages, fresh_msgs):
-            # Same row count, richer payload: rebuild sidecars imported before
-            # CLI tool metadata was preserved (#1772).
-            existing.messages = fresh_msgs
-            changed = True
+        if fresh_msgs:
+            if len(fresh_msgs) > len(existing.messages):
+                # Prefix-equality guard: only extend if existing messages are a prefix of
+                # the fresh CLI messages. Prevents silently dropping WebUI-added messages
+                # on hybrid sessions (user sent messages via WebUI while CLI continued).
+                if _is_messages_refresh_prefix_match(existing.messages, fresh_msgs):
+                    existing.messages = fresh_msgs
+                    changed = True
+            elif len(fresh_msgs) == len(existing.messages):
+                # Same row count, richer payload: rebuild sidecars imported before
+                # CLI tool metadata was preserved (#1772).
+                if _is_cli_tool_metadata_enrichment(existing.messages, fresh_msgs):
+                    existing.messages = fresh_msgs
+                    changed = True
+            else:
+                # Compression case: fresh messages are a prefix of existing messages
+                if _is_messages_refresh_prefix_match(fresh_msgs, existing.messages):
+                    existing.messages = fresh_msgs
+                    changed = True
         if cli_meta:
             # A subagent child must never be flipped to CLI-classified /
             # writable on an existing-session refresh either (#5307).
