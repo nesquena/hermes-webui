@@ -7673,6 +7673,21 @@ function renderMd(raw){
     return lead+'\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
   s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
+  // ── Bare local file paths → probe placeholders (deliverable-mode parity) ──
+  // Messaging platforms auto-attach bare paths like /tmp/chart.png; the WebUI
+  // mirrors that via a PROBE: the path renders as a placeholder span, and
+  // probeBarePathMedia() only swaps it for real media when /api/media confirms
+  // the file exists and is allowed — a 403/404 leaves the path as plain text,
+  // so hallucinated or referenced-only paths never produce broken embeds.
+  // Runs after the fence/inline-code stashes (code samples stay literal) and
+  // before the link passes; the captured lead char (prefix capture, NOT a
+  // regex lookbehind — that bricks engines without lookbehind support,
+  // Safari < 16.4) excludes URL/link/attr contexts.
+  const bare_probe_stash=[];
+  s=s.replace(/(^|[^/:\w.`("'=\[\]])((?:~\/|\/)(?:[\w.\-]+\/)*[\w.\-]+\.(?:png|jpe?g|gif|webp|avif|svg|mp3|wav|m4a|ogg|flac|mp4|mov|webm|mkv|pdf|html?|csv|xlsx?|docx?|pptx?|zip|txt|md|json|diff|patch))\b(?![\w./-])/gi,(m0,lead,rest)=>{
+    bare_probe_stash.push(rest);
+    return lead+'\x00J'+(bare_probe_stash.length-1)+'\x00';
+  });
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -8111,6 +8126,11 @@ function renderMd(raw){
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i]));
 
   // ── End MEDIA restore ──────────────────────────────────────────────────────
+  // ── Restore bare-path probes → placeholder spans (path stays visible) ─────
+  s=s.replace(/\x00J(\d+)\x00/g,(_,i)=>{
+    const p=bare_probe_stash[+i]||'';
+    return `<span class="bare-media-probe" data-path="${esc(p)}">${esc(p)}</span>`;
+  });
   // Restore blockquote stash. Done last so the inner HTML (already produced
   // by the recursive renderMd in the pre-pass) is dropped into the final
   // string verbatim — no further passes can mangle it.
@@ -19390,9 +19410,73 @@ function postProcessRenderedMessages(container) {
   loadExcalidrawInline(container);
   loadPdfInline(container);
   loadHtmlInline(container);
+  probeBarePathMedia(container);
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
+}
+
+// ── Bare-path probes: swap placeholder spans for media once /api/media
+// confirms the file exists and is allowed (deliverable-mode parity). A
+// cheap 1-byte Range GET is the existence check; 403/404/network errors
+// degrade the span back to plain text, so nothing ever breaks visibly.
+//
+// NO probe result is retained across render contexts. /api/media decides
+// authorization from the active profile and session, so an answer earned in
+// one context proves nothing about another: a remembered success would let
+// the next session swap in an embed it is not allowed to fetch — precisely
+// the broken embed this feature exists to prevent — and a remembered failure
+// would keep a path as plain text after it became available or authorized.
+// Repeated paths within ONE invocation still share a single in-flight
+// request, which is all the de-duplication a render pass actually needs.
+// Every server-side input /api/media authorizes from, as one comparable key.
+// Beyond session and profile that includes the ACTIVE WORKSPACE: _handle_media()
+// builds its allowed-roots list from get_last_workspace(), so a path reachable
+// under one workspace is refused under the next — with the session unchanged.
+function _barePathProbeContext(){
+  const st=(typeof S!=='undefined'&&S)?S:null;
+  const sess=(st&&st.session)?st.session:null;
+  const sid=(sess&&sess.session_id)?String(sess.session_id):'';
+  const profile=(st&&st.activeProfile)?String(st.activeProfile):'';
+  const workspace=(sess&&sess.workspace)?String(sess.workspace):'';
+  return {sid,profile,workspace,key:profile+'\x00'+sid+'\x00'+workspace};
+}
+function probeBarePathMedia(container){
+  const root=container||document;
+  const probes=root.querySelectorAll('.bare-media-probe:not([data-probed])');
+  if(!probes.length) return;
+  const ctx=_barePathProbeContext();
+  const inflight=new Map(); // path -> Promise<boolean>, THIS invocation only
+  probes.forEach(el=>{
+    el.setAttribute('data-probed','1');
+    const path=el.dataset.path||'';
+    const swap=ok=>{
+      if(!el.isConnected) return;
+      // A probe can land after the user switched session or profile. That
+      // result was authorized under the OLD context, so it must not decide
+      // this element — degrade to plain text instead of embedding it.
+      if(!ok||_barePathProbeContext().key!==ctx.key){el.replaceWith(document.createTextNode(path));return;}
+      const holder=document.createElement('span');
+      holder.className='bare-media-embed';
+      holder.innerHTML=_inlineMediaHtmlForRef(path,ctx.sid);
+      el.replaceWith(holder);
+      // Hydrate any lazy-load placeholders the media HTML produced.
+      const parent=holder.parentElement||holder;
+      loadDiffInline(parent);loadCsvInline(parent);loadPdfInline(parent);loadHtmlInline(parent);
+    };
+    let probe=inflight.get(path);
+    if(!probe){
+      const url='api/media?path='+encodeURIComponent(path)+(ctx.sid?'&session_id='+encodeURIComponent(ctx.sid):'');
+      probe=fetch(url,{headers:{'Range':'bytes=0-0'}})
+        .then(r=>r.status===200||r.status===206)
+        .catch(()=>false);
+      inflight.set(path,probe);
+    }
+    // The trailing catch is per element, not per probe: a hydrator throwing
+    // while swapping one placeholder must not surface as an unhandled
+    // rejection, and must not stop the other elements sharing this probe.
+    probe.then(swap).catch(()=>{});
+  });
 }
 
 function highlightCode(container) {

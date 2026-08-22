@@ -24,14 +24,33 @@ def test_autolink_comment_present():
     )
 
 
+
+def _rendermd_body(content: str, start: int) -> str:
+    """The real `renderMd` body, brace-matched.
+
+    A fixed byte window is a trap: every addition to the renderer pushes later
+    code out of it, so the assertion below either fails for an unrelated reason
+    or — worse — silently starts inspecting a different function and keeps
+    passing. Bound it by the function's own closing brace instead.
+    """
+    i = content.index("{", start)
+    depth = 1
+    i += 1
+    while depth > 0 and i < len(content):
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+        i += 1
+    return content[start:i]
+
 def test_autolink_regex_in_rendermd():
     """The autolink regex pattern (https?://) should appear in renderMd()."""
     content = read_ui_js()
     # Locate the renderMd function body
     rendermd_start = content.find('function renderMd(raw){')
     assert rendermd_start != -1, "renderMd function not found in ui.js"
-    # Find the closing brace after renderMd (look for the autolink pattern within it)
-    rendermd_body = content[rendermd_start:rendermd_start + 15000]
+    rendermd_body = _rendermd_body(content, rendermd_start)
     assert 'https?:\\/\\/' in rendermd_body, (
         "Autolink regex (https?:\\/\\/) not found inside renderMd() body."
     )
