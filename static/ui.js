@@ -7519,8 +7519,23 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
   return clean;
 }
 
+function _normalizeMarkdownLinkDestination(raw){
+  const value=String(raw||'').trim();
+  const titled=value.match(/^([\s\S]*\S)\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\))$/);
+  return titled?titled[1]:value;
+}
+
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // Some renderer contract tests execute renderMd() as a standalone extracted
+  // function. Keep that supported while using the shared helper in the browser.
+  const normalizeLinkDestination=typeof _normalizeMarkdownLinkDestination==='function'
+    ? _normalizeMarkdownLinkDestination
+    : rawValue=>{
+        const value=String(rawValue||'').trim();
+        const titled=value.match(/^([\s\S]*\S)\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\))$/);
+        return titled?titled[1]:value;
+      };
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -7738,6 +7753,142 @@ function renderMd(raw){
   // Inline backtick spans: restore <code> tags produced in the stash callback above.
   // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
+  // Keep inline code opaque through every labeled-link and autolink pass. The
+  // token is restored only after the final autolink stage below.
+  const _inlineCodeStash=[];
+  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_inlineCodeStash.push(m);return `\x00O${_inlineCodeStash.length-1}\x00`;});
+  // Keep each complete raw anchor opaque through markdown-link scanning. The
+  // range is restored immediately before the sanitizer so its allowlists still
+  // govern hrefs, event handlers, and unsupported attributes.
+  const _rawAnchorStash=[];
+  s=(function _stashCompleteRawAnchors(src){
+    let out='', cursor=0;
+    while(cursor<src.length){
+      const match=/<a\b/i.exec(src.slice(cursor));
+      if(!match){out+=src.slice(cursor);break;}
+      const open=cursor+match.index;
+      let openEnd=-1,quote='';
+      for(let i=open+2;i<src.length;i++){
+        const ch=src[i];
+        if(quote){
+          if(ch===quote) quote='';
+          continue;
+        }
+        if(ch==='"'||ch==="'"){quote=ch;continue;}
+        if(ch==='>'){openEnd=i+1;break;}
+      }
+      if(openEnd<0){out+=src.slice(cursor);break;}
+      const close=/<\/a\s*>/i.exec(src.slice(openEnd));
+      if(!close){out+=src.slice(cursor);break;}
+      const end=openEnd+close.index+close[0].length;
+      out+=src.slice(cursor,open);
+      _rawAnchorStash.push(src.slice(open,end));
+      out+=`\x00N${_rawAnchorStash.length-1}\x00`;
+      cursor=end;
+    }
+    return out;
+  })(s);
+  // Raw HTML attributes can contain literal Markdown-looking text. Protect each
+  // complete tag through link scanning, then restore it for the existing
+  // sanitizer rather than allowing an attribute to become nested anchors.
+  const _htmlTagStash=[];
+  s=(function _stashCompleteHtmlTags(src){
+    let out='', cursor=0;
+    while(cursor<src.length){
+      const open=src.indexOf('<',cursor);
+      if(open<0){out+=src.slice(cursor);break;}
+      let nameAt=open+1;
+      if(src[nameAt]==='/') nameAt++;
+      if(!/[a-zA-Z]/.test(src[nameAt]||'')){
+        out+=src.slice(cursor,open+1);
+        cursor=open+1;
+        continue;
+      }
+      let quote='', end=-1;
+      for(let i=nameAt+1;i<src.length;i++){
+        const ch=src[i];
+        if(quote){
+          if(ch===quote) quote='';
+          continue;
+        }
+        if(ch==='"'||ch==="'"){quote=ch;continue;}
+        if(ch==='>'){end=i+1;break;}
+      }
+      if(end<0){out+=src.slice(cursor);break;}
+      out+=src.slice(cursor,open);
+      _htmlTagStash.push(src.slice(open,end));
+      out+=`\x00T${_htmlTagStash.length-1}\x00`;
+      cursor=end;
+    }
+    return out;
+  })(s);
+  // Keep the settled renderer aligned with streaming-markdown: model/tool
+  // output can contain an unencoded space in a link destination. The old
+  // [^\s)] regex truncated those URLs after settlement.
+  function _stashMarkdownLinks(src, stash, marker){
+    const allowed=/^(?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)/i;
+    const isTerminalTitleAt=(value,index,opener)=>{
+      const rest=value.slice(index);
+      if(opener==='"') return /^"(?:\\.|[^"\\])*"\s*\)/.test(rest);
+      if(opener==="'") return /^'(?:\\.|[^'\\])*'\s*\)/.test(rest);
+      return /^\((?:\\.|[^()\\])*\)\s*\)/.test(rest);
+    };
+    let out='', cursor=0;
+    while(cursor<src.length){
+      const open=src.indexOf('[',cursor);
+      if(open<0){out+=src.slice(cursor);break;}
+      const close=src.indexOf(']',open+1);
+      if(close<0||src[close+1]!=='('){out+=src.slice(cursor,open+1);cursor=open+1;continue;}
+      const label=src.slice(open+1,close);
+      if(!label){out+=src.slice(cursor,open+1);cursor=open+1;continue;}
+      const start=close+2;
+      let end=-1, rawUrl='', quote='', titleDepth=0;
+      for(let i=start;i<src.length;i++){
+        const ch=src[i];
+        if(ch==='\n'||ch==='\r')break;
+        if(quote){
+          if(ch==='\\'){i++;continue;}
+          if(ch===quote) quote='';
+          continue;
+        }
+        if((ch==='"'||ch==="'")&&i>start&&/\s/.test(src[i-1])&&isTerminalTitleAt(src,i,ch)){
+          quote=ch;
+          continue;
+        }
+        if(ch==='('&&i>start&&/\s/.test(src[i-1])&&isTerminalTitleAt(src,i,ch)){
+          titleDepth++;
+          continue;
+        }
+        if(ch===')'){
+          if(titleDepth>0){titleDepth--;continue;}
+          rawUrl=src.slice(start,i);
+          end=i+1;
+          break;
+        }
+      }
+      const normalizedUrl=normalizeLinkDestination(rawUrl);
+      if(end<0){
+        // The scan stopped at a proven line boundary (or end-of-input). Keep
+        // the already-scanned literal span intact and resume there; advancing
+        // only one character would rescan every later `[` in a malformed line.
+        const nextBoundary=src.slice(start).search(/[\r\n]/);
+        const boundary=nextBoundary<0?src.length:start+nextBoundary;
+        out+=src.slice(cursor,boundary);
+        cursor=boundary;
+        continue;
+      }
+      if(!normalizedUrl||!allowed.test(normalizedUrl)){
+        out+=src.slice(cursor,open+1);
+        cursor=open+1;
+        continue;
+      }
+      out+=src.slice(cursor,open);
+      stash.push(_markdownAnchor(label,normalizedUrl));
+      out+=`\x00${marker}${stash.length-1}\x00`;
+      cursor=end;
+    }
+    return out;
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -7752,18 +7903,18 @@ function renderMd(raw){
     t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
     // backticks stays protected as a \x00C token and is never rendered as <img>.
-    // Must run before _code_stash restore and before _link_stash so the image
+    // Must run before inline-code restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
     t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
-    t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
+    t=_stashMarkdownLinks(t,_link_stash,'L');
     t=t.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{const trail=url.match(/[.,;:!?)\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
+    t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>{_inlineCodeStash.push(_code_stash[+i]);return `\x00O${_inlineCodeStash.length-1}\x00`;});
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
@@ -7771,15 +7922,10 @@ function renderMd(raw){
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
     return t;
   }
-  // Stash <code> tags from the backtick pass above so the outer bold/italic
-  // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
-  const _ob_stash=[];
-  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
-  s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
@@ -7902,11 +8048,20 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
+  s=_stashMarkdownLinks(s,_a_stash,'A');
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
+  // Restore complete raw anchors first so nested raw-pre/inline-code placeholders
+  // can complete their normal R/T/O restoration passes before sanitization.
+  s=s.replace(/\x00N(\d+)\x00/g,(_,i)=>_rawAnchorStash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
   s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
+  // Complete raw tags were protected from labeled-link scanning above. Restore
+  // them at the sanitizer boundary so unsafe attributes still fail closed.
+  s=s.replace(/\x00T(\d+)\x00/g,(_,i)=>_htmlTagStash[+i]);
+  // Restore inline-code placeholders before sanitization so raw HTML nested in
+  // <code> cannot bypass _tag() and reappear as executable markup afterward.
+  s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_inlineCodeStash[+i]);
   // Sanitize any remaining HTML tags.  The renderer intentionally returns
   // HTML and inserts it with innerHTML later, so tag names alone are not enough:
   // raw/model-provided HTML like <img onerror=...> or <a href="javascript:...">
@@ -7919,7 +8074,7 @@ function renderMd(raw){
     return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
   }
   function _markdownHref(raw){
-    const href=String(raw||'').replace(/"/g,'%22');
+    const href=normalizeLinkDestination(raw).replace(/"/g,'%22');
     if(/^session:\/\//i.test(href)){
       const sid=href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
       try{
@@ -7970,7 +8125,8 @@ function renderMd(raw){
   }
   function _markdownLabelHtml(label){
     const _label_stash=[];
-    const tokenized=String(label||'').replace(/<\/?[a-z][^>]*>/gi,tag=>{
+    const restored=String(label||'').replace(/\x00T(\d+)\x00/g,(_,i)=>_htmlTagStash[+i]||'');
+    const tokenized=restored.replace(/<\/?[a-z][^>]*>/gi,tag=>{
       if(!_isSafeLabelInline(tag)) return tag;
       _label_stash.push(tag);
       return `\x00H${_label_stash.length-1}\x00`;
@@ -7978,8 +8134,9 @@ function renderMd(raw){
     return esc(tokenized).replace(/\x00H(\d+)\x00/g,(_,i)=>_label_stash[+i]);
   }
   function _markdownAnchor(label,rawUrl){
-    const href=_markdownHref(rawUrl);
-    const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
+    const destination=normalizeLinkDestination(rawUrl);
+    const href=_markdownHref(destination);
+    const internal=/^session:\/\//i.test(destination) || _isInternalSessionHref(href);
     return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${_markdownLabelHtml(label)}</a>`;
   }
   function _isSafeUrl(v, img){
@@ -8061,9 +8218,9 @@ function renderMd(raw){
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
   s=s.replace(/<[a-zA-Z][\w:-]*[^>\n]*$/gm,tag=>esc(tag));
   // Autolink: convert plain URLs to clickable links.
-  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
+  // Stash <a>, <img>, <code> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  s=s.replace(/(<a\b[^>]*>(?:(?!<a\b)[\s\S])*?(?:<\/a>|(?=<a\b))|<img\b[^>]*>|<code\b[^>]*>[\s\S]*?<\/code>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
   s=s.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{
     // Strip trailing punctuation that was likely not part of the URL.
     // CJK full-width punctuation (）。，；：！？、) is included because LLMs
