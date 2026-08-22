@@ -36,7 +36,11 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
-from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
+from api.run_journal import (
+    RunJournalWriter,
+    bound_run_journal_snapshot_args,
+    validate_stable_run_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,20 @@ def _publish_gateway_run_id(stream_id: str, run_id: str) -> None:
             "owner_done": bool(state.get("owner_done")),
         }
         _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def _persist_gateway_stable_run_id(on_run_id, stream_id: str, run_id: str) -> None:
+    if on_run_id is None:
+        return
+    try:
+        on_run_id(run_id)
+    except Exception:
+        logger.debug(
+            "Failed to persist stable gateway run id %s for stream %s",
+            run_id,
+            stream_id,
+            exc_info=True,
+        )
 
 
 def _finish_gateway_run_starting(stream_id: str, *, result: str = "failed") -> None:
@@ -565,6 +583,7 @@ def _run_gateway_runs_api_streaming(
     base_url, api_key, prefill_messages, body_extras,
     *, put_gateway_event, cancel_event,
     attachments=None, cfg=None, session=None,
+    on_run_id=None,
     active_provider: str = "",
 ):
     """Submit via POST /v1/runs and relay SSE events including approval."""
@@ -639,15 +658,17 @@ def _run_gateway_runs_api_streaming(
         update_active_run(stream_id, phase="gateway-request")
         with urllib.request.urlopen(req, timeout=30) as resp:
             run_data = json.loads(resp.read(65536))
-        run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
-        if not run_id:
+        raw_run_id = str(run_data.get("run_id") or run_data.get("id") or "").strip()
+        if not raw_run_id:
             raise ValueError(f"Gateway runs API returned no run_id: {run_data!r}")
+        run_id = validate_stable_run_id(raw_run_id)
     except Exception:
         _finish_gateway_run_starting(stream_id)
         raise
 
     usage: dict = {}
     _publish_gateway_run_id(stream_id, run_id)
+    _persist_gateway_stable_run_id(on_run_id, stream_id, run_id)
 
     url_events = f"{base_url.rstrip('/')}/v1/runs/{run_id}/events"
     headers_sse = dict(headers)
@@ -941,11 +962,7 @@ def _run_gateway_chat_streaming(
         provider=model_provider,
         backend="gateway",
     )
-    try:
-        run_journal = RunJournalWriter(session_id, stream_id)
-    except Exception:
-        run_journal = None
-        logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
+    run_journal = None
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
@@ -1013,6 +1030,19 @@ def _run_gateway_chat_streaming(
             _finish_gateway_run_starting(stream_id, result="fallback")
             runs_api_pending_marked = False
         try:
+            run_journal = RunJournalWriter(
+                session_id,
+                stream_id,
+                stable_run_id=None if _use_runs_api else stream_id,
+            )
+        except Exception:
+            run_journal = None
+            logger.debug(
+                "Failed to initialize gateway run journal for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+        try:
             from api.streaming import (
                 _load_webui_prefill_context,
                 _prefill_messages_with_webui_context,
@@ -1067,6 +1097,7 @@ def _run_gateway_chat_streaming(
                     attachments=attachments,
                     cfg=cfg,
                     session=s,
+                    on_run_id=getattr(run_journal, "set_stable_run_id", None),
                     active_provider=(model_provider or ""),
                 )
             except Exception as exc:
@@ -1166,6 +1197,7 @@ def _run_gateway_chat_streaming(
                         continue
                     _payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip()
                     if _payload_event in {"hermes.approval.request", "approval.request"}:
+                        sse_event = "message"
                         approval_data = _gateway_runs_approval_event(payload)
                         if approval_data:
                             # Record the gateway run_id so /api/approval/respond
@@ -1185,7 +1217,6 @@ def _run_gateway_chat_streaming(
                             put_gateway_event("approval", approval_data)
                         else:
                             logger.debug("Ignoring malformed gateway approval payload")
-                        sse_event = "message"
                         continue
                     if sse_event == "hermes.tool.progress":
                         translated = _gateway_tool_progress_event(payload)
