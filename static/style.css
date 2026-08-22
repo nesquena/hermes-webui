@@ -7322,3 +7322,80 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+/* ── Locale-aware RTL shell (Persian fa and future RTL locales) ─────────────
+ * Activated by setLocale() via the locale's `_dir: 'rtl'` metadata, which
+ * sets dir="rtl" (and data-locale) on <html>. Flexbox order and text
+ * alignment follow dir automatically; these rules fix physical borders that
+ * would otherwise point the wrong way, and keep technical surfaces LTR +
+ * bidi-isolated so code, commands, URLs, paths, IDs, credentials, and
+ * numeric inputs never render mirrored in an RTL shell (see #6664).
+ */
+html[dir="rtl"] .sidebar{
+  border-right:none;
+  border-left:1px solid var(--border);
+}
+html[dir="rtl"] .rail{
+  border-right:none;
+  border-left:1px solid var(--border);
+}
+/* Chat + composer: mixed Persian/English content — direction follows the
+   first strong character of each paragraph via bidi plaintext. */
+html[dir="rtl"] .msg-row{
+  direction:rtl;
+  text-align:right;
+  unicode-bidi:plaintext;
+}
+html[dir="rtl"] .msg-body{
+  text-align:start;
+}
+html[dir="rtl"] textarea#msg,
+html[dir="rtl"] #msg{
+  direction:rtl;
+  text-align:right;
+  unicode-bidi:plaintext;
+}
+/* Technical surfaces stay LTR + bidi-isolated in RTL shells: code, commands,
+   terminal output, diffs, URLs, paths, IDs, credentials, and numeric inputs
+   must never render mirrored. */
+html[dir="rtl"] pre,
+html[dir="rtl"] code,
+html[dir="rtl"] kbd,
+html[dir="rtl"] samp,
+html[dir="rtl"] tt,
+html[dir="rtl"] .hljs,
+html[dir="rtl"] .code-block,
+html[dir="rtl"] .code-block *,
+html[dir="rtl"] pre *,
+html[dir="rtl"] .diff-block,
+html[dir="rtl"] .diff-block *,
+html[dir="rtl"] .csv-table,
+html[dir="rtl"] .csv-table *,
+html[dir="rtl"] .katex,
+html[dir="rtl"] .katex-html,
+html[dir="rtl"] .katex-inline,
+html[dir="rtl"] .composer-terminal-surface,
+html[dir="rtl"] .composer-terminal-viewport,
+html[dir="rtl"] .composer-terminal-inner,
+html[dir="rtl"] .skill-file-path,
+/* Plain-text tool surfaces: command lines, paths, and JSON rendered inside
+   tool-call groups and tool results must stay LTR + bidi-isolated in an RTL
+   shell (mirror of the .chat-content-rtl rules below) — Persian with the
+   manual RTL class off must not let commands/paths/JSON inherit RTL. */
+html[dir="rtl"] .tool-call-group-body,
+html[dir="rtl"] .tool-call-group-body *,
+html[dir="rtl"] .tool-result,
+html[dir="rtl"] .tool-result *,
+/* Plain-text path/ID surfaces elsewhere in the shell (audit per #6664):
+   command palette file paths and model IDs are technical identifiers and
+   stay LTR; ordinary Persian form text remains RTL. */
+html[dir="rtl"] .cmd-item-path-value,
+html[dir="rtl"] .model-opt-id,
+html[dir="rtl"] input[type="number"],
+html[dir="rtl"] input[type="url"],
+html[dir="rtl"] input[type="tel"],
+html[dir="rtl"] input[type="password"]{
+  direction:ltr;
+  text-align:left;
+  unicode-bidi:isolate;
+}

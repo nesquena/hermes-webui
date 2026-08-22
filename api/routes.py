@@ -10920,6 +10920,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "Neplatn\u00e9 heslo",
         "conn_failed": "P\u0159ipojen\u00ed selhalo",
     },
+    "fa": {
+        "lang": "fa-IR",
+        "title": "\u0648\u0631\u0648\u062f",
+        "subtitle": "\u0628\u0631\u0627\u06cc \u0627\u062f\u0627\u0645\u0647 \u0631\u0645\u0632 \u0639\u0628\u0648\u0631 \u062e\u0648\u062f \u0631\u0627 \u0648\u0627\u0631\u062f \u06a9\u0646\u06cc\u062f",
+        "placeholder": "\u0631\u0645\u0632 \u0639\u0628\u0648\u0631",
+        "btn": "\u0648\u0631\u0648\u062f",
+        "invalid_pw": "\u0631\u0645\u0632 \u0639\u0628\u0648\u0631 \u0646\u0627\u0645\u0639\u062a\u0628\u0631",
+        "conn_failed": "\u0627\u062a\u0635\u0627\u0644 \u0646\u0627\u0645\u0648\u0641\u0642 \u0628\u0648\u062f",
+    },
 }
 
 

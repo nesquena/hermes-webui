@@ -25,7 +25,7 @@ def _run_i18n_case(script_expr: str) -> dict:
             setItem: (k, v) => {{ storage[k] = String(v); }},
           }},
           document: {{
-            documentElement: {{ lang: '' }},
+            documentElement: {{ lang: '', dir: '', setAttribute: () => {{}} }},
             querySelectorAll: () => [],
           }},
         }};
