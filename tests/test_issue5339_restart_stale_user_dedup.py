@@ -402,6 +402,7 @@ def test_multimodal_mirror_requires_exact_timestamp_and_image_parts():
     ]
     text_only_parts = [{"type": "text", "text": "not an image-bearing list"}]
     malformed_text_parts = [
+        {"type": 0, "text": "describe this image"},
         {"type": "text", "text": 7},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
     ]

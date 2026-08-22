@@ -38,7 +38,6 @@ from pathlib import Path
 
 from api.turn_journal import (
     _turn_journal_timestamp,
-    derive_turn_journal_states,
     is_terminal_turn_event,
     iter_turn_journal_session_ids,
     read_turn_journal,
@@ -967,7 +966,14 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
 
     for session_id in iter_turn_journal_session_ids(session_dir):
         journal = read_turn_journal(session_id, session_dir=session_dir)
-        states, _ = derive_turn_journal_states(journal.get('events') or [])
+        events = journal.get('events') or []
+        terminal_turn_ids = {
+            str(event.get('turn_id') or '').strip()
+            for event in events
+            if isinstance(event, dict)
+            and is_terminal_turn_event(event)
+            and str(event.get('turn_id') or '').strip()
+        }
         live_path = session_dir / f"{session_id}.json"
         live_messages = _msg_count(live_path)
         existing_user_messages: set[tuple[str, float]] = set()
@@ -991,12 +997,26 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
                             ))
         except (OSError, json.JSONDecodeError, ValueError):
             pass
-        for turn_id, event in sorted(states.items()):
-            if is_terminal_turn_event(event):
+        pending_events = {}
+        for event in events:
+            if not isinstance(event, dict) or is_terminal_turn_event(event):
+                continue
+            turn_id = str(event.get('turn_id') or '').strip()
+            if not turn_id:
                 continue
             content = _message_content_text({'content': event.get('content')}).strip()
             if not content:
                 continue
+            previous = pending_events.get(turn_id)
+            if previous is None or (
+                str(event.get('event') or '') == 'submitted'
+                and str(previous.get('event') or '') != 'submitted'
+            ):
+                pending_events[turn_id] = event
+        for turn_id, event in sorted(pending_events.items()):
+            if turn_id in terminal_turn_ids:
+                continue
+            content = _message_content_text({'content': event.get('content')}).strip()
             event_timestamp = _turn_journal_timestamp(event.get('created_at'))
             if (
                 content

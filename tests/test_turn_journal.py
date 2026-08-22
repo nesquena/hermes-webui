@@ -240,6 +240,32 @@ def test_audit_keeps_invalid_created_at_turn_pending(tmp_path, created_at):
     assert report["items"][0]["turn_id"] == "turn-1"
 
 
+def test_audit_uses_submitted_content_when_empty_worker_wins_state(tmp_path):
+    _write_session(tmp_path, "sid-1", messages=[])
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "recover me",
+            "created_at": 2,
+        },
+        session_dir=tmp_path,
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {"event": "worker_started", "turn_id": "turn-1", "created_at": "malformed"},
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "warn"
+    assert report["summary"]["repairable"] == 1
+    assert report["items"][0]["event"] == "submitted"
+
+
 def test_audit_reports_repeated_prompt_when_turn_timestamp_differs(tmp_path):
     _write_session(
         tmp_path,

@@ -1580,7 +1580,11 @@ class Session:
             data[field] = normalized_values
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
-        if _collapsed_partials or _content_changed:
+        if _collapsed_partials or (
+            _content_changed
+            and _pre_read_sig is not None
+            and _sidecar_stat_signature(p) == _pre_read_sig
+        ):
             try:
                 # Self-heal repaired content or bloated sessions on first full
                 # load without touching recency/index ordering.
@@ -8759,23 +8763,23 @@ def _agent_durable_multimodal_content(msg: dict) -> str | None:
             continue
         if not isinstance(part, dict):
             return None
-        part_type = str(part.get("type") or "").lower()
+        raw_type = part.get("type")
+        if raw_type is not None and not isinstance(raw_type, str):
+            return None
+        part_type = str(raw_type or "").lower()
         if part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
             normalized_parts.append("[screenshot]")
             image_parts += 1
         elif part_type in _SESSION_MESSAGE_TEXT_PART_TYPES:
-            for key in _SESSION_MESSAGE_TEXT_PART_KEYS:
-                text = part.get(key)
-                if isinstance(text, str):
-                    normalized_parts.append(
-                        _normalized_message_content_value(
-                            text,
-                            strip_workspace_prefix=True,
-                        )
-                    )
-                    break
-            else:
+            text = _visible_duplicate_text_part(part)
+            if text is None:
                 return None
+            normalized_parts.append(
+                _normalized_message_content_value(
+                    text,
+                    strip_workspace_prefix=True,
+                )
+            )
         else:
             return None
     if not image_parts:
@@ -9666,8 +9670,10 @@ def _visible_duplicate_key_shape(key: tuple) -> bool | None:
     if isinstance(identity, str):
         if identity.startswith("structured:"):
             return True
-        if identity.startswith("scalar:"):
+        if identity in ("", "scalar:"):
             return False
+        if identity.startswith("scalar:"):
+            return None
     return None
 
 
@@ -9733,11 +9739,14 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         return None
     if lookup is None:
         lookup = _build_visible_duplicate_lookup(visible_keys)
+    visible_shape = _visible_duplicate_key_shape(visible_key)
+    if visible_shape is None:
+        return None
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
     visible_structured, visible_text = _visible_duplicate_shape_and_text(
         content,
-        structured=_visible_duplicate_key_shape(visible_key),
+        structured=visible_shape,
     )
     shape_by_key = lookup.setdefault("shape_by_key", {})
     for existing_key in lookup.get("by_role", {}).get(role, []):
@@ -9746,10 +9755,13 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
         if role != existing_role or sidecar != existing_sidecar or not existing_content:
             continue
+        existing_shape = _visible_duplicate_key_shape(existing_key)
+        if existing_shape is None:
+            continue
         if existing_key not in shape_by_key:
             shape_by_key[existing_key] = _visible_duplicate_shape_and_text(
                 existing_content,
-                structured=_visible_duplicate_key_shape(existing_key),
+                structured=existing_shape,
             )
         existing_structured, existing_text = shape_by_key[existing_key]
         if visible_structured and existing_structured:

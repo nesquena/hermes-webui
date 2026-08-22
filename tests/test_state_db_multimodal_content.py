@@ -622,18 +622,22 @@ def test_replay_key_matches_text_only_list_mirrors(
 
 
 @pytest.mark.parametrize(
-    "structured_content",
+    ("structured_content", "scalar_content"),
     [
-        ["hello", 42],
-        [{"type": "image_url", "image_url": {"url": IMAGE_A}}],
-        [{"type": "file", "file": {"file_id": "file-1"}}],
-        [{"type": "text", "text": "hello", "cache_control": {}}],
+        (["hello", 42], "hello"),
+        ([{"type": "image_url", "image_url": {"url": IMAGE_A}}], "hello"),
+        ([{"type": "file", "file": {"file_id": "file-1"}}], "hello"),
+        ([{"type": "text", "text": "hello", "cache_control": {}}], "hello"),
+        (["hello", {"type": 0, "text": "world"}], "helloworld"),
     ],
 )
-def test_replay_key_keeps_non_text_list_content_structured(structured_content):
+def test_replay_key_keeps_non_text_list_content_structured(
+    structured_content,
+    scalar_content,
+):
     from api.streaming import _message_replay_key, _strip_replayed_prefix
 
-    scalar = {"role": "user", "content": "hello"}
+    scalar = {"role": "user", "content": scalar_content}
     structured = {"role": "user", "content": structured_content}
 
     assert _message_replay_key(scalar) != _message_replay_key(structured)

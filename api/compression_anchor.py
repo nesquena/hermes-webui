@@ -34,11 +34,11 @@ compression contexts.
 """
 
 
-def _content_text(content, *, part_types):
+def _content_text(content, *, part_types, include_bare_strings=False):
     if isinstance(content, list):
         parts = []
         for part in content:
-            if isinstance(part, str):
+            if isinstance(part, str) and include_bare_strings:
                 parts.append(part)
             elif isinstance(part, dict) and part.get("type") in part_types:
                 parts.append(str(part.get("text") or part.get("content") or ""))
@@ -65,6 +65,7 @@ def is_context_compression_marker(message):
     text = _content_text(
         message.get("content", ""),
         part_types={"text", "input_text", "output_text"},
+        include_bare_strings=True,
     ).lower().lstrip()
     synthetic_unbracketed_marker = bool(message.get("_compressed_summary"))
     return (

@@ -238,12 +238,15 @@ class TestMergeToolCallsEndToEnd:
         from api.streaming import _message_replay_key
 
         empty = {"role": "user", "content": "", "timestamp": 1000}
+        string_zero = {"role": "user", "content": "0", "timestamp": 1000}
         zero = {"role": "user", "content": 0, "timestamp": 1000}
         false = {"role": "user", "content": False, "timestamp": 1000}
 
         merged = merge_session_messages_append_only([empty], [zero, false])
+        zero_merge = merge_session_messages_append_only([string_zero], [zero])
 
         assert [message["content"] for message in merged] == ["", 0, False]
+        assert zero_merge == [string_zero, zero]
         assert _message_replay_key(empty) != _message_replay_key(zero)
         assert _message_replay_key(empty) != _message_replay_key(false)
         assert _message_replay_key(zero) != _message_replay_key(false)

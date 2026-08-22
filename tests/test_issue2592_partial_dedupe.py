@@ -1,4 +1,5 @@
 import json
+import os
 
 
 def _tool_partial(reasoning="same reasoning", args=None, *, timestamp=123):
@@ -85,3 +86,41 @@ def test_session_load_collapses_adjacent_duplicate_partials(tmp_path, monkeypatc
     assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1
     assert persisted["updated_at"] == 200.0
     assert (session_dir / f"{sid}.json.bak").exists()
+
+
+def test_session_load_skips_content_self_heal_after_atomic_replacement(tmp_path, monkeypatch):
+    import api.models as models
+
+    sid = "content_race"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    old_content = '\x00json:[{"type":"text","text":"old"}]'
+    new_content = '\x00json:[{"type":"text","text":"new"}]'
+    payload = {
+        "session_id": sid,
+        "title": "content race",
+        "workspace": str(tmp_path),
+        "messages": [{"role": "user", "content": old_content}],
+    }
+    path = session_dir / f"{sid}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    replacement = {**payload, "messages": [{"role": "user", "content": new_content}]}
+    real_decode = models._decode_state_db_content
+    replaced = False
+
+    def replace_after_read(content):
+        nonlocal replaced
+        if not replaced:
+            replacement_path = path.with_suffix(".replacement")
+            replacement_path.write_text(json.dumps(replacement), encoding="utf-8")
+            os.replace(replacement_path, path)
+            replaced = True
+        return real_decode(content)
+
+    monkeypatch.setattr(models, "_decode_state_db_content", replace_after_read)
+
+    assert models.Session.load(sid) is not None
+    assert json.loads(path.read_text(encoding="utf-8"))["messages"] == replacement["messages"]
