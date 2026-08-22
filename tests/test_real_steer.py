@@ -123,6 +123,86 @@ class TestHandleChatSteerHappyPath:
         body = _captured_response(handler)
         assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
 
+    def test_accepted_queued_steer_claims_only_selected_backend_item(
+        self, _clear_caches, monkeypatch, tmp_path
+    ):
+        import queue as _q
+
+        from api import config as api_config
+        from api import session_queue
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+        from api.streaming import _handle_chat_steer
+
+        monkeypatch.setattr(api_config, "SESSION_DIR", tmp_path)
+        sid, stream_id = "sid_queue_steer", "stream_queue_steer"
+        first = session_queue.enqueue(sid, {"text": "keep queued"})
+        selected = session_queue.enqueue(sid, {"text": "steer selected"})
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[sid] = (agent, "sig")
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(
+                handler,
+                {
+                    "session_id": sid,
+                    "text": "stale browser copy",
+                    "queue_item_id": selected["id"],
+                },
+            )
+
+        agent.steer.assert_called_once_with("steer selected")
+        assert _captured_response(handler)["accepted"] is True
+        assert [item["id"] for item in session_queue.list_queue(sid)] == [first["id"]]
+
+    @pytest.mark.parametrize("steer_result", [False, RuntimeError("boom")], ids=["refused", "exception"])
+    def test_failed_queued_steer_restores_selected_backend_item_in_order(
+        self, _clear_caches, monkeypatch, tmp_path, steer_result
+    ):
+        import queue as _q
+
+        from api import config as api_config
+        from api import session_queue
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+        from api.streaming import _handle_chat_steer
+
+        monkeypatch.setattr(api_config, "SESSION_DIR", tmp_path)
+        sid, stream_id = "sid_queue_restore", "stream_queue_restore"
+        first = session_queue.enqueue(sid, {"text": "first"})
+        selected = session_queue.enqueue(sid, {"text": "selected"})
+        third = session_queue.enqueue(sid, {"text": "third"})
+        agent = MagicMock()
+        if isinstance(steer_result, Exception):
+            agent.steer = MagicMock(side_effect=steer_result)
+        else:
+            agent.steer = MagicMock(return_value=steer_result)
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[sid] = (agent, "sig")
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = _q.Queue()
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            _handle_chat_steer(
+                handler,
+                {"session_id": sid, "text": "selected", "queue_item_id": selected["id"]},
+            )
+
+        assert _captured_response(handler)["accepted"] is False
+        assert [item["id"] for item in session_queue.list_queue(sid)] == [
+            first["id"],
+            selected["id"],
+            third["id"],
+        ]
+
 
 class TestHandleChatSteerFallbacks:
     """Each gate that fails returns a structured fallback the frontend can branch on."""
