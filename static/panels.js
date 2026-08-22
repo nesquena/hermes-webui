@@ -11053,11 +11053,15 @@ function _formatProviderQuotaReset(value){
 }
 
 function _formatProviderQuotaWindowLabel(accountLimits,w){
-  const raw=((w&&w.label)||t('provider_quota_window_fallback')).trim();
+  const label=String((w&&w.label)||'').trim();
+  const raw=label||t('provider_quota_window_fallback');
   const provider=((accountLimits&&accountLimits.provider)||'').toLowerCase();
   if(provider==='openai-codex'){
-    if(raw.toLowerCase()==='session') return t('provider_quota_session_limit');
-    if(raw.toLowerCase()==='weekly') return t('provider_quota_weekly_limit');
+    const durationValue=w&&w.limit_window_seconds;
+    const duration=durationValue===null||durationValue===undefined||durationValue===''?NaN:Number(durationValue);
+    if(Number.isFinite(duration)&&duration===18000) return t('provider_quota_session_limit');
+    if(Number.isFinite(duration)&&duration===604800) return t('provider_quota_weekly_limit');
+    if(!label||label.toLowerCase()==='session'||label.toLowerCase()==='weekly') return t('provider_quota_usage_limit');
   }
   return raw||t('provider_quota_window_fallback');
 }
