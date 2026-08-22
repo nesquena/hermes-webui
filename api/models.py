@@ -10165,10 +10165,6 @@ def merge_session_messages_append_only(
                 and mirror_key in sidecar_multimodal_mirrors
                 and mirror_key not in ambiguous_multimodal_mirrors
             ):
-                identity = state_multimodal_mirror_identities.setdefault(
-                    mirror_key,
-                    [None, None, None],
-                )
                 stable_id, stable_id_valid = _stable_message_identity_details(
                     state_message
                 )
@@ -10176,19 +10172,18 @@ def merge_session_messages_append_only(
                 if not stable_id_valid or not row_id_valid:
                     ambiguous_state_multimodal_mirrors.add(mirror_key)
                     continue
-                for index, value in enumerate(
+                identities = state_multimodal_mirror_identities.setdefault(
+                    mirror_key, set()
+                )
+                identities.add(
                     (
                         stable_id,
                         row_id,
                         _session_message_api_content_key(state_message),
                     )
-                ):
-                    if value is None:
-                        continue
-                    if identity[index] is not None and identity[index] != value:
-                        ambiguous_state_multimodal_mirrors.add(mirror_key)
-                        break
-                    identity[index] = value
+                )
+                if len(identities) > 1:
+                    ambiguous_state_multimodal_mirrors.add(mirror_key)
     state_replay_idx = 0
     skipped_state_visible_counts = {}
     # Loop-invariant: a session whose original truncate cutoff (truncation_boundary)

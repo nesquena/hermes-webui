@@ -386,6 +386,71 @@ def test_multimodal_mirror_state_identity_ambiguity_is_order_independent():
     assert merged[1]["_state_db_row_id"] == 7
 
 
+def test_multimodal_mirror_partial_identity_ambiguity_preserves_distinct_state_row():
+    """An absent identity field never wildcards a distinct state-only row."""
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+
+    def make_rows(candidate_order):
+        sidecar = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe this image"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            ],
+            "timestamp": timestamp,
+        }
+        identity_free_mirror = {
+            "role": "user",
+            "content": "describe this image\n[screenshot]",
+            "timestamp": timestamp,
+        }
+        identified_distinct_row = {
+            "role": "user",
+            "content": "describe this image\n[screenshot]",
+            "timestamp": timestamp,
+            "_state_db_row_id": 7,
+            "api_content": "distinct-turn-wire-content",
+        }
+        assistant = {
+            "role": "assistant",
+            "content": "distinct answer",
+            "timestamp": timestamp + 1,
+            "_state_db_row_id": 8,
+            "api_content": "assistant-wire-content",
+        }
+        candidates = [identity_free_mirror, identified_distinct_row]
+        ordered_candidates = (
+            candidates
+            if candidate_order == "identity-free-first"
+            else list(reversed(candidates))
+        )
+        state_rows = [*ordered_candidates, assistant]
+        return (
+            sidecar,
+            identity_free_mirror,
+            identified_distinct_row,
+            assistant,
+            state_rows,
+        )
+
+    for candidate_order in ("identity-free-first", "identified-first"):
+        sidecar, identity_free_mirror, distinct_row, assistant, state_rows = make_rows(
+            candidate_order
+        )
+        merged = merge_session_messages_append_only([sidecar], state_rows)
+
+        assert merged == [sidecar, *state_rows]
+        assert identity_free_mirror in merged
+        assert distinct_row in merged
+        assert assistant in merged
+        assert sidecar.get("api_content") is None
+        assert identity_free_mirror.get("api_content") is None
+        assert distinct_row["api_content"] == "distinct-turn-wire-content"
+        assert assistant["api_content"] == "assistant-wire-content"
+
+
 def test_multimodal_mirror_rejects_conflicting_private_identity():
     """A projected image mirror never overrides contradictory provenance."""
     from api.models import merge_session_messages_append_only
