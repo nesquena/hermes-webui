@@ -9981,7 +9981,7 @@ def _run_agent_streaming(
             # send from a NAMED profile would resolve against the DEFAULT profile's
             # config and route to the wrong provider/base_url. Bind the captured
             # owning-session profile across warm + resolve so both see the right
-            # profile (no-op for the default/root profile).
+            # profile (default/root binds TLS without named-profile env mirroring).
             from api import profiles as profiles_api
             # #5979: treat this send as a deliberate pick ONLY when the persisted
             # explicit-pick signature matches the CURRENT model+provider routing

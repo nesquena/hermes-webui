@@ -1487,26 +1487,35 @@ def profile_scope_for_detached_worker(
     Pass the profile name CAPTURED on the spawning thread (where the TLS is
     valid) into the worker, then enter this scope at the top of the worker body.
     It sets the request-profile TLS for this (worker) thread and applies the
-    profile env via ``profile_env_for_background_worker``, restoring both on exit.
-    No-op for the default/root profile.
+    profile env via ``profile_env_for_background_worker`` for named profiles,
+    restoring both on exit. An explicit default/root profile still binds the TLS
+    but keeps the existing root process environment. Only an empty profile name
+    is a no-op.
 
     Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
-    TLS and must NOT clear it — the request thread keeps using it after the call),
-    this sets and then CLEARS the TLS, which is correct for a dedicated worker
-    thread that has no other use for it.
+    TLS), this temporarily replaces the worker thread's TLS and restores the exact
+    previous profile afterward. That keeps nested scopes and reused executor
+    threads compositional on both normal and exceptional exits.
     """
     name = (profile_name or "").strip()
-    if not name or _is_root_profile(name):
+    if not name:
         yield
         return
+    previous_profile = getattr(_tls, "profile", None)
     set_request_profile(name)
     try:
-        with profile_env_for_background_worker(
-            name, purpose, logger_override=logger_override
-        ):
+        if _is_root_profile(name):
             yield
+        else:
+            with profile_env_for_background_worker(
+                name, purpose, logger_override=logger_override
+            ):
+                yield
     finally:
-        clear_request_profile()
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
 
 
 def _set_hermes_home(home: Path):

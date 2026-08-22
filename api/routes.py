@@ -23419,7 +23419,7 @@ def _process_wakeup_provider_has_recovery_credential(
     if not provider_id:
         return False
     profile_name = str(getattr(session, "profile", "") or "").strip()
-    if profile_name and not _is_root_profile(profile_name):
+    if profile_name:
         with profile_scope_for_detached_worker(
             profile_name,
             "process_wakeup credential revalidation",
