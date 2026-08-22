@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
 
@@ -498,6 +500,613 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_publish_compression_child_over_one_second_stays_one_lineage_across_readers(
+    tmp_path, monkeypatch
+):
+    """WebUI follows the Agent's durable compression edge, not a time cutoff."""
+    hermes_state = pytest.importorskip('hermes_state')
+    import api.models as models
+    from api.agent_sessions import (
+        read_importable_agent_session_rows,
+        read_session_lineage_metadata,
+        read_session_lineage_report,
+    )
+    from api.models import get_state_db_session_messages
+
+    parent_id = 'slow_publish_parent'
+    child_id = 'slow_publish_child'
+    db_path = tmp_path / 'state.db'
+    db = hermes_state.SessionDB(db_path=db_path)
+    try:
+        db.create_session(parent_id, source='cli', model='test-model')
+        db.append_messages_batch(
+            parent_id,
+            [
+                {'role': 'user', 'content': 'parent request', 'timestamp': 950.0},
+                {'role': 'assistant', 'content': 'parent answer', 'timestamp': 960.0},
+            ],
+        )
+
+        # publish_compression_child stamps the child before inserting its handoff
+        # and closes the parent afterwards. Model a production-valid slow insert
+        # without adding wall-clock sleep to the suite: the durable gap is 2.5s.
+        publish_clock = iter((1000.0, 1001.0, 1002.5))
+        monkeypatch.setattr(hermes_state.time, 'time', lambda: next(publish_clock))
+        db.publish_compression_child(
+            parent_session_id=parent_id,
+            child_session_id=child_id,
+            source='cli',
+            messages=[
+                {
+                    'role': 'assistant',
+                    'content': '[CONTEXT COMPACTION] slow handoff',
+                    'timestamp': 1001.0,
+                }
+            ],
+            model='test-model',
+            require_compression_lease=False,
+        )
+
+        parent = db.get_session(parent_id)
+        child = db.get_session(child_id)
+        assert child['started_at'] == 1000.0
+        assert parent['ended_at'] == 1002.5
+        assert parent['ended_at'] - child['started_at'] > 1.0
+        assert db._is_compression_child_row(child) is True
+    finally:
+        db.close()
+
+    # Titles are a WebUI projection concern rather than an argument accepted by
+    # SessionDB.create_session/publish_compression_child. Shape them as the live
+    # readers see them while retaining the producer-authored edge and timestamps.
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE sessions SET title = ?, started_at = ? WHERE id = ?",
+            ('Slow compression conversation', 900.0, parent_id),
+        )
+        conn.execute(
+            "UPDATE sessions SET title = ? WHERE id = ?",
+            ('Slow compression continuation', child_id),
+        )
+
+    projected = read_importable_agent_session_rows(
+        db_path, limit=None, exclude_sources=None
+    )
+    lineage_rows = [row for row in projected if row.get('id') in {parent_id, child_id}]
+    assert len(lineage_rows) == 1
+    sidebar = lineage_rows[0]
+    assert sidebar['id'] == child_id
+    assert sidebar['title'] == 'Slow compression conversation'
+    assert sidebar['started_at'] == 900.0
+    assert sidebar['last_activity'] == 1001.0
+    assert sidebar['_lineage_root_id'] == parent_id
+    assert sidebar['_lineage_tip_id'] == child_id
+    assert sidebar['_compression_segment_count'] == 2
+
+    report = read_session_lineage_report(db_path, child_id)
+    assert report['lineage_key'] == parent_id
+    assert report['tip_session_id'] == child_id
+    assert report['total_segments'] == 2
+    assert [segment['session_id'] for segment in report['segments']] == [
+        child_id,
+        parent_id,
+    ]
+
+    metadata = read_session_lineage_metadata(db_path, {parent_id, child_id})
+    assert metadata[child_id]['_lineage_root_id'] == parent_id
+    assert metadata[child_id]['_lineage_tip_id'] == child_id
+    assert metadata[child_id]['_compression_segment_count'] == 2
+
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db_path)
+    stitched = get_state_db_session_messages(child_id, stitch_continuations=True)
+    assert [message['content'] for message in stitched] == [
+        'parent request',
+        'parent answer',
+        '[CONTEXT COMPACTION] slow handoff',
+    ]
+
+
+def test_compression_lineage_keeps_source_mismatch_separate():
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'guarded_parent',
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+    assert not _is_continuation_session(
+        parent,
+        {'id': 'different_source', 'source': 'cli', 'started_at': 150.0},
+    )
+
+
+def test_compression_lineage_keeps_legacy_fork_separate():
+    from api.agent_sessions import _is_continuation_session
+
+    assert not _is_continuation_session(
+        {
+            'id': 'guarded_parent',
+            'source': 'webui',
+            'ended_at': 200.0,
+            'end_reason': 'compression',
+        },
+        {
+            'id': 'explicit_fork',
+            'source': 'webui',
+            'session_source': 'fork',
+            'started_at': 150.0,
+        },
+    )
+
+
+def test_cli_close_keeps_exact_timestamp_boundary():
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'cli_closed_parent',
+        'source': 'cli',
+        'ended_at': 200.0,
+        'end_reason': 'cli_close',
+    }
+    assert _is_continuation_session(
+        parent,
+        {'id': 'cli_at_boundary', 'source': 'cli', 'started_at': 200.0},
+    )
+    assert not _is_continuation_session(
+        parent,
+        {'id': 'cli_before_boundary', 'source': 'cli', 'started_at': 199.999},
+    )
+
+
+def test_continuation_lineage_preserves_missing_ended_at_compatibility():
+    from api.agent_sessions import _is_continuation_session
+
+    child = {'id': 'old_schema_child', 'source': 'cli', 'started_at': 100.0}
+    for end_reason in ('compression', 'cli_close'):
+        assert _is_continuation_session(
+            {
+                'id': 'old_schema_parent',
+                'source': 'cli',
+                'ended_at': None,
+                'end_reason': end_reason,
+            },
+            child,
+        )
+
+
+def test_compression_lineage_rejects_model_config_branch_identity():
+    """Fork/delegate identity in model_config wins over a compression parent link.
+
+    Production rows carry branch/delegate lineage in model_config
+    (_delegate_from authoritative, _branched_from for manual branches), not in
+    session_source. A direct branch of a compression parent must stay a
+    boundary. Malformed model_config fails closed (boundary).
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'mc_parent',
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+    base_child = {'id': 'mc_child', 'source': 'webui', 'started_at': 199.7}
+
+    # A marker-free direct compression child still collapses (containment).
+    assert _is_continuation_session(parent, base_child)
+
+    # Delegate identity (authoritative) — JSON string as stored in state.db.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'_delegate_from': 'mc_parent'})},
+    )
+    # Manual branch identity — already-parsed dict shape.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': {'_branched_from': 'mc_parent'}},
+    )
+    # Malformed model_config: ambiguous identity evidence fails closed.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': '{not-json'},
+    )
+    # Non-dict model_config is equally ambiguous.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps(['_delegate_from'])},
+    )
+    # A model_config without branch markers does NOT block continuation.
+    assert _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'model': 'anthropic/claude'})},
+    )
+
+
+def test_model_config_branch_identity_is_fail_closed_on_hostile_payloads():
+    """Unusable model_config identity must never widen the compression stitch.
+
+    model_config is a TEXT JSON column, so the reader has to survive hostile or
+    truncated payloads. Any evidence it cannot fully trust — non-object JSON,
+    non-string marker values, empty markers, or a marker naming a session that
+    is neither the direct parent nor the parent's own inherited identity — is
+    ambiguous lineage and must fail closed as a boundary rather than raise.
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'fc_parent',
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+    }
+    base_child = {
+        'id': 'fc_child',
+        'source': 'webui',
+        'started_at': 199.7,
+        'parent_session_id': 'fc_parent',
+    }
+
+    # Non-string / unusable marker values are ambiguous, not "absent".
+    for hostile in (
+        {'_delegate_from': 123},
+        {'_delegate_from': ['fc_parent']},
+        {'_delegate_from': {'id': 'fc_parent'}},
+        {'_branched_from': True},
+        {'_branched_from': '   '},
+        {'_delegate_from': ''},
+    ):
+        assert not _is_continuation_session(
+            parent, {**base_child, 'model_config': json.dumps(hostile)}
+        ), hostile
+
+    # Truncated / non-JSON payloads stay fail-closed and must not raise.
+    for raw in ('{not-json', '[]', '"a string"', '17', 'null', '{"a":'):
+        assert not _is_continuation_session(
+            parent, {**base_child, 'model_config': raw}
+        ), raw
+
+    # A marker naming an unrelated session the parent cannot explain is
+    # ambiguous lineage evidence -> boundary.
+    assert not _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'_delegate_from': 'somewhere_else'})},
+    )
+
+    # An explicit JSON null marker carries no identity -> continuation allowed.
+    assert _is_continuation_session(
+        parent,
+        {**base_child, 'model_config': json.dumps({'_delegate_from': None})},
+    )
+
+
+def test_model_config_fork_child_stays_separate_without_session_source():
+    """The review vector: fork identity only in model_config stays separate.
+
+    The legacy ``session_source == 'fork'`` guard cannot see this child, so
+    the model_config identity check must reject the durable compression-parent
+    edge before it can stitch a genuine branch into the parent's lineage.
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {
+        'id': 'tol_parent',
+        'source': 'webui',
+        'ended_at': 500.0,
+        'end_reason': 'compression',
+    }
+
+    for marker in ('_delegate_from', '_branched_from'):
+        # The timestamp cannot override identity, and session_source is absent.
+        child = {
+            'id': f'tol_child_{marker}',
+            'source': 'webui',
+            'started_at': 499.5,
+            'parent_session_id': 'tol_parent',
+            'model_config': json.dumps({marker: 'tol_parent'}),
+        }
+        assert 'session_source' not in child
+        assert not _is_continuation_session(parent, child), marker
+
+        # The same row without the marker is a plain rotation -> continuation.
+        plain = {k: v for k, v in child.items() if k != 'model_config'}
+        assert _is_continuation_session(parent, plain), marker
+
+
+def test_model_config_branch_child_stays_separate_lineage_in_sidebar_projection():
+    """A direct fork/delegate child keeps its own sidebar row after compression."""
+    from api.agent_sessions import _project_agent_session_rows
+
+    rows = [
+        {
+            'id': 'mc_overlap_root',
+            'title': 'Compression parent',
+            'source': 'webui',
+            'started_at': 100.0,
+            'parent_session_id': None,
+            'ended_at': 200.0,
+            'end_reason': 'compression',
+            'actual_message_count': 3,
+            'actual_user_message_count': 1,
+            'message_count': 3,
+            'last_activity': 199.0,
+        },
+        {
+            'id': 'mc_overlap_continuation',
+            'title': 'Compression parent',
+            'source': 'webui',
+            'started_at': 199.8,
+            'parent_session_id': 'mc_overlap_root',
+            'ended_at': None,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 201.0,
+        },
+        {
+            'id': 'mc_overlap_delegate_child',
+            'title': 'Delegated subagent run',
+            'source': 'webui',
+            'started_at': 199.6,
+            'parent_session_id': 'mc_overlap_root',
+            'model_config': json.dumps({'_delegate_from': 'mc_overlap_root'}),
+            'ended_at': None,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 202.0,
+        },
+    ]
+
+    projected = _project_agent_session_rows(rows)
+    projected_by_id = {row['id']: row for row in projected}
+
+    # The real continuation still collapses into the chain tip...
+    assert 'mc_overlap_continuation' in projected_by_id
+    assert projected_by_id['mc_overlap_continuation']['_lineage_root_id'] == 'mc_overlap_root'
+    # ...while the delegate child remains a separate, visible lineage.
+    assert 'mc_overlap_delegate_child' in projected_by_id
+    assert projected_by_id['mc_overlap_delegate_child']['relationship_type'] == 'child_session'
+    assert '_lineage_root_id' not in projected_by_id['mc_overlap_delegate_child']
+
+
+def test_stitch_continuations_does_not_prefix_model_config_branch_child(tmp_path, monkeypatch):
+    """Transcript stitching must not pull ancestor messages into a delegate child."""
+    import api.models as models
+    from api.models import get_state_db_session_messages
+
+    db = tmp_path / 'state.db'
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            model_config TEXT,
+            started_at REAL,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, ended_at, end_reason) "
+        "VALUES ('st_parent', 'webui', 100.0, 200.0, 'compression')"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id) "
+        "VALUES ('st_delegate', 'webui', ?, 199.7, 'st_parent')",
+        (json.dumps({'_delegate_from': 'st_parent'}),),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, parent_session_id) "
+        "VALUES ('st_continuation', 'webui', 199.8, 'st_parent')"
+    )
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            ('st_parent', 'user', 'parent msg', 150.0),
+            ('st_delegate', 'user', 'delegate msg', 199.9),
+            ('st_continuation', 'user', 'continuation msg', 199.95),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db)
+
+    # Delegate child: only its own messages, no ancestor prefix.
+    delegate_msgs = get_state_db_session_messages('st_delegate', stitch_continuations=True)
+    assert [m['content'] for m in delegate_msgs] == ['delegate msg']
+
+    # Containment: a genuine compression continuation still stitches.
+    stitched = get_state_db_session_messages('st_continuation', stitch_continuations=True)
+    assert [m['content'] for m in stitched] == ['parent msg', 'continuation msg']
+
+
+def test_inherited_model_config_marker_does_not_split_compression_continuation():
+    """A compression child that inherits an ancestor fork/delegate marker stays a continuation.
+
+    publish_compression_child copies model_config verbatim, so D' (child of
+    delegate D) carries ``_delegate_from=A0`` rather than D. Presence-only
+    matching would wrong-split D→D'. Markers only count when they point at
+    the child's direct parent; a real fork of D stays separate.
+    """
+    from api.agent_sessions import _is_continuation_session, _project_agent_session_rows
+
+    ancestor_id = 'A0'
+    delegate_id = 'D'
+    continuation_id = 'Dprime'
+    fork_id = 'Dfork'
+
+    delegate = {
+        'id': delegate_id,
+        'source': 'webui',
+        'ended_at': 200.0,
+        'end_reason': 'compression',
+        'parent_session_id': ancestor_id,
+        'model_config': json.dumps({'_delegate_from': ancestor_id}),
+    }
+    inherited_child = {
+        'id': continuation_id,
+        'source': 'webui',
+        'started_at': 199.7,
+        'parent_session_id': delegate_id,
+        'model_config': json.dumps({'_delegate_from': ancestor_id}),
+    }
+    direct_fork = {
+        'id': fork_id,
+        'source': 'webui',
+        'started_at': 199.6,
+        'parent_session_id': delegate_id,
+        'model_config': json.dumps({'_branched_from': delegate_id}),
+    }
+
+    assert _is_continuation_session(delegate, inherited_child)
+    assert not _is_continuation_session(delegate, direct_fork)
+
+    rows = [
+        {
+            'id': ancestor_id,
+            'title': 'Root',
+            'source': 'webui',
+            'started_at': 50.0,
+            'parent_session_id': None,
+            'ended_at': 90.0,
+            'end_reason': None,
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 89.0,
+        },
+        {
+            'id': delegate_id,
+            'title': 'Delegate conversation',
+            'source': 'webui',
+            'started_at': 100.0,
+            'parent_session_id': ancestor_id,
+            'ended_at': 200.0,
+            'end_reason': 'compression',
+            'model_config': json.dumps({'_delegate_from': ancestor_id}),
+            'actual_message_count': 3,
+            'actual_user_message_count': 1,
+            'message_count': 3,
+            'last_activity': 199.0,
+        },
+        {
+            'id': continuation_id,
+            'title': 'Delegate conversation',
+            'source': 'webui',
+            'started_at': 199.7,
+            'parent_session_id': delegate_id,
+            'ended_at': None,
+            'end_reason': None,
+            'model_config': json.dumps({'_delegate_from': ancestor_id}),
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 201.0,
+        },
+        {
+            'id': fork_id,
+            'title': 'Explicit fork of delegate',
+            'source': 'webui',
+            'started_at': 199.6,
+            'parent_session_id': delegate_id,
+            'ended_at': None,
+            'end_reason': None,
+            'model_config': json.dumps({'_branched_from': delegate_id}),
+            'actual_message_count': 2,
+            'actual_user_message_count': 1,
+            'message_count': 2,
+            'last_activity': 202.0,
+        },
+    ]
+
+    projected = _project_agent_session_rows(rows)
+    projected_by_id = {row['id']: row for row in projected}
+
+    assert continuation_id in projected_by_id
+    assert projected_by_id[continuation_id]['_lineage_root_id'] == delegate_id
+    assert projected_by_id[continuation_id]['_compression_segment_count'] == 2
+    assert delegate_id not in projected_by_id
+    assert fork_id in projected_by_id
+    assert projected_by_id[fork_id]['relationship_type'] == 'child_session'
+    assert '_lineage_root_id' not in projected_by_id[fork_id]
+
+
+def test_stitch_continuations_keeps_inherited_marker_compression_child(tmp_path, monkeypatch):
+    """Transcript stitch must keep D→D' when D' inherited D's ancestor marker."""
+    import api.models as models
+    from api.models import get_state_db_session_messages
+
+    db = tmp_path / 'state.db'
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            model_config TEXT,
+            started_at REAL,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (id, source, started_at, ended_at, end_reason) "
+        "VALUES ('A0', 'webui', 50.0, 90.0, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id, "
+        "ended_at, end_reason) VALUES ('D', 'webui', ?, 100.0, 'A0', 200.0, 'compression')",
+        (json.dumps({'_delegate_from': 'A0'}),),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id) "
+        "VALUES ('Dprime', 'webui', ?, 199.7, 'D')",
+        (json.dumps({'_delegate_from': 'A0'}),),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, model_config, started_at, parent_session_id) "
+        "VALUES ('Dfork', 'webui', ?, 199.6, 'D')",
+        (json.dumps({'_branched_from': 'D'}),),
+    )
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            ('D', 'user', 'seg-1', 150.0),
+            ('Dprime', 'user', 'seg-2', 199.9),
+            ('Dfork', 'user', 'fork msg', 199.8),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db)
+
+    stitched = get_state_db_session_messages('Dprime', stitch_continuations=True)
+    assert [m['content'] for m in stitched] == ['seg-1', 'seg-2']
+
+    fork_msgs = get_state_db_session_messages('Dfork', stitch_continuations=True)
+    assert [m['content'] for m in fork_msgs] == ['fork msg']
 
 
 def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
