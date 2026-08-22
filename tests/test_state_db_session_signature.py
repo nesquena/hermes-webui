@@ -5,11 +5,12 @@ serialises every state.db display row with ``json.dumps``. On a 36k-row session
 that cost ~1.4s *per request*, which became the floor cost of even a cache HIT --
 the cache could never pay for itself.
 
-``_state_db_session_signature`` now reuses the project's DB/WAL/SHM commit key
-outside streams and switches to an exact target-session digest while another
-turn streams. These tests pin the properties that matter: every committed
-target mutation moves the signature; unrelated stream deltas remain stable;
-and failures return None so the caller falls back to the exact row fingerprint.
+``_state_db_session_signature`` now uses a cross-process target-session revision
+derived from supported session metadata plus indexed message aggregates. These
+tests pin the properties that matter: supported target mutations move the
+signature, direct insert/delete/length/timestamp changes remain visible,
+unrelated sessions stay stable without a process-local stream marker, and
+failures return None so the caller falls back to the exact row fingerprint.
 """
 
 import sqlite3
@@ -47,6 +48,21 @@ def _build_db(path, rows=None):
         conn.executemany(
             "INSERT INTO messages (id, session_id, role, content, timestamp) "
             "VALUES (?,?,?,?,?)", payload)
+        conn.execute(
+            "CREATE TABLE sessions ("
+            "  id TEXT PRIMARY KEY,"
+            "  message_count INTEGER,"
+            "  last_activity_at REAL,"
+            "  last_read_at REAL,"
+            "  ended_at REAL,"
+            "  end_reason TEXT,"
+            "  rewind_count INTEGER,"
+            "  archived INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+            (SID, len(payload), 1700000100.0, None, None, None, 0, 0),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -67,10 +83,18 @@ def _sig(db_path):
     return routes._state_db_session_signature(SID, None)
 
 
-def _mutate(db_path, sql, params=()):
+def _mutate(db_path, sql, params=(), *, touch_session=False):
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute(sql, params)
+        if touch_session:
+            conn.execute(
+                "UPDATE sessions SET "
+                "message_count=(SELECT COUNT(*) FROM messages WHERE session_id=?), "
+                "last_activity_at=COALESCE(last_activity_at, 0)+1 "
+                "WHERE id=?",
+                (SID, SID),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -133,7 +157,7 @@ def test_signature_detects_mutation(db, sql, params):
     """A stale cache is only safe if the key moves on every visible mutation."""
     before = _sig(db)
     assert before is not None
-    _mutate(db, sql, params)
+    _mutate(db, sql, params, touch_session=True)
     after = _sig(db)
     assert after is not None
     assert after != before, "signature did not move -> stale transcript risk"
@@ -147,14 +171,8 @@ def test_signature_is_stable_without_mutation(db):
         assert _sig(db) == first
 
 
-def test_streaming_signature_is_scoped_to_target_session(db, monkeypatch):
-    """Unrelated stream writes stay stable, but target edits invalidate immediately."""
-    marker = ("streaming", ("active-run-1",))
-    monkeypatch.setattr(
-        "api.models._cli_sessions_streaming_freeze_marker",
-        lambda: marker,
-        raising=False,
-    )
+def test_signature_is_scoped_to_target_without_process_local_stream_marker(db):
+    """Cross-process writes to another session must not churn this cache key."""
     first = _sig(db)
     assert first is not None
 
@@ -170,23 +188,31 @@ def test_streaming_signature_is_scoped_to_target_session(db, monkeypatch):
         "UPDATE messages SET content = 'Z' || SUBSTR(content, 2) WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages WHERE session_id = ?)",
         (SID,),
+        touch_session=True,
     )
-    assert _sig(db) != first, "target session edit was hidden by the global stream marker"
+    assert _sig(db) != first, "supported target edit did not advance session revision"
 
 
-def test_signature_invalidates_on_other_session_write(db):
-    """The DB-wide key favors correctness over per-session cache locality.
+def test_raw_target_tail_length_change_invalidates_without_session_metadata(db):
+    """A direct edit of the indexed tail shape still invalidates."""
+    before = _sig(db)
+    _mutate(
+        db,
+        "UPDATE messages SET content = 'short' WHERE rowid = "
+        "(SELECT MAX(rowid) FROM messages WHERE session_id = ?)",
+        (SID,),
+    )
+    assert _sig(db) != before
 
-    A write to another session intentionally invalidates this session's cache.
-    This false invalidation is safe; missing a write to an optional column or a
-    continuation parent would not be.
-    """
+
+def test_signature_stays_stable_on_other_session_write(db):
+    """Session-scoped revision avoids global DB/WAL false invalidations."""
     before = _sig(db)
     _mutate(
         db,
         "INSERT INTO messages (session_id, role, content, timestamp) "
         "VALUES ('20260202_000000_other', 'user', 'unrelated', 1700001111.0)")
-    assert _sig(db) != before
+    assert _sig(db) == before
 
 
 # --------------------------------------------------------------------------
@@ -228,6 +254,9 @@ def test_signature_uses_file_fallback_on_incomplete_schema(tmp_path, monkeypatch
 
 
 def test_signature_returns_none_when_all_fingerprints_fail(db, monkeypatch):
+    monkeypatch.setattr(
+        routes, "_state_db_target_session_revision", lambda *a, **k: None
+    )
     monkeypatch.setattr(
         "api.models._sqlite_file_stat_cache_key", lambda path: None, raising=False)
     assert routes._state_db_session_signature(SID, None) is None

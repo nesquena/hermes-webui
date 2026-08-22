@@ -9292,32 +9292,141 @@ def _state_db_target_session_signature(db_path, session_id):
         return None
 
 
-def _state_db_session_signature(session_id, profile=None):
-    """Commit-reliable state.db signature for a session cache key.
+def _state_db_target_session_revision(db_path, session_id):
+    """Return a bounded cross-process revision for one session's display rows.
 
-    The signature is intentionally database-wide rather than sampled per row.
-    ``_sqlite_file_stat_cache_key`` is the existing proven invalidation primitive
-    for WebUI state caches: it combines content summaries with DB/WAL/SHM stat
-    stamps and advances on every SQLite commit, including same-length edits to
-    optional message columns and continuation-parent rows.
-
-    Outside a stream, this may invalidate a session cache when *another*
-    session is written. That is a deliberate safety trade-off: false
-    invalidation costs one cold merge, while missed invalidation can serve a
-    stale or shrunk transcript. During an active stream, an exhaustive digest
-    of the target session replaces the global freeze marker: unrelated deltas
-    remain stable, while same-length direct edits to the target invalidate
-    immediately. The normal DB signature call costs about 1.3 ms on the
-    production state.db; the exhaustive path is reserved for active streams.
-
-    Returns None on any failure so callers fail closed onto the exact row
-    fingerprint rather than trusting a partial key.
+    Supported writers update ``sessions.last_activity_at``/``message_count``.
+    The indexed tail revision additionally catches direct appends, tail deletes,
+    and raw changes to timestamp, row flags, or byte lengths on the newest row.
+    Legacy stores without a sessions row use full numeric/length aggregates. A
+    same-length raw SQL rewrite of an older row that bypasses session metadata
+    is outside the state-store writer contract; detecting it exactly would
+    require scanning and hashing every message payload (148 MB on the production
+    long session), which would make the cache slower than the uncached path.
     """
-    from api.models import (
-        _agent_state_db_path,
-        _cli_sessions_streaming_freeze_marker,
-        _sqlite_file_stat_cache_key,
+    message_length_columns = (
+        "role",
+        "content",
+        "tool_call_id",
+        "tool_calls",
+        "tool_name",
+        "finish_reason",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "codex_reasoning_items",
+        "codex_message_items",
+        "effect_disposition",
+        "api_content",
+        "display_kind",
+        "display_metadata",
     )
+    message_sum_columns = ("observed", "active", "compacted")
+    session_revision_columns = (
+        "message_count",
+        "last_activity_at",
+        "ended_at",
+        "end_reason",
+        "rewind_count",
+        "archived",
+    )
+    try:
+        uri_path = quote(str(Path(db_path).resolve()), safe="/")
+        with closing(
+            sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, timeout=0.25)
+        ) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=250")
+            message_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")
+            }
+            if "session_id" not in message_columns or "id" not in message_columns:
+                return None
+            session_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")
+            }
+            available_session_columns = [
+                column
+                for column in session_revision_columns
+                if column in session_columns
+            ]
+            session_revision = None
+            if "id" in session_columns and available_session_columns:
+                session_revision = conn.execute(
+                    "SELECT "
+                    + ", ".join(
+                        f'"{column}"' for column in available_session_columns
+                    )
+                    + " FROM sessions WHERE id = ?",
+                    (str(session_id),),
+                ).fetchone()
+            if session_revision is not None:
+                latest_parts = ["id"]
+                latest_parts.append(
+                    "timestamp" if "timestamp" in message_columns else "NULL"
+                )
+                latest_parts.extend(
+                    f'LENGTH(COALESCE("{column}", \'\'))'
+                    for column in message_length_columns
+                    if column in message_columns
+                )
+                latest_parts.extend(
+                    f'COALESCE("{column}", 0)'
+                    for column in message_sum_columns
+                    if column in message_columns
+                )
+                latest_revision = conn.execute(
+                    f"SELECT {', '.join(latest_parts)} FROM messages "
+                    "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                    (str(session_id),),
+                ).fetchone()
+                return (
+                    "target-session-revision-v2",
+                    tuple(available_session_columns),
+                    tuple(session_revision),
+                    tuple(latest_revision) if latest_revision is not None else None,
+                )
+
+            # Legacy state stores without a sessions row have no supported
+            # O(1) activity revision. Keep them conservative by scanning compact
+            # numeric/length aggregates instead of trusting a global DB stamp.
+            aggregate_parts = ["COUNT(*)", "MAX(id)"]
+            aggregate_parts.append(
+                "MAX(timestamp)" if "timestamp" in message_columns else "NULL"
+            )
+            aggregate_parts.extend(
+                f'SUM(LENGTH(COALESCE("{column}", \'\')))'
+                for column in message_length_columns
+                if column in message_columns
+            )
+            aggregate_parts.extend(
+                f'SUM(COALESCE("{column}", 0))'
+                for column in message_sum_columns
+                if column in message_columns
+            )
+            message_revision = conn.execute(
+                f"SELECT {', '.join(aggregate_parts)} FROM messages "
+                "WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+            return (
+                "target-session-revision-v1-legacy",
+                (),
+                None,
+                tuple(message_revision) if message_revision is not None else None,
+            )
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+
+
+def _state_db_session_signature(session_id, profile=None):
+    """Return a cross-process target-session cache revision, fail-closed.
+
+    The session-scoped revision avoids DB/WAL false invalidations caused by a
+    different conversation streaming in another WebUI process. If the schema
+    cannot provide that revision, fall back to the existing global file key.
+    """
+    from api.models import _agent_state_db_path, _sqlite_file_stat_cache_key
 
     sid = str(session_id or "")
     if not sid or not is_safe_session_id(sid):
@@ -9328,12 +9437,9 @@ def _state_db_session_signature(session_id, profile=None):
             return None
     except Exception:
         return None
-    try:
-        streaming_marker = _cli_sessions_streaming_freeze_marker()
-    except Exception:
-        streaming_marker = None
-    if streaming_marker is not None:
-        return _state_db_target_session_signature(db_path, sid)
+    target_revision = _state_db_target_session_revision(db_path, sid)
+    if target_revision is not None:
+        return target_revision
     try:
         signature = _sqlite_file_stat_cache_key(Path(db_path))
     except Exception:
