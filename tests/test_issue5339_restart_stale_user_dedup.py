@@ -186,6 +186,238 @@ def test_content_key_keeps_distinct_user_messages_distinct():
     assert _session_message_content_key(one) != _session_message_content_key(two)
 
 
+def test_native_multimodal_sidecar_reconciles_with_agent_text_projection():
+    """A completed native-image turn keeps the rich sidecar row exactly once."""
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    prompt = (
+        "[Workspace::v1: /workspace]\n"
+        "Describe this image\n\n"
+        "[Attached files: /absolute/path/image.png]"
+    )
+    sidecar = {
+        "id": "webui-112",
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64,ZmFrZS1pbWFnZS1ieXRlcw==",
+                },
+            },
+        ],
+        "attachments": ["image.png"],
+        "timestamp": timestamp,
+    }
+    state = {
+        "role": "user",
+        "content": f"{prompt}\n[screenshot]",
+        "timestamp": timestamp,
+        "api_content": "trusted provider wire content",
+    }
+
+    merged = merge_session_messages_append_only([sidecar], [state])
+
+    assert merged == [sidecar]
+    assert merged[0] is sidecar
+    assert merged[0]["content"] is sidecar["content"]
+    assert merged[0]["attachments"] is sidecar["attachments"]
+    assert merged[0]["api_content"] == "trusted provider wire content"
+
+
+def test_ordinary_reconciliation_preserves_conflicting_provider_sidecars():
+    """Conflicting provider payloads remain separate ordinary rows."""
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    sidecar = {
+        "role": "assistant",
+        "content": "same answer",
+        "timestamp": timestamp,
+        "_state_db_row_id": 7,
+        "api_content": "wire-a",
+    }
+    state = {
+        "role": "assistant",
+        "content": "same answer",
+        "timestamp": timestamp,
+        "_state_db_row_id": 7,
+        "api_content": "wire-b",
+    }
+
+    assert merge_session_messages_append_only([sidecar], [state]) == [sidecar, state]
+
+
+def test_multimodal_mirror_requires_exact_timestamp_and_image_parts():
+    """Cross-store image identity never participates in timestamp-free replay."""
+    from api.models import (
+        _session_message_multimodal_mirror_key,
+        merge_session_messages_append_only,
+    )
+
+    timestamp = 1766352000.123456
+    multimodal = {
+        "id": "webui-image",
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "type [screenshot] literally"},
+            {"type": "image", "image": "data:one"},
+            {"type": "input_image", "image_url": "data:two"},
+        ],
+        "timestamp": timestamp,
+    }
+    exact_mirror = {
+        "role": "user",
+        "content": "type [screenshot] literally\n[screenshot]\n[screenshot]",
+        "timestamp": timestamp,
+    }
+    mixed_case_role = {**exact_mirror, "role": "  UsEr "}
+    assert _session_message_multimodal_mirror_key(mixed_case_role) == (
+        _session_message_multimodal_mirror_key(exact_mirror)
+    )
+    assert merge_session_messages_append_only([multimodal], [exact_mirror]) == [multimodal]
+
+    later_literal = {**exact_mirror, "timestamp": timestamp + 0.5}
+    later_sidecar = {
+        "id": "later-assistant",
+        "role": "assistant",
+        "content": "later sidecar row",
+        "timestamp": timestamp + 1,
+    }
+    merged = merge_session_messages_append_only(
+        [multimodal, later_sidecar],
+        [later_literal],
+    )
+    assert merged == [multimodal, later_literal, later_sidecar]
+
+    unknown_parts = [
+        {"type": "text", "text": "keep the original list identity"},
+        {"type": "document", "document": {"id": "doc-1"}},
+    ]
+    text_only_parts = [{"type": "text", "text": "not an image-bearing list"}]
+    malformed_text_parts = [
+        {"type": "text", "text": 7},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]
+    for parts in (unknown_parts, text_only_parts, malformed_text_parts, []):
+        sidecar = {
+            "id": f"structured-{len(parts)}",
+            "role": "user",
+            "content": parts,
+            "timestamp": timestamp,
+        }
+        assert _session_message_multimodal_mirror_key(
+            sidecar,
+            require_image_parts=True,
+        ) is None
+
+    distinct_state = {
+        "role": "user",
+        "content": "different text\n[screenshot]\n[screenshot]",
+        "timestamp": timestamp,
+    }
+    assert len(merge_session_messages_append_only([multimodal], [distinct_state])) == 2
+
+
+def test_multimodal_mirror_collapses_identical_duplicate_state_rows():
+    """Byte-identical scalar mirrors reconcile to the rich sidecar row."""
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    sidecar = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    state = {
+        "role": "user",
+        "content": "describe this image\n[screenshot]",
+        "timestamp": timestamp,
+    }
+
+    merged = merge_session_messages_append_only([sidecar], [state, dict(state)])
+
+    assert merged == [sidecar]
+    assert merged[0] is sidecar
+
+
+def test_multimodal_mirror_state_identity_ambiguity_is_order_independent():
+    """Contradictory state provenance does not fold every mirror into sidecar."""
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    sidecar = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    state_rows = [
+        {
+            "role": "user",
+            "content": "describe this image\n[screenshot]",
+            "timestamp": timestamp,
+            "_state_db_row_id": 7,
+        },
+        {
+            "role": "user",
+            "content": "describe this image\n[screenshot]",
+            "timestamp": timestamp,
+        },
+        {
+            "role": "user",
+            "content": "describe this image\n[screenshot]",
+            "timestamp": timestamp,
+            "_state_db_row_id": 8,
+        },
+    ]
+
+    merged = merge_session_messages_append_only([sidecar], state_rows)
+
+    assert merged == [sidecar, state_rows[0]]
+    assert merged[0]["content"] is sidecar["content"]
+    assert merged[1]["_state_db_row_id"] == 7
+
+
+def test_multimodal_mirror_rejects_conflicting_private_identity():
+    """A projected image mirror never overrides contradictory provenance."""
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    base_sidecar = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    base_state = {
+        "role": "user",
+        "content": "describe this image\n[screenshot]",
+        "timestamp": timestamp,
+    }
+    conflicts = (
+        ({"id": "sidecar-a", "message_id": "sidecar-b"}, {}),
+        ({"id": "sidecar"}, {"id": "state"}),
+        ({}, {"_state_db_row_id": True}),
+        ({"_state_db_row_id": 7}, {"_state_db_row_id": 8}),
+        ({"api_content": "wire-a"}, {"api_content": "wire-b"}),
+    )
+
+    for sidecar_identity, state_identity in conflicts:
+        sidecar = {**base_sidecar, **sidecar_identity}
+        state = {**base_state, **state_identity}
+        assert merge_session_messages_append_only([sidecar], [state]) == [sidecar, state]
+
+
 # ---------------------------------------------------------------------------
 # Delta-level: state_db_delta_after_context must not append a duplicate.
 # ---------------------------------------------------------------------------
