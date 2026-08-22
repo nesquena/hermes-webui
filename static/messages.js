@@ -5076,6 +5076,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     _walk(rootEl);
   }
+  // Exposed for the transparent-stream fade prose reconciler in ui.js
+  // (same pattern as __anchorProseIncrementalNode above): the no-cursor
+  // rebuild branch of _refreshTransparentFadeProseRow snapshots the rendered
+  // text before clearing and re-applies this mute so only genuinely-new tail
+  // words animate (#7082 review). The helper is stateless, so unlike
+  // __anchorProseIncrementalNode it never needs to be cleared per-stream.
+  if(typeof window!=='undefined') window.__streamFadeMuteRenderedPrefix=_streamFadeMuteRenderedPrefix;
   function _streamFadePauseAfter(text, paragraphBreakIndex){
     if(paragraphBreakIndex>=0) return 90;
     const trimmed=String(text||'').trimEnd();

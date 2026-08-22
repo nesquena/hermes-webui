@@ -13792,6 +13792,10 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   return true;
 }
 
+const _TRANSPARENT_FADE_BLOCK_TAGS = new Set([
+  'P','DIV','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','LI','UL','OL','PRE','TABLE',
+]);
+
 function _bindTransparentFadeCleanup(body){
   if(!body || body._transparentFadeCleanupBound || typeof body.addEventListener !== 'function') return;
   body._transparentFadeCleanupBound = true;
@@ -13806,6 +13810,20 @@ function _bindTransparentFadeCleanup(body){
     span.classList.remove('is-new');
     if(span.style) span.style.removeProperty('--stream-fade-ms');
   });
+}
+
+// Trailing block element of a live prose body, if any. Live rows are produced
+// by the incremental streaming-markdown path, which keeps an open block (a <p>)
+// as it parses; text appended as a sibling of that block would render on its
+// own line. Inline wrappers (fade spans) are not block boxes and are skipped.
+function _transparentFadeAppendTarget(body){
+  if(!body) return body;
+  const kids = body.childNodes;
+  if(!kids || !kids.length) return body;
+  const last = kids[kids.length - 1];
+  if(!last || last.nodeType !== 1) return body;
+  const tag = String(last.tagName || '').toUpperCase();
+  return _TRANSPARENT_FADE_BLOCK_TAGS.has(tag) ? last : body;
 }
 
 function _appendTransparentFadeText(body, text){
@@ -13833,13 +13851,58 @@ function _appendTransparentFadeText(body, text){
   }
   if(!changed) frag.appendChild(document.createTextNode(value));
   else if(last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
-  body.appendChild(frag);
+  // Append inside the trailing block element (the streaming markdown parser's
+  // open <p>) rather than at the root of .msg-body. A block sibling would start
+  // its own line box, so a continuation of the current sentence — in particular
+  // the tail of a word — must land inside that block to stay on the same line.
+  _transparentFadeAppendTarget(body).appendChild(frag);
 }
 
 function _refreshTransparentFadeProseRow(existing, node, preservedState){
+  if(!existing || !node) return node || existing;
+  if(existing === node) return existing;
   let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
   const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
-  const currentText = String(existing.getAttribute('data-stream-fade-text') || (body && body.textContent) || '');
+  // Resume strictly from the source-space cursor. `body.textContent` is NOT a
+  // valid substitute: rows built by the incremental streaming-markdown path
+  // render one character behind their source text (the parser holds the last
+  // character pending), so falling back to rendered text yields a delta that
+  // starts mid-word and tears the word in half. With no cursor we cannot know
+  // how much of the source is already rendered, so rebuild the body instead of
+  // guessing a delta.
+  const hasCursor = !!(existing.getAttribute && existing.getAttribute('data-stream-fade-text') !== null);
+  const currentText = hasCursor ? String(existing.getAttribute('data-stream-fade-text') || '') : '';
+  const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
+  const parserOwned = !!(candidateBody && candidateBody !== body && candidateBody.__smdParser);
+  const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
+    ? window.__streamFadeMuteRenderedPrefix
+    : null;
+  if(parserOwned){
+    // Promote the actual parser-owned candidate into the keyed row's DOM
+    // position once. Cloning its children into the old visible row on every
+    // later growth frame cuts off the previous tail word's ~620ms fade
+    // (`.is-new` is stripped from the replacement) and breaks word-node
+    // identity used for scroll-anchor stability. After this swap, later
+    // keyed renders hit `_refreshTransparentLiveRow(existing === node)` and
+    // keep growing the same parser target. Pending and MEDIA tails stay on
+    // the parser until it flushes them.
+    const prevRendered = String((body && body.textContent) || '');
+    if(candidateBody.classList) candidateBody.classList.add('stream-fade-active');
+    _bindTransparentFadeCleanup(candidateBody);
+    if(mute && prevRendered) mute(candidateBody, prevRendered);
+    if(node.removeAttribute) node.removeAttribute('data-stream-fade-text');
+    const parent = existing.parentNode || existing.parentElement || null;
+    if(parent && existing.parentNode === parent){
+      if(typeof parent.replaceChild === 'function'){
+        parent.replaceChild(node, existing);
+      }else if(typeof parent.insertBefore === 'function'){
+        parent.insertBefore(node, existing);
+        if(typeof existing.remove === 'function') existing.remove();
+      }
+    }
+    _rehydrateTransparentLiveRow(node, existing, preservedState);
+    return node;
+  }
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
   for(const pair of pairs){
@@ -13860,14 +13923,42 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.appendChild(body);
   }
   if(body.classList) body.classList.add('stream-fade-active');
-  if(!nextText.startsWith(currentText)){
-    body.textContent = '';
+  if(!hasCursor || !nextText.startsWith(currentText)){
+    // Rebuild branch. Snapshot the rendered text BEFORE clearing (#7082
+    // review should-fix): without it every word re-wraps as `.is-new`, the
+    // whole visible row dips to opacity 0 and fades back (~620ms), and the
+    // wholesale node replacement invites the one-time scroll-anchor bounce
+    // the #6257 comment in `_bindTransparentFadeCleanup` warns about.
+    const prevRendered = String(body.textContent || '');
     existing.setAttribute('data-stream-fade-text', '');
-    _appendTransparentFadeText(body, nextText);
+    // Non-parser candidates may still carry a parsed-looking body (tests and
+    // rewind rebuilds). Clone that DOM when present so we do not flatten it
+    // back to literal source.
+    let resumeCursor = nextText;
+    if(candidateBody && candidateBody !== body &&
+       typeof candidateBody.cloneNode === 'function' &&
+       candidateBody.childNodes && candidateBody.childNodes.length){
+      const clone = candidateBody.cloneNode(true);
+      body.textContent = '';
+      while(clone.childNodes && clone.childNodes.length) body.appendChild(clone.childNodes[0]);
+      _bindTransparentFadeCleanup(body);
+      const renderedNow = String(body.textContent || '');
+      if(renderedNow && nextText.startsWith(renderedNow)) resumeCursor = renderedNow;
+    }else{
+      body.textContent = '';
+      _appendTransparentFadeText(body, nextText);
+    }
+    // messages.js `_streamFadeMuteRenderedPrefix` idiom (exported on window the
+    // same way `__anchorProseIncrementalNode` is): rendered-space compare of the
+    // pre-rebuild snapshot against the rebuilt body, stripping `.is-new` from
+    // spans inside the common prefix so already-visible words do not replay
+    // their fade — only genuinely-new tail words animate.
+    if(mute && prevRendered) mute(body, prevRendered);
+    existing.setAttribute('data-stream-fade-text', resumeCursor);
   }else{
     _appendTransparentFadeText(body, nextText.slice(currentText.length));
+    existing.setAttribute('data-stream-fade-text', nextText);
   }
-  existing.setAttribute('data-stream-fade-text', nextText);
   _rehydrateTransparentLiveRow(existing, node, preservedState);
   return existing;
 }
