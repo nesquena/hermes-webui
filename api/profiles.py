@@ -197,8 +197,13 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # Env keys a pinned profile's .env may NOT override via _reload_dotenv() — these
 # are operator/deployment-level postures, not per-profile toggles. Letting a
 # profile .env set HERMES_WEBUI_ISOLATED_PROFILE=0 would let a contained user
-# escape isolation (#4589).
-_PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
+# escape isolation (#4589). HERMES_WEBUI_CSP_FRAME_ANCESTORS is deployment-wide
+# in the same way: a profile .env could otherwise decide who may frame the
+# WebUI for every user of the deployment, not just for itself.
+_PROTECTED_ENV_KEYS = frozenset({
+    'HERMES_WEBUI_ISOLATED_PROFILE',
+    'HERMES_WEBUI_CSP_FRAME_ANCESTORS',
+})
 
 
 def _isolated_profile_opt_in() -> bool:
@@ -934,6 +939,9 @@ _BLOCKED_RUNTIME_ENV_KEYS = {
     # #4589: operator/deployment isolation posture — never overridable by a
     # profile's own env on any runtime/gateway-parity path.
     'HERMES_WEBUI_ISOLATED_PROFILE',
+    # Framing policy is deployment-wide: a profile that could set it would
+    # choose who may embed the WebUI for every user.
+    'HERMES_WEBUI_CSP_FRAME_ANCESTORS',
 }
 
 
