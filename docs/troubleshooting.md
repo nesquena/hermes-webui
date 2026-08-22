@@ -177,6 +177,20 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ---
 
+## "You are offline" / Hermes requires a server connection while the server is up
+
+**Symptom.** The browser shows a dark page with **You are offline** and *Hermes requires a server connection...*, while health returns 200 and the origin is reachable (curl, another device, or a private window without a controlling service worker). Health is scope-relative: `/health` at the origin root, or `/hermes/health` when WebUI is mounted at `/hermes/`.
+
+**Why.** The service worker intercepts top-level navigations and re-fetches them. Behind reverse proxies, Cloudflare tunnels, SSH tunnels, or split-horizon DNS, a cloned `mode: 'navigate'` fetch can reject even when the server is healthy. The SW then returned a custom 200 HTML offline document, so the browser treated navigation as successful and reload kept hitting the same catch — trapping the tab until site data was cleared.
+
+**Immediate recovery.** Open the scope-relative login URL (for example `/login` at the origin root, or `/hermes/login` under a `/hermes/` mount). The SW does not intercept login. Or hard-refresh / clear site data for the Hermes origin, then reload.
+
+**Fix.** Current WebUI retries the navigation as a plain same-origin URL fetch before the offline HTML. The genuine offline fallback stays visible when `navigator.onLine` is false or the scope-relative health probe fails. Auto-recover (unregister this worker only, then redirect) runs only after `fetch(healthUrl)` succeeds, and it sends the user to the scope-relative login URL — never origin `/login` under a subpath mount. Tapping **Retry** performs that same recovery without waiting for the probe.
+
+**When to file a bug.** File a WebUI bug if a current build still shows this page while health returns 200 and a direct load of the scope-relative login URL also fails without a controlling service worker.
+
+---
+
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
 **Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
