@@ -182,6 +182,21 @@ def _host_without_port(host: str) -> str:
 
 
 def rp_context(handler) -> tuple[str, str]:
+    # A reverse proxy that rewrites Host to its own upstream address (common
+    # when a separate SPA front-end proxies /api to this backend) leaves Host
+    # useless for deriving the RPID, while Origin still carries the origin the
+    # browser is actually on. Prefer Origin's hostname: WebAuthn's RPID-origin
+    # check compares against the page's origin, not the backend's.
+    browser_origin = handler.headers.get("Origin", "")
+    if browser_origin:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(browser_origin)
+            if parsed.hostname:
+                return parsed.hostname, browser_origin
+        except Exception:
+            pass
+    # Fallback: derive from Host header (direct/internal access)
     host = _host_without_port(handler.headers.get("Host", "localhost"))
     proto = handler.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
     if proto not in {"http", "https"}:
