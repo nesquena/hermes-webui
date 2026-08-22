@@ -2388,9 +2388,39 @@ window._isImeEnter=_isImeEnter;
 function _hasFinePointerCoexisting(){
   try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
 }
+// Detect mobile/touch-only devices. On some iOS Safari versions
+// matchMedia('(pointer:coarse)') can be unreliable, so also check
+// the user agent for mobile indicators as a fallback.
+function _isTouchOnlyDevice(){
+  // Phone/tablet UA is authoritative and checked FIRST. Do NOT veto it with
+  // (any-pointer:fine): several iOS Safari builds report that query as true on
+  // plain iPhones (Apple Pencil / pointer-emulation heuristics), which is
+  // exactly why the media-query-only detection failed here. On a phone the
+  // software keyboard's return key must insert a newline; a user with a real
+  // Bluetooth keyboard still has Ctrl/Cmd+Enter and the send button.
+  const ua=navigator.userAgent||'';
+  if(/iPhone|iPod|Android/i.test(ua)) return true;
+  // iPadOS 13+ Safari masquerades as Macintosh; touch points disambiguate it.
+  if(/iPad/i.test(ua)) return true;
+  try{
+    if(/Macintosh/i.test(ua)&&(navigator.maxTouchPoints||0)>1) return true;
+  }catch(_){}
+  // Non-phone fallback: pure media-query detection for touch-primary devices.
+  try{
+    return matchMedia('(pointer:coarse)').matches&&!matchMedia('(any-pointer:fine)').matches;
+  }catch(_){}
+  return false;
+}
 function _isNumpadEnter(e){
   return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
 }
+// Initialise _sendKey synchronously from the localStorage cache so the keydown
+// handler below has the correct value before the async /api/settings call
+// (line ~3231) resolves. Without this, on slow mobile networks the race window
+// leaves _sendKey=undefined, _mobileDefault evaluates false, and plain Enter
+// falls through to the `else { send() }` branch — sending the message instead
+// of inserting a newline (issue: mobile Enter sends on fresh page load).
+try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -2424,9 +2454,8 @@ $('msg').addEventListener('keydown',e=>{
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
     const isNumpadEnter=_isNumpadEnter(e);
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches
-      &&!_hasFinePointerCoexisting()
-      &&window._sendKey==='enter';
+    const _mobileDefault=_isTouchOnlyDevice()
+      &&(window._sendKey==='enter'||typeof window._sendKey==='undefined');
     if(window._sendKey==='shift+enter'){
       if(e.shiftKey){e.preventDefault();send();}
     } else if(window._sendKey==='ctrl+enter'||_mobileDefault){
