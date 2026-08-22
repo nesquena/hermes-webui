@@ -44,7 +44,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import build_active_turn_token, stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -2335,6 +2335,98 @@ def _message_matches_pending_text(message, pending_text):
     )
 
 
+def _current_turn_token(session) -> str | None:
+    """Return the authoritative active-turn token for the session's pending turn."""
+    return build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_started_at', None),
+    )
+
+
+def _message_owns_current_turn(message: dict, session) -> bool:
+    """Return True when ``message`` is part of the session's active pending turn.
+
+    The check is hierarchical:
+    * If the session has an authoritative active-turn token, require the
+      message to carry the same ``_active_turn_token``.  This is the
+      preferred signal because it is written by ``stamp_message_source``
+      at the single authoritative checkpoint and is stable across
+      recovery, eager-merge, and retry paths.
+    * When the token is unavailable (legacy sidecars, missing pending
+      state, or interrupted turns before token stamping), fall back to
+      the existing ``_message_matches_pending_checkpoint`` comparison
+      which checks text + timestamp + source + attachments.
+    * Pure text equality is intentionally **not** used here — identical
+      prompts in earlier turns must not be mistaken for the current turn.
+    """
+    if not isinstance(message, dict):
+        return False
+    current_token = _current_turn_token(session)
+    if current_token is not None:
+        return message.get('_active_turn_token') == current_token
+    pending_text = _normalize_journal_recovery_text(getattr(session, 'pending_user_message', None))
+    if not pending_text:
+        return False
+    return _message_matches_pending_checkpoint(
+        message,
+        session.pending_user_message,
+        getattr(session, 'pending_started_at', None),
+        getattr(session, 'pending_user_source', None),
+        getattr(session, 'pending_attachments', None),
+    )
+
+
+def _pending_user_row_already_materialized(session, candidate, timestamp) -> bool:
+    """Return True only when ``candidate`` provably IS the pending user turn.
+
+    Used to decide whether ``_append_recovered_pending_turn`` may be skipped.
+    Historical text equality is deliberately NOT accepted: when an earlier turn
+    used the identical prompt, a text-only test treats that older row as the
+    pending turn, the current prompt is never materialized, and pending state is
+    then cleared — losing the current user prompt outright (CORE#3).
+
+    Accepted proofs, in order:
+
+    * the row carries the session's active-turn token;
+    * full pending-checkpoint identity (text + timestamp + source + attachments).
+
+    Anything less returns False so the caller PRESERVES/APPENDS the recovered
+    pending turn rather than suppressing it.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    if _message_matches_pending_checkpoint(
+        candidate,
+        session.pending_user_message,
+        timestamp,
+        session.pending_user_source,
+        session.pending_attachments,
+    ):
+        return True
+    current_token = _current_turn_token(session)
+    if current_token is not None and candidate.get('_active_turn_token') == current_token:
+        return _message_matches_pending_text(candidate, session.pending_user_message)
+    # Rows synced in from an external core transcript carry neither the runtime
+    # turn token nor the pending timestamp, so the two proofs above reject them
+    # and the prompt would be materialized a second time.  Admit such a row when
+    # it is the LAST user row in history and its text matches the pending prompt:
+    # with no later user turn, there is no subsequent turn it could belong to.
+    # An OLDER duplicate prompt always has a later user row after it, so it is
+    # still rejected and the current prompt is preserved.
+    messages = session.messages or []
+    if candidate is not None and _message_matches_pending_text(
+        candidate, session.pending_user_message
+    ):
+        last_user = None
+        for _m in reversed(messages):
+            if isinstance(_m, dict) and _m.get('role') == 'user':
+                last_user = _m
+                break
+        if last_user is candidate:
+            return True
+    return False
+
+
 def _latest_user_matches_pending_text(messages, pending_text):
     if not isinstance(messages, list) or not pending_text:
         return False
@@ -2399,16 +2491,19 @@ def _find_existing_assistant_for_journal_content(
     session,
     content: str,
     *,
+    min_index: int | None = None,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
+    stream_id: str | None = None,
 ) -> int | None:
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
         return None
     messages = session.messages or []
+    start = 0 if min_index is None else max(0, min_index)
     stop = len(messages) if max_index is None else min(len(messages), max_index)
     substring_match = None
-    for idx in range(stop):
+    for idx in range(start, stop):
         if excluded_indexes and idx in excluded_indexes:
             continue
         message = messages[idx]
@@ -2416,6 +2511,10 @@ def _find_existing_assistant_for_journal_content(
             continue
         if message.get('_error'):
             continue
+        if stream_id:
+            msg_stream = message.get('_recovered_stream_id') or message.get('_stream_id')
+            if msg_stream and str(msg_stream) != str(stream_id):
+                continue
         existing = _normalize_journal_recovery_text(message.get('content'))
         if not existing:
             continue
@@ -2432,21 +2531,27 @@ def _journal_tool_already_present(
     preview: str,
     *,
     stream_id: str | None = None,
+    current_turn_min_idx: int | None = None,
 ) -> bool:
     """Return True when an equivalent tool card already exists.
 
     Matching rule:
 
-    * If the existing tool card carries ``_recovered_stream_id``, that means a
-      previous journal-recovery run materialized it.  The retry can safely
-      collapse against it only when both stream ids match — otherwise a
-      legitimately-repeated tool (e.g. a second ``terminal: ls`` in a
-      different turn) would be dropped.
-    * If the existing tool card has no ``_recovered_stream_id`` (a live tool
-      card, or a tool card carried over from a core transcript that pre-dates
-      stream-id tagging), the legacy name+preview match still wins.  This
-      preserves the "core transcript already has this tool, don't duplicate
-      it" invariant the original repair path established.
+    * If the existing tool card carries ``_recovered_stream_id`` or ``_stream_id``,
+      that means it belongs to a known stream. The retry can safely collapse
+      against it only when both stream ids match — otherwise a legitimately-repeated
+      tool (e.g. a second ``terminal: ls`` in a different turn) would be dropped.
+    * If the existing tool card has no stream tag (a live tool card, or a tool card
+      carried over from a core transcript that pre-dates stream-id tagging), the
+      legacy name+preview match still wins **only when the card is not provably
+      owned by an earlier turn**. Ordinary persisted tool summaries carry no
+      stream tag at all, so the stream guard alone cannot protect them: an older
+      ``terminal: ls`` would suppress the current turn's recovered card (CORE#2).
+      When ``current_turn_min_idx`` is supplied, an untagged card whose
+      ``assistant_msg_idx`` sits BEFORE the current-turn boundary is proven to
+      belong to an earlier turn and must not match. Cards with no usable index
+      keep the legacy match so the "core transcript already has this tool, don't
+      duplicate it" invariant still holds.
     * When ``stream_id`` is omitted, the helper degrades cleanly to its
       pre-fix session-wide behaviour.
     """
@@ -2464,13 +2569,19 @@ def _journal_tool_already_present(
         if existing_preview != candidate_preview:
             continue
         if candidate_stream is not None:
-            existing_stream = tool_call.get('_recovered_stream_id')
-            # A tool card explicitly tagged with a recovered_stream_id that
-            # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry.  Untagged tool cards (live or carried
-            # over from the core transcript) still match.
-            if existing_stream and str(existing_stream) != candidate_stream:
-                continue
+            existing_stream = tool_call.get('_recovered_stream_id') or tool_call.get('_stream_id')
+            if existing_stream:
+                if str(existing_stream) != candidate_stream:
+                    continue
+            elif current_turn_min_idx is not None:
+                # Untagged card: use its anchor index to prove turn ownership.
+                # A card anchored BEFORE the current-turn boundary belongs to an
+                # earlier turn and must not suppress the current recovery.
+                _anchor = tool_call.get('assistant_msg_idx')
+                if isinstance(_anchor, bool) or not isinstance(_anchor, int):
+                    _anchor = None
+                if _anchor is not None and _anchor < current_turn_min_idx:
+                    continue
         return True
     return False
 
@@ -2798,6 +2909,108 @@ def _append_journaled_partial_output(
     initial_message_count = len(session.messages or [])
     claimed_existing_assistant_indexes: set[int] = set()
 
+    messages_list = session.messages or []
+    current_turn_min_idx = 0
+    current_turn_boundary_authoritative = False
+    # Derive the current-turn boundary from an AUTHORITATIVE ownership signal
+    # first (active-turn token, else the full pending checkpoint identity:
+    # text + timestamp + source + attachments).  Plain text equality is NOT an
+    # ownership proof: when an earlier turn used the identical prompt, a
+    # text-only backward scan walks PAST the current turn and pins the boundary
+    # at the older duplicate, letting that older turn's assistant row consume
+    # the current journal output (the CORE#1 data loss).
+    #
+    # Among CONSECUTIVE provably-owned user rows keep the EARLIEST: the WebUI
+    # can persist the same turn twice (an eager checkpoint plus a ``_recovered``
+    # echo), and rows between those copies still belong to this turn.  Stopping
+    # at the latest copy would exclude a legitimate same-turn core row from
+    # reasoning backfill.  Any older DUPLICATE prompt is separated from this run
+    # by an intervening assistant/user turn that is not owned, so the walk stops
+    # before reaching it.
+    for idx in range(initial_message_count - 1, -1, -1):
+        msg = messages_list[idx]
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        if _message_owns_current_turn(msg, session):
+            current_turn_min_idx = idx
+            current_turn_boundary_authoritative = True
+            continue
+        if current_turn_boundary_authoritative:
+            # Walked off the top of the owned run: previous idx was the start.
+            break
+        break
+    if not current_turn_boundary_authoritative:
+        # No provable current-turn user row.  Fall back to the latest user row
+        # as a non-authoritative hint so an in-turn match can still collapse,
+        # but leave ``current_turn_boundary_authoritative`` False so callers
+        # default to APPEND instead of collapsing on unproven ownership.
+        for idx in range(initial_message_count - 1, -1, -1):
+            msg = messages_list[idx]
+            if isinstance(msg, dict) and msg.get('role') == 'user':
+                current_turn_min_idx = idx
+                break
+
+    def content_match_owned_by_current_turn(existing_idx: int) -> bool:
+        """Return True when the assistant row at ``existing_idx`` provably
+        belongs to the current turn.
+
+        Every content match must clear this gate — including reasoning-free
+        ones.  The previous ``not reasoning or ...`` short-circuit skipped the
+        ownership check entirely whenever the journal produced no reasoning,
+        which let an older identical answer consume the current turn's output
+        and emit a false ``_pending_journal_recovery`` marker (CORE#1).
+
+        Ownership is proven two ways:
+
+        * the assistant row itself carries the active-turn token, or
+        * the row sits at/after an AUTHORITATIVE current-turn boundary and its
+          owning user row is provably the current turn.
+
+        When ownership cannot be proven, return False so the caller APPENDS
+        instead of collapsing.
+        """
+        messages = session.messages or []
+        if not (0 <= existing_idx < len(messages)):
+            return False
+        existing = messages[existing_idx]
+        current_token = _current_turn_token(session)
+        if current_token is not None and isinstance(existing, dict):
+            if existing.get('_active_turn_token') == current_token:
+                return True
+        owner_idx = None
+        for candidate_idx in range(existing_idx - 1, -1, -1):
+            candidate = messages[candidate_idx]
+            if isinstance(candidate, dict) and candidate.get('role') == 'user':
+                owner_idx = candidate_idx
+                break
+        if owner_idx is None:
+            return False
+        if _message_owns_current_turn(messages[owner_idx], session):
+            return True
+        # Core-transcript rows synced from an external file carry NO turn token
+        # (the token is a WebUI runtime stamp), so token/checkpoint identity
+        # alone would reject a legitimate same-turn merge and duplicate the
+        # row.  Admit such a row only when its owning user turn is the LAST
+        # user row in history AND matches the pending prompt: with no later
+        # user turn there is no subsequent turn it could belong to, so it is
+        # the current turn by position.  An older duplicate prompt always has
+        # a later user row after it and is therefore still rejected.
+        pending_text_local = _normalize_journal_recovery_text(
+            getattr(session, 'pending_user_message', None)
+        )
+        has_later_user = any(
+            isinstance(messages[i], dict) and messages[i].get('role') == 'user'
+            for i in range(owner_idx + 1, len(messages))
+        )
+        if not has_later_user:
+            if pending_text_local and _message_matches_pending_text(
+                messages[owner_idx], session.pending_user_message
+            ):
+                return True
+            if not pending_text_local and not current_turn_boundary_authoritative:
+                return owner_idx >= current_turn_min_idx
+        return False
+
     def content_match_can_receive_reasoning(existing_idx: int) -> bool:
         messages = session.messages or []
         owner_idx = None
@@ -2810,7 +3023,12 @@ def _append_journaled_partial_output(
             return False
 
         pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-        if pending_text and not _message_matches_pending_checkpoint(
+        current_token = _current_turn_token(session)
+        if current_token is not None:
+            owner_token = messages[owner_idx].get('_active_turn_token')
+            if owner_token != current_token:
+                return False
+        elif pending_text and not _message_matches_pending_checkpoint(
             messages[owner_idx],
             session.pending_user_message,
             session.pending_started_at,
@@ -2868,11 +3086,18 @@ def _append_journaled_partial_output(
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
+                    min_index=current_turn_min_idx,
                     max_index=initial_message_count,
                     excluded_indexes=search_excluded,
+                    stream_id=stream_id,
                 )
                 if candidate_idx is None:
                     break
+                # Ownership gate applies to EVERY match, reasoning or not.
+                # Unproven ownership => fall through to append.
+                if not content_match_owned_by_current_turn(candidate_idx):
+                    search_excluded.add(candidate_idx)
+                    continue
                 if not reasoning or content_match_can_receive_reasoning(candidate_idx):
                     existing_idx = candidate_idx
                     break
@@ -3009,6 +3234,7 @@ def _append_journaled_partial_output(
             preview = str(payload.get('preview') or '')
             if dedupe_existing and _journal_tool_already_present(
                 session, name, preview, stream_id=stream_id,
+                current_turn_min_idx=current_turn_min_idx,
             ):
                 current_assistant_idx = anchor_idx
                 continue
@@ -3439,6 +3665,7 @@ def _apply_core_sync_or_error_marker(
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
+                dedupe_existing=True,
                 terminal_recovery=_terminal_recovery,
             )
         )
@@ -3478,16 +3705,22 @@ def _apply_core_sync_or_error_marker(
             _recovered_ts = int(time.time())
             if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
                 _recovered_ts = int(session.pending_started_at)
+            _last_user = None
+            for _m in reversed(session.messages or []):
+                if isinstance(_m, dict) and _m.get('role') == 'user':
+                    _last_user = _m
+                    break
             _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
+                _last_user,
                 session.pending_user_message,
                 _recovered_ts,
                 session.pending_user_source,
                 session.pending_attachments,
             )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
+            _tail_user_already_checkpointed = _pending_user_row_already_materialized(
+                session,
+                _last_user,
+                _recovered_ts,
             )
             if (
                 _pending_text
@@ -3553,6 +3786,7 @@ def _apply_core_sync_or_error_marker(
         _recover_journaled_output_and_terminal_error(
             session,
             _stream_id,
+            dedupe_existing=True,
             terminal_recovery=_terminal_recovery,
         )
     )
