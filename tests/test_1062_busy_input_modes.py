@@ -266,7 +266,7 @@ class TestBusySendButton:
         assert update_idx > apos, (
             "send() should call updateSendBtn() after S.activeStreamId is assigned"
         )
-        attach_idx = send_body.find("attachLiveStream(activeSid, streamId, uploadedNames);")
+        attach_idx = send_body.find("attachLiveStream(runSid, streamId, uploadedNames);")
         assert attach_idx > update_idx, (
             "send() should refresh primary button before opening SSE stream attach"
         )
