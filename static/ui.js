@@ -16774,13 +16774,6 @@ function renderMessages(options){
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
   }
-  let lastUserRawIdx=-1;
-  for(let i=visWithIdx.length-1;i>=0;i--){
-    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
-      lastUserRawIdx=visWithIdx[i].rawIdx;
-      break;
-    }
-  }
   const insertionAnchorFull=_compressionAnchorIndex(
     visWithIdx,
     compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
@@ -17031,7 +17024,10 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
-    const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
+    // #6737: edit affordance on every user message (not just the last one).
+    // submitEdit() truncates the session at this message and re-sends the
+    // edited text, which is the standard edit-and-regenerate behavior.
+    const isEditableUser=isUser;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
@@ -17044,6 +17040,11 @@ function renderMessages(options){
       : false;
     const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    // #6737: delete affordance on every message. deleteMessage() truncates the
+    // session at this message (this message and everything after it is removed),
+    // letting the user unbloat a session or continue from an earlier point.
+    // Hidden on read-only sessions, matching the fork affordance.
+    const deleteBtn = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn msg-delete-btn" title="${t('delete_message')}" onclick="deleteMessage(this)">${li('trash-2',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -17060,7 +17061,7 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${deleteBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -19350,6 +19351,42 @@ async function regenerateResponse(btn) {
   try {
     await startRegeneration(initialSid, S.session.regeneration_revision);
   } catch(e) { setStatus(t('regen_failed') + e.message); }
+}
+
+// #6737: delete a message and everything after it. Reuses the same
+// /api/session/truncate machinery as edit/regenerate — truncating at this
+// message's absolute index removes it and all later messages, keeping the
+// remaining transcript coherent (user/assistant pairing stays intact).
+async function deleteMessage(btn) {
+  if(!S.session || S.busy) return;
+  const row = btn.closest('[data-msg-idx]');
+  if(!row) return;
+  const msgIdx = parseInt(row.dataset.msgIdx, 10);
+  if(!Number.isFinite(msgIdx)) return;
+  const initialSid = S.session.session_id;
+  const absoluteKeepCount = _oldestIdx + msgIdx; // keep messages before this one
+  if(typeof showConfirmDialog==='function'){
+    const ok=await showConfirmDialog({
+      title:t('delete_message_confirm_title'),
+      message:t('delete_message_confirm_message'),
+      confirmLabel:t('delete_message'),
+      danger:true,
+      focusCancel:true
+    });
+    if(!ok) return;
+  }
+  // #6737 SILENT-race guard: a session switch during the confirm/await must not
+  // let this deletion apply to the newly-visible session.
+  if(!S.session || S.session.session_id !== initialSid) return;
+  try {
+    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+      session_id: initialSid,
+      keep_count: absoluteKeepCount
+    })});
+    if(!S.session || S.session.session_id !== initialSid) return;
+    S.messages = S.messages.slice(0, absoluteKeepCount);
+    renderMessages();
+  } catch(e) { setStatus(t('delete_failed') + e.message); }
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll
