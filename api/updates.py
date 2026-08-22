@@ -24,9 +24,6 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
-from api.agent_health import get_active_profile_gateway_running_pid
-from api.gateway_restart import restart_active_profile_gateway
-from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
 from api.subprocess_utils import windows_hide_flags
 
@@ -45,7 +42,6 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
-_AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
@@ -322,14 +318,16 @@ def apply_clear_lock(target: str) -> dict:
         return {'ok': False, 'message': 'Update already in progress'}
 
     try:
+        if target == 'agent':
+            return _apply_agent_transaction()
         if target == 'webui':
             path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        if path is None or not (path / '.git').exists():
+        if path is None:
+            return {'ok': False, 'message': 'Not a git repository'}
+        if not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
         inv = _inventory_locks(path)
@@ -1839,84 +1837,6 @@ def _schedule_restart(delay: float = 2.0) -> None:
     threading.Thread(target=_do, daemon=True).start()
 
 
-def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
-    """Run the active-profile gateway restart when agent checkout changed.
-
-    Returns:
-        (ok, restart_payload) where:
-        - ok is False when restart did not complete and callers must abort success.
-        - restart_payload contains helper status fields for response shaping.
-    """
-    target_profile = str(get_active_profile_name() or "default").strip() or "default"
-    gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
-    restart_result = restart_active_profile_gateway(profile=target_profile)
-    status = str(restart_result.get("status") or "")
-    if status in {"completed", "in_progress"}:
-        return True, restart_result
-    if status != "failed":
-        return False, restart_result
-
-    # launchd can briefly fail to spawn the replacement gateway while it is
-    # rotating the supervised process (#6045). Retry exactly once after a
-    # bounded delay so an already-applied Agent update is not reported as a
-    # complete failure because of that transient process handoff.
-    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    retry_result = restart_active_profile_gateway(profile=target_profile)
-    retry_status = str(retry_result.get("status") or "")
-    if retry_status in {"completed", "in_progress"}:
-        return True, {
-            **retry_result,
-            "retry_attempted": True,
-            "initial_failure": restart_result.get("message"),
-        }
-    if retry_status != "failed":
-        return False, {
-            **retry_result,
-            "retry_attempted": True,
-            "initial_failure": restart_result.get("message"),
-        }
-
-    # A restart command can still exit non-zero after launchd has recovered the
-    # service. Only accept that recovery when the confirmed local PID changed;
-    # a merely-alive old gateway has not loaded the updated Agent checkout.
-    time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    gateway_pid_after_retry = get_active_profile_gateway_running_pid(profile=target_profile)
-    if (
-        gateway_pid_before_restart is not None
-        and gateway_pid_after_retry is not None
-        and gateway_pid_after_retry != gateway_pid_before_restart
-    ):
-        return True, {
-            "status": "completed",
-            "message": "Gateway service recovered after a transient restart failure",
-            "retry_attempted": True,
-            "process_replaced": True,
-            "initial_failure": restart_result.get("message"),
-            "retry_failure": retry_result.get("message"),
-        }
-
-    initial_message = str(restart_result.get("message") or "Restart failed")
-    retry_message = str(retry_result.get("message") or "retry did not complete")
-    return False, {
-        **retry_result,
-        "message": f"{initial_message}; recovery retry did not complete: {retry_message}",
-        "retry_attempted": True,
-        "initial_failure": restart_result.get("message"),
-    }
-
-
-def _agent_gateway_restart_failure_message(target: str, restart_result: dict) -> str:
-    if restart_result.get("message"):
-        return (
-            f'{target} updated, but gateway restart did not complete: '
-            f'{restart_result["message"]}. Run `hermes gateway restart` manually.'
-        )
-    return (
-        f'{target} updated, but gateway restart did not complete. '
-        'Run `hermes gateway restart` manually.'
-    )
-
-
 def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     """Discard local changes and reset *path* to *reset_ref*."""
     # Do not use -x: ignored build/cache artifacts should survive force update.
@@ -1967,15 +1887,19 @@ def apply_force_update(target: str, channel=None) -> dict:
     if blocker_snapshot.get('restart_blocked'):
         return _restart_blocked_response(target, blocker_snapshot)
 
+    if target == 'agent':
+        if not _apply_lock.acquire(blocking=False):
+            return {'ok': False, 'message': 'Update already in progress'}
+        try:
+            return _apply_agent_transaction(force=True)
+        finally:
+            _apply_lock.release()
+
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:
         if target == 'webui':
             path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
-            # Channel is WebUI-only — the Agent always uses the default channel.
-            channel = DEFAULT_UPDATE_CHANNEL
         else:
             return {'ok': False, 'message': f'Unknown target: {target}'}
 
@@ -2023,8 +1947,8 @@ def apply_force_update(target: str, channel=None) -> dict:
                     'channel': channel,
                 }
 
-        # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-        # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
+        # Rewind guard: refuse to reset --hard onto a ref that
+        # is an ANCESTOR of HEAD, since that would downgrade the checkout. This is the
         # switch-back-to-stable-while-ahead case. A ref that is a descendant of
         # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
         # allowed. Refs on a divergent line (neither ancestor nor descendant) are
@@ -2049,16 +1973,6 @@ def apply_force_update(target: str, channel=None) -> dict:
         with _cache_lock:
             _update_cache['checked_at'] = 0
 
-        if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-            if not gateway_ok:
-                return {
-                    'ok': False,
-                    'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                    'target': target,
-                    'gateway_restart': gateway_result.get('status'),
-                }
-
         _schedule_restart()
 
         response = {
@@ -2067,8 +1981,6 @@ def apply_force_update(target: str, channel=None) -> dict:
             'target': target,
             'restart_scheduled': True,
         }
-        if target == 'agent':
-            response['gateway_restart'] = gateway_result.get('status')
         return response
     finally:
         _apply_lock.release()
@@ -2089,6 +2001,21 @@ def apply_update(target, channel=None):
         return _apply_update_inner(target, channel)
     finally:
         _apply_lock.release()
+
+
+def _apply_agent_transaction(*, force: bool = False) -> dict:
+    """Map the Agent-owned transaction into the WebUI response contract."""
+    from api import agent_update
+
+    result = agent_update.apply_agent_update(force=force)
+    if result.get('reload_eligible'):
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+        _schedule_restart()
+        result['restart_scheduled'] = True
+    else:
+        result.pop('restart_scheduled', None)
+    return result
 
 
 def _restore_stash_after_pull_failure(
@@ -2129,13 +2056,10 @@ def _restore_stash_after_pull_failure(
 def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     """Inner implementation of apply_update, called under _apply_lock."""
     channel = _normalize_channel(channel)
+    if target == 'agent':
+        return _apply_agent_transaction()
     if target == 'webui':
         path = REPO_ROOT
-    elif target == 'agent':
-        path = _AGENT_DIR
-        # Channel is WebUI-only — the Agent always uses the default channel
-        # regardless of the user's WebUI selection (see check_for_updates).
-        channel = DEFAULT_UPDATE_CHANNEL
     else:
         return {'ok': False, 'message': f'Unknown target: {target}'}
 
@@ -2363,15 +2287,6 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
             with _cache_lock:
                 _update_cache['checked_at'] = 0
 
-            if target == 'agent':
-                gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-                if not gateway_ok:
-                    return {
-                        'ok': False,
-                        'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                        'target': target,
-                        'gateway_restart': gateway_result.get('status'),
-                    }
             _schedule_restart()
             response = {
                 'ok': True,
@@ -2387,23 +2302,11 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                 'restart_scheduled': True,
                 'stash_conflict': True,
             }
-            if target == 'agent':
-                response['gateway_restart'] = gateway_result.get('status')
             return response
 
     # Invalidate cache
     with _cache_lock:
         _update_cache['checked_at'] = 0
-
-    if target == 'agent':
-        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-        if not gateway_ok:
-            return {
-                'ok': False,
-                'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                'target': target,
-                'gateway_restart': gateway_result.get('status'),
-            }
 
     # Schedule a self-restart so the updated code is loaded fresh.  A plain
     # git pull leaves stale Python modules in sys.modules — agent imports that
@@ -2430,6 +2333,4 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         'target': target,
         'restart_scheduled': True,
     }
-    if target == 'agent':
-        response['gateway_restart'] = gateway_result.get('status')
     return response

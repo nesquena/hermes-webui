@@ -1825,3 +1825,79 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     # No stash pop on a clean pull-lock path.
     assert not any(c[0] == 'stash' for c in git_calls)
 
+
+def test_agent_update_uses_single_official_transaction_adapter(monkeypatch):
+    import api.agent_update as agent_update
+
+    calls = []
+    monkeypatch.setattr(
+        agent_update,
+        'apply_agent_update',
+        lambda **kwargs: calls.append(kwargs) or {
+            'ok': True, 'target': 'agent', 'outcome': 'noop', 'reload_eligible': False,
+        },
+    )
+    result = updates.apply_update('agent')
+    assert result['outcome'] == 'noop'
+    assert calls == [{'force': False}]
+
+
+def test_issue6617_agent_apply_owns_the_official_transaction(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(updates, '_restart_blocker_snapshot', lambda: {})
+    official_transaction = getattr(updates, '_apply_agent_transaction', None)
+    if official_transaction is not None:
+        monkeypatch.setattr(
+            updates,
+            '_apply_agent_transaction',
+            lambda **kwargs: calls.append(kwargs) or {
+                'ok': True, 'target': 'agent', 'outcome': 'noop', 'reload_eligible': False,
+            },
+        )
+    else:
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(updates, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(updates, '_run_git', lambda *args, **kwargs: ('', True))
+        monkeypatch.setattr(updates, '_select_apply_compare_ref', lambda *args, **kwargs: 'HEAD')
+        monkeypatch.setattr(updates, '_head_contains_ref', lambda *args, **kwargs: False)
+        monkeypatch.setattr(updates, '_discard_local_changes', lambda *args, **kwargs: True)
+        monkeypatch.setattr(updates, '_ensure_gateway_restart_for_agent_update', lambda: (True, {'status': 'completed'}))
+        monkeypatch.setattr(updates, '_schedule_restart', lambda: None)
+    updates.apply_update('agent')
+    assert calls == [{}]
+
+
+def test_agent_transaction_schedules_webui_reload_only_for_eligible_result(monkeypatch):
+    import api.agent_update as agent_update
+
+    scheduled = []
+    monkeypatch.setattr(
+        agent_update,
+        'apply_agent_update',
+        lambda **kwargs: {
+            'ok': True, 'target': 'agent', 'outcome': 'updated', 'reload_eligible': True,
+        },
+    )
+    monkeypatch.setattr(updates, '_schedule_restart', lambda: scheduled.append(True))
+    updates._update_cache['checked_at'] = 123
+    result = updates._apply_agent_transaction()
+    assert result['restart_scheduled'] is True
+    assert updates._update_cache['checked_at'] == 0
+    assert scheduled == [True]
+
+
+def test_agent_force_and_clear_lock_use_the_same_transaction(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        updates,
+        '_apply_agent_transaction',
+        lambda **kwargs: calls.append(kwargs) or {
+            'ok': True, 'target': 'agent', 'outcome': 'noop', 'reload_eligible': False,
+        },
+    )
+    monkeypatch.setattr(updates, '_AGENT_DIR', tmp_path)
+    (tmp_path / '.git').mkdir()
+    assert updates.apply_force_update('agent')['outcome'] == 'noop'
+    assert updates.apply_clear_lock('agent')['outcome'] == 'noop'
+    assert calls == [{'force': True}, {}]
+

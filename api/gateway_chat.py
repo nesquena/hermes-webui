@@ -278,15 +278,28 @@ def webui_gateway_chat_enabled(config_data=None, environ: dict[str, str] | None 
     return webui_chat_backend_mode(config_data, environ) == "gateway"
 
 
-def _gateway_base_url(config_data=None, environ: dict[str, str] | None = None) -> str:
+def resolve_effective_gateway_target(config_data=None, environ: dict[str, str] | None = None) -> dict[str, object]:
+    """Resolve the single URL that receives browser chat traffic.
+
+    Health URLs are deliberately absent here; they are observation inputs and
+    cannot change lifecycle ownership.
+    """
     source = os.environ if environ is None else environ
     cfg = config_data if isinstance(config_data, dict) else {}
-    raw = str(
-        source.get(_WEBUI_GATEWAY_BASE_URL_ENV)
-        or cfg.get("webui_gateway_base_url")
-        or "http://127.0.0.1:8642"
-    ).strip()
-    return raw.rstrip("/") or "http://127.0.0.1:8642"
+    raw = str(source.get(_WEBUI_GATEWAY_BASE_URL_ENV) or cfg.get("webui_gateway_base_url") or "http://127.0.0.1:8642").strip()
+    url = raw.rstrip("/") or "http://127.0.0.1:8642"
+    try:
+        import ipaddress
+        host = (urllib.parse.urlparse(url).hostname or "").strip().lower().rstrip(".")
+        local = host in {"localhost", "localhost.localdomain"} or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        local = False
+    source_name = "environment" if source.get(_WEBUI_GATEWAY_BASE_URL_ENV) else "config" if cfg.get("webui_gateway_base_url") else "default"
+    return {"url": url, "source": source_name, "local": local}
+
+
+def _gateway_base_url(config_data=None, environ: dict[str, str] | None = None) -> str:
+    return str(resolve_effective_gateway_target(config_data, environ)["url"])
 
 
 def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
