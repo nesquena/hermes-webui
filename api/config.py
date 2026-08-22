@@ -5072,6 +5072,13 @@ _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
+# Monotonic generation/owner token for the models-catalog cache machinery.
+# invalidate_models_cache() bumps it; a rebuild captures it when it starts and
+# discards its result (and skips the disk write) if it advanced while the
+# rebuild was in flight. This prevents an over-budget rebuild worker that
+# started before a provider cleanup from republishing a stale catalog that
+# resurrects just-removed providers (#6581).
+_models_cache_generation = 0
 
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
@@ -6478,7 +6485,15 @@ def invalidate_models_cache():
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _models_cache_generation
     with _available_models_cache_lock:
+        # Bump the generation/owner token so any in-flight rebuild that
+        # captured the previous generation discards its result when it
+        # finishes (see _publish_models_result / _build_generation). Without
+        # this, an over-budget rebuild worker that started before the
+        # invalidation would republish a stale catalog — resurrecting
+        # just-removed providers in memory and on disk (#6581).
+        _models_cache_generation += 1
         _available_models_cache = None
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
@@ -8420,6 +8435,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
+            # Capture the generation/owner token for THIS rebuild. If
+            # invalidate_models_cache() runs while we rebuild, the token
+            # advances and this rebuild's result must be discarded — it was
+            # built from a config snapshot that may have just had providers
+            # removed (#6581).
+            _build_generation = _models_cache_generation
 
         # Capture the active per-request profile (#3957). The live provider
         # probe inside the rebuild resolves credentials from os.environ /
@@ -8459,23 +8480,35 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     result = _invoke_models_rebuild(_build_available_models_uncached)
             except BaseException:
                 # Always reset the flag so waiting threads don't block for 60s
+                # — but only if we still own this rebuild's generation: an
+                # invalidation may have cleared the flag already, or a newer
+                # rebuild may own it now.
                 with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                    if _build_generation == _models_cache_generation:
+                        _cache_build_in_progress = False
+                        _cache_build_cv.notify_all()
                 raise
-            with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
             try:
-                _save_models_cache_to_disk(result)
+                with _cache_build_cv:
+                    if _build_generation == _models_cache_generation:
+                        published_at = time.monotonic()
+                        _available_models_cache = result
+                        _available_models_cache_ts = published_at
+                        _available_models_live_rebuild_ts = published_at
+                        _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                        _sync_models_cache_provenance()
+                        # Hold the cv through the atomic disk rename: an
+                        # invalidation can no longer interleave between the
+                        # generation check and the file write (TOCTOU #6581).
+                        # It either blocks until the rename lands and then
+                        # deletes the file, or runs first and bumps the
+                        # generation so this publish block is skipped.
+                        _save_models_cache_to_disk(result)
             finally:
                 with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                    if _build_generation == _models_cache_generation:
+                        _cache_build_in_progress = False
+                        _cache_build_cv.notify_all()
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -8512,6 +8545,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
             with _cache_build_cv:
+                if _build_generation != _models_cache_generation:
+                    # A cache invalidation happened while this rebuild was in
+                    # flight. The result was built from a stale config
+                    # snapshot and would resurrect just-removed providers
+                    # (#6581): discard it, skip the disk write, and leave
+                    # _cache_build_in_progress alone so a newer rebuild (if
+                    # any) keeps its serialization.
+                    return
                 published_at = time.monotonic()
                 _available_models_cache = result
                 _available_models_cache_ts = published_at
@@ -8521,17 +8562,36 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 _sync_models_cache_provenance()
             try:
-                _save_models_cache_to_disk(result)
+                # Hold the cv from the re-check through the atomic disk
+                # rename: an invalidation can no longer interleave between
+                # the generation check and the file write (TOCTOU #6581). It
+                # either blocks until the rename lands and then deletes the
+                # file, or runs first and bumps the generation so this
+                # publish block is skipped — the stale catalog cannot survive
+                # a restart and resurrect a just-removed provider.
+                with _cache_build_cv:
+                    if _build_generation != _models_cache_generation:
+                        return
+                    _save_models_cache_to_disk(result)
             except Exception:
                 logger.debug("models cache disk save failed", exc_info=True)
             finally:
+                # Only clear the in-progress flag if we still own this
+                # rebuild's generation: an obsolete worker must never clear a
+                # newer rebuild's in-progress state.
                 with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                    if _build_generation == _models_cache_generation:
+                        _cache_build_in_progress = False
+                        _cache_build_cv.notify_all()
 
         def _clear_build_in_progress():
             global _cache_build_in_progress
             with _cache_build_cv:
+                # Same generation guard as _publish_models_result: an
+                # obsolete rebuild (error path) must not clear the in-progress
+                # state of a newer rebuild started after an invalidation.
+                if _build_generation != _models_cache_generation:
+                    return
                 _cache_build_in_progress = False
                 _cache_build_cv.notify_all()
 
