@@ -111,7 +111,7 @@ def test_new_chat_has_screen_reader_only_workspace_announcer():
 
 def test_new_session_announces_started_workspace_without_leaving_stale_browse_text():
     helper = _block(SESSIONS_JS, "function _setNewSessionWorkspaceCue", "function _setNewSessionPending")
-    new_session = _block(SESSIONS_JS, "async function newSession", "/**\n * Self-heal")
+    new_session = _block(SESSIONS_JS, "async function newSession", "function _rearmActiveSessionStream")
 
     assert "const announcer=$('a11yAnnouncer')" in helper
     assert "const composerCue=$('composerWorkspaceContext')" in helper

@@ -1589,33 +1589,6 @@ async function newSession(flash, options={}){
   }
 }
 
-/**
- * Self-heal: clear the stuck session ID from localStorage and URL when a
- * loadSession() call failed during boot (no currentSid). This prevents the
- * browser from retrying the same dead session on every refresh.
- *
- * Called from loadSession() after 401 redirect (undefined data) or any
- * non-404 error (400, 403, 500, network). The 404 path has its own
- * inline self-heal; this helper consolidates the non-404 cases.
- *
- * Only clears when !currentSid — no session is active on screen, so
- * the stored ID is definitely stale. When currentSid is set (already
- * viewing a session), a non-404 failure could be a transient server error
- * and the session may still exist on the server; wiping localStorage in
- * that case is unnecessarily destructive (#4028 follow-up).
- *
- * A click into a *different* dead session (currentSid && currentSid!==sid)
- * must not run it: localStorage and the URL still point at the live session
- * (both are only updated on a successful load), so wiping them would log
- * the user out of a healthy session (#2782).
- */
-function _clearStuckSessionOnBoot(sid, currentSid){
-  if(!currentSid){
-    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-  }
-}
-
 // #2971 (Greptile P1 r3377162160): loadSession() tears down the live
 // per-session SSE at the top via stopSessionStream() (line ~754), but only the
 // success path re-arms it via startSessionStream() (line ~875). Every
@@ -1705,7 +1678,7 @@ async function loadSession(sid){
     }
   }
   const forceReload = !!opts.force;
-  const currentSid = S.session ? S.session.session_id : null;
+  let currentSid = S.session ? S.session.session_id : null;
   const sameSessionForceReload = forceReload && currentSid===sid;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
@@ -1874,8 +1847,9 @@ async function loadSession(sid){
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
-      }catch(switchErr){
-        e=switchErr;
+      }catch(_switchErr){
+        // Keep e as the original metadata failure: a failed profile switch
+        // does not prove that the requested session is missing.
       }
     }
     const _msgInner = $('msgInner');
@@ -1890,36 +1864,45 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
+    // A non-loadSession transition can change S.session while metadata awaits.
+    // Refresh the snapshot before deciding ownership or rearming a stream.
+    currentSid = S.session ? S.session.session_id : null;
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
-        // Self-heal (clear saved id + strip /session/<id> URL) only when the
-        // 404'd id is the one we are activating: a boot-time restore
-        // (!currentSid, #2798) or a mid-session reload of the *current* session
-        // whose sidecar was deleted server-side (#2782). A click into a
-        // *different* dead session (currentSid && currentSid!==sid) must not run
-        // it: localStorage and the URL still point at the live session (both are
-        // only updated on a successful load), so wiping them would log the user
-        // out of a healthy session. The URL strip is needed in the self-heal
-        // case because _sessionIdFromLocation() re-injects the id on reload.
-        // Only the rethrow stays gated on !currentSid: boot rethrows to fall
-        // through to empty-state; mid-session there is no boot path to reach.
-        if(!currentSid || currentSid===sid){
+        // Self-heal (clear saved id + strip /session/<id> URL) only when this
+        // load still owns recovery state: it is loading the active session, or
+        // boot has no active session and the saved pointer and route (if
+        // present) still target sid.
+        // A concurrent boot load of a different dead session must not wipe the
+        // live saved route. The URL strip is needed because
+        // _sessionIdFromLocation() re-injects the id on reload. Only an owned
+        // boot 404 rethrows to fall through to empty-state.
+        let _savedSid;
+        let _routeSid;
+        try{ _savedSid=localStorage.getItem('hermes-webui-session'); }catch(_){ }
+        try{
+          _routeSid=typeof _sessionIdFromLocation==='function'
+            ? _sessionIdFromLocation()
+            : undefined;
+        }catch(_){ }
+        const _savedOwned = _savedSid===sid;
+        const _routeOwned = _routeSid===sid;
+        if(_savedOwned){
           try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+        }
+        if(_routeOwned){
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
+        }
+        if(!currentSid && (_savedOwned || _routeOwned)){
           if (_isCurrentLoad()) _loadingSessionId = null;
-          if(!currentSid){
-            throw e;
-          }
+          throw e;
         }
       } else {
         // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
         // via the if(!data) guard below since api() returns undefined on 401
-        // rather than throwing. Clear the stuck session ID only during boot
-        // (!currentSid) so the next boot doesn't retry the same dead session.
-        // When currentSid is set, a 500/network error may be transient — the
-        // session might still exist on the server (#4028 follow-up).
-        _clearStuckSessionOnBoot(sid, currentSid);
+        // rather than throwing. These failures do not prove the session is
+        // missing, so preserve the saved ID and URL for recovery.
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }

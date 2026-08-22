@@ -136,7 +136,10 @@ def test_same_session_force_refresh_does_not_reset_scroll_direction_tracker():
     body = _function_body(SESSIONS_JS, "loadSession")
     compact = _compact(body)
 
-    assert "constcurrentSid=S.session?S.session.session_id:null;" in compact
+    assert any(
+        f"{keyword}currentSid=S.session?S.session.session_id:null;" in compact
+        for keyword in ("const", "let")
+    )
     assert "if(currentSid!==sid&&typeofwindow!=='undefined'&&typeofwindow._resetScrollDirectionTracker==='function')" in compact
 
 

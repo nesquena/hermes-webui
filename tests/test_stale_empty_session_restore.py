@@ -104,9 +104,10 @@ def test_load_session_clears_saved_stale_404_and_rethrows_to_boot():
     assert "_loadingSessionId = null" in block, (
         "loadSession must clear the in-flight load marker on 404"
     )
-    # Boot-time (!currentSid) rethrow so boot falls through to the empty state.
-    assert "!currentSid" in block, (
-        "loadSession must keep the !currentSid gate around the boot-time rethrow"
+    # Boot-time with no live active session rethrows so boot falls through to
+    # the empty state, after clearing only owned recovery components.
+    assert "!currentSid && (_savedOwned || _routeOwned)" in block, (
+        "loadSession must keep the no-live-session gate around the boot-time rethrow"
     )
     assert re.search(r"throw\s+e", block), (
         "loadSession must rethrow the stale saved-session 404 so boot can fall "
@@ -114,27 +115,26 @@ def test_load_session_clears_saved_stale_404_and_rethrows_to_boot():
     )
 
 
-def test_load_session_404_self_heal_gated_to_active_or_boot():
-    """#2782: the localStorage clear + URL strip self-heal runs only when the
-    404'd id is the one being activated, gated on (!currentSid || currentSid===sid):
-    a boot-time restore (#2798) or a reload of the *current* session whose sidecar
-    was deleted. A click into a *different* dead session preserves the live
-    session's saved id and URL. Only the rethrow stays gated on !currentSid."""
+def test_load_session_404_self_heal_uses_component_ownership():
+    """#2782: self-heal independently clears matching recovery components."""
+    block = _load_session_error_block()
     arm = _load_session_404_block()
-    self_heal = "if(!currentSid || currentSid===sid)"
-    assert self_heal in arm, (
-        "self-heal must be gated to boot or the active session, not unconditional"
+    assert "currentSid = S.session ? S.session.session_id : null;" in block, (
+        "metadata failure handling must refresh the live active session"
     )
-    heal_idx = arm.find(self_heal)
-    clear_idx = arm.find("localStorage.removeItem('hermes-webui-session')")
-    strip_idx = arm.find("history.replaceState")
-    assert clear_idx > heal_idx, "localStorage clear must run inside the self-heal gate"
-    assert strip_idx > heal_idx, "URL strip must run inside the self-heal gate"
-    # The boot-time rethrow stays nested on !currentSid, inside the self-heal gate.
-    rethrow_gate_idx = arm.find("if(!currentSid)")
-    assert rethrow_gate_idx > heal_idx, "the !currentSid rethrow gate must remain"
-    assert re.search(r"throw\s+e", arm[rethrow_gate_idx:]), (
-        "the !currentSid gate must still contain the boot-time rethrow"
+    assert "const _savedOwned = _savedSid===sid;" in arm, (
+        "saved-pointer cleanup must be independently owned"
+    )
+    assert "const _routeOwned = _routeSid===sid;" in arm, (
+        "route cleanup must be independently owned"
+    )
+    assert "if(_savedOwned){" in arm, "saved-pointer cleanup must use its own ownership"
+    assert "if(_routeOwned){" in arm, "route cleanup must use its own ownership"
+    assert "if(!currentSid && (_savedOwned || _routeOwned)){" in arm, (
+        "boot rethrow must depend on live state and owned components"
+    )
+    assert re.search(r"throw\s+e", arm), (
+        "the owned boot 404 must still rethrow to the empty state"
     )
 
 
