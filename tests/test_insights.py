@@ -508,3 +508,177 @@ def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_pa
     assert data["models"][0]["cache_hit_percent"] is None
     assert data["total_cache_hit_percent"] is None
 
+
+
+def test_skill_usage_table_overflow_trio_stays_together():
+    """PR #6775 regression: the skill-usage table must keep its 3-piece
+    narrow-screen overflow contract. A future CSS cleanup that removes one
+    half of the fix (card min-width floor, table overflow scroller, or the
+    shared head/row min-width) silently reintroduces the card overflow bug
+    on narrow screens, so the trio is asserted as a unit."""
+    # 1) The card that hosts the table must be allowed to shrink below its
+    #    intrinsic grid width, or the table can never overflow-scroll locally.
+    card_line = [l for l in STYLE_CSS.splitlines() if l.startswith(".insights-card{")][0]
+    assert "min-width:0" in card_line, (
+        f".insights-card must carry min-width:0 so the grid item can shrink; got: {card_line}"
+    )
+
+    # 2) The table owns a local horizontal scroller (display:block so the
+    #    wrapper participates in layout; overflow-x:auto contains the width).
+    table_block = [l for l in STYLE_CSS.splitlines() if l.startswith(".skill-usage-table{")][0]
+    assert "overflow-x:auto" in table_block, (
+        f".skill-usage-table must own overflow-x:auto; got: {table_block}"
+    )
+    assert "display:block" in table_block, (
+        f".skill-usage-table must be display:block for the scroller to size; got: {table_block}"
+    )
+
+    # 3) Header AND data rows share the same minimum content width (352px) so
+    #    columns stay aligned while the wrapper scrolls. The rule covers both
+    #    selectors in one declaration (the selector list may wrap across two
+    #    lines), exactly like the PR fix.
+    css_lines = STYLE_CSS.splitlines()
+    head_idx = next(
+        (i for i, l in enumerate(css_lines)
+         if ".skill-usage-table .insights-table-head" in l),
+        None,
+    )
+    assert head_idx is not None, "a .skill-usage-table head rule must exist"
+    # The selector list may span two lines: head selector + comma, then the
+    # row selector with the declaration block. Collect both lines.
+    joined = css_lines[head_idx]
+    if not joined.strip().endswith("{"):
+        # Look ahead for the continuation line carrying the row selector and
+        # the declaration block.
+        for j in range(head_idx + 1, min(head_idx + 3, len(css_lines))):
+            nxt = css_lines[j].strip()
+            if ".insights-table-row" in nxt:
+                joined = joined + "\n" + css_lines[j]
+                break
+    assert ".skill-usage-table .insights-table-row" in joined, (
+        "head and row selectors must be declared together"
+    )
+    assert "min-width:352px" in joined, (
+        f"head and row must share min-width:352px; got: {joined}"
+    )
+    assert "grid-template-columns" in joined, (
+        f"head and row must keep the shared grid-template-columns; got: {joined}"
+    )
+
+
+def test_models_table_overflow_contract_stays_together():
+    """PR #6775 sibling regression: the regular Models table needs the same
+    all-width containment contract as the skill-usage table.
+
+    The card-level min-width:0 lets every .insights-card shrink in the
+    two-column usage grid, so above the 640px breakpoint the Models table
+    must own a local horizontal scroller (overflow-x:auto + display:block)
+    and its head/rows must share a min-width floor; otherwise the six-column
+    grid paints outside its card at intermediate widths (641px+)."""
+    # 1) The Models table wrapper owns a local horizontal scroller.
+    table_block = [l for l in STYLE_CSS.splitlines() if l.startswith(".insights-model-table{")][0]
+    assert "overflow-x:auto" in table_block, (
+        f".insights-model-table must own overflow-x:auto; got: {table_block}"
+    )
+    assert "display:block" in table_block, (
+        f".insights-model-table must be display:block for the scroller to size; got: {table_block}"
+    )
+
+    # 2) Header AND data rows share the same minimum content width (402px,
+    #    matching the six declared columns + gaps) in one shared rule, so
+    #    columns stay aligned while the wrapper scrolls.
+    css_lines = STYLE_CSS.splitlines()
+    head_idx = next(
+        (i for i, l in enumerate(css_lines)
+         if ".insights-model-table .insights-table-head" in l),
+        None,
+    )
+    assert head_idx is not None, "a .insights-model-table head rule must exist"
+    joined = css_lines[head_idx]
+    if not joined.strip().endswith("{"):
+        for j in range(head_idx + 1, min(head_idx + 3, len(css_lines))):
+            nxt = css_lines[j].strip()
+            if ".insights-table-row" in nxt:
+                joined = joined + "\n" + css_lines[j]
+                break
+    assert ".insights-model-table .insights-table-row" in joined, (
+        "head and row selectors must be declared together"
+    )
+    assert "min-width:402px" in joined, (
+        f"head and row must share min-width:402px; got: {joined}"
+    )
+    assert "grid-template-columns" in joined, (
+        f"head and row must keep the shared grid-template-columns; got: {joined}"
+    )
+
+
+def test_models_table_mobile_single_scroll_owner():
+    """PR #6775 follow-up regression: the ≤640px mobile cascade must keep a
+    single scroll owner.
+
+    Before this fix, the mobile block combined
+    `.insights-usage-grid .insights-card{overflow-x:auto}` with
+    `.insights-model-table{min-width:360px}`. On very narrow screens (e.g.
+    390px) that produced a NESTED scroller: the card scrolled the table, and
+    the table scrolled its ~402px content — the final Share cell was only
+    reachable after a second scroll, which shifted the card title 32px left.
+
+    The contract: inside `@media (max-width: 640px)`, the card must NOT
+    claim overflow-x (leave it visible) and the model table must be allowed
+    to shrink (min-width:0), so the base `.insights-model-table{overflow-x:
+    auto;display:block}` rule is the table's single local scroller.
+    """
+    insights_mobile = "/* ── Mobile layout for Token Breakdown + Models"
+    assert insights_mobile in STYLE_CSS, "Issue #2104 mobile rules should exist in CSS"
+    section_start = STYLE_CSS.find(insights_mobile)
+    section_end = STYLE_CSS.find("/* ── Checkpoints", section_start)
+    section_block = STYLE_CSS[section_start:section_end]
+
+    # Card must not become its own scroller in the mobile cascade (that would
+    # nest a scroller inside the table scroller and shift the title on
+    # two-step scroll). `overflow-x: visible` is the explicit single-owner form.
+    card_block = [
+        l for l in section_block.splitlines()
+        if ".insights-usage-grid .insights-card" in l
+    ]
+    assert card_block, "mobile cascade must style .insights-usage-grid .insights-card"
+    # find declarations on the same line OR the 2-4 following lines
+    joined = card_block[0]
+    idx = section_block.splitlines().index(card_block[0])
+    all_lines = section_block.splitlines()
+    for j in range(idx + 1, min(idx + 4, len(all_lines))):
+        nxt = all_lines[j].strip()
+        if nxt.startswith(".") or nxt.startswith("}"):
+            break
+        joined += " " + nxt
+    assert "overflow-x: visible" in joined, (
+        f"mobile card must keep overflow-x: visible (single scroll owner on the table), got: {joined}"
+    )
+    assert "overflow-x: auto" not in joined, (
+        f"mobile card must NOT claim overflow-x:auto (nested scroller), got: {joined}"
+    )
+
+    # The mobile model-table rule must drop the 360px floor so the base
+    # table scroller sizes from the card width instead of overflowing past it.
+    model_block = [
+        l.strip() for l in all_lines
+        if l.strip().startswith(".insights-model-table")
+    ]
+    assert model_block, "mobile cascade must style .insights-model-table"
+    mline = model_block[0]
+    m_idx = next(
+        i for i, l in enumerate(all_lines)
+        if l.strip().startswith(".insights-model-table")
+    )
+    mj = mline
+    for j in range(m_idx + 1, min(m_idx + 4, len(all_lines))):
+        nxt = all_lines[j].strip()
+        if nxt.startswith(".") or nxt.startswith("}"):
+            break
+        mj += " " + nxt
+    assert "min-width: 0" in mj or "min-width:0" in mj, (
+        f"mobile .insights-model-table must be min-width:0 so the table owns the scroll; got: {mj}"
+    )
+    assert "min-width: 360px" not in mj and "min-width:360px" not in mj, (
+        f"mobile .insights-model-table must not keep the 360px floor; got: {mj}"
+    )
