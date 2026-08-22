@@ -916,9 +916,13 @@ def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> 
     pending_text = str(session.pending_user_message or '')
     if not pending_text:
         return None
-    recovered_ts = int(time.time())
-    if isinstance(timestamp, (int, float)) and timestamp > 0:
-        recovered_ts = int(timestamp)
+    recovered_ts = time.time()
+    # Preserve full float resolution (#6378 review): the recovered row must
+    # stay checkpoint-consistent with pending_started_at so a later guard
+    # pass can recognize it; int() truncation would make an identical re-send
+    # in the same second collide with this row.
+    if isinstance(timestamp, (int, float)) and math.isfinite(timestamp) and timestamp > 0:
+        recovered_ts = timestamp
     recovered: dict = {
         'role': 'user',
         'content': session.pending_user_message,
@@ -960,6 +964,129 @@ def _message_timestamp(message):
         return float(raw) if raw is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _finite_timestamp(raw):
+    """Return a finite float timestamp, or None when the raw value is missing,
+    non-numeric, or non-finite (NaN / +/-Inf).
+
+    Fail-closed by design (#6378 review): a None result means "checkpoint
+    identity is ambiguous", and callers treat it as NOT the same turn rather
+    than suppressing recovery. int(float('inf'))/int(float('nan')) would
+    otherwise raise OverflowError/ValueError and abort the whole repair.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _current_turn_has_final_assistant(
+    messages,
+    pending_text,
+    *,
+    pending_started_at=None,
+    pending_source=None,
+    pending_attachments=None,
+) -> bool:
+    """Return True when the pending user turn already has a committed
+    non-partial, non-error assistant response in the transcript.
+
+    Prevents stale cancel recovery from appending a duplicate user +
+    partial + error round after a final answer for the same logical turn
+    was already committed by a subsequent stream.
+
+    To distinguish a genuine re-send of the same prompt text from a stale
+    pending reference to an already-answered turn, this checks both text
+    match *and* checkpoint identity (timestamp, source, attachments).
+
+    The WHOLE bounded turn is classified, not just the first assistant row:
+    scanning starts at the checkpoint-matched user row and continues through
+    tool rows, context-compaction markers, top-level tool-call assistants,
+    partial/error/empty rows, and other non-final assistant rows, stopping
+    only at the next user boundary. A committed final assistant answer
+    (canonical rule from api.streaming._assistant_message_has_final_visible_text)
+    anywhere within that turn proves completion, so a later committed final
+    after tool use is recognized without appending duplicate recovery rows.
+    """
+    if not pending_text or not isinstance(messages, list):
+        return False
+    # Find the checkpoint-matched user row. The pending turn's user may not
+    # be the last row in the transcript when a later user turn already
+    # started, so scan backward for the most recent user that matches BOTH
+    # the pending text and the checkpoint identity (timestamp, source,
+    # attachments) — never just the text, and never just the last row.
+    # Full-resolution, fail-closed checkpoint identity (#6378 review): compare
+    # timestamps at float precision so two identical prompts sent in the same
+    # second (e.g. 1000.1 vs 1000.9) no longer collide after int() truncation.
+    # A missing/non-finite timestamp yields None -> the checkpoint never
+    # matches -> the guard does NOT suppress recovery on ambiguous identity.
+    _recovered_ts = _finite_timestamp(pending_started_at)
+    matched_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get('role')
+        if role in ('tool', 'tool_calls'):
+            continue
+        if role != 'user':
+            continue
+        if not _message_matches_pending_text(msg, pending_text):
+            continue
+        if _message_matches_pending_checkpoint(
+            msg,
+            pending_text,
+            _recovered_ts,
+            pending_source,
+            pending_attachments,
+        ):
+            matched_user_idx = i
+            break
+    if matched_user_idx < 0:
+        return False
+    # Classify the whole bounded turn: scan forward from the checkpoint-matched
+    # user and continue past tool rows, context-compaction markers, top-level
+    # tool-call assistants, partial/error/empty rows, and any other non-final
+    # assistant row; stop only at the next user boundary. A committed final
+    # assistant answer after tool use may prove completion.
+    #
+    # The canonical structured-content finality predicate lives in
+    # api.streaming; import it lazily to avoid a circular import
+    # (api.streaming imports api.models at module load). Reusing the canonical
+    # rule keeps the tool-boundary semantics identical across both modules:
+    # visible text BEFORE a tool_use/tool_call block is process text, not a
+    # settled final — only post-tool visible text can prove completion.
+    from api.streaming import _assistant_message_has_final_visible_text
+    for j in range(matched_user_idx + 1, len(messages)):
+        next_msg = messages[j]
+        if not isinstance(next_msg, dict):
+            continue
+        role = next_msg.get('role')
+        if role == 'user':
+            break  # Next user row bounds the turn — no committed final found.
+        if role in ('tool', 'tool_calls'):
+            continue
+        if is_context_compression_marker(next_msg):
+            continue
+        if role == 'assistant':
+            # Partial/error rows are not settled finals — keep scanning in
+            # case a later committed final proves completion.
+            if next_msg.get('_partial') or next_msg.get('_error'):
+                continue
+            # Canonical finality predicate: rejects top-level tool_calls,
+            # empty content, and content-list rows whose visible text only
+            # precedes a tool-use block; accepts post-tool visible text.
+            if _assistant_message_has_final_visible_text(next_msg):
+                return True
+            continue
+        # Any other role is not a committed final answer — keep scanning
+        # within the bounded turn.
+        continue
+    return False
 
 
 def _is_empty_partial_activity_message(message):
@@ -2312,17 +2439,27 @@ def _normalize_journal_recovery_text(value) -> str:
 def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
-    try:
-        message_timestamp = int(message.get('timestamp'))
-        expected_timestamp = int(timestamp)
-    except (TypeError, ValueError):
+    # Total predicate over persisted input (#6378 review): timestamps are
+    # compared at full float resolution and must be finite; attachments must
+    # be lists. Malformed/scalar/ambiguous values never match (fail-closed),
+    # so a single bad row (scalar attachments, unhashable/structured content,
+    # non-finite timestamps) can no longer abort recovery with a TypeError.
+    message_timestamp = _finite_timestamp(message.get('timestamp'))
+    expected_timestamp = _finite_timestamp(timestamp)
+    if message_timestamp is None or expected_timestamp is None:
+        return False
+    message_attachments = message.get('attachments')
+    pending_attachment_list = attachments
+    if message_attachments is not None and not isinstance(message_attachments, list):
+        return False
+    if pending_attachment_list is not None and not isinstance(pending_attachment_list, list):
         return False
     return (
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
         and message_timestamp == expected_timestamp
         and (message.get('_source') or 'webui') == (source or 'webui')
-        and list(message.get('attachments') or []) == list(attachments or [])
+        and list(message_attachments or []) == list(pending_attachment_list or [])
     )
 
 
@@ -3380,14 +3517,80 @@ def _apply_core_sync_or_error_marker(
         session, _stream_id,
     )
 
+    # ── Completed-journal recovery first (#6378 review finding 3) ─────────
+    # When the run journal's terminal state is 'completed', the deduplicated
+    # journal rows (visible process text + tool calls) must be restored even
+    # when the transcript already contains a committed final assistant answer.
+    # Base behavior replayed both; running the stale-turn guard first would
+    # clear state and silently drop the journaled process rows, so this branch
+    # is evaluated BEFORE the guard. `len(session.messages) != 0` preserves the
+    # historical scope of the branch (the empty-messages core-sync path below
+    # handles the empty case).
+    _journal_terminal_state = _run_journal_terminal_state(session, _stream_id)
+    if _journal_terminal_state == 'completed' and len(session.messages) != 0:
+        _recovered_ts = _finite_timestamp(session.pending_started_at) or time.time()
+        _already_checkpointed = _message_matches_pending_checkpoint(
+            session.messages[-1],
+            session.pending_user_message,
+            _recovered_ts,
+            session.pending_user_source,
+            session.pending_attachments,
+        )
+        if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
+            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        _append_journaled_partial_output(
+            session,
+            _stream_id,
+            dedupe_existing=True,
+        )
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        session.save(touch_updated_at=touch_updated_at)
+        logger.info(
+            "Session %s: cleared stale pending state for completed stream %s without error marker",
+            sid,
+            _stream_id,
+        )
+        return True
+
+    # ── Stale-turn guard (#6366): if the pending user message already has a
+    # committed non-partial, non-error assistant response, clear stale state
+    # without appending any recovered rows. Without this check, a stale cancel
+    # recovery for a cancelled stream can append a duplicate user → _partial →
+    # error tail after a final answer for the same turn was already committed
+    # by a subsequent completed stream.
+    if _current_turn_has_final_assistant(
+        session.messages,
+        session.pending_user_message,
+        pending_started_at=session.pending_started_at,
+        pending_source=session.pending_user_source,
+        pending_attachments=session.pending_attachments,
+    ):
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        session.save(touch_updated_at=touch_updated_at)
+        logger.info(
+            "Session %s: pending turn already has final assistant answer, "
+            "cleared stale state without recovery append",
+            sid,
+        )
+        return True
+
     # When messages is already non-empty, do not overwrite history from any core
     # transcript. The pending user turn may still be the only durable copy of a
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        _recovered_ts = int(time.time())
-        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
+        # Full-resolution identity (#6378 review): compare at float precision
+        # so same-second re-sends do not collide; a finite pending_started_at
+        # is preserved verbatim for the recovered row.
+        _recovered_ts = _finite_timestamp(session.pending_started_at) or time.time()
         _already_checkpointed = _message_matches_pending_checkpoint(
             session.messages[-1],
             session.pending_user_message,
@@ -3400,26 +3603,6 @@ def _apply_core_sync_or_error_marker(
             session.pending_user_message,
         )
         _pending_started_at = session.pending_started_at
-        if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
-            _append_journaled_partial_output(
-                session,
-                _stream_id,
-                dedupe_existing=True,
-            )
-            session.active_stream_id = None
-            session.pending_user_message = None
-            session.pending_attachments = []
-            session.pending_started_at = None
-            session.pending_user_source = None
-            session.save(touch_updated_at=touch_updated_at)
-            logger.info(
-                "Session %s: cleared stale pending state for completed stream %s without error marker",
-                sid,
-                _stream_id,
-            )
-            return True
         if not _tail_user_already_checkpointed:
             _append_recovered_pending_turn(session, timestamp=_recovered_ts)
         else:
@@ -3475,9 +3658,8 @@ def _apply_core_sync_or_error_marker(
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
             _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-            _recovered_ts = int(time.time())
-            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-                _recovered_ts = int(session.pending_started_at)
+            # Full-resolution identity (#6378 review): see _finite_timestamp.
+            _recovered_ts = _finite_timestamp(session.pending_started_at) or time.time()
             _already_checkpointed = _message_matches_pending_checkpoint(
                 session.messages[-1] if session.messages else None,
                 session.pending_user_message,
@@ -3544,10 +3726,9 @@ def _apply_core_sync_or_error_marker(
     # user turn (preserving the draft), then append an error marker.
     if session.pending_user_message:
         # Use the original send time if available so the recovered turn
-        # appears in the correct chronological position.
-        _recovered_ts = int(time.time())
-        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
-            _recovered_ts = int(session.pending_started_at)
+        # appears in the correct chronological position. Full-resolution
+        # identity (#6378 review): see _finite_timestamp.
+        _recovered_ts = _finite_timestamp(session.pending_started_at) or time.time()
         _append_recovered_pending_turn(session, timestamp=_recovered_ts)
     recovered_output, terminal_error_recovered = (
         _recover_journaled_output_and_terminal_error(

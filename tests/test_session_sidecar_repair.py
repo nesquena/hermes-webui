@@ -320,9 +320,9 @@ class TestDraftRecovery:
         assert len(user_msgs) == 1
         assert user_msgs[0]["content"] == "My important question"
         assert user_msgs[0].get("_recovered") is True
-        assert user_msgs[0]["timestamp"] == int(_ts), (
-            f"Recovered turn timestamp should match pending_started_at ({_ts}), "
-            f"got {user_msgs[0]['timestamp']}"
+        assert user_msgs[0]["timestamp"] == _ts, (
+            f"Recovered turn timestamp should match pending_started_at at full "
+            f"resolution ({_ts}), got {user_msgs[0]['timestamp']}"
         )
 
     def test_pending_message_recovered_into_context_messages(self, hermes_home, monkeypatch):
@@ -2117,3 +2117,298 @@ class TestWslPageCacheRace:
         assert len(interrupted_markers) == 1
         recovered = [m for m in s.messages if m.get("_recovered_from_run_journal")]
         assert sum(1 for m in recovered if "ConcurrentTokens" in m.get("content", "")) == 1
+
+
+class TestStaleFinalWholeTurnGuard:
+    """#6366 re-gate regressions: ``_current_turn_has_final_assistant`` must
+    classify the WHOLE bounded turn (checkpoint-matched user → next user row)
+    using the canonical structured-content finality predicate, so a stale
+    cancel recovery never discards an interrupted tool turn and never appends
+    a duplicate recovery round after a committed final.
+
+    All tests drive the real repair path (``_apply_core_sync_or_error_marker``)
+    or the stale-repair caller (``_repair_stale_pending``) with persisted
+    message shapes — not the helper in isolation.
+    """
+
+    # ── fixtures/helpers ──────────────────────────────────────────────────
+
+    def _make_turn_session(self, session_id="turn_sid", pending="Question?", tail=None, started_at=None):
+        """Session whose messages already contain the checkpoint-matched user
+        row (same text, timestamp, source, attachments as the pending turn)
+        followed by ``tail`` rows."""
+        if started_at is None:
+            started_at = int(time.time()) - 60
+        user_row = {
+            "role": "user",
+            "content": pending,
+            "timestamp": started_at,
+            "_source": "webui",
+        }
+        s = _make_session(session_id=session_id, messages=[user_row] + (tail or []))
+        s.pending_user_message = pending
+        s.pending_started_at = started_at
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        return s
+
+    def _apply(self, s, hermes_home):
+        lock = config._get_session_agent_lock(s.session_id)
+        with lock:
+            core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
+            return _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1",
+            )
+
+    def _assert_cleared_without_append(self, s, expected_roles):
+        """Final answer committed → stale state cleared, NO recovered user row
+        and NO extra rows appended (the transcript is exactly the persisted
+        shape — no duplicate recovery round)."""
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+        assert [m.get("role") for m in s.messages] == expected_roles
+        assert len(s.messages) == len(expected_roles), (
+            "No rows may be appended when a committed final exists"
+        )
+        assert not any(m.get("_recovered") for m in s.messages)
+
+    def _assert_recovery_preserved(self, s):
+        """No committed final → pending turn recovered (recovered user row +
+        error marker appended), never silently discarded."""
+        assert s.pending_user_message is None
+        assert any(m.get("_recovered") for m in s.messages), (
+            "Interrupted turn must be recovered, not discarded as if final"
+        )
+        assert any(m.get("_error") for m in s.messages)
+
+    # ── real-path regressions ────────────────────────────────────────────
+
+    def test_plain_final_clears_stale_state_without_append(self, hermes_home):
+        """matching user + plain committed final → stale state cleared, no
+        duplicate recovery rows appended."""
+        s = self._make_turn_session(tail=[{"role": "assistant", "content": "Committed answer."}])
+        assert self._apply(s, hermes_home) is True
+        self._assert_cleared_without_append(s, ["user", "assistant"])
+
+    def test_top_level_tool_call_plus_tool_tail_preserves_recovery(self, hermes_home):
+        """matching user + assistant tool_calls + tool tail (still running) →
+        NOT a committed final; legitimate recovery must be preserved."""
+        s = self._make_turn_session(tail=[
+            {"role": "assistant", "content": "", "tool_calls": [{"name": "terminal", "args": {"cmd": "sleep 30"}}]},
+            {"role": "tool", "content": "still running", "name": "terminal"},
+        ])
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_content_list_text_before_tool_use_plus_tool_tail_preserves_recovery(self, hermes_home):
+        """matching user + content-list text BEFORE a tool_use block + tool
+        tail → leading process text is NOT a settled final (canonical rule
+        from api.streaming._assistant_message_has_final_visible_text)."""
+        s = self._make_turn_session(tail=[
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "First content row."},
+                    {"type": "tool_use", "tool_use_id": "content-tool", "tool_name": "terminal", "args": {"cmd": "first"}},
+                ],
+            },
+            {"role": "tool", "content": "still running", "name": "terminal"},
+        ])
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_tool_use_result_then_later_final_clears_stale_state(self, hermes_home):
+        """matching user + tool call + tool result + LATER committed final →
+        the later final proves completion; stale state cleared without append."""
+        s = self._make_turn_session(tail=[
+            {"role": "assistant", "content": "", "tool_calls": [{"name": "terminal", "args": {"cmd": "ls"}}]},
+            {"role": "tool", "content": "file.txt", "name": "terminal"},
+            {"role": "assistant", "content": "Final answer after tool."},
+        ])
+        assert self._apply(s, hermes_home) is True
+        self._assert_cleared_without_append(s, ["user", "assistant", "tool", "assistant"])
+
+    def test_partial_error_empty_compaction_followed_by_later_final(self, hermes_home):
+        """partial/error/empty/compaction rows are non-final; a LATER committed
+        final in the same bounded turn proves completion."""
+        tails = [
+            [{"role": "assistant", "content": "thinking...", "_partial": True}, {"role": "assistant", "content": "Final."}],
+            [{"role": "assistant", "content": "err", "_error": True}, {"role": "assistant", "content": "Final."}],
+            [{"role": "assistant", "content": ""}, {"role": "assistant", "content": "Final."}],
+            [{"role": "assistant", "content": "[context compaction summary of earlier turns]"}, {"role": "assistant", "content": "Final."}],
+        ]
+        for i, tail in enumerate(tails):
+            s = self._make_turn_session(session_id=f"turn_sid_{i}", tail=tail)
+            assert self._apply(s, hermes_home) is True, f"tail #{i} must clear stale state"
+            self._assert_cleared_without_append(s, ["user", "assistant", "assistant"])
+
+    def test_next_user_boundary_stops_scan(self, hermes_home):
+        """A later user row bounds the turn: the final answer after the NEXT
+        user belongs to the next turn, so this pending turn has NO committed
+        final → recovery must be preserved."""
+        s = self._make_turn_session(tail=[
+            {"role": "assistant", "content": "thinking...", "_partial": True},
+            {"role": "user", "content": "Next question?", "timestamp": int(time.time())},
+            {"role": "assistant", "content": "Answer to next question."},
+        ])
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_idempotent_second_repair(self, hermes_home):
+        """Running repair twice is idempotent: the second call bails (pending
+        already cleared) and appends nothing."""
+        s = self._make_turn_session(tail=[{"role": "assistant", "content": "Committed answer."}])
+        assert self._apply(s, hermes_home) is True
+        n_before = len(s.messages)
+        assert self._apply(s, hermes_home) is False, "second repair must bail out"
+        assert len(s.messages) == n_before, "second repair must not append anything"
+
+    def test_repair_stale_pending_caller_clears_committed_final(self, hermes_home, monkeypatch):
+        """The stale-repair caller (_repair_stale_pending) reaches the same
+        guard through the real lock + core-path pipeline: a committed final
+        clears stale state without appending a duplicate recovery round."""
+        monkeypatch.setattr(models, "_get_profile_home", lambda profile: hermes_home)
+        s = self._make_turn_session(
+            session_id="caller_turn_sid",
+            tail=[{"role": "assistant", "content": "Committed answer."}],
+        )
+        assert _repair_stale_pending(s) is True
+        self._assert_cleared_without_append(s, ["user", "assistant"])
+
+    # ── #6378 re-gate: full-res timestamps, total predicates, journal order ─
+
+    def test_same_second_identical_prompt_is_not_suppressed(self, hermes_home):
+        """#6378 review finding 1: the checkpoint match truncated timestamps
+        to whole seconds, so two identical prompts sent in the same second
+        (committed row at 1000.1, pending at 1000.9) collided and the guard
+        cleared the fresh turn as if it were the already-answered one. Full-
+        resolution finite matching must fail the checkpoint -> recovery runs
+        and the re-sent turn survives."""
+        s = _make_session(session_id="same_second_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.1, "_source": "webui"},
+            {"role": "assistant", "content": "Committed answer."},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.9
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_non_finite_pending_started_at_fails_closed(self, hermes_home):
+        """#6378 review finding 1 (fail-closed): a non-finite
+        pending_started_at raised OverflowError (int(float('inf'))) / ValueError
+        (int(float('nan'))) inside the guard and aborted repair entirely. It
+        must be treated as ambiguous identity -> checkpoint never matches ->
+        recovery proceeds instead of raising."""
+        for bad in (float("inf"), float("nan")):
+            s = _make_session(session_id=f"nonfinite_sid_{bad}", messages=[
+                {"role": "user", "content": "Question?", "timestamp": 1000.0, "_source": "webui"},
+                {"role": "assistant", "content": "Committed answer."},
+            ])
+            s.pending_user_message = "Question?"
+            s.pending_started_at = bad
+            s.pending_user_source = "webui"
+            s.pending_attachments = []
+            s.active_stream_id = "stream_1"
+            assert self._apply(s, hermes_home) is True
+            self._assert_recovery_preserved(s)
+
+    def test_scalar_attachments_row_does_not_abort_recovery(self, hermes_home):
+        """#6378 review finding 2: a persisted user row whose `attachments`
+        is a scalar (int) made list(attachments) raise TypeError inside the
+        checkpoint match, aborting recovery for the whole session. The
+        predicate must be total: malformed attachments -> non-match
+        (fail-closed) -> recovery proceeds instead of raising."""
+        s = _make_session(session_id="scalar_attachments_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.0,
+             "_source": "webui", "attachments": 5},
+            {"role": "assistant", "content": "Committed answer."},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.0
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_unhashable_structured_content_does_not_abort_recovery(self, hermes_home):
+        """#6378 review finding 2: a content part whose `type` is an
+        unhashable structured value (list) made `type in part_types` raise
+        TypeError inside is_context_compression_marker() during the guard
+        scan, aborting recovery. The marker predicate must be total: the row
+        is not a marker (fail-closed) and recovery proceeds."""
+        s = _make_session(session_id="unhashable_content_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.0, "_source": "webui"},
+            {"role": "assistant",
+             "content": [{"type": ["unhashable"], "text": "[context compaction summary of earlier turns]"}]},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.0
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        assert self._apply(s, hermes_home) is True
+        self._assert_recovery_preserved(s)
+
+    def test_completed_journal_restores_rows_before_stale_guard(self, hermes_home):
+        """#6378 review finding 3: with a committed final in the transcript AND
+        a journal whose terminal state is 'completed' (visible process text +
+        tool call), the stale-turn guard used to run first, clear state and
+        silently drop the journaled rows. Completed-journal recovery must run
+        BEFORE the guard so the deduplicated journal tail (process text + tool
+        call) is restored and no error marker is appended."""
+        s = _make_session(session_id="completed_journal_sid", messages=[
+            {"role": "user", "content": "Question?", "timestamp": 1000.0, "_source": "webui"},
+            {"role": "assistant", "content": "Committed answer."},
+        ])
+        s.pending_user_message = "Question?"
+        s.pending_started_at = 1000.0
+        s.pending_user_source = "webui"
+        s.pending_attachments = []
+        s.active_stream_id = "stream_1"
+        s.save()
+
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "token",
+            {"text": "I will check GitHub first."},
+        )
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "tool",
+            {
+                "name": "terminal",
+                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "args": {"command": "gh pr list --repo nesquena/hermes-webui"},
+            },
+        )
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "tool_complete",
+            {"name": "terminal", "duration": 0.4, "is_error": False},
+        )
+        append_run_event(
+            s.session_id,
+            "stream_1",
+            "done",
+            {"terminal_state": "completed"},
+        )
+
+        assert self._apply(s, hermes_home) is True
+        # Journaled process text and the tool call are restored...
+        contents = [m.get("content", "") for m in s.messages]
+        assert any("I will check GitHub first." in str(c) for c in contents), contents
+        assert s.tool_calls, "completed-journal tool call must be restored"
+        assert s.tool_calls[0]["name"] == "terminal"
+        # ...stale pending state is cleared, and the completed branch appends
+        # NO error marker (the turn completed; nothing was interrupted).
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+        assert not any(m.get("_error") for m in s.messages)
