@@ -14679,6 +14679,41 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/mcp/tools":
         return _handle_mcp_tools_list(handler)
 
+    # ── Toolsets (GET) ── provider/model/env configuration for toolsets
+    # such as TTS, image/video gen, web search — the GUI counterpart of
+    # `hermes tools`. See api/toolset_config.py for the hermes_cli bridge.
+    if parsed.path == "/api/tools/toolsets":
+        from api.toolset_config import ToolsetConfigError, list_toolsets
+
+        try:
+            return j(handler, list_toolsets())
+        except ToolsetConfigError as exc:
+            return j(handler, {"error": str(exc), **exc.extra}, status=exc.status)
+
+    if parsed.path.startswith("/api/tools/toolsets/"):
+        from api.toolset_config import (
+            ToolsetConfigError,
+            get_toolset_config,
+            get_toolset_models,
+        )
+
+        rest = parsed.path[len("/api/tools/toolsets/"):]
+        parts = [p for p in rest.split("/") if p != ""] if rest else []
+        try:
+            if len(parts) == 2 and parts[1] == "config":
+                return j(handler, get_toolset_config(parts[0]))
+            if len(parts) == 2 and parts[1] == "models":
+                qs = parse_qs(parsed.query)
+                provider = qs.get("provider", [""])[0] or None
+                return j(handler, get_toolset_models(parts[0], provider))
+        except ToolsetConfigError as exc:
+            return j(handler, {"error": str(exc), **exc.extra}, status=exc.status)
+        # This prefix is owned by the toolset API. A one-segment path or an
+        # unrecognised action must answer 404 here rather than fall through the
+        # remaining GET matchers into the generic "unhandled" signal, which
+        # would give a stale client or a typo'd JS call an unpredictable reply.
+        return bad(handler, "Unknown toolset route", 404)
+
     if parsed.path == "/api/notes/sources":
         return _handle_notes_sources_list(handler)
     if parsed.path == "/api/notes/search":
@@ -17707,6 +17742,38 @@ def handle_put(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
+    # Prefix only: a bare PUT /api/tools/toolsets has no handler (the collection
+    # itself is read-only), so admitting it here only produced an empty `parts`
+    # list that matched nothing and fell through.
+    if parsed.path.startswith("/api/tools/toolsets/"):
+        from api.toolset_config import (
+            ToolsetConfigError,
+            save_toolset_env,
+            select_toolset_model,
+            select_toolset_provider,
+            toggle_toolset,
+        )
+
+        rest = parsed.path[len("/api/tools/toolsets/"):]
+        parts = [p for p in rest.split("/") if p != ""] if rest else []
+        try:
+            if len(parts) == 1:
+                if "enabled" not in body:
+                    return bad(handler, "enabled is required")
+                return j(handler, toggle_toolset(parts[0], bool(body.get("enabled"))))
+            if len(parts) == 2 and parts[1] == "provider":
+                return j(handler, select_toolset_provider(parts[0], str(body.get("provider") or "")))
+            if len(parts) == 2 and parts[1] == "model":
+                return j(
+                    handler,
+                    select_toolset_model(parts[0], str(body.get("model") or ""), body.get("provider")),
+                )
+            if len(parts) == 2 and parts[1] == "env":
+                env = body.get("env")
+                return j(handler, save_toolset_env(parts[0], env if isinstance(env, dict) else {}))
+        except ToolsetConfigError as exc:
+            return j(handler, {"error": str(exc), **exc.extra}, status=exc.status)
+        return bad(handler, "Unknown toolset route", 404)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
