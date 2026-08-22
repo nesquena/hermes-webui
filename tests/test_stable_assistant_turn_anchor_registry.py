@@ -805,7 +805,7 @@ console.log(JSON.stringify({{result,applied,renderCount,renderOutcome}}));
     }
 
 
-def test_side_effect_owner_survives_scene_settlement_and_reload():
+def test_side_effect_owner_survives_reload_without_promoting_browser_artifact():
     from api import routes
 
     data = _registry_snapshot()
@@ -828,11 +828,7 @@ def test_side_effect_owner_survives_scene_settlement_and_reload():
     hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
     settled_scene = hydrated[1]["_anchor_activity_scene"]
 
-    assert settled_scene["artifacts"] == scene["artifacts"]
-    assert settled_scene["artifacts"][0]["payload"] == {
-        "kind": "workspace_file",
-        "path": "answer.txt",
-    }
+    assert settled_scene["artifacts"] == []
     assert settled_scene["side_effects"] == scene["side_effects"]
     assert settled_scene["side_effects"][0]["source_event_type"] == "state_saved"
     assert settled_scene["side_effects"][0]["payload"] == {

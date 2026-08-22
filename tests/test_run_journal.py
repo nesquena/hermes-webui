@@ -48,6 +48,23 @@ def test_run_journal_reads_bounded_replay_window(tmp_path):
     assert [event["payload"]["text"] for event in journal["events"]] == ["two", "three"]
 
 
+def test_run_journal_reader_bounds_rows_and_bytes(tmp_path):
+    writer = RunJournalWriter("session_1", "run_bounded", session_dir=tmp_path)
+    for index in range(100):
+        writer.append_sse_event("token", {"text": "x" * 1000, "index": index})
+
+    journal = read_run_events(
+        "session_1",
+        "run_bounded",
+        session_dir=tmp_path,
+        max_rows=3,
+        max_bytes=16 * 1024,
+    )
+
+    assert len(journal["events"]) <= 3
+    assert all(event["event"] == "token" for event in journal["events"])
+
+
 def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
     path = tmp_path / "_run_journal" / "session_1" / "run_1.jsonl"
     path.parent.mkdir(parents=True)

@@ -61,6 +61,18 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.artifact_references import (
+    anchor_artifact_event_from_payload,
+    anchor_artifact_owner_mismatch,
+    anchor_activity_scene_owner_mismatch,
+    bound_anchor_activity_scene_artifacts,
+    bound_anchor_artifact_events,
+    canonical_workspace_identity,
+    merge_anchor_activity_scene,
+    raw_anchor_artifact_input_within_limits,
+    retain_server_authoritative_artifact_events,
+    validate_anchor_activity_scene_artifact_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3206,6 +3218,8 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
 
 
 _RUN_JOURNAL_TOOL_ID_KEYS = ("tid", "id", "tool_call_id", "tool_use_id", "call_id")
+_ANCHOR_JOURNAL_SNAPSHOT_MAX_BYTES = 2 * 1024 * 1024
+_ANCHOR_JOURNAL_SNAPSHOT_MAX_ROWS = 4096
 
 
 def _run_journal_snapshot_tool_id(payload: dict | None) -> str:
@@ -3302,7 +3316,13 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
-def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
+def _run_journal_live_snapshot(
+    stream_id: str | None,
+    *,
+    handler=None,
+    session_id: str | None = None,
+    workspace_id: str | None = None,
+) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
         return None
@@ -3312,14 +3332,36 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         emit_error=False,
     ):
         return None
-    summary = find_run_summary(stream_id)
-    if not summary:
-        return None
-    session_id = str(summary.get("session_id") or "")
-    if not session_id:
-        return None
-    journal = read_run_events(session_id, stream_id)
+    known_session_id = str(session_id or "").strip()
+    if known_session_id:
+        # The caller already resolved the owning session.  Direct lookup keeps
+        # evidence reads scoped to one journal file and applies independent
+        # byte/row caps before any snapshot normalization work.
+        journal = read_run_events(
+            known_session_id,
+            stream_id,
+            max_bytes=_ANCHOR_JOURNAL_SNAPSHOT_MAX_BYTES,
+            max_rows=_ANCHOR_JOURNAL_SNAPSHOT_MAX_ROWS,
+        )
+        summary = {
+            "session_id": known_session_id,
+            "run_id": stream_id,
+            "last_seq": max(
+                (int(event.get("seq") or 0) for event in journal.get("events") or [] if isinstance(event, dict)),
+                default=0,
+            ),
+        }
+    else:
+        summary = find_run_summary(stream_id)
+        if not summary:
+            return None
+        known_session_id = str(summary.get("session_id") or "")
+        if not known_session_id:
+            return None
+        journal = read_run_events(known_session_id, stream_id)
+    session_id = known_session_id
     events = [event for event in (journal.get("events") or []) if isinstance(event, dict)]
+    journal_truncated = bool(journal.get("truncated"))
     if not events:
         return None
     event_run_ids: set[str] = set()
@@ -3343,6 +3385,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    artifact_references: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3411,6 +3454,52 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             call["activityBurstId"] = current_activity_burst_id
             call["activitySegmentSeq"] = current_activity_burst_id
         tool_calls.append(call)
+
+    def append_artifact_reference(event: dict, payload: dict) -> None:
+        nonlocal artifact_references
+        if journal_truncated:
+            # A partial journal cannot prove the complete server artifact set;
+            # keep the live prose cursor but fail closed for artifact authority.
+            return
+        if not isinstance(payload, dict):
+            return
+        try:
+            event_seq = int(event.get("seq") or 0)
+        except (TypeError, ValueError):
+            event_seq = 0
+        event_id = (
+            _run_journal_snapshot_event_id_for_run(event, run_id, event_seq)
+            or str(event.get("event_id") or "").strip()
+            or None
+        )
+        # Journal payloads are evidence, not selectors.  Build from the
+        # payload's own workspace claim and only accept it when it matches the
+        # server-resolved workspace.  Passing the current digest into the
+        # factory would silently re-authorize a legacy/mismatched event.
+        artifact = anchor_artifact_event_from_payload(
+            payload,
+            session_id=session_id,
+            run_id=run_id,
+            stream_id=stream_id,
+            event_id=event_id,
+            seq=event_seq,
+            created_at=event.get("created_at"),
+            local_id=(
+                (f"artifact:{event_id}" if event_id else "")
+                or f"artifact:{stream_id}:{len(artifact_references) + 1}"
+            ),
+        )
+        if not artifact:
+            return
+        if workspace_id:
+            mismatch = anchor_artifact_owner_mismatch(
+                payload,
+                workspace_id=workspace_id,
+                require_owner_authority=True,
+            )
+            if mismatch or artifact.get("workspace_id") != workspace_id:
+                return
+        artifact_references = bound_anchor_artifact_events([*artifact_references, artifact])
 
     def reasoning_echo_tail_matches(text: str) -> bool:
         candidate = _compact_for_echo_compare(text)
@@ -3485,6 +3574,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload)
             fresh_segment = True
+            continue
+        if event_name == "artifact_reference":
+            append_artifact_reference(event, payload)
+            fresh_segment = True
+            continue
 
     if assistant_text or reasoning_text:
         message = {
@@ -3830,6 +3924,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "last_seq": last_seq,
         "last_event_id": last_event_id,
         "event_count": len(events),
+        "journal_truncated": journal_truncated,
         "fresh_segment": fresh_segment,
         "messages": messages,
         "tool_calls": tool_calls,
@@ -3845,6 +3940,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "session_id": session_id,
                 "stream_id": stream_id,
                 "run_id": run_id,
+                **({"workspace_id": workspace_id} if workspace_id else {}),
                 "source_message_refs": [],
             },
             "lifecycle": {
@@ -3855,6 +3951,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "artifacts": artifact_references,
+            "side_effects": [],
         },
     }
 
@@ -4005,7 +4103,10 @@ def _sanitize_anchor_activity_scene(scene):
         raise ValueError("scene.activity_rows must be a list")
     if len(rows) > _ANCHOR_ACTIVITY_SCENE_MAX_ROWS:
         raise ValueError("scene.activity_rows is too large")
-    scene_copy = copy.deepcopy(scene)
+    raw_artifacts = scene.get("artifacts")
+    if isinstance(raw_artifacts, list) and not raw_anchor_artifact_input_within_limits(raw_artifacts):
+        raise ValueError("scene.artifacts input is too large")
+    scene_copy = bound_anchor_activity_scene_artifacts(copy.deepcopy(scene))
     encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
@@ -5084,7 +5185,15 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     return repaired
 
 
-def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool_calls=None):
+def _hydrate_anchor_activity_scenes(
+    messages,
+    records,
+    *,
+    message_offset=0,
+    tool_calls=None,
+    session_id=None,
+    workspace=None,
+):
     if not isinstance(messages, list) or not isinstance(records, dict) or not records:
         return messages
     by_ref = {}
@@ -5133,8 +5242,44 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
         scene = record.get("scene")
         if not isinstance(scene, dict):
             continue
+        scene = copy.deepcopy(scene)
+        raw_artifacts = scene.get("artifacts") if isinstance(scene.get("artifacts"), list) else []
+        if raw_artifacts:
+            if str(record.get("artifact_authority") or "") != "server":
+                scene["artifacts"] = []
+            else:
+                scene_identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
+                artifact_session_id = str(session_id or scene_identity.get("session_id") or "").strip()
+                artifact_run_id = str(record.get("run_id") or scene_identity.get("run_id") or "").strip()
+                artifact_stream_id = str(record.get("stream_id") or scene_identity.get("stream_id") or "").strip()
+                current_workspace_id = canonical_workspace_identity(workspace)
+                record_workspace_id = str(record.get("workspace_id") or "").strip()
+                scene_workspace_id = str(scene_identity.get("workspace_id") or "").strip()
+                try:
+                    if (
+                        not current_workspace_id
+                        or not record_workspace_id
+                        or not scene_workspace_id
+                        or record_workspace_id != current_workspace_id
+                        or scene_workspace_id != current_workspace_id
+                    ):
+                        raise ValueError("artifact workspace authority is stale or missing")
+                    scene["artifacts"] = retain_server_authoritative_artifact_events(
+                        raw_artifacts,
+                        raw_artifacts,
+                        session_id=artifact_session_id,
+                        run_id=artifact_run_id,
+                        stream_id=artifact_stream_id,
+                        workspace_id=current_workspace_id,
+                        allow_missing_workspace=True,
+                    )
+                    validate_anchor_activity_scene_artifact_paths(scene, workspace)
+                except ValueError:
+                    scene["artifacts"] = []
         next_message = dict(message)
         stream_id = record.get("stream_id")
+        scene_identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
+        run_id = record.get("run_id") or scene_identity.get("run_id")
         next_message["_anchor_activity_scene"] = _complete_hydrated_anchor_scene(
             messages,
             scene,
@@ -5145,6 +5290,8 @@ def _hydrate_anchor_activity_scenes(messages, records, *, message_offset=0, tool
         )
         if stream_id:
             next_message["_anchor_stream_id"] = str(stream_id)
+        if run_id:
+            next_message["_anchor_run_id"] = str(run_id)
         out[local_idx] = next_message
     return out
 
@@ -5159,8 +5306,9 @@ def _handle_session_anchor_scene(handler, body):
         return bad(handler, "session_id is required", 400)
     message_index = _anchor_scene_message_index_from_request(body)
     message_ref = str(body.get("message_ref") or "")
+    raw_scene = body.get("scene")
     try:
-        scene = _sanitize_anchor_activity_scene(body.get("scene"))
+        scene = _sanitize_anchor_activity_scene(raw_scene)
     except ValueError as exc:
         return bad(handler, str(exc), 400)
     try:
@@ -5176,7 +5324,14 @@ def _handle_session_anchor_scene(handler, body):
     # same shape the read path uses — and leave anchor_activity_scenes untouched.
     if not _session_visible_to_active_profile(getattr(s, "profile", None) or None, handler):
         return bad(handler, "Session not found", 404)
-    with _get_session_agent_lock(sid):
+    scene_identity = scene.get("identity") if isinstance(scene.get("identity"), dict) else {}
+
+    raw_input_artifacts = raw_scene.get("artifacts") if isinstance(raw_scene, dict) and isinstance(raw_scene.get("artifacts"), list) else []
+    raw_artifacts = scene.get("artifacts") if isinstance(scene.get("artifacts"), list) else []
+    incoming_has_artifacts = bool(raw_artifacts)
+    request_stream_id = str(body.get("stream_id") or "").strip()
+
+    def resolve_state():
         idx, message = _find_anchor_scene_message(
             getattr(s, "messages", None) or [],
             message_index=message_index,
@@ -5184,21 +5339,227 @@ def _handle_session_anchor_scene(handler, body):
             scene=scene,
         )
         if message is None or idx is None:
-            return bad(handler, "Assistant message not found", 404)
+            return {"error": ("Assistant message not found", 404)}
+        ref = _assistant_anchor_scene_message_ref(message)
+        records = dict(_anchor_scene_records(s))
+        key = ref or f"index:{idx}"
+        existing_record = records.get(key) if isinstance(records.get(key), dict) else {}
+        existing_scene = existing_record.get("scene") if isinstance(existing_record.get("scene"), dict) else {}
+        existing_identity = existing_scene.get("identity") if isinstance(existing_scene.get("identity"), dict) else {}
+        existing_authoritative = str(existing_record.get("owner_authority") or "") == "server"
+        existing_artifact_authoritative = str(existing_record.get("artifact_authority") or "") == "server"
+        message_stream_id = str(message.get("_anchor_stream_id") or "").strip() if isinstance(message, dict) else ""
+        message_run_id = str(message.get("_anchor_run_id") or "").strip() if isinstance(message, dict) else ""
+        existing_stream_id = (
+            str(existing_identity.get("stream_id") or existing_record.get("stream_id") or "").strip()
+            if existing_authoritative
+            else ""
+        )
+        existing_run_id = (
+            str(existing_identity.get("run_id") or existing_record.get("run_id") or "").strip()
+            if existing_authoritative
+            else ""
+        )
+        trusted_stream_id = message_stream_id or existing_stream_id
+        trusted_run_id = message_run_id or existing_run_id or (trusted_stream_id if trusted_stream_id else "")
+        if incoming_has_artifacts and (not trusted_run_id or not trusted_stream_id):
+            return {"error": ("scene artifacts require server-owned stream identity", 400)}
+        stream_id = trusted_stream_id or request_stream_id
+        run_id = trusted_run_id or (stream_id if stream_id else "")
+        if trusted_stream_id and request_stream_id and trusted_stream_id != request_stream_id:
+            return {"error": ("scene.stream_id does not match assistant message", 400)}
+        return {
+            "idx": idx,
+            "message": message,
+            "ref": ref,
+            "records": records,
+            "key": key,
+            "existing_record": existing_record,
+            "existing_scene": existing_scene,
+            "existing_authoritative": existing_authoritative,
+            "existing_artifact_authoritative": existing_artifact_authoritative,
+            "message_stream_id": message_stream_id,
+            "message_run_id": message_run_id,
+            "trusted_stream_id": trusted_stream_id,
+            "trusted_run_id": trusted_run_id,
+            "stream_id": stream_id,
+            "run_id": run_id,
+        }
+
+    # Capture the first owner tuple while holding the same per-session lock as
+    # the eventual commit.  This prevents a concurrent workspace/message/record
+    # mutation from tearing the evidence selector before the lock-free journal
+    # read begins.
+    with _get_session_agent_lock(sid):
+        workspace_id = canonical_workspace_identity(getattr(s, "workspace", None))
+        if not workspace_id:
+            return bad(handler, "Session workspace identity is unavailable", 400)
+        claimed_workspace_id = str(scene_identity.get("workspace_id") or "").strip()
+        if claimed_workspace_id and claimed_workspace_id != workspace_id:
+            return bad(handler, "scene.identity.workspace_id does not match session workspace", 400)
+        try:
+            validate_anchor_activity_scene_artifact_paths(scene, getattr(s, "workspace", None))
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        state = resolve_state()
+    if state.get("error"):
+        message_text, status = state["error"]
+        return bad(handler, message_text, status)
+
+    # Journal evidence is immutable input for the eventual commit.  Read it
+    # before taking the per-session agent lock; the lock is reserved for the
+    # short message/record revalidation and save below.
+    snapshot = None
+    if incoming_has_artifacts and state["trusted_run_id"] and state["trusted_stream_id"]:
+        snapshot = _run_journal_live_snapshot(
+            state["trusted_stream_id"],
+            handler=handler,
+            session_id=sid,
+            workspace_id=workspace_id,
+        )
+
+    with _get_session_agent_lock(sid):
+        current_workspace_id = canonical_workspace_identity(getattr(s, "workspace", None))
+        if current_workspace_id != workspace_id:
+            return bad(handler, "Session workspace changed during anchor persistence", 409)
+        current_state = resolve_state()
+        if current_state.get("error"):
+            message_text, status = current_state["error"]
+            return bad(handler, message_text, status)
+        for field in ("idx", "ref", "trusted_run_id", "trusted_stream_id"):
+            if current_state.get(field) != state.get(field):
+                return bad(handler, "Anchor target changed during evidence lookup", 409)
+        idx = current_state["idx"]
+        message = current_state["message"]
+        ref = current_state["ref"]
+        records = current_state["records"]
+        existing_record = current_state["existing_record"]
+        existing_scene = current_state["existing_scene"]
+        existing_artifact_authoritative = current_state["existing_artifact_authoritative"]
+        trusted_stream_id = current_state["trusted_stream_id"]
+        trusted_run_id = current_state["trusted_run_id"]
+        stream_id = current_state["stream_id"]
+        run_id = current_state["run_id"]
         if scene.get("turn_duration") is None:
             duration = _anchor_scene_message_turn_duration(message)
             if duration is not None:
                 scene["turn_duration"] = duration
-        ref = _assistant_anchor_scene_message_ref(message)
-        records = dict(_anchor_scene_records(s))
-        records[ref or f"index:{idx}"] = {
+        authoritative_artifacts = []
+        if existing_artifact_authoritative:
+            existing_record_workspace_id = str(existing_record.get("workspace_id") or "").strip()
+            existing_identity = existing_scene.get("identity") if isinstance(existing_scene.get("identity"), dict) else {}
+            existing_scene_workspace_id = str(existing_identity.get("workspace_id") or "").strip()
+            if (
+                existing_record_workspace_id == workspace_id
+                and existing_scene_workspace_id == workspace_id
+            ):
+                authoritative_artifacts.extend(existing_scene.get("artifacts") or [])
+        snapshot_scene = (
+            snapshot.get("anchor_activity_scene")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("anchor_activity_scene"), dict)
+            else {}
+        )
+        snapshot_identity = (
+            snapshot_scene.get("identity")
+            if isinstance(snapshot_scene.get("identity"), dict)
+            else {}
+        )
+        if (
+            str((snapshot or {}).get("session_id") or "").strip() == sid
+            and str(snapshot_identity.get("run_id") or "").strip() == trusted_run_id
+            and str(snapshot_identity.get("stream_id") or "").strip() == trusted_stream_id
+            and str(snapshot_identity.get("workspace_id") or "").strip() == workspace_id
+        ):
+            authoritative_artifacts.extend(snapshot_scene.get("artifacts") or [])
+        incoming_scene = copy.deepcopy(scene)
+        incoming_identity = incoming_scene.get("identity") if isinstance(incoming_scene.get("identity"), dict) else {}
+        incoming_identity = dict(incoming_identity)
+        incoming_identity.update({"session_id": sid, "workspace_id": workspace_id})
+        if run_id:
+            incoming_identity["run_id"] = run_id
+        if stream_id:
+            incoming_identity["stream_id"] = stream_id
+        incoming_scene["identity"] = incoming_identity
+        try:
+            identity_mismatch = anchor_activity_scene_owner_mismatch(
+                {"identity": scene_identity},
+                session_id=sid,
+                run_id=trusted_run_id,
+                stream_id=trusted_stream_id,
+                workspace_id=workspace_id,
+                require_artifact_owner_authority=False,
+            )
+            if identity_mismatch:
+                raise ValueError(f"anchor scene owner mismatch: {identity_mismatch}")
+            existing_scene = copy.deepcopy(existing_scene)
+            existing_scene["artifacts"] = retain_server_authoritative_artifact_events(
+                authoritative_artifacts,
+                existing_scene.get("artifacts") or [],
+                session_id=sid,
+                run_id=trusted_run_id,
+                stream_id=trusted_stream_id,
+                workspace_id=workspace_id,
+                allow_missing_workspace=True,
+            )
+            incoming_scene["artifacts"] = retain_server_authoritative_artifact_events(
+                authoritative_artifacts,
+                raw_artifacts or [],
+                session_id=sid,
+                run_id=trusted_run_id,
+                stream_id=trusted_stream_id,
+                workspace_id=workspace_id,
+                allow_missing_workspace=True,
+            )
+            # Browser rows still need explicit server-owned identity even when
+            # a compatibility snapshot lacks it.  The compatibility allowance
+            # above applies only to canonical server evidence; projected rows
+            # are checked before retention and cannot self-authenticate.
+            for raw_artifact in raw_input_artifacts:
+                mismatch = anchor_artifact_owner_mismatch(
+                    raw_artifact,
+                    session_id=sid,
+                    run_id=trusted_run_id,
+                    stream_id=trusted_stream_id,
+                    workspace_id=workspace_id,
+                    require_owner_authority=False,
+                )
+                if mismatch:
+                    raise ValueError(f"anchor scene owner mismatch: artifact.{mismatch}")
+            scene = merge_anchor_activity_scene(
+                existing_scene,
+                incoming_scene,
+                session_id=sid,
+                run_id=run_id,
+                stream_id=stream_id,
+                owner_session_id=sid,
+                owner_run_id=trusted_run_id,
+                owner_stream_id=trusted_stream_id,
+                owner_workspace_id=workspace_id,
+                workspace_id=workspace_id,
+                require_owner_authority=True,
+                final_message_ref=ref,
+                turn_duration=_anchor_scene_message_turn_duration(message),
+                reject_owner_mismatch=True,
+                allow_missing_workspace=True,
+            )
+            scene = _sanitize_anchor_activity_scene(scene)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        record = {
             "version": "anchor_activity_scene_record_v1",
             "message_index": idx,
             "message_ref": ref,
-            "stream_id": str(body.get("stream_id") or ""),
+            "run_id": run_id,
+            "stream_id": stream_id,
+            "workspace_id": workspace_id,
             "scene": scene,
             "updated_at": time.time(),
         }
+        if trusted_run_id and trusted_stream_id:
+            record["owner_authority"] = "server"
+        if scene.get("artifacts") and authoritative_artifacts:
+            record["artifact_authority"] = "server"
+        records[ref or f"index:{idx}"] = record
         if len(records) > 256:
             ordered = sorted(
                 records.items(),
@@ -13698,6 +14059,8 @@ def handle_get(handler, parsed) -> bool:
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
                     tool_calls=getattr(s, "tool_calls", None),
+                    session_id=getattr(s, "session_id", None),
+                    workspace=getattr(s, "workspace", None),
                 )
             else:
                 _truncated_msgs = []
@@ -13822,7 +14185,12 @@ def handle_get(handler, parsed) -> bool:
                     )
                     if journal_active and (not load_messages or msg_limit is None):
                         try:
-                            snapshot = _run_journal_live_snapshot(original_stream_id, handler=handler)
+                            snapshot = _run_journal_live_snapshot(
+                                original_stream_id,
+                                handler=handler,
+                                session_id=sid,
+                                workspace_id=canonical_workspace_identity(getattr(s, "workspace", None)),
+                            )
                         except Exception:
                             logger.debug(
                                 "Failed to build runtime journal snapshot for %s",
