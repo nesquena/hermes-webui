@@ -5704,6 +5704,27 @@ def _check_csrf(handler) -> bool:
 _EXTENSION_SIDECAR_PROXY_RE = _re.compile(
     r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$"
 )
+_EXTENSION_SIDECAR_PROXY_RE_IC = _re.compile(
+    r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$",
+    _re.IGNORECASE,
+)
+
+
+def _original_api_path(handler, parsed):
+    """Return the request path exactly as received by the server.
+
+    server.py case-folds ``/api/*`` paths for case-insensitive route matching
+    and retains the original-case path on the handler (``_raw_api_path``).
+    Dynamic path captures — share tokens, MCP server names, sidecar proxy
+    paths, opaque IDs — are case-sensitive and must be extracted from the
+    original path, never from the folded matching path. Falls back to
+    ``parsed.path`` when the request did not pass through server.py's
+    normalization (e.g. direct unit-test calls).
+    """
+    raw = getattr(handler, "_raw_api_path", None)
+    return raw if isinstance(raw, str) else parsed.path
+
+
 _HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -5870,6 +5891,12 @@ def _handle_extension_sidecar_proxy(
     matched = _match_extension_sidecar_proxy_path(parsed.path)
     if matched is None:
         return False
+    # The sidecar extension id and proxy path are case-sensitive dynamic
+    # values: re-extract them from the original-case request path (see
+    # _original_api_path) instead of the case-folded matching path.
+    raw_matched = _EXTENSION_SIDECAR_PROXY_RE_IC.match(_original_api_path(handler, parsed) or "")
+    if raw_matched:
+        matched = (raw_matched.group("extension_id"), raw_matched.group("proxy_path") or "")
     # Require same-origin browser provenance on EVERY proxied method, not just
     # GET. Browser extensions (the only legitimate caller) always send Origin/
     # Referer/Sec-Fetch-Site, so this costs nothing on the real path while
@@ -13063,7 +13090,10 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
-        token = parsed.path[len("/api/share/"):].strip()
+        # Share tokens are case-sensitive (secrets.token_urlsafe), so the
+        # capture must come from the original-case path, not the folded
+        # matching path (server.py normalizes /api/ paths for matching).
+        token = _original_api_path(handler, parsed)[len("/api/share/"):].strip()
         share = load_share(token)
         if not share:
             return bad(handler, "Shared conversation not found", 404)
@@ -17641,7 +17671,9 @@ def handle_patch(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_toggle(handler, name, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
@@ -17669,7 +17701,9 @@ def handle_delete(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
@@ -17705,7 +17739,9 @@ def handle_put(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
     return False
 
