@@ -84,6 +84,8 @@ from api.process_event_utils import (
     schedule_async_delegation_claim_retry,
     stamp_message_source,
 )
+from api.delegated_child_runtime import record_subagent_event
+from api.session_events import publish_session_list_changed
 
 
 def get_stream_runtime_snapshot() -> dict[str, object]:
@@ -9725,6 +9727,25 @@ def _run_agent_streaming(
                 elif len(cb_args) == 1:
                     name = cb_args[0]
                     event_type = 'tool.started'
+
+                if isinstance(event_type, str) and event_type.startswith('subagent.'):
+                    child_payload = {
+                        key: cb_kwargs.get(key)
+                        for key in ('child_session_id', 'status')
+                        if cb_kwargs.get(key) is not None
+                    }
+                    if record_subagent_event(
+                        getattr(s, 'profile', None),
+                        event_type,
+                        child_payload,
+                        owner_session_id=getattr(s, 'session_id', session_id),
+                    ):
+                        publish_session_list_changed(
+                            'delegated_child_runtime_changed',
+                            profile=getattr(s, 'profile', None),
+                            session_id=child_payload.get('child_session_id'),
+                        )
+                    return
 
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
