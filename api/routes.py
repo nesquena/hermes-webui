@@ -2939,6 +2939,7 @@ from api.helpers import (
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
+from api.log_stream import access_log_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
@@ -13240,6 +13241,13 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/system/health":
         j(handler, build_system_health_payload())
         return True
+
+    if parsed.path == "/api/health/logging":
+        # Access-log liveness (#0574). A process whose log writer has wedged
+        # keeps serving 200s, so neither /health nor the log scanner can see
+        # it — this endpoint 503s so a plain URL health-watch catches it.
+        payload = access_log_status()
+        return j(handler, payload, status=200 if payload["healthy"] else 503)
 
     if parsed.path == "/api/models":
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
