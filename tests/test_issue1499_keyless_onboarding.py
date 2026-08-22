@@ -70,6 +70,16 @@ def _isolate_onboarding_writes(monkeypatch, tmp_path):
     cfg_path = tmp_path / "config.yaml"
     monkeypatch.setattr(ob, "_get_config_path", lambda: cfg_path)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    # ``config.get_config()`` (called from ``get_onboarding_status``) resolves its
+    # own path through ``api.config._get_config_path`` — which honours the
+    # ``HERMES_CONFIG_PATH`` env override BEFORE the active-profile home. If an
+    # earlier test in the suite leaked that env var into ``os.environ`` (set
+    # outside monkeypatch's scope), ``get_config()`` reloads a foreign config
+    # over this test's in-memory setup and the keyless status flips. Clear the
+    # override and pin config's path resolver to this test's tmp home so the
+    # full-status path is hermetic regardless of suite ordering.
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
     monkeypatch.delenv("HERMES_WEBUI_SKIP_ONBOARDING", raising=False)
     for var in (
         "LM_API_KEY", "LMSTUDIO_API_KEY", "OLLAMA_API_KEY", "OPENAI_API_KEY",
@@ -350,12 +360,20 @@ class TestKeylessChatReady:
         # _swap_in_test_config-style — replicate just enough of that pattern.
         old_cfg = dict(config.cfg)
         old_mtime = config._cfg_mtime
+        old_cfg_path = config._cfg_path
+        old_fingerprint = config._cfg_fingerprint
         config.cfg.clear()
         try:
             import yaml
             config.cfg.update(yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {})
         except Exception:
             pass
+        # Stamp the path-tracking globals to THIS test's config so a spurious
+        # ``path_changed`` staleness check inside get_config()/get_available_models()
+        # cannot reload a foreign config over the in-memory setup above (the
+        # cross-file _cfg_path leak class). config._get_config_path is already
+        # pinned to cfg_path by _isolate_onboarding_writes.
+        config._cfg_path = cfg_path
         try:
             config._cfg_mtime = cfg_path.stat().st_mtime
         except Exception:
@@ -379,3 +397,5 @@ class TestKeylessChatReady:
             config.cfg.clear()
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
+            config._cfg_path = old_cfg_path
+            config._cfg_fingerprint = old_fingerprint
