@@ -179,30 +179,33 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
 
     probe_started = threading.Event()
     release_probe = threading.Event()
-    rebuild_finished = threading.Event()
+    real_thread = threading.Thread
+    rebuild_workers = []
+
+    def _record_thread(*args, **kwargs):
+        worker = real_thread(*args, **kwargs)
+        if kwargs.get("name") == "models-catalog-rebuild":
+            rebuild_workers.append(worker)
+        return worker
 
     def _slow_rebuild(_builder):
         probe_started.set()
-        try:
-            # Hold the probe past the foreground budget without assuming how
-            # quickly a loaded CI worker schedules or sleeps.
-            assert release_probe.wait(timeout=5.0), (
-                "test did not release slow probe"
-            )
-            return {
-                "active_provider": "anthropic",
-                "default_model": "anthropic/claude-sonnet-4",
-                "configured_model_badges": {},
-                "groups": [],
-            }
-        finally:
-            rebuild_finished.set()
+        # Hold the probe past the foreground budget without assuming how
+        # quickly a loaded CI worker schedules or sleeps.
+        assert release_probe.wait(timeout=5.0), "test did not release slow probe"
+        return {
+            "active_provider": "anthropic",
+            "default_model": "anthropic/claude-sonnet-4",
+            "configured_model_badges": {},
+            "groups": [],
+        }
 
     # Replace the rebuild seam so no real per-provider network call happens
     # but the foreground still has to wait for (a stand-in for) it.
     monkeypatch.setattr(cfg, "_invoke_models_rebuild", _slow_rebuild, raising=True)
     # Ensure no disk cache short-circuits the cold path.
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None, raising=True)
+    monkeypatch.setattr(cfg.threading, "Thread", _record_thread, raising=True)
 
     try:
         result = cfg.get_available_models()
@@ -210,10 +213,11 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
         assert probe_started.wait(timeout=5.0), (
             "the rebuild worker should have started"
         )
+        assert len(rebuild_workers) == 1
         # The foreground returned while the probe was deliberately blocked, so
         # the result can only be the bounded-path fallback. Assert that contract
         # directly instead of comparing wall-clock time on a contended runner.
-        assert not rebuild_finished.is_set()
+        assert rebuild_workers[0].is_alive()
         assert isinstance(result, dict)
         for k in (
             "active_provider",
@@ -225,9 +229,11 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
         assert isinstance(result["groups"], list)
     finally:
         release_probe.set()
-        assert rebuild_finished.wait(timeout=5.0), (
-            "slow rebuild worker did not finish"
-        )
+        for worker in rebuild_workers:
+            worker.join(timeout=5.0)
+
+    assert not rebuild_workers[0].is_alive(), "slow rebuild worker did not finish"
+    assert cfg._cache_build_in_progress is False
 
 
 def test_minimal_static_catalog_is_network_free(monkeypatch):
