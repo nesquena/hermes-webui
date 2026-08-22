@@ -6128,7 +6128,9 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         if state_db_source == 'webui':
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
-            session['session_source'] = state_db_session_source
+            # ``state.db`` has no fork provenance on older Agent schemas.
+            if str(session.get('session_source') or '').strip().lower() != 'fork':
+                session['session_source'] = state_db_session_source
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
         # Overlay the real state.db message count for WebUI-owned rows AND for
@@ -6213,6 +6215,11 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         candidates = sessions[:_cap]
     else:
         candidates = sessions
+    originals = {
+        str(session.get('session_id')): dict(session)
+        for session in sessions
+        if session.get('session_id')
+    }
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),
@@ -6234,7 +6241,62 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
                 '_state_db_source_label',
             ):
                 entry.pop(key, None)
+
+            root_id = str(entry.get('_lineage_root_id') or '')
+            root = originals.get(root_id)
+            if root_id and root is None:
+                try:
+                    root_session = Session.load_metadata_only(root_id)
+                except Exception:
+                    root_session = None
+                root = root_session.compact() if root_session else None
+
+            if root_id:
+                for key in (
+                    'relationship_type',
+                    'parent_title',
+                    'parent_source',
+                    '_parent_lineage_root_id',
+                    '_parent_lineage_tip_id',
+                    '_cross_surface_child_session',
+                ):
+                    session.pop(key, None)
+
+            original = originals.get(str(sid), {})
+            fork_root = root if root and root.get('session_source') == 'fork' else None
+            if not root_id and original.get('session_source') == 'fork':
+                fork_root = original
+
+            if fork_root:
+                parent_id = str(fork_root.get('parent_session_id') or '')
+                session['session_source'] = 'fork'
+                entry['parent_session_id'] = parent_id or None
+                entry['relationship_type'] = 'child_session'
+                if parent_id:
+                    parent_meta = metadata.get(parent_id)
+                    if parent_meta is None:
+                        parent_meta = read_session_lineage_metadata(
+                            _active_state_db_path(), {parent_id}
+                        ).get(parent_id, {})
+                    entry['_parent_lineage_root_id'] = (
+                        parent_meta.get('_lineage_root_id') or parent_id
+                    )
+                    entry['_parent_lineage_tip_id'] = (
+                        parent_meta.get('_lineage_tip_id') or parent_id
+                    )
+            elif root_id and originals.get(str(sid), {}).get('session_source') == 'fork':
+                session['session_source'] = 'webui'
             session.update(entry)
+
+
+def _enrich_sidebar_visibility_metadata(sessions: list[dict]) -> None:
+    sensitive = [
+        session for session in sessions
+        if session.get('pre_compression_snapshot')
+        or session.get('session_source') == 'fork'
+    ]
+    if sensitive:
+        _enrich_sidebar_lineage_metadata(sensitive)
 
 
 def _diag_stage(diag, name: str) -> None:
@@ -6384,6 +6446,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
             else:
                 _diag_stage(diag, "all_sessions.state_db_overrides")
                 _apply_sidebar_state_db_overrides(result)
+                _enrich_sidebar_visibility_metadata(result)
                 _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
             result = _prefer_fuller_snapshots_for_sidebar(result)
             sidebar_candidates = result
@@ -6439,6 +6502,7 @@ def all_sessions(diag=None, *, include_lineage_metadata: bool = True):
     else:
         _diag_stage(diag, "all_sessions.state_db_overrides")
         _apply_sidebar_state_db_overrides(result)
+        _enrich_sidebar_visibility_metadata(result)
         _diag_stage(diag, "all_sessions.lineage_metadata_skipped")
     result = _prefer_fuller_snapshots_for_sidebar(result)
     sidebar_candidates = result

@@ -52,6 +52,7 @@ MESSAGING_SOURCES = {
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
+CONTINUATION_BOUNDARY_TOLERANCE_SECONDS = 1.0
 
 SOURCE_LABELS = {
     'acp': 'ACP',
@@ -336,7 +337,11 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         # continuations when no boundary timestamp is available.
         return True
     try:
-        return float(child.get('started_at') or 0) >= float(ended_at)
+        return (
+            float(child.get('started_at') or 0)
+            + CONTINUATION_BOUNDARY_TOLERANCE_SECONDS
+            >= float(ended_at)
+        )
     except (TypeError, ValueError):
         return False
 

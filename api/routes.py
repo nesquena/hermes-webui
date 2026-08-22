@@ -2436,6 +2436,10 @@ def _build_session_list_cache_payload(
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
         webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+        # Resolve lineage before checking which state.db rows are represented.
+        _enrich_sidebar_lineage_metadata([
+            s for s in webui_sessions if not _is_cli_session_for_settings(s)
+        ])
         represented_webui_ids = set()
         for s in webui_sessions:
             represented_webui_ids.update(_session_lineage_ids(s))
@@ -9995,6 +9999,7 @@ def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> d
     if not _session_source_is_webui(state_meta):
         return dict(session)
 
+    was_fork = session.get("session_source") == "fork"
     reconciled = dict(session)
     reconciled["is_cli_session"] = False
     reconciled["read_only"] = False
@@ -10018,6 +10023,9 @@ def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> d
                 reconciled[key] = max(float(current or 0), float(state_meta.get(key) or 0))
             except (TypeError, ValueError):
                 reconciled[key] = state_meta[key]
+    if was_fork:
+        reconciled["session_source"] = "fork"
+        _enrich_sidebar_lineage_metadata([reconciled])
     return reconciled
 
 
