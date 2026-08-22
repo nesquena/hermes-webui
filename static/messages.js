@@ -5313,8 +5313,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _rememberRunJournalCursor(e){
     const raw=String(e&&e.lastEventId||'').trim();
     if(!raw) return;
-    const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
-    const seq=Number.parseInt(tail,10);
+    const prefix=`${String(streamId||'')}:`;
+    if(!streamId||!raw.startsWith(prefix)) return;
+    const tail=raw.slice(prefix.length);
+    if(!/^[1-9]\d*$/.test(tail)) return;
+    const seq=Number(tail);
     if(Number.isFinite(seq)&&seq>_lastRunJournalSeq){
       _lastRunJournalSeq=seq;
       _lastRunJournalEventId=raw;
@@ -5966,7 +5969,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
+      _sendStreamNotification(
+        'Approval required',
+        d.description||'Tool approval needed',
+        _captureNotificationEventIdentity(streamId,e,d),
+        {sid:activeSid},
+      );
     });
 
     source.addEventListener('clarify',e=>{
@@ -5974,7 +5982,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
+      _sendStreamNotification(
+        'Clarification needed',
+        d.question||'Tool clarification needed',
+        _captureNotificationEventIdentity(streamId,e,d),
+        {sid:activeSid},
+      );
     });
 
     source.addEventListener('state_saved',e=>{
@@ -6112,6 +6125,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelThrottledSnapshotTimer();
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
+      const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent,_doneData);
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
@@ -6403,7 +6417,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           sessionId:completedSid,
           liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
         });
-        sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
+        _sendStreamNotification(
+          'Response complete',
+          _completionPreview||'Task finished',
+          _doneNotificationIdentity,
+          {forceHidden:_wasEverBackgrounded,sid:activeSid},
+        );
       };
       if(_shouldUseLiveProseFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -9147,12 +9166,285 @@ function playAttentionSound(key){
 function _notificationOptions(body,options={}){
   const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
   const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  const identity=options&&options.eventIdentity;
+  const identityValid=!!identity&&typeof identity==='object'&&!Array.isArray(identity)&&
+    typeof identity.streamId==='string'&&identity.streamId.length>0&&
+    identity.streamId.length<=512&&typeof identity.lastEventId==='string'&&
+    identity.lastEventId.length>0&&identity.lastEventId.length<=512;
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url,...(identityValid?{eventId:identity.lastEventId}:{})}};
+}
+const _NOTIFICATION_IDENTITY_MAX_LENGTH=512;
+const _NOTIFICATION_OWNER_DB='hermes-notifications';
+const _NOTIFICATION_OWNER_STORE='event-identities';
+const _NOTIFICATION_OWNER_VERSION=1;
+const NOTIFICATION_PRESENT_DEADLINE_MS=2000;
+const NOTIFICATION_OWNER_LEASE_MS=NOTIFICATION_PRESENT_DEADLINE_MS*4;
+function _captureNotificationEventIdentity(streamId,event,payload){
+  const lastEventId=String(event&&event.lastEventId||'');
+  const deliveryEventId=String(payload&&payload.notification_event_id||'');
+  const identity=lastEventId.trim()?lastEventId:deliveryEventId;
+  if(!streamId||!identity.trim()||identity.length>_NOTIFICATION_IDENTITY_MAX_LENGTH) return null;
+  return {streamId:String(streamId),lastEventId:identity};
+}
+function _sendStreamNotification(title,body,eventIdentity,options={}){
+  return eventIdentity
+    ? sendBrowserNotification(title,body,{...options,eventIdentity})
+    : sendBrowserNotification(title,body,options);
+}
+function _hasNotificationIdentity(options){
+  return !!options&&Object.prototype.hasOwnProperty.call(options,'eventIdentity');
+}
+function _isValidNotificationIdentity(identity){
+  return !!identity&&typeof identity==='object'&&!Array.isArray(identity)&&
+    typeof identity.streamId==='string'&&identity.streamId.length>0&&
+    identity.streamId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH&&
+    typeof identity.lastEventId==='string'&&identity.lastEventId.length>0&&
+    identity.lastEventId.length<=_NOTIFICATION_IDENTITY_MAX_LENGTH;
+}
+function _registrationAfterNotificationTransition(previous){
+  if(!navigator.serviceWorker||typeof navigator.serviceWorker.getRegistration!=='function') return Promise.resolve(null);
+  const previousActive=previous&&previous.active?previous.active:previous;
+  return new Promise(resolve=>{
+    const deadline=Date.now()+NOTIFICATION_PRESENT_DEADLINE_MS;
+    const check=()=>{
+      const remaining=deadline-Date.now();
+      if(remaining<=0){resolve(null);return;}
+      let lookup;
+      try{lookup=Promise.resolve(navigator.serviceWorker.getRegistration());}catch(_error){resolve(null);return;}
+      Promise.race([lookup,new Promise(done=>setTimeout(()=>done(null),remaining))]).then(next=>{
+        if(next&&next.active&&next.active!==previousActive&&next.active.state==='activated'&&!next.installing&&!next.waiting){resolve(next);return;}
+        if(Date.now()>=deadline){resolve(null);return;}
+        setTimeout(check,Math.min(50,Math.max(1,deadline-Date.now())));
+      },()=>resolve(null));
+    };
+    check();
+  });
+}
+function _presentNotificationLocally(reg,title,opts){
+  if(reg&&typeof reg.showNotification==='function'){
+    const attemptedActive=reg.active;
+    return Promise.resolve().then(()=>reg.showNotification(title,opts)).then(()=> 'shown').catch(error=>{
+      return _registrationAfterNotificationTransition(attemptedActive).then(next=>next
+        ? _presentNotificationLocally(next,title,opts)
+        : Promise.reject(error));
+    });
+  }
+  return Promise.resolve().then(()=>new Notification(title,opts)).then(()=> 'shown');
+}
+function _presentNotification(active,title,opts,identity){
+  if(typeof window.MessageChannel!=='function') return Promise.resolve('unavailable');
+  return new Promise(resolve=>{
+    let settled=false;
+    let timer=null;
+    let channel;
+    const finish=status=>{
+      if(settled)return;
+      settled=true;
+      if(timer)clearTimeout(timer);
+      try{if(channel&&channel.port1)channel.port1.close();}catch(_){ }
+      resolve(status);
+    };
+    try{
+      channel=new window.MessageChannel();
+      if(!channel.port1||!channel.port2||typeof active.postMessage!=='function'){
+        finish('unavailable');
+        return;
+      }
+      channel.port1.onmessage=event=>{
+        const status=event&&event.data&&event.data.status;
+        if(status==='shown'||status==='duplicate'){
+          finish(status);
+          return;
+        }
+        finish(status||'unavailable');
+      };
+      if(typeof channel.port1.start==='function')channel.port1.start();
+      timer=setTimeout(()=>finish('ambiguous'),NOTIFICATION_PRESENT_DEADLINE_MS);
+      active.postMessage({
+        type:'hermes.notification.present',
+        protocolVersion:1,
+        eventId:identity.lastEventId,
+        title,
+        options:opts,
+      },[channel.port2]);
+    }catch(_){
+      finish('ambiguous');
+    }
+  });
+}
+function _notificationOwnerKey(identity){return [identity.streamId,identity.lastEventId];}
+function _notificationOwnerStorageUnavailable(){
+  const error=new Error('notification owner storage unavailable');
+  error._notificationOwnerStorageUnavailable=true;
+  return error;
+}
+function _openNotificationOwnerDb(){
+  if(!window.indexedDB||typeof window.indexedDB.open!=='function') return Promise.reject(_notificationOwnerStorageUnavailable());
+  return new Promise((resolve,reject)=>{
+    let request;
+    try{request=window.indexedDB.open(_NOTIFICATION_OWNER_DB,_NOTIFICATION_OWNER_VERSION);}catch(_error){reject(_notificationOwnerStorageUnavailable());return;}
+    request.onupgradeneeded=()=>{
+      try{if(!request.result.objectStoreNames.contains(_NOTIFICATION_OWNER_STORE)) request.result.createObjectStore(_NOTIFICATION_OWNER_STORE,{keyPath:['streamId','lastEventId']});}catch(error){reject(error);}
+    };
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error||new Error('notification owner storage failed'));
+    request.onblocked=()=>reject(new Error('notification owner storage blocked'));
+  });
+}
+function _notificationOwnerToken(){
+  return `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+function _leasePageNotification(identity){
+  const key=_notificationOwnerKey(identity);
+  const token=_notificationOwnerToken();
+  return _openNotificationOwnerDb().then(db=>new Promise(resolve=>{
+    let settled=false;
+    let lease=null;
+    const finish=(status,details={})=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve({status,token,...details});}};
+    let tx;
+    try{
+      tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
+      const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
+      const read=store.get(key);
+      read.onerror=()=>finish('ambiguous');
+      read.onsuccess=()=>{
+        const current=read.result;
+        const now=Date.now();
+        if(current&&current.state==='delivered'){finish('duplicate');return;}
+        const expiresAt=Number(current&&current.expiresAt);
+        const peerLease=current&&current.state==='pending'&&
+          (current.phase==='claimed'||current.phase==='presenting')&&
+          Number.isFinite(expiresAt)&&expiresAt>now;
+        if(peerLease){finish('defer',{expiresAt});return;}
+        lease={streamId:identity.streamId,lastEventId:identity.lastEventId,state:'pending',phase:'presenting',token,expiresAt:now+NOTIFICATION_OWNER_LEASE_MS};
+        try{store.put(lease);}
+        catch(_error){finish('ambiguous');}
+      };
+      tx.oncomplete=()=>{if(lease&&!settled)finish('lease', {lease});};
+      tx.onerror=()=>finish('ambiguous');
+      tx.onabort=()=>finish('ambiguous');
+    }catch(_error){finish('ambiguous');}
+  })).catch(error=>({status:error&&error._notificationOwnerStorageUnavailable?'unavailable':'ambiguous',token}));
+}
+function _settlePageNotification(identity,token,state){
+  const key=_notificationOwnerKey(identity);
+  return _openNotificationOwnerDb().then(db=>new Promise(resolve=>{
+    let settled=false;
+    const finish=ok=>{if(!settled){settled=true;try{db.close();}catch(_error){ }resolve(!!ok);}};
+    try{
+      const tx=db.transaction(_NOTIFICATION_OWNER_STORE,'readwrite');
+      const store=tx.objectStore(_NOTIFICATION_OWNER_STORE);
+      const read=store.get(key);
+      read.onerror=()=>finish(false);
+      read.onsuccess=()=>{
+        const current=read.result;
+        if(!current||current.state!=='pending'||current.token!==token){finish(false);return;}
+        try{
+          if(state==='delivered') store.put({...current,state,phase:'delivered',expiresAt:0});
+          else if(state==='released') store.delete(key);
+          else finish(false);
+        }catch(_error){finish(false);}
+      };
+      tx.oncomplete=()=>finish(true);
+      tx.onerror=()=>finish(false);
+      tx.onabort=()=>finish(false);
+    }catch(_error){finish(false);}
+  })).catch(()=>false);
+}
+function _releasePageNotification(identity,token){
+  return _settlePageNotification(identity,token,'released').catch(()=>false);
+}
+function _displayedNotificationMatches(reg,opts,identity){
+  if(!reg||typeof reg.getNotifications!=='function') return Promise.resolve(false);
+  return Promise.resolve(reg.getNotifications({tag:opts.tag})).then(records=>Array.isArray(records)&&records.some(record=>record&&record.data&&record.data.eventId===identity.lastEventId));
+}
+function _workerSupportsNotificationPresentation(active){
+  if(!active||typeof active.scriptURL!=='string'||!active.scriptURL) return Promise.resolve(false);
+  return Promise.resolve(/[?&]notification_protocol=1(?:&|#|$)/.test(active.scriptURL));
+}
+function _reconcileWorkerTimeout(active,reg,opts,identity,title,body){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
+    if(displayed)return 'duplicate';
+    return _workerSupportsNotificationPresentation(active).then(capable=>
+      capable===false?_deliverPageNotification(title,body,opts,identity,reg):'ambiguous'
+    );
+  });
+}
+function _presentPageNotificationLease(title,body,opts,identity,reg,lease){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
+    if(displayed){
+      return _releasePageNotification(identity,lease.token).then(()=> 'duplicate');
+    }
+    return _presentNotificationLocally(reg,title,opts).then(()=>
+      _settlePageNotification(identity,lease.token,'delivered').then(()=> 'shown')
+    ).catch(()=>_releasePageNotification(identity,lease.token).then(()=> 'ambiguous'));
+  }).catch(()=>_releasePageNotification(identity,lease.token).then(()=> 'ambiguous'));
+}
+function _presentWithoutPageLease(title,body,opts,identity,reg){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>
+    displayed?'duplicate':_presentNotificationLocally(reg,title,opts).then(()=> 'shown')
+  ).catch(()=> 'ambiguous');
+}
+function _displayedNotificationMatchesBounded(reg,opts,identity,timeoutMs){
+  if(!reg||typeof reg.getNotifications!=='function') return Promise.resolve(false);
+  return Promise.race([
+    _displayedNotificationMatches(reg,opts,identity).catch(()=>false),
+    new Promise(resolve=>setTimeout(()=>resolve(false),Math.max(0,timeoutMs)))
+  ]);
+}
+function _retryPageNotificationAfterLease(title,body,opts,identity,reg){
+  return _displayedNotificationMatchesBounded(reg,opts,identity,NOTIFICATION_PRESENT_DEADLINE_MS).then(displayed=>{
+    if(displayed)return 'duplicate';
+    return _leasePageNotification(identity).then(lease=>{
+      if(lease.status==='duplicate')return 'duplicate';
+      if(lease.status==='unavailable')return _presentWithoutPageLease(title,body,opts,identity,reg);
+      if(lease.status!=='lease')return 'ambiguous';
+      return _presentPageNotificationLease(title,body,opts,identity,reg,lease);
+    });
+  }).catch(()=> 'ambiguous');
+}
+function _awaitPageNotificationLease(title,body,opts,identity,reg,expiresAt){
+  const deadline=Number(expiresAt);
+  const retry=()=>_retryPageNotificationAfterLease(title,body,opts,identity,reg);
+  if(!Number.isFinite(deadline))return Promise.resolve('ambiguous');
+  if(!reg||typeof reg.getNotifications!=='function'){
+    return new Promise(resolve=>setTimeout(resolve,Math.max(0,deadline-Date.now()))).then(retry);
+  }
+  const wait=()=>_displayedNotificationMatchesBounded(reg,opts,identity,Math.min(50,Math.max(0,deadline-Date.now()))).then(displayed=>{
+    if(displayed)return 'duplicate';
+    const remaining=deadline-Date.now();
+    if(remaining<=0)return retry();
+    return new Promise(resolve=>setTimeout(resolve,Math.min(50,remaining))).then(wait);
+  }).catch(()=>{
+    const remaining=deadline-Date.now();
+    if(remaining<=0)return retry();
+    return new Promise(resolve=>setTimeout(resolve,Math.min(50,remaining))).then(wait);
+  });
+  return wait();
+}
+function _deliverPageNotification(title,body,opts,identity,reg){
+  return _displayedNotificationMatches(reg,opts,identity).then(displayed=>{
+    if(displayed)return 'duplicate';
+    return _leasePageNotification(identity).then(lease=>{
+      if(lease.status==='duplicate')return 'duplicate';
+      if(lease.status==='defer')return _awaitPageNotificationLease(title,body,opts,identity,reg,lease.expiresAt);
+      if(lease.status==='unavailable')return _presentWithoutPageLease(title,body,opts,identity,reg);
+      if(lease.status!=='lease')return 'ambiguous';
+      return _presentPageNotificationLease(title,body,opts,identity,reg,lease);
+    });
+  }).catch(error=>{
+    return error&&error._notificationOwnerStorageUnavailable
+      ? _presentWithoutPageLease(title,body,opts,identity,reg)
+      : 'ambiguous';
+  });
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
-  const direct=()=>new Notification(title||botName,opts);
+  const present=reg=>_presentNotificationLocally(reg,title||botName,opts);
+  const identityBearing=_hasNotificationIdentity(options);
+  const identity=options&&options.eventIdentity;
+  const deliverPage=reg=>_deliverPageNotification(title||botName,body,opts,identity,reg);
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
@@ -9163,12 +9455,22 @@ function _showPwaNotification(title,body,options={}){
     const reg$=Promise.race([
       navigator.serviceWorker.getRegistration().catch(()=>null),
       new Promise(res=>setTimeout(()=>res(null),2000))
-    ]);
-    return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
-      ? reg.showNotification(title||botName,opts)
-      : direct());
+      ]).catch(()=>null);
+    return reg$.then(reg=>{
+      if(identityBearing&&!_isValidNotificationIdentity(identity)) return present(reg&&reg.active?reg:null);
+      if(identityBearing){
+        if(!reg||!reg.active)return deliverPage(null);
+        return _presentNotification(reg.active,title||botName,opts,identity).then(status=>
+          status==='shown'||status==='duplicate'?status:
+            status==='ambiguous'
+              ? _reconcileWorkerTimeout(reg.active,reg,opts,identity,title||botName,body)
+              : deliverPage(reg)
+        );
+      }
+      return present(reg);
+    });
   }
-  return Promise.resolve(direct());
+  return identityBearing&&_isValidNotificationIdentity(identity)?deliverPage(null):present(null);
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
@@ -9194,6 +9496,7 @@ function requestNotificationPermission(){
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
+  const identityBearing=!!options&&Object.prototype.hasOwnProperty.call(options,'eventIdentity');
   // #4416: `forceHidden` means the caller already determined the tab was hidden
   // during the relevant window (e.g. a stream that ran while backgrounded), so
   // the live `document.hidden` visibility gate — which a late, throttled SSE
@@ -9203,14 +9506,26 @@ function sendBrowserNotification(title,body,options={}){
   const forceHidden=!!(options&&options.forceHidden);
   if(!force&&!window._notificationsEnabled) return;
   if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
-  if(!('Notification' in window)) return;
+  if(!('Notification' in window)){
+    if(!identityBearing)return;
+    return Promise.resolve(_showPwaNotification(title,body,options)).catch(()=> 'ambiguous');
+  }
   if(Notification.permission==='granted'){
-    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    const delivery=_showPwaNotification(title,body,options);
+    return identityBearing
+      ? Promise.resolve(delivery).catch(()=> 'ambiguous')
+      : delivery.catch(()=>{_presentNotificationLocally(null,title||assistantDisplayName(),_notificationOptions(body,options)).catch(()=>{});});
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
   }else{
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
+    return requestNotificationPermission().then(p=>{
+      if(p!=='granted')return;
+      const delivery=_showPwaNotification(title,body,options);
+        return identityBearing
+          ? Promise.resolve(delivery).catch(()=> 'ambiguous')
+          : delivery.catch(()=>{_presentNotificationLocally(null,title||assistantDisplayName(),_notificationOptions(body,options)).catch(()=>{});});
+    });
   }
 }
 

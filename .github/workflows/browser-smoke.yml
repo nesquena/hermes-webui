@@ -120,3 +120,7 @@ jobs:
       - name: Run browser smoke
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py
+
+      - name: Run notification ownership gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_issue6673_service_worker.py

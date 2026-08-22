@@ -22,7 +22,7 @@ def test_streaming_journals_sse_events_before_queue_delivery():
 
     assert put_idx < journal_idx < queue_idx
     assert "Failed to append run journal event" in block
-    assert "queue_item = (event, data, event_id) if event_id and hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
+    assert "queue_item = (event, data, event_id) if hasattr(q, \"subscribe_with_snapshot\") else (event, data)" in block
 
 
 

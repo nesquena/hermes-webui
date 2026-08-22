@@ -9044,8 +9044,10 @@ def _run_agent_streaming(
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
 
     _success_writeback_committed = False
+    _delivery_event_seq = 0
 
     def put(event, data):
+        nonlocal _delivery_event_seq
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
@@ -9063,13 +9065,17 @@ def _run_agent_streaming(
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+        if not event_id and event in ("approval", "clarify", "done") and isinstance(data, dict):
+            _delivery_event_seq += 1
+            data = dict(data)
+            data["notification_event_id"] = f"{stream_id}:delivery:{_delivery_event_seq}"
         if event_id and hasattr(q, "note_last_event_id"):
             try:
                 q.note_last_event_id(event_id)
             except Exception:
                 logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+            queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
         except Exception:
             logger.debug("Failed to put event to queue")

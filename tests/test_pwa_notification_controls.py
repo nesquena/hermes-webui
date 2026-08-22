@@ -25,7 +25,8 @@ def _source_between(start_marker: str, end_marker: str) -> str:
 
 def test_browser_notifications_use_service_worker_when_available():
     assert "function _showPwaNotification" in MESSAGES_JS
-    assert "navigator.serviceWorker.ready" in MESSAGES_JS
+    notification_region = _source_between("function _showPwaNotification", "function requestNotificationPermission")
+    assert "navigator.serviceWorker.getRegistration" in notification_region
     assert "reg.showNotification" in MESSAGES_JS
     assert "new Notification" in MESSAGES_JS
     assert "function sendBrowserNotification" in MESSAGES_JS
@@ -35,14 +36,22 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "function _notificationOptions" in MESSAGES_JS
     assert "const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);" in MESSAGES_JS
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
-    assert "data:{url}" in MESSAGES_JS
+    assert "data:{url,..." in MESSAGES_JS
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
     assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
-    assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
+    assert "function _captureNotificationEventIdentity(streamId,event,payload)" in MESSAGES_JS
+    assert "function _sendStreamNotification(title,body,eventIdentity,options={})" in MESSAGES_JS
+    approval = _source_between("source.addEventListener('approval'", "source.addEventListener('clarify'")
+    clarify = _source_between("source.addEventListener('clarify'", "source.addEventListener('state_saved'")
+    done = _source_between("source.addEventListener('done'", "source.addEventListener('stream_end'")
+    assert "_captureNotificationEventIdentity(streamId,e,d)" in approval
+    assert "_captureNotificationEventIdentity(streamId,e,d)" in clarify
+    assert "const _doneNotificationIdentity=_captureNotificationEventIdentity(streamId,_doneEvent,_doneData);" in done
+    assert "_sendStreamNotification(" in done
+    assert "_doneNotificationIdentity" in done
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
-    assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
-    assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
+    assert "eventIdentity" in MESSAGES_JS
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
@@ -115,6 +124,33 @@ def test_service_worker_handles_notification_clicks_without_hijacking_other_sess
     open_idx = SW_JS.index("self.clients.openWindow(targetUrl)")
     navigate_idx = SW_JS.index("focusableClient.navigate(targetUrl)")
     assert exact_idx < open_idx < navigate_idx
+
+
+def test_presenter_options_are_same_origin_and_in_scope_without_changing_click_routing():
+    assert "function normalizeNotificationUrl(value)" in SW_JS
+    assert "targetUrl.origin !== self.location.origin" in SW_JS
+    assert "!targetUrl.pathname.startsWith(scopePath)" in SW_JS
+    assert "data: {url, eventId}" in SW_JS
+    assert "self.addEventListener('notificationclick'" in SW_JS
+    assert "samePath(client.url)" in SW_JS
+
+
+def test_page_and_worker_use_one_registration_first_presenter_with_page_owner_fallback():
+    notification_region = MESSAGES_JS[MESSAGES_JS.index("function _notificationOptions"):MESSAGES_JS.index("// ── /btw ephemeral stream")]
+    assert "indexedDB.open(" in MESSAGES_JS
+    assert "_leasePageNotification" in MESSAGES_JS
+    assert "NOTIFICATION_OWNER_LEASE_MS" in MESSAGES_JS
+    assert "_markPageNotificationDisplaying" not in MESSAGES_JS
+    assert "BroadcastChannel" not in MESSAGES_JS
+    assert "hermes-notifications" in MESSAGES_JS
+    assert notification_region.count("new Notification(") == 1
+    assert notification_region.count("reg.showNotification(") == 1
+    assert "error&&error._notificationOwnerStorageUnavailable" in notification_region
+    assert "_presentWithoutPageLease(title,body,opts,identity,reg)" in notification_region
+    assert "indexedDB.open(" not in SW_JS
+    assert "hermes.notification.present" in MESSAGES_JS
+    assert "hermes.notification.present" in SW_JS
+    assert "getNotifications({tag})" in SW_JS
 
 
 def test_settings_expose_permission_and_test_controls():
