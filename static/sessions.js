@@ -34,13 +34,77 @@ let _pendingCarryForwardSnapshot = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
-// Debounced save — prevents hammering the server on every keystroke.
-let _draftSaveTimer = null;
+// Debounced saves are scoped to the complete composer owner. A late callback
+// for one profile/session must never cancel another owner's pending draft POST.
+const _draftSaveTimerByOwner = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
+const _composerPendingFilesByOwner = new Map();
+const _composerDraftWriteBySid = new Map();
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
+
+function _queueComposerDraftWrite(sid, write){
+  const previous=_composerDraftWriteBySid.get(sid)||Promise.resolve();
+  const current=previous.catch(()=>{}).then(write);
+  _composerDraftWriteBySid.set(sid,current);
+  const cleanup=()=>{
+    if(_composerDraftWriteBySid.get(sid)===current) _composerDraftWriteBySid.delete(sid);
+  };
+  current.then(cleanup,cleanup);
+  return current;
+}
+
+function _composerPendingFilesOwnerKey(sid, ownerProfile) {
+  if (!sid) return '';
+  const sessionProfile = S.session && S.session.session_id === sid
+    ? S.session.profile
+    : null;
+  const profile = String(ownerProfile || sessionProfile || S.activeProfile || 'default').trim() || 'default';
+  return `${profile}\u0000${sid}`;
+}
+
+function _clearComposerDraftSaveTimer(sid, ownerProfile) {
+  const key = _composerPendingFilesOwnerKey(sid, ownerProfile);
+  if (!key || !_draftSaveTimerByOwner.has(key)) return;
+  clearTimeout(_draftSaveTimerByOwner.get(key));
+  _draftSaveTimerByOwner.delete(key);
+}
+
+function _composerPendingFileIsLive(file) {
+  if (!file || typeof file !== 'object') return false;
+  if (typeof File !== 'undefined' && file instanceof File) return true;
+  if (typeof Blob !== 'undefined' && file instanceof Blob) return true;
+  return typeof file.arrayBuffer === 'function' || typeof file.slice === 'function';
+}
+
+function _rememberComposerPendingFiles(sid, files, ownerProfile) {
+  const key = _composerPendingFilesOwnerKey(sid, ownerProfile);
+  if (!key) return;
+  const liveFiles = Array.isArray(files) ? files.filter(_composerPendingFileIsLive) : [];
+  if (liveFiles.length) _composerPendingFilesByOwner.set(key, [...liveFiles]);
+  else _composerPendingFilesByOwner.delete(key);
+}
+
+function _forgetComposerPendingFiles(sid) {
+  if (!sid) return;
+  const suffix = `\u0000${sid}`;
+  for (const key of _composerPendingFilesByOwner.keys()) {
+    if (key.endsWith(suffix)) _composerPendingFilesByOwner.delete(key);
+  }
+}
+
+function _restoreComposerPendingFiles(sid) {
+  const key = _composerPendingFilesOwnerKey(sid);
+  const remembered = key ? (_composerPendingFilesByOwner.get(key) || []) : [];
+  const current = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
+  const unchanged = current.length === remembered.length
+    && current.every((file, index) => file === remembered[index]);
+  if (unchanged) return;
+  S.pendingFiles = [...remembered];
+  if (typeof renderTray === 'function') renderTray();
+}
 
 function _composerDraftFileSignature(file) {
   if (typeof file === 'string') return { value: file };
@@ -219,25 +283,61 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  const ownerProfile=String(
+    arguments[3]||(S.session&&S.session.session_id===sid&&S.session.profile)
+    ||S.activeProfile||'default'
+  ).trim()||'default';
+  const ownerKey=_composerPendingFilesOwnerKey(sid,ownerProfile);
+  _clearComposerDraftSaveTimer(sid,ownerProfile);
+  _rememberComposerPendingFiles(sid, files, ownerProfile);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  _syncComposerOwnerStateFromDraft(sid, normalizedText, files, ownerProfile);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
   }
-  _draftSaveTimer = setTimeout(() => {
-    api('/api/session/draft', {
+  const timer=setTimeout(() => {
+    if(_draftSaveTimerByOwner.get(ownerKey)!==timer)return;
+    _draftSaveTimerByOwner.delete(ownerKey);
+    const enqueue=typeof _queueComposerDraftWrite==='function'
+      ? _queueComposerDraftWrite
+      : (_sid,write)=>Promise.resolve().then(write);
+    enqueue(sid,()=>api('/api/session/draft', {
       method: 'POST',
       body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
     }).then(() => {
       _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-    }).catch(() => {});
+    })).catch(() => {});
   }, _DRAFT_SAVE_DELAY_MS);
+  _draftSaveTimerByOwner.set(ownerKey,timer);
 }
 
 function _composerDraftHasPayload(text, files) {
   return !!(String(text || '') || (Array.isArray(files) && files.filter(Boolean).length));
+}
+
+function _syncComposerOwnerStateFromDraft(sid, text, files, ownerProfile) {
+  if (!sid || typeof _rememberComposerOwnerState !== 'function') return;
+  const profile = String(
+    ownerProfile || (S.session && S.session.session_id === sid && S.session.profile)
+    || S.activeProfile || 'default'
+  ).trim() || 'default';
+  const remembered = typeof _composerRememberedOwnerSnapshot === 'function'
+    ? _composerRememberedOwnerSnapshot(sid, profile)
+    : null;
+  const normalizedText = String(text || '');
+  const liveFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const payloadChanged = !!remembered && (
+    remembered.text !== normalizedText
+    || remembered.files.length !== liveFiles.length
+    || remembered.files.some((file, index) => file !== liveFiles[index])
+  );
+  _rememberComposerOwnerState(sid, profile, {
+    text: normalizedText,
+    files: liveFiles,
+    revision: remembered ? remembered.revision + (payloadChanged ? 1 : 0) : 0,
+  }, remembered ? remembered.generation : 0);
 }
 
 function _sessionComposerDraftHasPayload(session) {
@@ -261,10 +361,17 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
+  const ownerProfile=String(
+    arguments[3]||(S.session&&S.session.session_id===sid&&S.session.profile)
+    ||S.activeProfile||'default'
+  ).trim()||'default';
+  const rejectOnError=!!(arguments[4]&&arguments[4].rejectOnError);
   if (!sid) return Promise.resolve();
-  clearTimeout(_draftSaveTimer);
+  _clearComposerDraftSaveTimer(sid,ownerProfile);
+  _rememberComposerPendingFiles(sid, files, ownerProfile);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  _syncComposerOwnerStateFromDraft(sid, normalizedText, files, ownerProfile);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
   }
@@ -277,12 +384,16 @@ function _saveComposerDraftNow(sid, text, files) {
       && !_composerDraftKnownPayloadSessions.has(sid)) {
     return Promise.resolve();
   }
-  return api('/api/session/draft', {
+  const enqueue=typeof _queueComposerDraftWrite==='function'
+    ? _queueComposerDraftWrite
+    : (_sid,write)=>Promise.resolve().then(write);
+  const request=enqueue(sid,()=>api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+  }));
+  return rejectOnError?request:request.catch(() => {});
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -311,6 +422,12 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // normally so the previous session's composer contents do not leak forward.
   if (preserveActiveInput && current && current !== text) return;
 
+  // Browser File objects cannot be reconstructed from server metadata after a
+  // reload. Within this page lifetime, keep the live objects scoped by
+  // profile+session and update the staged-file tray at the same ownership
+  // boundary as the textarea. A session with no live files clears stale chips.
+  _restoreComposerPendingFiles(restoreSid);
+
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
   if (!text && !files.length) {
@@ -327,22 +444,30 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
-  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  const ownerProfile=String(
+    arguments[3]||(S.session&&S.session.session_id===sid&&S.session.profile)
+    ||S.activeProfile||'default'
+  ).trim()||'default';
+  _clearComposerDraftSaveTimer(sid,ownerProfile);
+  _forgetComposerPendingFiles(sid);
+  if(typeof _releaseComposerOwnerFiles==='function') _releaseComposerOwnerFiles(sid);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
-  return api('/api/session/draft', {
+  const enqueue=typeof _queueComposerDraftWrite==='function'
+    ? _queueComposerDraftWrite
+    : (_sid,write)=>Promise.resolve().then(write);
+  return enqueue(sid,()=>api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: '' }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+  })).catch(() => {});
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
@@ -1291,7 +1416,105 @@ function _markPollingCompletionUnreadTransitions(sessions) {
   }
 }
 
+let _contextTransitionGeneration=0;
+let _contextTransitionTail=Promise.resolve();
+const _CONTEXT_TRANSITION_INTENT=Symbol('context-transition-intent');
+
+function _claimContextTransition(kind){
+  const previous=_contextTransitionTail.catch(()=>{});
+  let release;
+  const settled=new Promise(resolve=>{release=resolve;});
+  const intent={
+    marker:_CONTEXT_TRANSITION_INTENT,
+    kind:String(kind||'context'),
+    generation:++_contextTransitionGeneration,
+    previous,
+    release,
+  };
+  _contextTransitionTail=previous.then(()=>settled);
+  return intent;
+}
+
+async function _runContextTransition(kind,existingIntent,callback){
+  if(existingIntent&&existingIntent.marker===_CONTEXT_TRANSITION_INTENT){
+    return callback(existingIntent);
+  }
+  const intent=_claimContextTransition(kind);
+  await intent.previous;
+  try{return await callback(intent);}
+  finally{intent.release();}
+}
+
+async function _waitForContextTransitionSettlement(){
+  const pending=_contextTransitionTail;
+  try{await pending;}catch(_){}
+}
+
+// Kept as a compatibility entry point for sidebar/direct-session navigation.
+async function _waitForNewSessionNavigationSettlement(){
+  await _waitForContextTransitionSettlement();
+}
+
+function _captureContextTransitionOwner(){
+  const session=S.session||null;
+  return {
+    session,
+    sid:session&&session.session_id?String(session.session_id):null,
+    profile:String((session&&session.profile)||S.activeProfile||'default'),
+    workspace:session&&session.workspace?String(session.workspace):null,
+  };
+}
+
+function _contextTransitionOwnerIsCurrent(owner){
+  if(!owner||!owner.session||!owner.sid)return false;
+  return S.session===owner.session
+    &&String(S.session.session_id||'')===owner.sid
+    &&String((S.session&&S.session.profile)||S.activeProfile||'default')===owner.profile;
+}
+
+function _captureWorkspaceRepaintBoundary(){
+  return {
+    owner:_captureContextTransitionOwner(),
+    directory:String(S.currentDir||'.'),
+    treeGeneration:typeof _wsTreeGen==='number'?_wsTreeGen:null,
+  };
+}
+
+function _workspaceRepaintBoundaryIsCurrent(boundary){
+  if(!boundary||!_contextTransitionOwnerIsCurrent(boundary.owner))return false;
+  if(String(S.currentDir||'.')!==boundary.directory)return false;
+  if(boundary.treeGeneration!==null){
+    if(typeof _wsTreeGen!=='number'||_wsTreeGen!==boundary.treeGeneration)return false;
+  }
+  return true;
+}
+
 let _newSessionInFlight=null;
+let _newSessionRequest=null;
+let _blankPageSessionInFlight=null;
+async function _ensureBlankPageSession(workspace,contextIntent){
+  return _runContextTransition('blank-page-session',contextIntent,async intent=>{
+    if(S.session)return S.session;
+    if(_blankPageSessionInFlight)return _blankPageSessionInFlight;
+    const targetWorkspace=String(
+      workspace||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||''
+    ).trim();
+    if(!targetWorkspace)return null;
+    _blankPageSessionInFlight=(async()=>{
+      // Reuse the canonical ownership transaction instead of assigning S.session
+      // from a parallel /api/session/new completion. This also inherits its
+      // generation, abort, disabled-reason, draft/file, and focus guarantees.
+      // These system-minted context sessions must not inherit toolsets staged on
+      // the empty composer; deliberate New Chat remains the only consumer.
+      S._pendingSessionToolsets=null;
+      S._profileSwitchWorkspace=targetWorkspace;
+      await newSession(false,{worktree:false,contextTransition:intent});
+      return S.session||null;
+    })();
+    try{return await _blankPageSessionInFlight;}
+    finally{_blankPageSessionInFlight=null;}
+  });
+}
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalThis;
 
@@ -1383,6 +1606,23 @@ function _setNewSessionPending(pending){
     btn.disabled=!!pending;
     btn.setAttribute('aria-busy',pending?'true':'false');
   }
+  // Native controls are one producer class. Programmatic producers use the
+  // ownership transaction and buffer mutations for the destination owner.
+  const composerIds=['msg','fileInput','btnAttach','btnSavedPrompts','btnMic','btnVoiceMode'];
+  for(let i=0;i<composerIds.length;i++){
+    const control=$(composerIds[i]);
+    if(!control) continue;
+    if(typeof _composerControlSetDisabledReason==='function'){
+      _composerControlSetDisabledReason(control,'new-session',!!pending);
+    }else control.disabled=!!pending;
+  }
+  if(typeof document!=='undefined'&&document.querySelectorAll){
+    document.querySelectorAll('#attachTray button').forEach(control=>{
+      if(typeof _composerControlSetDisabledReason==='function'){
+        _composerControlSetDisabledReason(control,'new-session',!!pending);
+      }else control.disabled=!!pending;
+    });
+  }
   const statusEl=$('composerStatus');
   const pendingText=_newSessionPendingText();
   if(pending){
@@ -1393,12 +1633,43 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
-  if(_newSessionInFlight){
+  const existingContextIntent=options&&options.contextTransition;
+  if(_newSessionRequest){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
-    return _newSessionInFlight;
+    // A direct New Chat can already be queued behind the context intent that
+    // later discovers it also needs a new session (for example profile switch
+    // A followed by New Chat B). Joining B from A would deadlock: B waits for A
+    // to release the coordinator while A waits for B. Let the current owning
+    // intent start the one shared request; B will observe the same result when
+    // its queued coordinator slot is eventually released.
+    if(existingContextIntent&&!_newSessionRequest.started){
+      Promise.resolve(_newSessionRequest.start(existingContextIntent)).catch(()=>{});
+    }
+    return await _newSessionRequest.promise;
   }
-  _setNewSessionPending(true);
-  _newSessionInFlight=(async()=>{
+  let resolveRequest;
+  let rejectRequest;
+  const request={
+    started:false,
+    start:null,
+    promise:new Promise((resolve,reject)=>{
+      resolveRequest=resolve;
+      rejectRequest=reject;
+    }),
+  };
+  request.resolve=resolveRequest;
+  request.reject=rejectRequest;
+  _newSessionRequest=request;
+  _newSessionInFlight=request.promise;
+  let focusRestoredComposerAfterAbort=false;
+  let restoredComposerOwnerSid=null;
+  let restoredComposerOwnerProfile=null;
+  request.start=async contextIntent=>{
+    if(request.started)return request.promise;
+    request.started=true;
+    try{
+    _setNewSessionPending(true);
+    try{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1501,11 +1772,91 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
-    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // newSession() replaces S.session directly instead of going through
+    // loadSession(). Flush the current composer at the create boundary so its
+    // draft remains owned by the conversation being left, not the fresh session.
+    const previousSid=S.session&&S.session.session_id;
+    const previousProfile=String(
+      (S.session&&S.session.profile)||S.activeProfile||'default'
+    ).trim()||'default';
+    const sourceComposerText=($('msg')||{}).value||'';
+    const sourceComposerFiles=S.pendingFiles?[...S.pendingFiles]:[];
+    const composerTransition=typeof _beginComposerOwnershipTransition==='function'
+      ? _beginComposerOwnershipTransition(previousSid,previousProfile)
+      : null;
+    // With no previous owner (the first Send on an empty app), the existing
+    // composer already belongs to the destination that is being created.
+    if(composerTransition&&!previousSid){
+      if(sourceComposerText&&typeof _composerSetText==='function')_composerSetText(sourceComposerText);
+      if(sourceComposerFiles.length&&typeof _composerAddFiles==='function')_composerAddFiles(sourceComposerFiles);
+    }
+    try{
+      if(previousSid&&typeof _saveComposerDraftNow==='function'){
+        await _saveComposerDraftNow(
+          previousSid,
+          sourceComposerText,
+          sourceComposerFiles,
+          previousProfile,
+          {rejectOnError:true}
+        );
+      }
+    }catch(error){
+      if(composerTransition&&typeof _abortComposerOwnershipTransition==='function'){
+        const restoredVisible=_abortComposerOwnershipTransition(composerTransition);
+        focusRestoredComposerAfterAbort=restoredVisible||focusRestoredComposerAfterAbort;
+        if(restoredVisible){
+          restoredComposerOwnerSid=composerTransition.sourceSid;
+          restoredComposerOwnerProfile=composerTransition.sourceProfile;
+        }
+      }
+      throw error;
+    }
+    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)}).catch(error=>{
+      if(composerTransition&&typeof _abortComposerOwnershipTransition==='function'){
+        const restoredVisible=_abortComposerOwnershipTransition(composerTransition);
+        focusRestoredComposerAfterAbort=restoredVisible||focusRestoredComposerAfterAbort;
+        if(restoredVisible){
+          restoredComposerOwnerSid=composerTransition.sourceSid;
+          restoredComposerOwnerProfile=composerTransition.sourceProfile;
+        }
+      }
+      throw error;
+    });
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    S.session=data.session;
+    if(typeof _adoptRegenerationRevision==="function") _adoptRegenerationRevision(data.session);
+    S.messages=data.session.messages||[];
+    if(composerTransition&&typeof _bindComposerOwnershipDestination==='function'){
+      _bindComposerOwnershipDestination(
+        composerTransition,S.session.session_id,S.session.profile||reqBody.profile
+      );
+    }
+    // Owner swap, destination restore, and ordered mutation drain are one
+    // synchronous transaction. There is deliberately no await in this block:
+    // producer callbacks can only run before it (and be buffered) or after it
+    // (and mutate the destination directly), never inside an unowned gap.
+    if(typeof _restoreComposerDraft==='function') _restoreComposerDraft(S.session.composer_draft);
+    if(composerTransition&&typeof _drainComposerOwnershipTransition==='function'){
+      _drainComposerOwnershipTransition(composerTransition);
+    }
+    const composer=$('msg');
+    if(((composer||{}).value||'')||(S.pendingFiles&&S.pendingFiles.length)){
+      if(typeof autoResize==='function') autoResize();
+      if(typeof updateSendBtn==='function') updateSendBtn();
+      if(typeof renderTray==='function') renderTray();
+      if(typeof _saveComposerDraftNow==='function'){
+        // Voice Mode send() waits on _newSessionInFlight, so destination draft
+        // persistence completes before an auto-send can clear the same payload.
+        await _saveComposerDraftNow(
+          S.session.session_id,
+          (composer||{}).value||'',
+          S.pendingFiles?[...S.pendingFiles]:[],
+          (S.session&&S.session.profile)||reqBody.profile
+        );
+      }
+    }
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1580,13 +1931,37 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
-  })();
-  try{
-    return await _newSessionInFlight;
-  }finally{
-    _newSessionInFlight=null;
-    _setNewSessionPending(false);
-  }
+    }finally{
+      _setNewSessionPending(false);
+      if(focusRestoredComposerAfterAbort
+        &&typeof _composerOwnerIsVisible==='function'
+        &&_composerOwnerIsVisible(
+          restoredComposerOwnerSid,
+          restoredComposerOwnerProfile
+        )){
+        const input=$('msg');
+        if(input&&input.disabled!==true&&typeof input.focus==='function')input.focus();
+      }
+    }
+    request.resolve();
+    return;
+    }catch(error){
+      request.reject(error);
+      throw error;
+    }finally{
+      if(_newSessionRequest===request){
+        _newSessionRequest=null;
+        _newSessionInFlight=null;
+      }
+    }
+  };
+  // Keep coordinator settlement separate from the shared result promise. The
+  // result may be started by an earlier owning intent to break an A→B→A wait
+  // cycle, while this queued slot still releases normally afterward.
+  Promise.resolve(
+    _runContextTransition('new-session',existingContextIntent,request.start)
+  ).catch(()=>{});
+  return await request.promise;
 }
 
 /**
@@ -1694,6 +2069,9 @@ async function loadSession(sid){
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+  }
+  if(typeof _waitForNewSessionNavigationSettlement==='function'){
+    await _waitForNewSessionNavigationSettlement();
   }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
@@ -2499,6 +2877,9 @@ async function _ensureSidebarSessionProfile(session){
 
 async function _openSidebarSession(session, loadOpts={}){
   if(!session||!session.session_id) return;
+  if(typeof _waitForNewSessionNavigationSettlement==='function'){
+    await _waitForNewSessionNavigationSettlement();
+  }
   // Extension pre-open hook — before any side-effects (external import, profile switching).
   // Handler returns {cancel:true} to prevent the open.
   if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
@@ -4361,6 +4742,8 @@ function _renderBatchActionBar(){
       const retainedCount=_worktreeResponseCount(results);
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
+      ids.forEach(_forgetComposerPendingFiles);
+      if(typeof _forgetComposerOwnerState==='function') ids.forEach(_forgetComposerOwnerState);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
@@ -9164,6 +9547,8 @@ async function deleteSession(sid, beforeDelete=null){
   }
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  _forgetComposerPendingFiles(sid);
+  if(typeof _forgetComposerOwnerState==='function') _forgetComposerOwnerState(sid);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;

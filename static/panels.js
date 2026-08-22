@@ -6357,53 +6357,56 @@ async function removeWorkspace(path){
 }
 
 async function promptWorkspacePath(){
-  // Opus review Q6: if called from blank page (no session), auto-create one first.
-  if(!S.session){
-    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
-    if(!ws)return;
-    try{
-      // System-minted session (#6022): worktree:false is explicit so a config
-      // worktree default can't leak a worktree from a workspace prompt.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
-    }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
-    if(!S.session)return;
-  }
-  const value=await showPromptDialog({
-    title:t('workspace_switch_prompt_title'),
-    message:t('workspace_switch_prompt_message'),
-    confirmLabel:t('workspace_switch_prompt_confirm'),
-    placeholder:t('workspace_switch_prompt_placeholder'),
-    value:S.session.workspace||''
-  });
-  const path=(value||'').trim();
-  if(!path)return;
-  try{
-    const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
-    _workspaceList=data.workspaces||[];
-    const target=_workspaceList[_workspaceList.length-1];
-    if(!target) throw new Error(t('workspace_not_added'));
-    await switchToWorkspace(target.path,target.name);
-  }catch(e){
-    if(String(e.message||'').includes('Workspace already in list')){
-      showToast(t('workspace_already_saved'));
-      return;
+  const contextIntent=arguments[0];
+  return _runContextTransition('workspace-path',contextIntent,async intent=>{
+    // Opus review Q6: if called from blank page (no session), auto-create one first.
+    if(!S.session){
+      const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+      if(!ws)return;
+      try{
+        await _ensureBlankPageSession(ws,intent);
+      }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
+      if(!S.session)return;
     }
-    showToast(t('workspace_switch_failed')+e.message);
-  }
+    const value=await showPromptDialog({
+      title:t('workspace_switch_prompt_title'),
+      message:t('workspace_switch_prompt_message'),
+      confirmLabel:t('workspace_switch_prompt_confirm'),
+      placeholder:t('workspace_switch_prompt_placeholder'),
+      value:S.session.workspace||''
+    });
+    const path=(value||'').trim();
+    if(!path)return;
+    const owner=_captureContextTransitionOwner();
+    if(!_contextTransitionOwnerIsCurrent(owner))return;
+    try{
+      const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      _workspaceList=data.workspaces||[];
+      const target=_workspaceList[_workspaceList.length-1];
+      if(!target) throw new Error(t('workspace_not_added'));
+      await switchToWorkspace(target.path,target.name,intent);
+    }catch(e){
+      if(!_contextTransitionOwnerIsCurrent(owner))return;
+      if(String(e.message||'').includes('Workspace already in list')){
+        showToast(t('workspace_already_saved'));
+        return;
+      }
+      showToast(t('workspace_switch_failed')+e.message);
+    }
+  });
 }
 
 async function switchToWorkspace(path,name){
+  const contextIntent=arguments[2];
+  return _runContextTransition('workspace-switch',contextIntent,async intent=>{
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
   if(!S.session){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
-      // System-minted session (#6022): explicit worktree:false — a workspace
-      // switch from a blank page is not deliberate New Chat intent.
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      await _ensureBlankPageSession(ws,intent);
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6438,8 +6441,8 @@ async function switchToWorkspace(path,name){
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
-    if(typeof newSession==='function') await newSession(false);
-    showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
+    if(typeof newSession==='function') await newSession(false,{contextTransition:intent});
+    if(S.session)showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
   if(typeof _previewDirty!=='undefined'&&_previewDirty){
@@ -6457,6 +6460,8 @@ async function switchToWorkspace(path,name){
   const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
     ? _getComposerWorkspaceFocusTarget()
     : null;
+  const owner=_captureContextTransitionOwner();
+  if(!_contextTransitionOwnerIsCurrent(owner))return;
   try{
     closeWsDropdown();
     // Invalidate any older /api/list response before the explicit workspace
@@ -6464,9 +6469,10 @@ async function switchToWorkspace(path,name){
     // overwrite the user's newer selection and reject this switch's fresh tree.
     if(typeof bumpWorkspaceTreeGen==='function')bumpWorkspaceTreeGen();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
+      session_id:owner.sid, workspace:path, model:owner.session.model, model_provider:owner.session.model_provider||null
     })});
-    S.session.workspace=path;
+    if(!_contextTransitionOwnerIsCurrent(owner))return;
+    owner.session.workspace=path;
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -6474,14 +6480,18 @@ async function switchToWorkspace(path,name){
     syncTopbar();
     if(
       restoreComposerFocusTarget&&
+      _contextTransitionOwnerIsCurrent(owner)&&
       typeof _shouldRestoreComposerWorkspaceFocus==='function'&&
       _shouldRestoreComposerWorkspaceFocus(composerDd)&&
       typeof _focusComposerWorkspaceTarget==='function'
     ) _focusComposerWorkspaceTarget(restoreComposerFocusTarget);
     await loadDir('.');
+    if(!_contextTransitionOwnerIsCurrent(owner))return;
     if (_currentPanel === 'memory') await loadMemory(true);
+    if(!_contextTransitionOwnerIsCurrent(owner))return;
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
-  }catch(e){setStatus(t('switch_failed')+e.message);}
+  }catch(e){if(_contextTransitionOwnerIsCurrent(owner))setStatus(t('switch_failed')+e.message);}
+  });
 }
 
 // ── Profile panel + dropdown ──
@@ -6965,6 +6975,8 @@ function _openProfileSwitchSessionBrowser(){
 }
 
 async function switchToProfile(name) {
+  const contextIntent=arguments[1];
+  return _runContextTransition('profile-switch',contextIntent,async intent=>{
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -7196,7 +7208,7 @@ async function switchToProfile(name) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false, contextTransition:intent});
       if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
@@ -7292,6 +7304,7 @@ async function switchToProfile(name) {
       _setProfileSwitchListEmbargo(false);
     }
   }
+  });
 }
 
 function openProfileCreate(){

@@ -98,6 +98,10 @@ function extractAsyncFunction(source, name) {
 }
 
 const newSessionSrc = extractAsyncFunction(src, 'newSession');
+const contextStart = src.indexOf('let _contextTransitionGeneration=0;');
+const contextEnd = src.indexOf('\nconst _newSessionPendingText', contextStart);
+if (contextStart < 0 || contextEnd < 0) throw new Error('context transition helpers not found');
+const contextTransitionSrc = src.slice(contextStart, contextEnd);
 
 globalThis.window = globalThis;
 globalThis.document = {
@@ -162,7 +166,7 @@ globalThis.api = async (_url, opts) => {
   return { session: { session_id: 's-1', messages: [], model: 'gpt-4', model_provider: 'openai', workspace: null, message_count: 0, last_usage: {} } };
 };
 
-eval(newSessionSrc);
+eval(contextTransitionSrc + '\n' + newSessionSrc + '\n;globalThis.newSession=newSession;');
 
 (async () => {
   await newSession(false, args.options);
