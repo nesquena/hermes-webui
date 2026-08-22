@@ -213,8 +213,19 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
     # post-dates the compression (the marker persists across saves) → it is a
     # recoverable post-compression snapshot, never a shrink-undoing one.
     try:
-        from api.models import _context_messages_include_compression_marker
-        if _context_messages_include_compression_marker(bak_ctx):
+        from api.models import (
+            _context_messages_include_compression_marker,
+            _decode_state_db_content,
+        )
+        decoded_bak_ctx = [
+            {
+                **message,
+                'content': _decode_state_db_content(message.get('content')),
+            }
+            if isinstance(message, dict) else message
+            for message in bak_ctx
+        ]
+        if _context_messages_include_compression_marker(decoded_bak_ctx):
             return False
     except Exception:
         # If the marker check is unavailable, fall through to the length guard.
