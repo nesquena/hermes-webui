@@ -9143,6 +9143,33 @@ def _display_merge_cache_entry_usable(entry, cache_key) -> bool:
     return 0.0 <= age <= _DISPLAY_MERGE_STREAMING_TTL_SECONDS
 
 
+def _display_merge_requires_lineage_provenance(session) -> bool:
+    """Return whether this sidecar view depends on a stitched snapshot parent."""
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id:
+        return False
+    if not is_safe_session_id(parent_id):
+        return True
+    try:
+        parent = Session.load(parent_id)
+    except Exception:
+        return True
+    if parent is None:
+        return True
+    if not getattr(parent, "pre_compression_snapshot", False):
+        return False
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    parent_source = str(
+        getattr(parent, "session_source", "") or ""
+    ).strip().lower()
+    if source == "fork" and parent_source != "fork":
+        return False
+    return not _messages_start_with_visible_prefix(
+        list(getattr(session, "messages", []) or []),
+        list(getattr(parent, "messages", []) or []),
+    )
+
+
 def _display_merge_cache_key(
     session,
     sidecar_messages,
@@ -9167,14 +9194,18 @@ def _display_merge_cache_key(
     # Lineage parents: reuse the signatures recorded by the (already memoized)
     # lineage stitch so a write to any parent snapshot invalidates this cache
     # too. A lineage without snapshot parents records no entry — empty tuple.
-    parent_sigs: tuple = ()
+    parent_sigs = ()
     with _lineage_display_cache_lock:
         lineage_entry = _lineage_display_cache.get(sid)
         if lineage_entry is not None:
+            if lineage_entry.get("provenance_complete") is not True:
+                return None
             parent_sigs = tuple(
                 (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
                 for path, sig in (lineage_entry.get("parent_sigs") or [])
             )
+    if not parent_sigs and _display_merge_requires_lineage_provenance(session):
+        return None
     last_ts = None
     if sidecar_messages:
         last = sidecar_messages[-1]
@@ -9463,14 +9494,19 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     """
     from api.models import _sidecar_stat_signature
 
+    cache_allowed = not _display_merge_session_is_active(session)
     sid = str(getattr(session, "session_id", "") or "")
     self_sig = None
     if sid and is_safe_session_id(sid):
         self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
-    if self_sig is not None:
+    if cache_allowed and self_sig is not None:
         with _lineage_display_cache_lock:
             entry = _lineage_display_cache.get(sid)
-        if entry is not None and entry.get("self_sig") == self_sig:
+        if (
+            entry is not None
+            and entry.get("provenance_complete") is True
+            and entry.get("self_sig") == self_sig
+        ):
             stale = False
             for parent_path, parent_sig in entry.get("parent_sigs") or []:
                 if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
@@ -9535,11 +9571,17 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         getattr(session, "messages", []) or [],
         truncation_watermark=None,
     )
-    if self_sig is not None and parent_sigs and parent_signatures_complete:
+    if (
+        cache_allowed
+        and self_sig is not None
+        and parent_sigs
+        and parent_signatures_complete
+    ):
         with _lineage_display_cache_lock:
             _lineage_display_cache[sid] = {
                 "self_sig": self_sig,
                 "parent_sigs": parent_sigs,
+                "provenance_complete": True,
                 "messages": merged,
             }
             _lineage_display_cache.move_to_end(sid, last=True)

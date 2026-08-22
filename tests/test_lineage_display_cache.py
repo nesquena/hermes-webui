@@ -115,6 +115,31 @@ def test_parent_write_invalidates_cache(lineage, hermes_home):
     )
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("active_stream_id", "stream-live"),
+        ("pending_user_message", {"content": "queued"}),
+    ],
+)
+def test_active_or_pending_lineage_bypasses_reads_and_writes(lineage, field, value):
+    routes, Session, child = lineage
+    routes._webui_sidecar_lineage_messages_for_display(child)
+    setattr(child, field, value)
+    child.messages.append(
+        {"role": "assistant", "content": "unsaved live tail", "timestamp": 2000}
+    )
+
+    merged = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert any(m.get("content") == "unsaved live tail" for m in merged)
+
+    with routes._lineage_display_cache_lock:
+        routes._lineage_display_cache.pop(child.session_id, None)
+    routes._webui_sidecar_lineage_messages_for_display(child)
+    with routes._lineage_display_cache_lock:
+        assert child.session_id not in routes._lineage_display_cache
+
+
 def test_lru_eviction_during_parent_validation_cannot_crash(lineage, monkeypatch):
     """A cache entry may disappear while its parent signatures are checked."""
     routes, Session, child = lineage
@@ -181,6 +206,12 @@ def test_incomplete_multihop_parent_signatures_disable_cache(hermes_home, monkey
     assert [m.get("content") for m in got] == ["grand", "parent", "child"]
     with routes._lineage_display_cache_lock:
         assert child.session_id not in routes._lineage_display_cache
+    assert routes._display_merge_cache_key(
+        child,
+        got,
+        [],
+        state_db_signature=("db", "stable"),
+    ) is None
 
 
 def test_sessions_without_lineage_do_not_pollute_cache(lineage):
