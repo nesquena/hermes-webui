@@ -1367,28 +1367,12 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
-        if not is_safe_session_id(self.session_id):
-            raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
-        # ── #1558 P0 guard ──────────────────────────────────────────────
-        # Refuse to save a session that was loaded with metadata_only=True.
-        # Such sessions have messages=[] (it's the whole point of the partial
-        # load), and save() unconditionally writes self.messages to disk via
-        # an atomic os.replace(). Saving a metadata-only stub thus wipes the
-        # full conversation history — which is exactly the v0.50.279
-        # _clear_stale_stream_state() regression that lost users 1000+
-        # message conversations. Any caller that needs to mutate persisted
-        # fields on a metadata-only session must reload with
-        # metadata_only=False first.
-        if getattr(self, '_loaded_metadata_only', False):
-            raise RuntimeError(
-                f"Refusing to save metadata-only session {self.session_id!r}: "
-                f"would atomically overwrite on-disk messages with []. "
-                f"Reload with metadata_only=False before mutating state. "
-                f"See #1558."
-            )
-        if touch_updated_at:
-            self.updated_at = time.time()
+    def _serialize_payload(self) -> str:
+        """Serialize the complete sidecar without publishing it.
+
+        Keeping serialization separate from ``save()`` lets callers stage and
+        validate a multi-session transaction before the first durable replace.
+        """
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1443,7 +1427,31 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        return json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+
+    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        if not is_safe_session_id(self.session_id):
+            raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
+        # ── #1558 P0 guard ──────────────────────────────────────────────
+        # Refuse to save a session that was loaded with metadata_only=True.
+        # Such sessions have messages=[] (it's the whole point of the partial
+        # load), and save() unconditionally writes self.messages to disk via
+        # an atomic os.replace(). Saving a metadata-only stub thus wipes the
+        # full conversation history — which is exactly the v0.50.279
+        # _clear_stale_stream_state() regression that lost users 1000+
+        # message conversations. Any caller that needs to mutate persisted
+        # fields on a metadata-only session must reload with
+        # metadata_only=False first.
+        if getattr(self, '_loaded_metadata_only', False):
+            raise RuntimeError(
+                f"Refusing to save metadata-only session {self.session_id!r}: "
+                f"would atomically overwrite on-disk messages with []. "
+                f"Reload with metadata_only=False before mutating state. "
+                f"See #1558."
+            )
+        if touch_updated_at:
+            self.updated_at = time.time()
+        payload = self._serialize_payload()
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -6710,12 +6718,14 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    persist: bool = True,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
     Preserve parent_session_id from state.db so imported continuation segments
     keep their lineage in the WebUI store and sidebar instead of reappearing as
-    detached orphan chats.
+    detached orphan chats. ``persist=False`` constructs a complete session for
+    callers that will publish it through a larger durable transaction.
     """
     s = Session(
         session_id=session_id,
@@ -6733,16 +6743,17 @@ def import_cli_session(
     # clear the tombstone entry so the freshly-imported session is visible
     # on the next poll. Wrapped because a tombstone failure must never block
     # an import.
-    try:
-        _clear_webui_zero_message_orphan_tombstone(s.session_id)
-        _clear_webui_deleted_session_tombstone(s.session_id)
-    except Exception:
-        logger.debug(
-            "Failed to clear webui tombstone for %s",
-            s.session_id,
-            exc_info=True,
-        )
-    s.save(touch_updated_at=False)
+    if persist:
+        try:
+            _clear_webui_zero_message_orphan_tombstone(s.session_id)
+            _clear_webui_deleted_session_tombstone(s.session_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear webui tombstone for %s",
+                s.session_id,
+                exc_info=True,
+            )
+        s.save(touch_updated_at=False)
     return s
 
 

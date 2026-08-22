@@ -4862,12 +4862,21 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    // Sidebar lineage metadata is deliberately bounded, so its absence cannot
+    // prove that this row is a singleton. Let the backend resolve the mutation
+    // scope authoritatively for every archive and restore action.
+    const payload={session_id:session.session_id,archived,lineage:true};
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(payload)});
+    const targetIds=new Set(Array.isArray(response.session_ids)?response.session_ids:[session.session_id]);
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
-    if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
+    for(const related of (_allSessions||[])){
+      if(related&&targetIds.has(related.session_id)) related.archived=archived;
+    }
+    if(S.session&&targetIds.has(S.session.session_id)) S.session.archived=archived;
     try{ if(archived&&session.session_id&&localStorage.getItem('hermes-webui-session')===session.session_id) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ if(archived&&targetIds.has(localStorage.getItem('hermes-webui-session'))) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
     showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
     if(renderHold) await renderHold;
     if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');
