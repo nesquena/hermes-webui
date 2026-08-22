@@ -5426,10 +5426,14 @@ function syncReasoningChip(){
 
 function _highlightReasoningOption(effort){
   const dd=$('composerReasoningDropdown');
-  if(!dd) return;
+  if(!dd) return null;
+  let selected=null;
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
-    opt.classList.toggle('selected',opt.dataset.effort===effort);
+    const isSelected=opt.dataset.effort===effort;
+    opt.classList.toggle('selected',isSelected);
+    if(isSelected) selected=opt;
   });
+  return selected;
 }
 
 function toggleReasoningDropdown(){
@@ -5442,9 +5446,10 @@ function toggleReasoningDropdown(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  _highlightReasoningOption(_currentReasoningEffort);
+  const selected=_highlightReasoningOption(_currentReasoningEffort);
   dd.classList.add('open');
   _positionReasoningDropdown();
+  if(selected) selected.scrollIntoView({block:'nearest',inline:'nearest'});
   chip.classList.add('active');
   const mobileAction=$('composerMobileReasoningAction');
   if(mobileAction) mobileAction.classList.add('active');
