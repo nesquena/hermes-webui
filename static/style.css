@@ -6906,6 +6906,11 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-modal-row input[type="color"]{height:36px;padding:2px;cursor:pointer;}
 .kanban-modal-row-inline{display:flex;gap:10px;}
 .kanban-modal-row-inline > *{flex:1;min-width:0;}
+.kanban-modal-id-display{display:flex;align-items:center;gap:6px;}
+.kanban-modal-id-value{font-family:var(--font-mono);font-size:12px;color:var(--muted);word-break:break-all;}
+.kanban-modal-id-copy{display:inline-flex;align-items:center;justify-content:center;padding:4px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;border-radius:4px;line-height:0;}
+.kanban-modal-id-copy:hover{color:var(--blue);background:var(--input-bg);}
+.kanban-modal-id-copy.copied{color:var(--blue);}
 .kanban-modal-hint{font-size:11px;color:var(--muted);line-height:1.5;margin-top:6px;}
 .kanban-status-original-hint{
   display:block;
@@ -7059,6 +7064,8 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-board-in-lane{min-height:0;overflow-x:auto}
 .kanban-card-topline{display:flex;gap:6px;align-items:center;margin-bottom:4px;font-size:10px;color:var(--muted)}
 .kanban-card-id{font-family:var(--font-mono);opacity:.8}
+.kanban-card-copy{display:inline-flex;align-items:center;justify-content:center;padding:1px;border:none;background:transparent;color:var(--muted);cursor:pointer;border-radius:3px;line-height:0}
+.kanban-card-copy:hover{color:var(--blue);background:var(--input-bg)}
 .kanban-badge{border:1px solid var(--border);border-radius:999px;padding:1px 6px;font-size:10px;color:var(--muted)}
 .kanban-badge.priority{color:var(--accent)}
 .kanban-badge.tenant{color:var(--text)}

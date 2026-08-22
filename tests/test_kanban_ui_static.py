@@ -332,6 +332,81 @@ def test_kanban_edit_mode_preserves_status_when_dropdown_untouched():
     assert "_kanbanSetTaskModalStatusHint(null, null);" in close_body
 
 
+def test_kanban_card_has_copy_task_id_affordance():
+    """Regression: Kanban cards show a short task ID but offer no way to
+    copy the full ID for pasting elsewhere (CLI, search, links). Cards must
+    render a `.kanban-card-copy` button wired to `copyKanbanTaskId`, and that
+    handler must stop the click from bubbling to the card (which would open
+    the task detail) and copy the full task id via `_copyText`.
+    """
+    card_match = re.search(r"function _kanbanCard\(task, status\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert card_match, "_kanbanCard() not found"
+    card_body = card_match.group(1)
+    assert 'class="kanban-card-copy"' in card_body
+    assert "onclick=\"copyKanbanTaskId(event, '" in card_body
+
+    copy_fn = re.search(r"function copyKanbanTaskId\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert copy_fn, "copyKanbanTaskId() not found"
+    copy_body = copy_fn.group(1)
+    assert "event.stopPropagation()" in copy_body, (
+        "copyKanbanTaskId must stop propagation or clicking the copy button "
+        "would also open the task detail view."
+    )
+    assert "_copyText(taskId)" in copy_body
+
+    # Keyboard parity (maintainer review, PR #6956): the card <article> is
+    # tabindex="0" role="button" with its own Enter/Space onkeydown that opens
+    # detail. The .kanban-card-copy button is a focusable descendant, so its
+    # keydown bubbles to the article first and would open detail before (or
+    # instead of) copying. The article keydown must ignore events whose target
+    # is a nested control (event.target !== event.currentTarget), so the card
+    # only opens detail when it owns the event.
+    article_return = re.search(r'onkeydown="([^"]*event\.target!==event\.currentTarget[^"]*)"', card_body)
+    assert article_return, (
+        "card article onkeydown must ignore events from nested controls "
+        "(add 'if(event.target!==event.currentTarget) return;' before the key test)"
+    )
+    assert "event.key==='Enter'" in article_return.group(1), (
+        "card article must still handle Enter/Space to open detail when it owns the event"
+    )
+
+
+def test_kanban_edit_modal_id_row_shown_only_in_edit_mode():
+    """Regression: the create/edit task modal had no way to see or copy a
+    task's ID. An ID row (#kanbanTaskModalIdRow) must exist in the markup,
+    must be shown only when editing an existing task (never when creating
+    one, since a new task has no ID yet), and openKanbanEdit must populate
+    it via _kanbanResetTaskModalFields.
+    """
+    assert 'id="kanbanTaskModalIdRow"' in INDEX
+
+    label_match = re.search(
+        r"function _kanbanSetTaskModalLabels\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL
+    )
+    assert label_match, "_kanbanSetTaskModalLabels() not found"
+    label_body = label_match.group(1)
+    edit_branch = re.search(r"if \(mode === 'edit'\) \{(.*?)\n  \} else \{(.*?)\n  \}", label_body, re.DOTALL)
+    assert edit_branch, "_kanbanSetTaskModalLabels edit/create branches not found"
+    edit_part, create_part = edit_branch.group(1), edit_branch.group(2)
+    assert "idRow.style.display = ''" in edit_part, (
+        "Edit mode must reveal the task ID row."
+    )
+    assert "idRow.style.display = 'none'" in create_part, (
+        "Create mode must hide the task ID row (no ID exists yet)."
+    )
+
+    open_edit_match = re.search(
+        r"async function openKanbanEdit\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL
+    )
+    assert open_edit_match, "openKanbanEdit() not found"
+    open_edit_body = open_edit_match.group(1)
+    reset_call = re.search(r"_kanbanResetTaskModalFields\(\{(.*?)\n\s*\}\);", open_edit_body, re.DOTALL)
+    assert reset_call, "openKanbanEdit must call _kanbanResetTaskModalFields({...})"
+    assert "id:" in reset_call.group(1), (
+        "openKanbanEdit must pass the task id into _kanbanResetTaskModalFields."
+    )
+
+
 def test_kanban_modal_focus_trap_helper_exists():
     """Shared focus-trap helper should exist and attach/remove Tab key handling."""
     assert "function _trapModalFocus" in PANELS
@@ -700,7 +775,7 @@ def test_kanban_ui_parity_polish_adds_card_metadata_quick_actions_and_swimlanes(
         "kanban-card-assignee",
         "draggable=\"true\"",
         "ondrop=\"dropKanbanTask",
-        "onkeydown=\"if(event.key==='Enter'||event.key===' ')",
+        "onkeydown=\"if(event.target!==event.currentTarget) return; if(event.key==='Enter'||event.key===' ')",
     ):
         assert token in PANELS
     assert "target=\"_blank\" rel=\"noopener noreferrer\"" in PANELS
