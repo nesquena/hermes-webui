@@ -130,6 +130,25 @@ def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _clarify_sse_subscribers.pop(session_id, None)
 
 
+def _queue_head_snapshot(gw_queue: list) -> dict:
+    """The authoritative attention state for a session, taken under ``_lock``.
+
+    Both notification paths must describe the SAME thing: the oldest unresolved
+    clarify and how many are outstanding. The chat-SSE callback used to receive
+    the SUBMITTED entry with no count at all, so the browser fell back to 1
+    while the sidebar poll reported the real queue length — two different dedup
+    keys (``sid:clarify:1`` vs ``sid:clarify:2``) for one ongoing state, and
+    therefore a second notification for something the user had already been
+    told about.
+
+    Taken from the same locked mutation that produced the queue, so the count
+    can never be a later, racy read.
+    """
+    head = dict(gw_queue[0].data) if gw_queue else {}
+    head["pending_count"] = len(gw_queue)
+    return head
+
+
 def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
     """Queue a pending clarify request and notify the UI callback if registered."""
     data = _with_timeout_metadata(data)
@@ -155,7 +174,7 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                 _pending[session_key] = gw_queue[0].data
                 if cb:
                     try:
-                        cb(dict(entry.data))
+                        cb(_queue_head_snapshot(gw_queue))
                     except Exception:
                         pass
                 # Safe to call while holding _lock: publish() only takes the
@@ -171,10 +190,13 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
         cb = _gateway_notify_cbs.get(session_key)
         # Notify SSE subscribers from inside _lock for ordering guarantees.
         _clarify_sse_notify(session_key, dict(gw_queue[0].data), len(gw_queue))
+        # Snapshot for the chat-SSE callback taken from THIS mutation, so both
+        # paths publish the same head and the same count.
+        head_snapshot = _queue_head_snapshot(gw_queue)
     publish_session_list_changed("attention_pending")
     if cb:
         try:
-            cb(data)
+            cb(head_snapshot)
         except Exception:
             pass
     return entry

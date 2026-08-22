@@ -5964,17 +5964,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
-      showApprovalForSession(activeSid, d, d.pending_count || 1);
-      playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
+      const _approvalCount=_attentionPendingCount(d.pending_count);
+      showApprovalForSession(activeSid, d, _approvalCount);
+      playAttentionSound(_attentionSoundKey(activeSid,'approval',_approvalCount));
+      // Unconditional (gate follow-up #1): the visibility/active gate lives
+      // in the delivery path itself now -- a SELECTED session in a hidden
+      // tab is exactly when a browser notification is needed. Shared-key
+      // dedup keeps the sidebar path from double-alerting.
+      //
+      // The count MUST be the real pending count, not a hardcoded 1. The
+      // sidebar poll derives its dedup key from the server's own
+      // `attention.count` (api/routes.py::_session_attention_summary), so a
+      // second stacked approval makes the poll's key `sid:approval:2` while a
+      // hardcoded SSE key stays `sid:approval:1`. Different keys defeat the
+      // generation-backed pending/delivered dedup entirely and the user gets
+      // two notifications for one ongoing "needs approval" state. That was
+      // inert while the poll excluded the selected session; routing the
+      // selected session through the poll seam makes it live.
+      _deliverAttentionNotification(activeSid,'approval',_approvalCount,'Approval required',d.description||'Tool approval needed');
     });
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
-      playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
+      // Same key-agreement requirement as the approval handler above.
+      const _clarifyCount=_attentionPendingCount(d.pending_count);
+      playAttentionSound(_attentionSoundKey(activeSid,'clarify',_clarifyCount));
+      _deliverAttentionNotification(activeSid,'clarify',_clarifyCount,'Clarification needed',d.question||'Tool clarification needed');
     });
 
     source.addEventListener('state_saved',e=>{
@@ -9108,11 +9125,128 @@ function playNotificationSound(){
 }
 
 
+function _attentionPendingCount(raw){
+  // The explicit missing/malformed contract for an attention count.
+  //
+  // Every production producer stamps the authoritative count from the same
+  // locked mutation that created the state: `api/clarify.py::submit_pending`
+  // via `_queue_head_snapshot`, the approval mirror reconcile in
+  // `api/streaming.py`, and `api/routes.py::_session_attention_summary` for the
+  // sidebar poll. A missing, non-numeric, non-finite, fractional or
+  // non-positive value therefore never comes from one of them.
+  //
+  // It normalizes to a whole number >= 1 rather than being passed through,
+  // because the SSE path and the poll path must derive the SAME dedup key from
+  // the same state. Two spellings of one count are two keys, and two keys mean
+  // the user is alerted twice for a single ongoing request.
+  const value=Number(raw);
+  if(!Number.isFinite(value)||value<1) return 1;
+  return Math.floor(value);
+}
+
 function _attentionSoundKey(sid,kind,count){
   const safeSid=String(sid||'');
   const safeKind=String(kind||'attention');
-  const safeCount=Math.max(1,Number(count)||1);
+  const safeCount=_attentionPendingCount(count);
   return `${safeSid}:${safeKind}:${safeCount}`;
+}
+
+function _hasAttentionNotificationKey(sid,kind,count){
+  const safeSid=String(sid||'');
+  const seen=window._attentionNotificationKeys;
+  return !!safeSid&&seen instanceof Map&&seen.get(safeSid)===_attentionSoundKey(safeSid,kind,count);
+}
+
+function _markAttentionNotificationKey(sid,kind,count){
+  const safeSid=String(sid||'');
+  if(!safeSid) return false;
+  const key=_attentionSoundKey(safeSid,kind,count);
+  const seen=window._attentionNotificationKeys instanceof Map?window._attentionNotificationKeys:new Map();
+  window._attentionNotificationKeys=seen;
+  if(seen.get(safeSid)===key) return false;
+  seen.set(safeSid,key);
+  return true;
+}
+
+function _clearAttentionNotificationKey(sid){
+  const safeSid=String(sid||'');
+  const seen=window._attentionNotificationKeys;
+  if(safeSid&&seen instanceof Map) seen.delete(safeSid);
+  const pending=window._attentionNotificationPendingKeys;
+  if(safeSid&&pending instanceof Map) pending.delete(safeSid);
+  const retry=window._attentionNotificationRetryKeys;
+  if(safeSid&&retry instanceof Map) retry.delete(safeSid);
+}
+
+function _attentionRetryBackoffMs(attempts){
+  return Math.min(300000,60000*Math.pow(2,Math.max(0,attempts-2)));
+}
+
+function _attentionRetryEligible(sid,kind,count){
+  // A failed delivery may try again: freely while under the attempt bound,
+  // and after an exponential backoff beyond it. Never a permanent block — a
+  // still-pending approval must stay reachable until it resolves or its
+  // signature changes.
+  const retry=window._attentionNotificationRetryKeys;
+  const state=retry instanceof Map?retry.get(String(sid||'')):null;
+  const key=typeof state==='string'?state:(state&&state.key);
+  if(key!==_attentionSoundKey(sid,kind,count)) return false;
+  const attempts=typeof state==='string'?1:Math.max(0,Number(state&&state.attempts)||0);
+  if(attempts<2) return true;
+  const lastFailedAt=Number(state&&state.lastFailedAt)||0;
+  return Date.now()-lastFailedAt>=_attentionRetryBackoffMs(attempts);
+}
+
+function _deliverAttentionNotification(sid,kind,count,title,body){
+  const safeSid=String(sid||'');
+  if(!safeSid||_hasAttentionNotificationKey(safeSid,kind,count)) return false;
+  const key=_attentionSoundKey(safeSid,kind,count);
+  const pending=window._attentionNotificationPendingKeys instanceof Map
+    ?window._attentionNotificationPendingKeys:new Map();
+  const retry=window._attentionNotificationRetryKeys instanceof Map
+    ?window._attentionNotificationRetryKeys:new Map();
+  window._attentionNotificationPendingKeys=pending;
+  window._attentionNotificationRetryKeys=retry;
+  const priorPending=pending.get(safeSid);
+  if(priorPending&&priorPending.key===key) return false;
+  const priorRetry=retry.get(safeSid);
+  const priorRetryKey=typeof priorRetry==='string'?priorRetry:(priorRetry&&priorRetry.key);
+  const priorRetryAttempts=typeof priorRetry==='string'?1:Math.max(0,Number(priorRetry&&priorRetry.attempts)||0);
+  if(priorRetryKey===key&&priorRetryAttempts>=2&&!_attentionRetryEligible(safeSid,kind,count)) return false;
+  // Gate follow-up #2: ownership is a unique GENERATION, not the reusable
+  // sid:kind:count text. An A->B->A sequence gives the second A a new
+  // generation; the first A's late callbacks compare unequal and become
+  // no-ops instead of marking the new attempt delivered / eating its retry.
+  window._attentionNotificationGenSeq=(Number(window._attentionNotificationGenSeq)||0)+1;
+  const gen=window._attentionNotificationGenSeq;
+  pending.set(safeSid,{key,gen});
+  if(priorRetryKey===key) retry.delete(safeSid);
+  const ownsClaim=()=>{
+    const cur=pending.get(safeSid);
+    return !!cur&&cur.gen===gen;
+  };
+  const release=()=>{
+    if(ownsClaim()) pending.delete(safeSid);
+  };
+  const delivered=()=>{
+    if(!ownsClaim()) return;
+    release();
+    _markAttentionNotificationKey(safeSid,kind,count);
+  };
+  const failed=()=>{
+    if(!ownsClaim()) return;
+    release();
+    retry.set(safeSid,{key,attempts:priorRetryKey===key?priorRetryAttempts+1:1,lastFailedAt:Date.now()});
+  };
+  try{
+    return sendBrowserNotification(title,body,{
+      sid:safeSid,onlyIfInactive:true,onDelivered:delivered,onFailed:failed,
+      shouldDeliver:ownsClaim
+    });
+  }catch(_){
+    failed();
+    return false;
+  }
 }
 
 function playAttentionSound(key){
@@ -9152,7 +9286,22 @@ function _notificationOptions(body,options={}){
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
-  const direct=()=>new Notification(title||botName,opts);
+  const pageHidden=()=>{try{return !!(typeof document!=='undefined'&&document.hidden);}catch(_){return false;}};
+  // Gate follow-up #1: "active session" must not suppress delivery while the
+  // page is BACKGROUNDED -- that is exactly when the user needs the alert.
+  // Gate follow-up #2: a token-backed shouldDeliver runs immediately before
+  // display, so attention that was cleared/replaced after this delivery was
+  // scheduled can never surface late.
+  const mayDeliver=()=>{
+    if(typeof options.shouldDeliver==='function'&&!options.shouldDeliver()) return false;
+    return !(options.onlyIfInactive&&!pageHidden()&&S&&S.session&&S.session.session_id===options.sid);
+  };
+  const direct=()=>{
+    if(!mayDeliver()){
+      throw new Error('attention session is active');
+    }
+    return new Notification(title||botName,opts);
+  };
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
@@ -9165,10 +9314,10 @@ function _showPwaNotification(title,body,options={}){
       new Promise(res=>setTimeout(()=>res(null),2000))
     ]);
     return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
-      ? reg.showNotification(title||botName,opts)
-      : direct());
+      ? (mayDeliver()?reg.showNotification(title||botName,opts):direct())
+      : direct()).catch(()=>direct());
   }
-  return Promise.resolve(direct());
+  return Promise.resolve().then(direct);
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
@@ -9194,6 +9343,7 @@ function requestNotificationPermission(){
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
+  const failed=()=>{if(typeof options.onFailed==='function') options.onFailed();};
   // #4416: `forceHidden` means the caller already determined the tab was hidden
   // during the relevant window (e.g. a stream that ran while backgrounded), so
   // the live `document.hidden` visibility gate — which a late, throttled SSE
@@ -9201,16 +9351,25 @@ function sendBrowserNotification(title,body,options={}){
   // notifications-enabled SETTING is still honored (unlike `force`, which is the
   // explicit "Send test" override); only the visibility gate is bypassed.
   const forceHidden=!!(options&&options.forceHidden);
-  if(!force&&!window._notificationsEnabled) return;
-  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
-  if(!('Notification' in window)) return;
+  if(!force&&!window._notificationsEnabled){failed();return false;}
+  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()){failed();return false;}
+  if(!('Notification' in window)){failed();return false;}
+  const deliver=()=>_showPwaNotification(title,body,options)
+    .then(()=>{if(typeof options.onDelivered==='function') options.onDelivered();return true;})
+    .catch(()=>{failed();return false;});
   if(Notification.permission==='granted'){
-    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    deliver();
+    return true;
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    failed();
+    return false;
   }else{
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
+    requestNotificationPermission().then(p=>{if(p==='granted'){
+      deliver();
+    }else failed();}).catch(failed);
+    return false;
   }
 }
 

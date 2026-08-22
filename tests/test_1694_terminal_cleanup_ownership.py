@@ -149,8 +149,11 @@ def test_attention_events_use_distinct_sound_from_completion():
     done_body = _event_body("done")
     attention_body = _function_body("playAttentionSound")
 
-    assert "playAttentionSound(_attentionSoundKey(activeSid,'approval',1));" in approval_body
-    assert "playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));" in clarify_body
+    # The count is the real pending count now, not a literal 1: the sidebar poll
+    # derives its dedup key from the server's attention count, and a hardcoded 1
+    # made the two paths disagree for a second stacked approval (double alert).
+    assert "playAttentionSound(_attentionSoundKey(activeSid,'approval',_approvalCount));" in approval_body
+    assert "playAttentionSound(_attentionSoundKey(activeSid,'clarify',_clarifyCount));" in clarify_body
     for body in (approval_body, clarify_body):
         assert "playNotificationSound();" not in body
     assert "playNotificationSound();" in done_body

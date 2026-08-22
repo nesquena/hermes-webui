@@ -127,8 +127,10 @@ def test_chat_stream_approval_listener_renders_received_count():
     function _applyToAnchor() {{}}
     function showApprovalForSession(sid, data, count) {{ rendered.push({{sid, data, count}}); }}
     function playAttentionSound() {{}}
+    function _attentionPendingCount(raw) {{ const v=Number(raw); return (!Number.isFinite(v)||v<1)?1:Math.floor(v); }}
     function _attentionSoundKey() {{ return 'approval'; }}
     function sendBrowserNotification() {{}}
+    function _deliverAttentionNotification() {{}}
     {listener}
     source.listeners.approval({{ data: JSON.stringify({{command: 'head', approval_id: 'a', pending_count: 2}}) }});
     process.stdout.write(JSON.stringify(rendered));
