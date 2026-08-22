@@ -271,4 +271,3 @@ def test_kanban_source_filter_passed_to_dedupe():
         "source_filter must be forwarded to _dedupe_cli_sidebar_sessions_for_api "
         "so an explicit kanban filter can override the hide"
     )
-
