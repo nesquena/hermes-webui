@@ -161,6 +161,10 @@ def _reset_wakeup_state() -> None:
     cfg.PENDING_BG_TASK_COMPLETIONS.clear()
     cfg.BG_TASK_COMPLETE_EVENTS_SEEN.clear()
     cfg.DEFERRED_PROCESS_WAKEUPS.clear()
+    # Clear any per-origin wakeup-admission reservations left by a test that
+    # monkeypatched the wakeup runner (which normally releases them).
+    with bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.clear()
     reset = getattr(peu, "_reset_legacy_async_delivery_dedupe_for_tests", None)
     if reset is not None:
         reset()
@@ -1292,5 +1296,333 @@ def test_next_turn_drain_respects_origin_over_session_key_index(monkeypatch):
     assert [consumer for _evt, consumer in delivery["claim"]] == ["webui-next-turn"]
     assert len(delivery["complete"]) == 1
     assert delivery["release"] == []
+
+
+def test_concurrent_idle_wakeups_share_one_atomic_admission(monkeypatch):
+    """Issue #6959 regression: N simultaneous idle completions for one origin
+    must not each claim the durable delivery. The busy pre-check is not a
+    reservation — multiple completions can pass it together and race for a
+    single turn-admission slot; sibling 409s would then consume the finite
+    delivery-attempt budget. Only one completion may own the in-flight wakeup
+    admission; siblings defer WITHOUT claiming (zero attempts consumed)."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    from api import routes
+
+    turn_started = threading.Event()
+    allow_turn = threading.Event()
+    turn_calls: list[str] = []
+
+    def _start_turn(session_id, prompt, **_kwargs):
+        turn_calls.append(session_id)
+        turn_started.set()
+        assert allow_turn.wait(timeout=3), "first wakeup never unblocked"
+        return {"_status": 200, "stream_id": "stream-1"}
+
+    monkeypatch.setattr(routes, "start_session_turn", _start_turn)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: False)
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)
+
+    events = [
+        _async_delegation_event(delegation_id=f"deleg_race_{i}")
+        for i in range(3)
+    ]
+    try:
+        # First completion reserves the per-origin admission and claims.
+        bp._process_async_delegation_event(
+            events[0],
+            session_id="webui-session-1",
+            delegation_id=events[0]["delegation_id"],
+            process_registry=registry,
+        )
+        assert _wait_until(turn_started.is_set), "first wakeup never started a turn"
+
+        # Siblings arrive while the first wakeup is still in flight: they must
+        # defer WITHOUT claiming (no delivery attempt consumed).
+        for evt in events[1:]:
+            bp._process_async_delegation_event(
+                evt,
+                session_id="webui-session-1",
+                delegation_id=evt["delegation_id"],
+                process_registry=registry,
+            )
+
+        assert len(turn_calls) == 1, "at most one wakeup turn per origin"
+        assert len(delivery["claim"]) == 1, (
+            "siblings must not claim while admission is held"
+        )
+        assert delivery["claim"][0][0]["delegation_id"] == "deleg_race_0"
+        assert delivery["delivery_attempts"] == 1
+        assert delivery["complete"] == []
+        assert delivery["release"] == []
+        assert delivery["delivery_state"] == "pending"
+
+        # Release admission: exactly the one admitted wakeup delivers once.
+        allow_turn.set()
+        assert _wait_until(lambda: len(delivery["complete"]) == 1)
+        assert delivery["delivery_attempts"] == 1
+        assert delivery["release"] == []
+        assert delivery["delivery_state"] == "delivered"
+        assert len(turn_calls) == 1
+        # Sibling deferrals armed a durable restore sweep (not dropped).
+        assert peu.async_delivery_retry_timer_count() >= 1
+    finally:
+        allow_turn.set()
+        _reset_wakeup_state()
+
+
+def test_idle_wakeup_admission_rotates_after_transient_rejection(monkeypatch):
+    """Issue #6959: when the admitted wakeup loses the turn (transient 409),
+    only ITS OWN claim is consumed; the per-origin admission slot rotates so
+    the next backlogged completion claims and delivers on the next
+    opportunity. No row reaches the terminal dropped state."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    from api import routes
+
+    turn_started = threading.Event()
+    allow_turn = threading.Event()
+    round_ = {"n": 0}
+
+    def _start_turn(session_id, prompt, **_kwargs):
+        turn_started.set()
+        assert allow_turn.wait(timeout=3), "wakeup never unblocked"
+        round_["n"] += 1
+        if round_["n"] == 1:
+            return {"_status": 409, "error": "busy"}  # lost turn admission
+        return {"_status": 200, "stream_id": "stream-1"}
+
+    monkeypatch.setattr(routes, "start_session_turn", _start_turn)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: False)
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)
+
+    def _admission_empty() -> bool:
+        with bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+            return not bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT
+
+    evt_first = _async_delegation_event(delegation_id="deleg_rotate_0")
+    evt_second = _async_delegation_event(delegation_id="deleg_rotate_1")
+    try:
+        # Round 1: the admitted wakeup is transiently rejected. Its release
+        # must consume exactly one attempt and free the admission slot.
+        bp._process_async_delegation_event(
+            evt_first,
+            session_id="webui-session-1",
+            delegation_id=evt_first["delegation_id"],
+            process_registry=registry,
+        )
+        assert _wait_until(turn_started.is_set)
+        allow_turn.set()
+        assert _wait_until(lambda: len(delivery["release"]) == 1)
+        assert delivery["delivery_attempts"] == 1
+        assert delivery["delivery_state"] == "pending"
+        assert round_["n"] == 1
+        assert _wait_until(_admission_empty), "slot must rotate after rejection"
+
+        # Round 2: the next backlogged completion claims and is accepted.
+        turn_started.clear()
+        bp._process_async_delegation_event(
+            evt_second,
+            session_id="webui-session-1",
+            delegation_id=evt_second["delegation_id"],
+            process_registry=registry,
+        )
+        assert _wait_until(turn_started.is_set)
+        allow_turn.set()
+        assert _wait_until(lambda: len(delivery["complete"]) == 1)
+        assert delivery["delivery_state"] == "delivered"
+        assert delivery["delivery_attempts"] == 2
+        assert len(delivery["release"]) == 1
+        assert round_["n"] == 2
+        assert _wait_until(_admission_empty)
+    finally:
+        allow_turn.set()
+        _reset_wakeup_state()
+
+
+def test_admission_slot_released_on_claim_and_format_failures(monkeypatch):
+    """Issue #6959 guard: every pre-dispatch exit of the delivery path must
+    release the per-origin admission reservation, or a failed claim/format
+    would block all future wakeups for that session."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    from api import routes
+
+    accepted = []
+
+    monkeypatch.setattr(
+        routes,
+        "start_session_turn",
+        lambda *_args, **_kwargs: accepted.append(1)
+        or {"_status": 200, "stream_id": "stream-1"},
+    )
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: False)
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)
+
+    def _admission_empty() -> bool:
+        with bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+            return not bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT
+
+    try:
+        # Claim returns None (row already delivered): slot must be released.
+        delivery["delivery_state"] = "delivered"
+        bp._process_async_delegation_event(
+            _async_delegation_event(delegation_id="deleg_noclaim"),
+            session_id="webui-session-1",
+            delegation_id="deleg_noclaim",
+            process_registry=registry,
+        )
+        assert _admission_empty(), "claim-None exit must release the admission slot"
+
+        # Formatting failure (empty prompt): slot must be released.
+        delivery["delivery_state"] = "pending"
+        monkeypatch.setattr(bp, "format_wakeup_prompt", lambda _evt: "")
+        bp._process_async_delegation_event(
+            _async_delegation_event(delegation_id="deleg_badfmt"),
+            session_id="webui-session-1",
+            delegation_id="deleg_badfmt",
+            process_registry=registry,
+        )
+        assert _admission_empty(), "format-failure exit must release the admission slot"
+
+        # A normal wakeup for the same session still claims and delivers.
+        monkeypatch.setattr(bp, "format_wakeup_prompt", lambda _evt: "delegation result")
+        bp._process_async_delegation_event(
+            _async_delegation_event(delegation_id="deleg_ok"),
+            session_id="webui-session-1",
+            delegation_id="deleg_ok",
+            process_registry=registry,
+        )
+        assert _wait_until(lambda: len(delivery["complete"]) == 1)
+        assert delivery["delivery_state"] == "delivered"
+        assert accepted
+    finally:
+        _reset_wakeup_state()
+
+
+def test_busy_predicate_covers_stream_publication_window_before_active_runs(
+    monkeypatch,
+):
+    """#6959 gate (MUST-FIX 1 repro): a worker blocked *before* ACTIVE_RUNS
+    registration — stream already published (STREAMS + STREAM_SESSION_OWNERS
+    populated), worker thread not yet in ACTIVE_RUNS — must still count as an
+    active turn. Otherwise a sibling same-origin completion would pass the busy
+    pre-check, reserve, claim, and 409 against the already-published stream,
+    burning the finite delivery-attempt budget. With the fix, completions that
+    arrive in that window defer WITHOUT claiming (zero claims, zero attempts)."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    # ACTIVE_RUNS is empty: the worker has NOT yet registered — only the
+    # pre-registration stream publication is visible.
+    monkeypatch.setattr(cfg, "ACTIVE_RUNS", {})
+    monkeypatch.setattr(cfg, "STREAMS", {"stream-preactive": object()})
+    monkeypatch.setattr(
+        cfg,
+        "STREAM_SESSION_OWNERS",
+        {"stream-preactive": "webui-session-1"},
+    )
+    monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)
+
+    try:
+        # The real predicate (not monkeypatched) must see the published stream.
+        assert bp._session_has_active_turn("webui-session-1") is True
+        # Cross-origin isolation: another session is not blocked by it.
+        assert bp._session_has_active_turn("other-session") is False
+
+        # A completion for the origin arrives in the publication window: it
+        # must defer via the busy path — zero claims, zero delivery attempts.
+        bp._process_async_delegation_event(
+            _async_delegation_event(delegation_id="deleg_preactive"),
+            session_id="webui-session-1",
+            delegation_id="deleg_preactive",
+            process_registry=registry,
+        )
+        assert delivery["claim"] == [], (
+            "no claim may be taken while the pre-ACTIVE_RUNS stream is live"
+        )
+        assert delivery["delivery_attempts"] == 0
+        assert delivery["release"] == []
+        with bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+            assert bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT == set(), (
+                "busy-path exit must not leave a reservation behind"
+            )
+        assert delivery["delivery_state"] == "pending"
+    finally:
+        _reset_wakeup_state()
+
+
+def test_admission_slot_released_when_retry_helper_raises(monkeypatch):
+    """#6959 gate (MUST-FIX 2 repro): the post-reservation body must release
+    the per-origin admission even when a retry helper raises mid-path — the
+    old code released manually AFTER schedule_async_delegation_claim_retry, so
+    a raise there stranded the reservation permanently and every later
+    completion for the origin deferred forever without delivery."""
+    _reset_wakeup_state()
+    registry = _install_fake_process_registry(monkeypatch)
+    delivery = _install_fake_durable_delivery_api(monkeypatch)
+    monkeypatch.setattr(bp, "_session_has_active_turn", lambda _session_id: False)
+    monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)
+
+    def _admission_empty() -> bool:
+        with bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+            return not bp._ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT
+
+    try:
+        # Claim succeeds, then the claim-None retry scheduler raises: the
+        # exception must NOT strand the reservation.
+        delivery["delivery_state"] = "delivered"  # claim returns None
+        monkeypatch.setattr(
+            bp,
+            "schedule_async_delegation_claim_retry",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("retry scheduler boom")
+            ),
+        )
+        with pytest.raises(RuntimeError):
+            bp._process_async_delegation_event(
+                _async_delegation_event(delegation_id="deleg_raise_claim"),
+                session_id="webui-session-1",
+                delegation_id="deleg_raise_claim",
+                process_registry=registry,
+            )
+        assert _admission_empty(), (
+            "reservation must be released even when the retry scheduler raises"
+        )
+
+        # The session is NOT bricked: a later completion still claims and
+        # delivers normally (real wakeup thread; its own finally releases).
+        from api import routes
+
+        delivery["delivery_state"] = "pending"
+        monkeypatch.setattr(
+            bp,
+            "schedule_async_delegation_claim_retry",
+            lambda *a, **k: False,
+        )
+        monkeypatch.setattr(bp, "format_wakeup_prompt", lambda _evt: "delegation result")
+        monkeypatch.setattr(
+            routes,
+            "start_session_turn",
+            lambda *_args, **_kwargs: {"_status": 200, "stream_id": "stream-1"},
+        )
+        bp._process_async_delegation_event(
+            _async_delegation_event(delegation_id="deleg_raise_ok"),
+            session_id="webui-session-1",
+            delegation_id="deleg_raise_ok",
+            process_registry=registry,
+        )
+        assert _wait_until(lambda: len(delivery["complete"]) == 1)
+        assert delivery["delivery_state"] == "delivered"
+        assert _wait_until(_admission_empty)
+    finally:
+        _reset_wakeup_state()
 
 
