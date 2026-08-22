@@ -1362,12 +1362,33 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+        # Serialized bytes represented by this resident object. Full loads and
+        # successful saves refresh this scalar without walking the Python object
+        # graph; metadata-only stubs replace it with their small prefix size.
+        self._cache_resident_bytes = 0
+        # Fingerprint of the last successfully persisted public state. Byte-only
+        # eviction compares this allocation-bounded digest before dropping a full
+        # session, because message-count parity cannot detect same-count edits.
+        self._cache_persisted_fingerprint = None
+        # One authority token couples the public-state fingerprint with the
+        # durable sidecar generation it describes.  The two legacy projections
+        # above/below remain for compatibility with existing callers, but every
+        # eviction/publication decision reads this tuple so a partial transfer
+        # fails closed rather than pairing one writer's fingerprint with another
+        # writer's sidecar generation.
+        self._cache_persisted_authority = None
+        self._sidecar_stat_sig = None
 
     @property
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        enforce_cache_bounds: bool = True,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1426,14 +1447,14 @@ class Session:
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
-        meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
-        # Keep the in-memory fingerprint aligned with what we just persisted, so a
-        # later metadata-only reload of THIS object (or any fingerprint reader)
-        # sees the current value rather than a stale load-time snapshot (#5854
-        # defense-in-depth; the cached-side freshness check reads real records,
-        # not this, so this is belt-and-suspenders).
-        self._anchor_scene_index = dict(meta['anchor_scene_index'])
+        # Placeholders only — reserves their position ahead of 'messages' in
+        # dict/JSON key order. The real values are derived from ``snapshot``
+        # below (after the deep copy), not from live ``self``, so a concurrent
+        # mutation of self.messages/self.anchor_activity_scenes during the
+        # deep copy can't leave stale counts describing a payload that no
+        # longer matches what was actually captured.
+        meta['message_count'] = None
+        meta['anchor_scene_index'] = None
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
@@ -1443,7 +1464,43 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        # Capture ONE immutable snapshot of the public state and use it for both
+        # the fingerprint and the serialized bytes. ``payload_data`` itself only
+        # holds top-level references to ``self``'s attributes (e.g.
+        # ``meta['messages'] is self.messages``), so hashing it and then calling
+        # ``json.dumps`` on it in a separate traversal previously left a window
+        # where a nested field could change A->B->A between the two passes
+        # (e.g. across a slow/yielding serialization of a huge transcript): the
+        # fingerprint would describe A, the disk bytes would describe B, and a
+        # revert back to A before the post-write comparison below would make
+        # the mismatch invisible, letting byte-only eviction treat a corrupted
+        # sidecar as clean. Deep-copying breaks that aliasing: the copy is a
+        # fully independent object graph, so no concurrent mutation of ``self``
+        # (during or after this point) can change what gets hashed or written.
+        payload_data = {**meta, **extra}
+        snapshot = copy.deepcopy(payload_data)
+        # Derive the prefix metadata from the snapshot itself (not live self)
+        # now that the copy is complete, so message_count/anchor_scene_index
+        # always describe the exact messages/anchor_activity_scenes that got
+        # captured into ``snapshot`` — even if ``self`` was mutated during the
+        # deepcopy above. Assigning into the existing keys does not change
+        # their position, so they still precede 'messages' in JSON output.
+        snapshot['message_count'] = len(snapshot.get('messages') or [])
+        snapshot['anchor_scene_index'] = _anchor_scene_index_from_records(
+            snapshot.get('anchor_activity_scenes')
+        )
+        # Keep the in-memory fingerprint aligned with what we just persisted, so a
+        # later metadata-only reload of THIS object (or any fingerprint reader)
+        # sees the current value rather than a stale load-time snapshot (#5854
+        # defense-in-depth; the cached-side freshness check reads real records,
+        # not this, so this is belt-and-suspenders).
+        self._anchor_scene_index = dict(snapshot['anchor_scene_index'])
+        persisted_fingerprint = _session_public_state_fingerprint({
+            key: value
+            for key, value in snapshot.items()
+            if key not in {'message_count', 'anchor_scene_index'}
+        })
+        payload = json.dumps(snapshot, ensure_ascii=False, indent=2)
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1465,11 +1522,11 @@ class Session:
                     existing_msg_count = len(existing.get('messages') or [])
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(snapshot.get('messages') or [])
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
+                    and (snapshot.get('active_stream_id') or snapshot.get('pending_user_message'))
                 ):
                     logger.warning(
                         "refusing to overwrite session %s messages with empty active/pending snapshot "
@@ -1509,18 +1566,62 @@ class Session:
             pass
 
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        written_size = None
+        written_identity = None
+        installed_sig = None
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+                try:
+                    # Measure the exact temp-file inode whose bytes will be
+                    # atomically installed. A later path stat can race cleanup
+                    # or replacement and must not preserve a stale old weight.
+                    written_stat = os.fstat(f.fileno())
+                    written_size = max(0, int(written_stat.st_size))
+                    # Keep the exact temp inode identity while it still names
+                    # the bytes that were just fsync'd.  ``os.replace`` moves
+                    # that inode into place; a post-replace path stat can then
+                    # prove the final path still names *this* payload instead
+                    # of a concurrent writer's replacement.
+                    written_identity = _sidecar_file_identity_from_stat(written_stat)
+                except (OSError, TypeError, ValueError, OverflowError):
+                    written_size = None
             _safe_replace(tmp, self.path)
+            # Do not blindly stat the path and call it this save's generation:
+            # another writer may replace it immediately after our install.  A
+            # matching inode/dev/size/mtime identity binds the captured final
+            # signature to the exact fsync'd temp bytes; otherwise both the
+            # fingerprint and generation become unknown and byte eviction fails
+            # closed.
+            observed_sig = _sidecar_stat_signature(self.path)
+            if (
+                written_identity is not None
+                and _sidecar_signature_has_file_identity(observed_sig, written_identity)
+            ):
+                installed_sig = observed_sig
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
             raise
+        # ``None`` is an explicit unknown-weight sentinel. Cache accounting
+        # treats it as over-budget rather than retaining a stale pre-save size.
+        # A replacement detected between install and generation capture is also
+        # unknown: the temp-file byte count belongs to another path generation.
+        self._cache_resident_bytes = written_size if installed_sig is not None else None
+        if (
+            persisted_fingerprint is not None
+            and _session_state_fingerprint(self) != persisted_fingerprint
+        ):
+            persisted_fingerprint = None
+        _set_session_persisted_authority(
+            self,
+            persisted_fingerprint,
+            installed_sig,
+        )
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1548,6 +1649,51 @@ class Session:
                     exc_info=True,
                 )
 
+        # A resident session can grow far past the aggregate byte budget without
+        # causing another cache insertion. Re-run the shared bound after durable
+        # persistence so old clean entries are reclaimed immediately. Cache
+        # maintenance is best-effort: a completed sidecar save must not be
+        # reported as failed if eviction diagnostics encounter an error.
+        if enforce_cache_bounds:
+            try:
+                with LOCK:
+                    cached = SESSIONS.get(self.session_id)
+                    self_authority = _session_persisted_authority(self)
+                    if cached is not None:
+                        cached_authority = _session_persisted_authority(cached)
+                        # A detached writer may replace only a clean older
+                        # generation. Do not snapshot arbitrary live state here:
+                        # another writer can already hold the per-session lock,
+                        # mutate this object, and be waiting for LOCK. Its
+                        # persisted fingerprint is the only safe CAS baseline.
+                        cached_state_fingerprint = (
+                            cached_authority[0] if cached_authority is not None else None
+                        )
+                        if cached is self:
+                            _evict_sessions_over_cap()
+                        elif (
+                            _session_is_evictable(cached)
+                            and _session_has_current_persisted_generation(self, self_authority)
+                            and _cache_entry_matches_observed_authority(
+                                cached,
+                                cached,
+                                cached_authority,
+                                cached_state_fingerprint,
+                            )
+                        ):
+                            # CAS-publish this newly saved generation only over
+                            # a still-clean observed cache entry. A concurrent
+                            # writer/cache publisher changes either identity or
+                            # authority and wins instead of being overwritten.
+                            SESSIONS[self.session_id] = self
+                            _evict_sessions_over_cap()
+            except Exception:
+                logger.debug(
+                    "Post-save session cache enforcement failed for %s",
+                    self.session_id,
+                    exc_info=True,
+                )
+
     @classmethod
     def load(cls, sid):
         # Validate session ID format to prevent path traversal.  API/gateway
@@ -1556,21 +1702,50 @@ class Session:
         if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
+        # Read one descriptor-stable sidecar generation.  A plain ``stat`` then
+        # ``read_bytes`` can describe different atomic-replace generations; the
+        # helper binds the parsed bytes to a descriptor-derived token and
+        # revalidates the pathname before we construct a cacheable Session.
+        # Parsing a very large sidecar is itself a window, so retry the complete
+        # read → parse → path-validation sequence boundedly rather than returning
+        # an object whose exact input generation has already gone stale.
+        sidecar_bytes = None
+        _pre_read_sig = None
+        data = None
+        for _attempt in range(_SIDECAR_GENERATION_READ_RETRIES):
+            snapshot = _read_sidecar_snapshot(p)
+            if snapshot is None:
+                continue
+            candidate_bytes, candidate_sig = snapshot
+            candidate_data = json.loads(candidate_bytes)
+            if not _sidecar_signature_matches_path(p, candidate_sig):
+                continue
+            sidecar_bytes = candidate_bytes
+            _pre_read_sig = candidate_sig
+            data = candidate_data
+            break
+        if sidecar_bytes is None or _pre_read_sig is None or data is None:
             return None
-        # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
-        # cache write is only committed if the file didn't change under us
-        # during the parse (TOCTOU guard against an atomic replace mid-read).
-        _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        # Weight the exact buffer parsed above. The path can be atomically
+        # replaced between the pre-read signature and open/read; using that old
+        # signature's size would permanently undercount a larger replacement.
+        session._cache_resident_bytes = len(sidecar_bytes)
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
                 # intentionally shrinks the transcript (#2592).
-                session.save(touch_updated_at=False, skip_index=True)
+                # A full load can occur inside the global cache lock while an
+                # eviction pass resolves authoritative legacy facts. That outer
+                # pass already enforces the bound; reacquiring the non-reentrant
+                # LOCK here would deadlock. Normal saves retain enforcement.
+                session.save(
+                    touch_updated_at=False,
+                    skip_index=True,
+                    enforce_cache_bounds=False,
+                )
             except Exception:
                 logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
         else:
@@ -1594,6 +1769,11 @@ class Session:
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+            _set_session_persisted_authority(
+                session,
+                _session_state_fingerprint(session),
+                _pre_read_sig,
+            )
         return session
 
     @classmethod
@@ -1622,7 +1802,9 @@ class Session:
                 return cls.load(sid)
             parsed['messages'] = []
             parsed['tool_calls'] = []
+            metadata_resident_bytes = len(prefix.encode('utf-8'))
             session = cls(**parsed)
+            session._cache_resident_bytes = metadata_resident_bytes
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
@@ -1654,6 +1836,7 @@ class Session:
                 if _facts is not None:
                     parsed['anchor_scene_index'] = _facts.get('scene_index') or {}
                     session = cls(**parsed)
+                    session._cache_resident_bytes = metadata_resident_bytes
                     session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
                     session._loaded_metadata_only = True
                     return session
@@ -3762,7 +3945,11 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
-def _sync_sidecar_from_state_db_if_newer(session) -> bool:
+def _sync_sidecar_from_state_db_if_newer(
+    session,
+    *,
+    enforce_cache_bounds: bool = True,
+) -> bool:
     """Read-side self-heal when WebUI sidecar lags Hermes state.db.
 
     A WebUI stream can lose its terminal ``done``/``stream_end`` path while the
@@ -3775,6 +3962,10 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
     This deliberately reuses the existing append-only reconciler so workspace
     prefixes, timestamp drift, compaction watermarks, and tool metadata keep the
     same semantics as normal WebUI/state.db display merging.
+
+    ``enforce_cache_bounds=False`` preserves the scan accessor's no-LRU-churn
+    contract. The durable repair and cached projection still update, but a
+    content scan must not evict or promote the user's working set.
     """
     if session is None or getattr(session, '_loaded_metadata_only', False):
         return False
@@ -3938,6 +4129,69 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.updated_at = locked.updated_at
+        session._cache_resident_bytes = locked._cache_resident_bytes
+        # The durable save happened through a freshly loaded lock-owned object,
+        # not necessarily the object held in SESSIONS. Transfer the derived
+        # accounting only when this cached projection exactly matches what was
+        # persisted; otherwise leave it fingerprint-unknown so byte eviction is
+        # conservative about any concurrent unsaved metadata.
+        locked_authority = _session_persisted_authority(locked)
+        try:
+            if (
+                locked_authority is not None
+                and _session_has_current_persisted_generation(locked, locked_authority)
+                and _session_state_fingerprint(session) == locked_authority[0]
+            ):
+                _set_session_persisted_authority(
+                    session,
+                    locked_authority[0],
+                    locked_authority[1],
+                )
+            else:
+                # Keep fingerprint and sidecar generation inseparable. A newer
+                # path replacement, or any caller-local metadata divergence,
+                # makes both unknown so byte eviction cannot misclassify it.
+                _set_session_persisted_authority(session, None, None)
+        except Exception:
+            _set_session_persisted_authority(session, None, None)
+        if enforce_cache_bounds:
+            try:
+                with LOCK:
+                    cached = SESSIONS.get(sid)
+                    session_authority = _session_persisted_authority(session)
+                    if cached is not None:
+                        cached_authority = _session_persisted_authority(cached)
+                        # This reconciliation holds the session mutation lock;
+                        # nevertheless a cached object may have unsaved state
+                        # from a prior owner. Replace only an exact clean older
+                        # authority, never a freshly observed mutable graph.
+                        cached_state_fingerprint = (
+                            cached_authority[0] if cached_authority is not None else None
+                        )
+                        if cached is session:
+                            _evict_sessions_over_cap()
+                        elif (
+                            _session_is_evictable(cached)
+                            and _session_has_current_persisted_generation(session, session_authority)
+                            and _cache_entry_matches_observed_authority(
+                                cached,
+                                cached,
+                                cached_authority,
+                                cached_state_fingerprint,
+                            )
+                        ):
+                            # Publish the reconciled projection only if the
+                            # resident entry still represents the clean state we
+                            # observed; a competing writer/publication wins CAS.
+                            SESSIONS[sid] = session
+                            _evict_sessions_over_cap()
+            except Exception:
+                logger.debug(
+                    "Post-reconciliation session cache enforcement failed for %s",
+                    sid,
+                    exc_info=True,
+                )
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,
@@ -4127,18 +4381,100 @@ def _disk_scene_fingerprint(disk_meta_prefix: dict):
     return None
 
 
+_SIDECAR_GENERATION_READ_RETRIES = 3
+
+
+def _sidecar_file_identity_from_stat(st):
+    """Return the immutable-on-replace part of one sidecar ``stat`` result.
+
+    ``ctime`` changes when a temporary inode is renamed into its final path on
+    common Linux filesystems, so it cannot prove that a post-rename path still
+    names the inode we fsync'd.  Device/inode/size/mtime can: a competing atomic
+    replace necessarily changes the inode (and an in-place edit changes size or
+    mtime).  The full signature below still retains ctime for ordinary freshness
+    checks.
+    """
+    try:
+        return (
+            int(st.st_dev),
+            int(st.st_ino),
+            int(st.st_size),
+            int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
+        )
+    except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _sidecar_stat_signature_from_stat(path, st):
+    """Build a durable sidecar generation token from one descriptor/path stat."""
+    identity = _sidecar_file_identity_from_stat(st)
+    if identity is None:
+        return None
+    try:
+        return (
+            str(path),
+            identity[3],
+            identity[2],
+            int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))),
+            identity[0],
+            identity[1],
+        )
+    except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _sidecar_signature_has_file_identity(signature, identity) -> bool:
+    """Whether a path signature still names an expected fsync'd file identity."""
+    if not isinstance(signature, tuple) or len(signature) < 6 or identity is None:
+        return False
+    try:
+        return (signature[4], signature[5], signature[2], signature[1]) == tuple(identity)
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
 def _sidecar_stat_signature(path):
     """Stat signature for a sidecar path, or None if it can't be stat'd.
 
-    Any edit (atomic-rename or in-place) changes at least one component, so a
-    cached entry keyed by this signature is auto-invalidated on the next write.
+    Device and inode distinguish an atomic replacement from an equal-size,
+    same-timestamp sibling write.  Callers that parse a sidecar use
+    ``_read_sidecar_snapshot`` below, which derives this token from the opened
+    descriptor and revalidates the path before it is published.
     """
     try:
         st = path.stat()
     except OSError:
         return None
-    return (str(path), int(getattr(st, 'st_mtime_ns', int(st.st_mtime * 1_000_000_000))),
-            int(st.st_size), int(getattr(st, 'st_ctime_ns', int(st.st_ctime * 1_000_000_000))))
+    return _sidecar_stat_signature_from_stat(path, st)
+
+
+def _sidecar_signature_matches_path(path, signature) -> bool:
+    """Return whether ``path`` still names the exact captured generation."""
+    return signature is not None and _sidecar_stat_signature(path) == signature
+
+
+def _read_sidecar_snapshot(path):
+    """Read one stable sidecar generation as ``(bytes, signature)`` or ``None``.
+
+    The descriptor is fstat'd before and after the read, then the path is
+    revalidated against that descriptor-derived token.  Therefore the returned
+    bytes, generation, and current pathname all describe one coherent sidecar
+    generation.  A rename or in-place edit at any observed boundary retries;
+    bounded exhaustion fails closed rather than publishing an unverifiable load.
+    """
+    for _attempt in range(_SIDECAR_GENERATION_READ_RETRIES):
+        try:
+            with open(path, 'rb') as sidecar:
+                before = _sidecar_stat_signature_from_stat(path, os.fstat(sidecar.fileno()))
+                sidecar_bytes = sidecar.read()
+                after = _sidecar_stat_signature_from_stat(path, os.fstat(sidecar.fileno()))
+        except OSError:
+            continue
+        if before is None or before != after:
+            continue
+        if _sidecar_signature_matches_path(path, after):
+            return sidecar_bytes, after
+    return None
 
 
 def _legacy_sidecar_facts_get(sid):
@@ -4357,8 +4693,26 @@ def _cached_session_lags_disk(cached) -> bool:
             # (which would serve a potentially stale cache). Greptile P1.
             pass
         else:
-            # Inactive session, count matches, scene records match — cache is
-            # at parity with disk.
+            # Inactive session, count matches, scene records match.
+            # Check if disk was modified (e.g. metadata or same-count edit)
+            # while cached has remained clean and unmodified.
+            authority = _session_persisted_authority(cached)
+            if authority is not None:
+                disk_sig = _sidecar_stat_signature(cached.path)
+                if disk_sig is not None and disk_sig != authority[1]:
+                    # The cache may legitimately hold a clean older generation
+                    # while a detached writer has installed a newer sidecar. Do
+                    # not require path parity here: that is exactly the stale
+                    # condition we are detecting. The public fingerprint still
+                    # proves this object itself has not accrued unsaved edits.
+                    try:
+                        if (
+                            _session_persisted_authority(cached) == authority
+                            and _session_state_fingerprint(cached) == authority[0]
+                        ):
+                            return True
+                    except Exception:
+                        pass
             return False
     try:
         disk_meta = Session.load_metadata_only(sid)
@@ -4616,8 +4970,187 @@ def _session_is_evictable(s) -> bool:
     return disk_count >= in_memory_count
 
 
-def _evict_sessions_over_cap(cap: int | None = None) -> int:
-    """Evict clean, persisted, non-active sessions until len(SESSIONS) <= cap.
+_UNKNOWN_SESSION_CACHE_RESIDENT_BYTES = (1 << 63) - 1
+
+
+def _session_cache_resident_bytes(session) -> int:
+    """Return recorded weight, failing closed when a full-session size is unknown."""
+    raw_value = getattr(session, '_cache_resident_bytes', 0)
+    if raw_value is None:
+        return _UNKNOWN_SESSION_CACHE_RESIDENT_BYTES
+    try:
+        value = int(raw_value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return _UNKNOWN_SESSION_CACHE_RESIDENT_BYTES
+    return max(0, value)
+
+
+def _session_public_state_fingerprint(public_state: dict) -> bytes:
+    """Hash a public-state mapping without materializing another JSON payload.
+
+    Walking the object graph catches same-count message edits and metadata
+    changes while keeping temporary allocation bounded for transcripts with
+    giant strings.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    seen = set()
+
+    def update(value):
+        if value is None:
+            digest.update(b'n;')
+        elif value is True:
+            digest.update(b'b1;')
+        elif value is False:
+            digest.update(b'b0;')
+        elif isinstance(value, int):
+            digest.update(b'i')
+            digest.update(str(value).encode('ascii'))
+            digest.update(b';')
+        elif isinstance(value, float):
+            digest.update(b'f')
+            digest.update(repr(value).encode('ascii'))
+            digest.update(b';')
+        elif isinstance(value, str):
+            digest.update(b's')
+            digest.update(str(len(value)).encode('ascii'))
+            digest.update(b':')
+            for offset in range(0, len(value), 256 * 1024):
+                digest.update(value[offset:offset + 256 * 1024].encode('utf-8'))
+            digest.update(b';')
+        elif isinstance(value, (list, tuple)):
+            obj_id = id(value)
+            if obj_id in seen:
+                digest.update(b'cycle;')
+                return
+            seen.add(obj_id)
+            digest.update(b'l[')
+            for item in value:
+                update(item)
+            digest.update(b'];')
+            seen.remove(obj_id)
+        elif isinstance(value, dict):
+            obj_id = id(value)
+            if obj_id in seen:
+                digest.update(b'cycle;')
+                return
+            seen.add(obj_id)
+            digest.update(b'd{')
+            for key in sorted(value, key=lambda item: (type(item).__name__, repr(item))):
+                update(key)
+                update(value[key])
+            digest.update(b'};')
+            seen.remove(obj_id)
+        else:
+            # Session.save() would reject non-JSON state. Keep this conservative:
+            # a changed fallback representation blocks byte-only eviction.
+            digest.update(b'x')
+            digest.update(type(value).__qualname__.encode('utf-8', errors='replace'))
+            digest.update(b':')
+            digest.update(repr(value).encode('utf-8', errors='replace'))
+            digest.update(b';')
+
+    update(public_state)
+    return digest.digest()
+
+
+def _session_state_fingerprint(session) -> bytes:
+    """Hash the resident session state represented by its persisted public fields."""
+    return _session_public_state_fingerprint({
+        key: value
+        for key, value in getattr(session, '__dict__', {}).items()
+        if not key.startswith('_')
+    })
+
+
+def _session_persisted_authority(session):
+    """Return ``(public_fingerprint, exact_sidecar_generation)`` or ``None``.
+
+    The tuple is the authoritative cache proof.  The legacy attributes remain
+    observable for existing call sites/tests, but must never be independently
+    mixed: a fingerprint without its descriptor/path generation is deliberately
+    untrusted.
+    """
+    if hasattr(session, '_cache_persisted_authority'):
+        authority = getattr(session, '_cache_persisted_authority', None)
+        if (
+            isinstance(authority, tuple)
+            and len(authority) == 2
+            and isinstance(authority[0], bytes)
+            and authority[1] is not None
+        ):
+            return authority
+        return None
+    # Compatibility for a resident object created before this module revision
+    # was loaded.  New Session objects always carry the atomic tuple above.
+    fingerprint = getattr(session, '_cache_persisted_fingerprint', None)
+    signature = getattr(session, '_sidecar_stat_sig', None)
+    if isinstance(fingerprint, bytes) and signature is not None:
+        return fingerprint, signature
+    return None
+
+
+def _set_session_persisted_authority(session, fingerprint, signature) -> None:
+    """Publish or clear fingerprint and durable generation as one authority unit."""
+    if not isinstance(fingerprint, bytes) or signature is None:
+        fingerprint = None
+        signature = None
+        authority = None
+    else:
+        authority = (fingerprint, signature)
+    # Clear the tuple before changing compatibility projections, then make the
+    # complete pair visible in one assignment.  Readers use the tuple, so any
+    # concurrent observation during this small window fails closed.
+    session._cache_persisted_authority = None
+    session._cache_persisted_fingerprint = fingerprint
+    session._sidecar_stat_sig = signature
+    session._cache_persisted_authority = authority
+
+
+def _session_has_current_persisted_generation(session, authority=None) -> bool:
+    """Return whether a session's authority still names the current sidecar."""
+    if authority is None:
+        authority = _session_persisted_authority(session)
+    if authority is None:
+        return False
+    try:
+        return _sidecar_signature_matches_path(session.path, authority[1])
+    except Exception:
+        return False
+
+
+def _session_matches_persisted_state(
+    session,
+    *,
+    authority=None,
+    require_current_generation=True,
+) -> bool:
+    """Return whether public state matches its paired durable authority.
+
+    ``require_current_generation=False`` is reserved for a CAS that is about to
+    replace a clean *older* cache generation with a newer, independently
+    verified writer/load candidate.  Eviction and ordinary freshness decisions
+    retain the default, which requires both equal public state and a path that
+    still names the exact descriptor generation.
+    """
+    if authority is None:
+        authority = _session_persisted_authority(session)
+    if authority is None:
+        return False
+    try:
+        if _session_persisted_authority(session) != authority:
+            return False
+        if _session_state_fingerprint(session) != authority[0]:
+            return False
+        return (
+            not require_current_generation
+            or _session_has_current_persisted_generation(session, authority)
+        )
+    except Exception:
+        return False
+
+
+def _evict_sessions_over_cap(cap: int | None = None, max_bytes: int | None = None) -> int:
+    """Evict safe LRU entries until count and serialized-byte bounds are met.
 
     Replaces the previous blind ``SESSIONS.popitem(last=False)`` loops (#4765).
     The blind loops could evict the least-recently-used entry even if it was
@@ -4626,21 +5159,60 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     entries that ``_session_is_evictable()`` proves are safe. An evicted session
     transparently lazily reloads from its sidecar on the next ``get_session()``.
 
-    CALLER CONTRACT: the global ``LOCK`` MUST already be held (every call site
-    mutates ``SESSIONS`` under ``LOCK``). This function never acquires ``LOCK``
-    or any stream lock itself, so it cannot introduce a lock-ordering deadlock.
-    Under that same held ``LOCK`` it publishes the cap it enforced into
-    ``api.config._LAST_APPLIED_SESSIONS_CACHE_MAX`` for nonblocking diagnostics
-    (#6351); any future edit that can change ``cap`` after that point must move
-    the publish down with it.
+    The byte budget uses each resident object's serialized sidecar size, captured
+    on full load/save. It is a stable, allocation-free floor for Python memory,
+    not an exact RSS measurement. Unknown weights fail closed as over-budget;
+    metadata-only stubs contribute only their small parsed prefix. One most-recent
+    entry may remain above the byte budget by itself so an oversized transcript
+    does not cold-reload on every access.
 
-    Returns the number of sessions evicted. If every over-cap candidate is
-    active/unsaved, the cache may temporarily exceed ``cap`` — that is the
-    intended safe behavior (never lose an active/unsaved session).
+    CALLER CONTRACT: the global ``LOCK`` MUST already be held (every call site
+    mutates ``SESSIONS`` under ``LOCK``). Byte-only removal additionally makes a
+    *nonblocking* attempt at the candidate's per-session agent lock (see below);
+    it never blocks on ``LOCK`` or any other lock itself, so it cannot introduce
+    a lock-ordering deadlock. Under that same held ``LOCK`` it publishes the cap
+    it enforced into ``api.config._LAST_APPLIED_SESSIONS_CACHE_MAX`` for
+    nonblocking diagnostics (#6351); any future edit that can change ``cap``
+    after that point must move the publish down with it.
+
+    Byte-only eviction validates ``_session_matches_persisted_state()`` and then
+    removes the entry. Validating and removing are not atomic with respect to a
+    writer: without ownership, a writer could establish mutation ownership (the
+    per-session agent lock every normal mutation path takes) in the window
+    between validation and removal, and its update would be silently discarded
+    once the stale in-memory copy is dropped. To close that window, the
+    byte-only path takes the candidate's per-session agent lock around the
+    (re-)validate-then-pop pair, so a writer using the standard lock-then-mutate
+    discipline either finishes and releases before we validate, or blocks until
+    we finish and release — either way it cannot observe removal mid-mutation.
+    The acquire is nonblocking: normal code takes session-lock then ``LOCK``, so
+    a *blocking* acquire here (``LOCK`` already held) would invert that order
+    and could deadlock against a writer holding the session lock and waiting on
+    ``LOCK``. A contended lock (including this same thread already holding it
+    via a self-heal path, e.g. ``_sync_sidecar_from_state_db_if_newer``) just
+    leaves the candidate resident this pass — the same fail-safe posture used
+    elsewhere in this function for weight/parity uncertainty.
+
+    Returns the number of sessions evicted. If every over-budget candidate is
+    active/unsaved/lock-contended, the cache may temporarily exceed a bound —
+    that is the intended safe behavior (never lose an active/unsaved session).
     """
+    config_data = None
+    if cap is None or max_bytes is None:
+        try:
+            loaded_config = _cfg.get_config()
+            if isinstance(loaded_config, dict):
+                config_data = loaded_config
+        except Exception:
+            pass
+
     if cap is None:
         try:
-            cap = _cfg.get_sessions_cache_max()
+            cap = (
+                _cfg.get_sessions_cache_max(config_data)
+                if config_data is not None
+                else SESSIONS_MAX
+            )
         except Exception:
             cap = SESSIONS_MAX
     if not isinstance(cap, int) or cap < 1:
@@ -4650,23 +5222,79 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     # payload report a cap eviction actually applied — including the getter-failure
     # fallback and explicit/normalized calls, which never reach the resolver (#6351).
     _cfg._LAST_APPLIED_SESSIONS_CACHE_MAX = cap
+
+    if max_bytes is None:
+        try:
+            max_bytes = (
+                _cfg.get_sessions_cache_max_bytes(config_data)
+                if config_data is not None
+                else _cfg.DEFAULT_SESSIONS_CACHE_MAX_BYTES
+            )
+        except Exception:
+            max_bytes = _cfg.DEFAULT_SESSIONS_CACHE_MAX_BYTES
+    if not isinstance(max_bytes, int) or max_bytes < 1:
+        max_bytes = _cfg.DEFAULT_SESSIONS_CACHE_MAX_BYTES
+
+    resident_bytes = sum(_session_cache_resident_bytes(s) for s in SESSIONS.values())
     evicted = 0
-    # Iterate over a snapshot of ids in LRU order (oldest first). We stop as
-    # soon as we are at/below the cap. Skipping a non-evictable oldest entry and
-    # moving on lets us reclaim a slightly-newer clean entry instead of blocking
-    # eviction entirely behind one pinned active session.
+    mru_sid = next(reversed(SESSIONS), None) if SESSIONS else None
+    # Iterate over a snapshot of ids in LRU order (oldest first). Skipping a
+    # non-evictable oldest entry lets us reclaim a slightly-newer clean entry
+    # instead of blocking behind one pinned active session.
     for sid in list(SESSIONS.keys()):
-        if len(SESSIONS) <= cap:
+        over_count = len(SESSIONS) > cap
+        over_bytes = resident_bytes > max_bytes
+        if not over_count and not over_bytes:
+            break
+        # Byte pressure never evicts the currently warm MRU. Count pressure keeps
+        # its existing semantics and may still reclaim it when all older entries
+        # are pinned, because the public entry cap remains authoritative.
+        if over_bytes and not over_count and sid == mru_sid:
+            continue
+        # Keep one warm entry even when it alone exceeds the byte budget. This is
+        # not needed for count pressure because cap is always at least one.
+        if len(SESSIONS) <= 1 and not over_count:
             break
         candidate = SESSIONS.get(sid)
         if _session_is_evictable(candidate):
-            SESSIONS.pop(sid, None)
-            evicted += 1
-    if len(SESSIONS) > cap:
+            # The historical count cap used message-count parity. Byte pressure
+            # is more frequent for large full sessions and must not widen that
+            # policy to same-count edits or unsaved metadata. Metadata-only stubs
+            # are immutable disk projections and need no full-state digest.
+            byte_only_pressure = (
+                over_bytes
+                and not over_count
+                and not getattr(candidate, '_loaded_metadata_only', False)
+            )
+            if byte_only_pressure:
+                # Tie validation to removal via mutation ownership (see the
+                # CALLER CONTRACT note above): a writer cannot establish
+                # ownership of *candidate* while we hold its lock, so a clean
+                # verdict here cannot be invalidated before the pop below.
+                session_lock = _get_session_agent_lock(sid)
+                if not session_lock.acquire(blocking=False):
+                    continue
+                try:
+                    if not _session_matches_persisted_state(candidate):
+                        continue
+                    removed = SESSIONS.pop(sid, None)
+                finally:
+                    session_lock.release()
+            else:
+                removed = SESSIONS.pop(sid, None)
+            if removed is not None:
+                resident_bytes = max(
+                    0,
+                    resident_bytes - _session_cache_resident_bytes(removed),
+                )
+                evicted += 1
+
+    if len(SESSIONS) > cap or resident_bytes > max_bytes:
         logger.debug(
-            "SESSIONS cache above cap (%d > %d) after eviction pass: remaining "
-            "entries are active or unsaved and were preserved (#4765)",
-            len(SESSIONS), cap,
+            "SESSIONS cache remains above a safe bound after eviction: "
+            "entries=%d/%d serialized_bytes=%d/%d; remaining entries are "
+            "active, unsaved, or the sole warm transcript (#4765/#6351)",
+            len(SESSIONS), cap, resident_bytes, max_bytes,
         )
     return evicted
 
@@ -4718,6 +5346,127 @@ def _finish_full_session_resolve(session_id: str, event: threading.Event) -> Non
     event.set()
 
 
+_SESSION_CACHE_PUBLICATION_RETRIES = 3
+
+
+def _cache_entry_matches_observed_authority(
+    session,
+    expected_session,
+    expected_authority,
+    expected_state_fingerprint,
+) -> bool:
+    """CAS predicate for a cache entry observed before a disk load.
+
+    Object identity alone is not enough: another writer may have mutated and
+    saved the same resident object while a loader was parsing disk. The observed
+    public-state fingerprint catches mutations even for intentionally unpersisted
+    optimistic projections; the paired authority (including ``None``) catches a
+    competing durable publication without taking a blocking session lock while
+    ``LOCK`` is held.
+    """
+    if session is not expected_session or not isinstance(expected_state_fingerprint, bytes):
+        return False
+    try:
+        return (
+            _session_persisted_authority(session) == expected_authority
+            and _session_state_fingerprint(session) == expected_state_fingerprint
+        )
+    except Exception:
+        return False
+
+
+def _publish_verified_session_cas(
+    sid,
+    candidate,
+    *,
+    expected_cached,
+    expected_authority,
+    expected_state_fingerprint,
+    promote_cache,
+    enforce_cache_bounds,
+):
+    """Publish a loaded full session only if cache and disk generations still match.
+
+    Returns ``("published", candidate)`` when this caller won publication,
+    ``("current", current)`` when another cache writer won, and ``("retry",
+    None)`` when the loaded candidate no longer names the durable sidecar.
+    Callers perform bounded reloads for the latter case; they never install an
+    unverifiable snapshot.
+    """
+    if (
+        candidate is None
+        or str(getattr(candidate, 'session_id', '') or '') != str(sid)
+        or not _session_has_current_persisted_generation(candidate)
+    ):
+        return "retry", None
+    with LOCK:
+        current = SESSIONS.get(sid)
+        if expected_cached is None:
+            if current is not None:
+                return "current", current
+        else:
+            if current is not expected_cached:
+                return "current", current
+            if not _cache_entry_matches_observed_authority(
+                current,
+                expected_cached,
+                expected_authority,
+                expected_state_fingerprint,
+            ):
+                return "current", current
+
+        # Revalidate after taking the cache lock. A sidecar replacement while
+        # the JSON parser ran must not become a stale cache publication merely
+        # because the cache entry itself was unchanged.
+        if not _session_has_current_persisted_generation(candidate):
+            return "retry", None
+        SESSIONS[sid] = candidate
+        if promote_cache:
+            SESSIONS.move_to_end(sid)
+        if enforce_cache_bounds:
+            _evict_sessions_over_cap()
+        return "published", candidate
+
+
+def _reload_and_publish_session_cas(
+    sid,
+    *,
+    expected_cached,
+    expected_authority,
+    expected_state_fingerprint,
+    promote_cache,
+    enforce_cache_bounds,
+):
+    """Boundedly reload and CAS-publish one current full sidecar generation."""
+    observed_cached = expected_cached
+    observed_authority = expected_authority
+    observed_state_fingerprint = expected_state_fingerprint
+    for _attempt in range(_SESSION_CACHE_PUBLICATION_RETRIES):
+        candidate = Session.load(sid)
+        if candidate is None:
+            continue
+        status, result = _publish_verified_session_cas(
+            sid,
+            candidate,
+            expected_cached=observed_cached,
+            expected_authority=observed_authority,
+            expected_state_fingerprint=observed_state_fingerprint,
+            promote_cache=promote_cache,
+            enforce_cache_bounds=enforce_cache_bounds,
+        )
+        if status == "published":
+            return result
+        if status == "current":
+            # Another publisher won. Its object is authoritative for this cache
+            # generation; importantly, do not overwrite it with our old parse.
+            if result is not None:
+                return result
+            observed_cached = None
+            observed_authority = None
+            observed_state_fingerprint = None
+    return None
+
+
 def _resolve_session_once(
     sid,
     metadata_only=False,
@@ -4759,12 +5508,20 @@ def _resolve_session_once(
             if not allow_full_load:
                 raise _FullSessionResolveRequired
             try:
-                disk_session = Session.load(sid)
-                with LOCK:
-                    SESSIONS[sid] = disk_session
-                    if promote_cache:
-                        SESSIONS.move_to_end(sid)
-                cached = disk_session
+                try:
+                    observed_state_fingerprint = _session_state_fingerprint(cached)
+                except Exception:
+                    observed_state_fingerprint = None
+                refreshed = _reload_and_publish_session_cas(
+                    sid,
+                    expected_cached=cached,
+                    expected_authority=_session_persisted_authority(cached),
+                    expected_state_fingerprint=observed_state_fingerprint,
+                    promote_cache=promote_cache,
+                    enforce_cache_bounds=cache_on_miss,
+                )
+                if refreshed is not None:
+                    cached = refreshed
             except Exception:
                 logger.debug(
                     "cached session disk-freshness check failed for session %s", sid, exc_info=True,
@@ -4773,13 +5530,40 @@ def _resolve_session_once(
             if not allow_full_load:
                 raise _FullSessionResolveRequired
             try:
-                disk_session = Session.load(sid)
-                if _cache_has_stale_unsaved_user_tail(cached, disk_session):
-                    with LOCK:
-                        SESSIONS[sid] = disk_session
-                        if promote_cache:
-                            SESSIONS.move_to_end(sid)
-                    cached = disk_session
+                observed_cached = cached
+                observed_authority = _session_persisted_authority(cached)
+                try:
+                    observed_state_fingerprint = _session_state_fingerprint(cached)
+                except Exception:
+                    observed_state_fingerprint = None
+                for _attempt in range(_SESSION_CACHE_PUBLICATION_RETRIES):
+                    disk_session = Session.load(sid)
+                    if disk_session is None:
+                        continue
+                    if not _cache_has_stale_unsaved_user_tail(cached, disk_session):
+                        break
+                    status, result = _publish_verified_session_cas(
+                        sid,
+                        disk_session,
+                        expected_cached=observed_cached,
+                        expected_authority=observed_authority,
+                        expected_state_fingerprint=observed_state_fingerprint,
+                        promote_cache=promote_cache,
+                        enforce_cache_bounds=cache_on_miss,
+                    )
+                    if status == "published":
+                        cached = result
+                        break
+                    if status == "current":
+                        if result is not None:
+                            cached = result
+                            break
+                        # The observed entry was evicted while we parsed disk.
+                        # Retry as a cache miss rather than pinning the detached
+                        # stale object or overwriting a future publisher.
+                        observed_cached = None
+                        observed_authority = None
+                        observed_state_fingerprint = None
             except Exception:
                 logger.debug(
                     "stale cached user-tail check failed for session %s", sid, exc_info=True,
@@ -4793,7 +5577,10 @@ def _resolve_session_once(
                 )
         if not metadata_only:
             try:
-                _sync_sidecar_from_state_db_if_newer(cached)
+                _sync_sidecar_from_state_db_if_newer(
+                    cached,
+                    enforce_cache_bounds=cache_on_miss,
+                )
             except Exception:
                 logger.debug(
                     "state.db newer-sidecar sync failed on cache hit for session %s", sid, exc_info=True,
@@ -4809,14 +5596,40 @@ def _resolve_session_once(
         s = Session.load(sid)
     if s:
         if cache_on_miss:
-            with LOCK:
-                SESSIONS[sid] = s
-                if promote_cache:
-                    SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            candidate = s
+            published = None
+            for _attempt in range(_SESSION_CACHE_PUBLICATION_RETRIES):
+                status, result = _publish_verified_session_cas(
+                    sid,
+                    candidate,
+                    expected_cached=None,
+                    expected_authority=None,
+                    expected_state_fingerprint=None,
+                    promote_cache=promote_cache,
+                    enforce_cache_bounds=True,
+                )
+                if status in {"published", "current"} and result is not None:
+                    published = result
+                    break
+                # The candidate's descriptor/path generation changed before
+                # publication (or couldn't be proven). Read a new coherent
+                # generation for the next bounded attempt; after exhaustion we
+                # fail closed below instead of putting an unverifiable object in
+                # SESSIONS.
+                if _attempt + 1 < _SESSION_CACHE_PUBLICATION_RETRIES:
+                    candidate = Session.load(sid)
+            if published is None:
+                with LOCK:
+                    published = SESSIONS.get(sid)
+            if published is None:
+                raise KeyError(sid)
+            s = published
         if not metadata_only:
             try:
-                synced_from_state = _sync_sidecar_from_state_db_if_newer(s)
+                synced_from_state = _sync_sidecar_from_state_db_if_newer(
+                    s,
+                    enforce_cache_bounds=cache_on_miss,
+                )
                 repaired = False if synced_from_state else _repair_stale_pending(s)
                 # If the stale-pending repair did not fire but the session
                 # already carries a pending-journal-retry marker (e.g. set on
