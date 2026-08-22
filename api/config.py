@@ -307,30 +307,151 @@ def _thread_local_env_value(name: str, default: str = "") -> str:
 
     return str(os.getenv(env_name, default or ""))
 
+_ENV_REF_PATTERN = re.compile(r"\${([^}]+)}")
+_NON_ENV_SECRET_SOURCE_RE = re.compile(r"^[a-z][a-z0-9_-]*:")
+
+# Dedup set + lock for missing env-ref warnings (mirror
+# hermes_cli.config._warn_once_per_provider: a concurrent probe expanding the
+# same unset ref five times logs exactly one warning). Module-lifetime scope.
+_env_ref_warned: set[str] = set()
+_env_ref_warn_lock = threading.Lock()
+
+
+def _env_ref_var_name(inner: str) -> str | None:
+    """Normalize a ``${...}`` body to the env-var name it reads, or ``None``
+    for a non-env SecretRef source (``file:`` / ``vault:`` / ``bitwarden:`` /
+    ...). ``env:`` is stripped (Cursor-style); uppercase ``${ENV:VAR}`` falls
+    through as a legacy bare name because the non-env-source regex is lowercase-
+    prefix-only, matching ``hermes_cli.config._env_ref_var_name``."""
+    ref = (inner or "").strip()
+    if ref.startswith("env:"):
+        name = ref[len("env:"):].strip()
+        return name or None
+    if ":" in ref and _NON_ENV_SECRET_SOURCE_RE.match(ref):
+        return None
+    return ref
+
+
+def _named_profile_active() -> bool:
+    """True when the active profile is a named (non-root) profile."""
+    try:
+        from api.profiles import get_active_profile_name, _is_root_profile
+    except ImportError:
+        return False
+    try:
+        name = (get_active_profile_name() or "").strip()
+    except Exception:
+        return False
+    return bool(name) and not _is_root_profile(name)
+
+
+def _warn_unset_env_ref(raw: str, name: str) -> None:
+    """Log one deduplicated warning for an unset env ref (thread-safe)."""
+    with _env_ref_warn_lock:
+        if name in _env_ref_warned:
+            return
+        _env_ref_warned.add(name)
+    logger.warning(
+        "Config env ref %r: %s is not set (check ~/.hermes/.env); keeping the literal placeholder",
+        raw,
+        name,
+    )
+
+
+def _resolve_env_ref_body(inner: str) -> str:
+    """Resolve one ``${...}`` body under the active thread scope, failing closed
+    to "" for any case that cannot be resolved here (non-env SecretRef source,
+    missing var, or a named-profile ``env:`` ref absent from the thread-local
+    profile env)."""
+    body = (inner or "").strip()
+    ref_name = _env_ref_var_name(body)
+    if ref_name is None:
+        return ""
+    if body.startswith("env:") and _named_profile_active():
+        # Named (non-root) profile: an env: ref resolves ONLY from the profile's
+        # own thread-local env — it never falls through to os.environ, so
+        # profile A's / the server's process key cannot leak to profile B.
+        thread_env = getattr(_thread_ctx, "env", {})
+        if isinstance(thread_env, dict):
+            value = thread_env.get(ref_name)
+            if value is not None:
+                return str(value)
+        return ""
+    # Bare ${VAR} (and uppercase ${ENV:VAR} fallthrough): thread-local profile
+    # env first, then the legacy process-env fallback unless the scope blocks it
+    # (#3957/#3961 behavior preserved).
+    return _thread_local_env_value(ref_name, "")
+
+
+def _resolve_config_ref_value(value: object) -> str:
+    """Resolve one config value that may be a ``${...}`` env reference.
+
+    Returns the resolved value for a resolvable ref, the literal for a plain
+    string, and "" (fail-closed) for an unresolvable ref — so callers never
+    treat the raw placeholder as a credential."""
+    text = str(value or "").strip()
+    match = _ENV_REF_PATTERN.fullmatch(text)
+    if match:
+        return _resolve_env_ref_body(match.group(1))
+    return text
+
+
+def _expand_env_ref(m: re.Match, *, resolve_env_prefix: bool) -> str:
+    """Expand one ``${...}`` reference matched by ``_ENV_REF_PATTERN``."""
+    raw = m.group(0)
+    inner = (m.group(1) or "").strip()
+    ref_name = _env_ref_var_name(inner)
+    if ref_name is None:
+        # Non-env SecretRef source: stays verbatim.
+        return raw
+    if inner.startswith("env:") and not resolve_env_prefix:
+        # Process-global cache keeps env: refs literal (constraint 2).
+        return raw
+    resolved = _resolve_env_ref_body(inner)
+    if resolved:
+        return resolved
+    _warn_unset_env_ref(raw, ref_name)
+    return raw
+
 
 # ── Config file (reloadable -- supports profile switching) ──────────────────
 
-def _expand_env_vars(obj):
-    """Recursively expand ${VAR} references in config values.
+def _expand_env_vars(obj, *, resolve_env_prefix: bool = True):
+    """Recursively expand ``${VAR}`` / ``${env:VAR}`` references in config values.
 
-    Uses the thread-local-first profile env lookup (_thread_local_env_value) so a
-    ${VAR} reference in a profile's config.yaml resolves to that profile's value,
-    and — critically — does NOT fall back to the server process os.environ when a
-    profile-scoped readonly/background scope set block_process_env_fallback. The
-    raw (unexpanded) dict is what gets cached; this expansion re-runs on every
-    read against the current thread's scope, so a cross-profile credential
+    ``env:``-prefixed references use Cursor-style SecretRef semantics (the prefix
+    is stripped before lookup, matching ``hermes_cli.config``); bare ``${VAR}``
+    keeps the legacy form. Non-env SecretRef sources (``file:`` / ``vault:`` /
+    ``bitwarden:`` / ...) stay verbatim — external backends inject their values
+    into the environment at startup.
+
+    ``resolve_env_prefix=False`` keeps ``env:``-prefixed references LITERAL while
+    still resolving bare ``${VAR}``; the process-global ``_cfg_cache`` uses it so
+    a profile's ``${env:VAR}`` value is never baked into the shared cache under
+    the unscoped process-env view. Bare references resolve against the
+    thread-local profile env (then process env unless blocked) per the existing
+    #3961 rule; ``env:``-prefixed references on a NAMED profile resolve ONLY from
+    the profile's thread-local env and fail closed (constraint 3).
+
+    The raw (unexpanded) dict is what gets cached; this expansion re-runs on
+    every read against the current thread's scope, so a cross-profile credential
     (e.g. config api_key: ${ANTHROPIC_TOKEN}) can't be reconstructed from the
     server process env for a named profile that has no such value (#3961)."""
     if isinstance(obj, str):
-        return re.sub(
-            r"\${([^}]+)}",
-            lambda m: _thread_local_env_value(m.group(1), m.group(0)),
+        return _ENV_REF_PATTERN.sub(
+            lambda m: _expand_env_ref(m, resolve_env_prefix=resolve_env_prefix),
             obj,
         )
     if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
+        return {
+            k: _expand_env_vars(v, resolve_env_prefix=resolve_env_prefix)
+            for k, v in obj.items()
+        }
     if isinstance(obj, list):
-        return [_expand_env_vars(item) for item in obj]
+        return [
+            _expand_env_vars(item, resolve_env_prefix=resolve_env_prefix)
+            for item in obj
+        ]
     return obj
 
 
@@ -579,7 +700,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
                     try:
                         _thread_ctx.block_process_env_fallback = False
                         _thread_ctx.env = {}
-                        _cfg_cache.update(_expand_env_vars(loaded))
+                        _cfg_cache.update(_expand_env_vars(loaded, resolve_env_prefix=False))
                     finally:
                         _thread_ctx.block_process_env_fallback = _prev_block
                         if _prev_env is None:
@@ -751,6 +872,78 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     return profile_cfg
 
 
+def _items_by_unique_name(items: list) -> dict | None:
+    """Return a name-indexed dict when all items are dicts with unique string
+    names, else None (mirrors hermes_cli.config for custom_providers)."""
+    if not isinstance(items, list):
+        return None
+    indexed: dict = {}
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        if name in indexed:
+            return None
+        indexed[name] = item
+    return indexed
+
+
+def _preserve_env_ref_templates(current: Any, raw: Any) -> Any:
+    """Restore a raw ``${...}`` template when the to-be-saved value either still
+    equals the raw placeholder or equals the placeholder's current expansion.
+    A caller-owned edit (a value that no longer matches the expansion) is left
+    untouched. Mirrors hermes_cli.config._preserve_env_ref_templates."""
+    if isinstance(current, str) and isinstance(raw, str):
+        if _ENV_REF_PATTERN.search(raw):
+            if current == raw:
+                return raw
+            if _expand_env_vars(raw) == current:
+                return raw
+        return current
+    if isinstance(current, dict) and isinstance(raw, dict):
+        return {
+            key: _preserve_env_ref_templates(value, raw.get(key))
+            for key, value in current.items()
+        }
+    if isinstance(current, list) and isinstance(raw, list):
+        current_by_name = _items_by_unique_name(current)
+        raw_by_name = _items_by_unique_name(raw)
+        if current_by_name is not None and raw_by_name is not None:
+            return [
+                _preserve_env_ref_templates(item, raw_by_name.get(item.get("name")))
+                for item in current
+            ]
+        return [
+            _preserve_env_ref_templates(
+                item, raw[index] if index < len(raw) else None
+            )
+            for index, item in enumerate(current)
+        ]
+    return current
+
+
+def _restore_raw_env_placeholders(config_path: Path, config_data: dict) -> dict:
+    """Restore raw ``${VAR}`` / ``${env:VAR}`` templates before a config write.
+
+    A read-modify-write flow loads the EXPANDED config (secrets resolved), edits
+    one field, then calls ``_save_yaml_config_file``; without this pass the
+    resolved secret would round-trip into config.yaml in plaintext, replacing
+    the placeholder. Reload the RAW on-disk config and substitute the original
+    ``${...}`` template wherever the to-be-saved value still equals the
+    template's current expansion."""
+    if not isinstance(config_data, dict):
+        return config_data
+    try:
+        raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    except Exception:
+        return config_data
+    if not isinstance(raw, dict) or not raw:
+        return config_data
+    return _preserve_env_ref_templates(config_data, raw)
+
+
 def _config_for_yaml_save(config_data: dict) -> dict:
     """Return a YAML-safe config copy without runtime-only expanded defaults."""
     if not isinstance(config_data, dict):
@@ -781,9 +974,10 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    to_save = _restore_raw_env_placeholders(config_path, config_data)
     _paths._atomic_write_text(
         config_path,
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
+        _yaml.safe_dump(_config_for_yaml_save(to_save), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
     # Invalidate the memoized parse for this path so the next read re-parses the
@@ -3184,7 +3378,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
         if raw_api_key is not None:
             key_text = str(raw_api_key).strip()
             if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
-                api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
+                api_key = _resolve_config_ref_value(key_text).strip() or None
             elif key_text:
                 api_key = key_text
         if not api_key:

@@ -6793,12 +6793,13 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
     while preserving the same literal, ``${ENV_VAR}``, ``key_env``, and
     sanitized-env shapes used by streaming/provider resolution.
     """
+    from api.config import _lookup_custom_api_key_env, _resolve_config_ref_value, _thread_local_env_value
+
     raw_api_key = entry.get("api_key")
     if raw_api_key is not None:
         api_key_text = str(raw_api_key).strip()
         if api_key_text.startswith("${") and api_key_text.endswith("}") and len(api_key_text) > 3:
-            env_name = api_key_text[2:-1]
-            resolved = os.getenv(env_name, "").strip()
+            resolved = _resolve_config_ref_value(api_key_text).strip()
             if resolved:
                 return resolved
             logger.debug(
@@ -6811,13 +6812,11 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
 
     key_env = str(entry.get("key_env") or "").strip()
     if key_env:
-        resolved = os.getenv(key_env, "").strip()
+        resolved = _thread_local_env_value(key_env).strip()
         if resolved:
             return resolved
 
     try:
-        from api.config import _lookup_custom_api_key_env
-
         return _lookup_custom_api_key_env(provider) or ""
     except Exception:
         return ""
@@ -6831,6 +6830,8 @@ def _context_length_config_api_key_for_provider(
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
 
+    from api.config import _resolve_config_ref_value, _thread_local_env_value
+
     def _resolve_key(raw_api_key, raw_key_env=None) -> str:
         api_key_text = str(raw_api_key or "").strip()
         if (
@@ -6838,18 +6839,17 @@ def _context_length_config_api_key_for_provider(
             and api_key_text.endswith("}")
             and len(api_key_text) > 3
         ):
-            resolved = os.getenv(api_key_text[2:-1], "").strip()
+            resolved = _resolve_config_ref_value(api_key_text).strip()
             if resolved:
                 return resolved
         elif api_key_text:
             return api_key_text
         key_env = str(raw_key_env or "").strip()
         if key_env:
-            resolved = os.getenv(key_env, "").strip()
+            resolved = _thread_local_env_value(key_env).strip()
             if resolved:
                 return resolved
         return ""
-
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         for provider_key, provider_cfg in providers_cfg.items():
@@ -21473,15 +21473,17 @@ def _handle_live_models(handler, parsed):
                 return _ids
 
             def _custom_provider_api_key(_cp):
+                from api.config import _resolve_config_ref_value, _thread_local_env_value
+
                 _raw = _cp.get("api_key")
                 if _raw is not None:
                     _key = str(_raw).strip()
                     if _key.startswith("${") and _key.endswith("}") and len(_key) > 3:
-                        _key = os.getenv(_key[2:-1], "").strip()
+                        _key = _resolve_config_ref_value(_key).strip()
                     if _key:
                         return _key
                 _env = str(_cp.get("key_env") or "").strip()
-                return os.getenv(_env, "").strip() if _env else ""
+                return _thread_local_env_value(_env).strip() if _env else ""
 
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
