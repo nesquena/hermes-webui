@@ -8109,6 +8109,20 @@ def _json_loads_if_string(value):
         return value
 
 
+_STATE_DB_CONTENT_JSON_PREFIX = "\x00json:"
+
+
+def _decode_state_db_content(value):
+    """Decode Agent's structured-content storage form without widening it."""
+    if not isinstance(value, str) or not value.startswith(_STATE_DB_CONTENT_JSON_PREFIX):
+        return value
+    try:
+        decoded = json.loads(value[len(_STATE_DB_CONTENT_JSON_PREFIX):])
+    except Exception:
+        return value
+    return decoded if isinstance(decoded, list) else value
+
+
 @dataclass(frozen=True)
 class StateDBSessionMessagesSnapshot:
     """Internal message projection paired with its durable SQLite revision."""
@@ -8387,7 +8401,7 @@ def get_state_db_session_messages(
             for row in rows:
                 msg = {
                     'role': row['role'],
-                    'content': row['content'],
+                    'content': _decode_state_db_content(row['content']),
                     'timestamp': row['timestamp'],
                 }
                 # ``id`` is the durable SQLite row identity, not the WebUI's
@@ -8553,7 +8567,7 @@ def get_state_db_session_message_keys_before_timestamp(
                 _session_message_visible_key(
                     {
                         "role": row["role"],
-                        "content": row["content"],
+                        "content": _decode_state_db_content(row["content"]),
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
                     },
@@ -8948,6 +8962,31 @@ def _message_sidecar_role(message: dict | None):
 _WORKSPACE_PREFIX_RE = re.compile(r"^\s*\[Workspace(?:::v1)?:[^\]]+\]\s*")
 
 
+def _normalized_message_content_value(value, *, strip_workspace_prefix=False):
+    if isinstance(value, str):
+        if strip_workspace_prefix:
+            value = _WORKSPACE_PREFIX_RE.sub("", value, count=1)
+        return " ".join(value.split())
+    if isinstance(value, list):
+        return [
+            _normalized_message_content_value(
+                item,
+                strip_workspace_prefix=strip_workspace_prefix,
+            )
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _normalized_message_content_value(
+                child,
+                strip_workspace_prefix=strip_workspace_prefix and key == "text",
+            )
+            for key, child in value.items()
+            if key not in {"api_content", "_state_db_row_id", "_db_row_id", "state_db_row_id"}
+        }
+    return value
+
+
 def _message_visible_content_key(message: dict | None):
     """Return a canonical visible-content key for sidecar reconciliation."""
     if not isinstance(message, dict):
@@ -8956,23 +8995,10 @@ def _message_visible_content_key(message: dict | None):
     if role is None:
         return None
 
-    def _normalize(value, *, strip_prefix=False):
-        if isinstance(value, str):
-            text = value
-            if strip_prefix:
-                text = _WORKSPACE_PREFIX_RE.sub("", text, count=1)
-            return " ".join(text.split())
-        if isinstance(value, list):
-            return [_normalize(item, strip_prefix=strip_prefix) for item in value]
-        if isinstance(value, dict):
-            return {
-                key: _normalize(child, strip_prefix=False)
-                for key, child in value.items()
-                if key not in {"api_content", "_state_db_row_id", "_db_row_id", "state_db_row_id"}
-            }
-        return value
-
-    normalized = _normalize(message.get("content"), strip_prefix=(role == "user"))
+    normalized = _normalized_message_content_value(
+        message.get("content"),
+        strip_workspace_prefix=(role == "user"),
+    )
     try:
         content = json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)
     except (TypeError, ValueError):
@@ -9448,10 +9474,22 @@ def _session_message_dedup_key(msg: dict):
     ), msg)
 
 
-def _normalized_session_message_content(msg: dict) -> str:
+def _normalized_session_message_content(
+    msg: dict,
+    *,
+    normalize_workspace_prefix: bool = False,
+) -> str:
     if not isinstance(msg, dict):
         return repr(msg)
-    return " ".join(str(msg.get("content") or "").split())
+    normalized = _normalized_message_content_value(
+        msg.get("content") or "",
+        strip_workspace_prefix=(
+            normalize_workspace_prefix and str(msg.get("role") or "") == "user"
+        ),
+    )
+    if isinstance(normalized, str):
+        return normalized
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _loose_session_message_content(value: str) -> str:
@@ -9466,27 +9504,13 @@ def _session_message_content_key(
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
-    if role == "user" and normalize_workspace_prefix:
-        # WebUI sends the model a workspace-prefixed user_message
-        # ("[Workspace::v1: /path]\n<text>") while the visible/optimistic
-        # bubble and the WebUI sidecar row carry only the bare "<text>". The
-        # streaming dedup identity (_message_identity in api/streaming.py)
-        # strips this prefix for user turns, so this reconciliation key must
-        # do the same. Otherwise a state.db row (prefixed) and a sidecar row
-        # (bare) key DIFFERENTLY, the alignment loop in
-        # state_db_delta_after_context fails to match them, treats the
-        # state.db copy as a NEW row, and appends a duplicate user turn. The
-        # agent then merges the two adjacent user rows into a permanent
-        # composite -- the post-restart stale-user-prepend bug (#5339). Reuse
-        # the SAME helper as the streaming side (imported lazily to avoid a
-        # circular import; api.streaming imports api.models at module load) so
-        # the two dedup layers can't drift apart again.
-        from api.streaming import _strip_workspace_prefix
-
-        content = " ".join(
-            _strip_workspace_prefix(content, include_legacy=True).split()
-        )
+    # WebUI sends the model a workspace-prefixed user message while the
+    # visible/optimistic bubble and sidecar keep the bare content. Normalize
+    # both scalar and structured text parts before prefix alignment (#5339).
+    content = _normalized_session_message_content(
+        msg,
+        normalize_workspace_prefix=normalize_workspace_prefix,
+    )
     return _session_message_key_with_sidecar((
         role,
         content,
@@ -9509,17 +9533,12 @@ def _session_message_visible_key(
     _tc = msg.get("tool_calls")
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     role = str(msg.get("role") or "")
-    content = _normalized_session_message_content(msg)
-    if role == "user" and normalize_workspace_prefix:
-        # state.db stores the model-facing workspace-prefixed prompt while the
-        # WebUI sidecar owns the bare visible text. Fold that protocol wrapper
-        # into the exact key so large-session reconciliation does not depend on
-        # the bounded fuzzy fallback to recognize one logical turn.
-        from api.streaming import _strip_workspace_prefix
-
-        content = " ".join(
-            _strip_workspace_prefix(content, include_legacy=True).split()
-        )
+    # Fold the state.db workspace wrapper out of scalar and structured user
+    # content so exact reconciliation does not depend on the fuzzy fallback.
+    content = _normalized_session_message_content(
+        msg,
+        normalize_workspace_prefix=normalize_workspace_prefix,
+    )
     return _session_message_key_with_sidecar((
         role,
         content,
@@ -9993,13 +10012,20 @@ def merge_session_messages_append_only(
             if prepared_msg is None:
                 value = helper(msg)
                 # If this is a legacy message key, keep the already-stringified
-                # content payload for downstream helper calls.
+                # content payload for downstream scalar helper calls.
                 if isinstance(value, tuple) and value and value[0] == "legacy":
                     prepared_msg = dict(msg)
                     prepared_msg["content"] = value[2]
                     _cached_msg_prepared[msg_cache_key] = prepared_msg
             else:
                 value = helper(prepared_msg)
+            _cached_msg_keys[cache_key] = value
+            return value
+
+        # Structured content must retain its list/dict shape so visible and
+        # content keys can normalize nested text without dropping image parts.
+        if isinstance(msg.get("content"), (list, dict)):
+            value = helper(msg)
             _cached_msg_keys[cache_key] = value
             return value
 
