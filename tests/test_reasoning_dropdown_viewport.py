@@ -32,6 +32,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _dropdown_markup() -> str:
@@ -50,7 +51,14 @@ def _dropdown_markup() -> str:
     return markup[: markup.rindex("</div>")]
 
 
-def _measure(width: int, height: int):
+def _reasoning_open_behavior() -> str:
+    """Extract the shipped highlight/open/position functions from ui.js."""
+    start = UI_JS.index("function _highlightReasoningOption(")
+    end = UI_JS.index("function closeReasoningDropdown(", start)
+    return UI_JS[start:end]
+
+
+def _measure(width: int, height: int, selected_effort: str = ""):
     try:
         from playwright.sync_api import sync_playwright
     except Exception:  # pragma: no cover - dependency missing path
@@ -74,18 +82,31 @@ def _measure(width: int, height: int):
             "<!doctype html><html><head></head><body>"
             '<div class="composer-footer" '
             'style="position:fixed;left:0;right:0;bottom:0;">'
+            '<button id="composerReasoningChip" type="button">Reasoning</button>'
             + _dropdown_markup()
             + "</div></body></html>"
         )
         page.add_style_tag(content=STYLE_CSS)
+        page.add_script_tag(
+            content=(
+                "const $=id=>document.getElementById(id);"
+                "const closeProfileDropdown=()=>{};"
+                "const closeWsDropdown=()=>{};"
+                "const closeModelDropdown=()=>{};"
+                "const closeToolsetsDropdown=()=>{};"
+                f"let _currentReasoningEffort={selected_effort!r};"
+                + _reasoning_open_behavior()
+            )
+        )
         result = page.evaluate(
             """
             () => {
               const dd = document.getElementById('composerReasoningDropdown');
-              dd.classList.add('open');
+              toggleReasoningDropdown();
               const rows = Array.from(dd.querySelectorAll('.reasoning-option'));
               const first = rows[0];
               const last = rows[rows.length - 1];
+              const selected = dd.querySelector('.reasoning-option.selected');
               const style = getComputedStyle(dd);
               const box = () => dd.getBoundingClientRect();
               const inBox = (el) => {
@@ -102,6 +123,10 @@ def _measure(width: int, height: int):
                 menuBottom: box().bottom,
                 viewportH: window.innerHeight,
                 scrollable: dd.scrollHeight > dd.clientHeight + 1,
+                selectedEffort: selected && selected.dataset.effort,
+                selectedVisibleOnOpen: selected ? inBox(selected) : false,
+                selectedTopOnOpen: selected ? selected.getBoundingClientRect().top : null,
+                selectedBottomOnOpen: selected ? selected.getBoundingClientRect().bottom : null,
               };
               dd.scrollTop = 0;
               out.firstReachableAtTop = inBox(first);
@@ -159,3 +184,14 @@ def test_short_landscape_390x300_default_row_reachable():
     # max-height must engage and hand the overflow to the scroll container.
     assert m["scrollable"], f"expected the height cap to engage at 390x300: {m}"
     assert m["overflowY"] in ("auto", "scroll"), m
+
+
+@pytest.mark.parametrize("effort", ["", "medium", "ultra"])
+def test_short_landscape_selected_row_visible_immediately_on_open(effort):
+    """Default, a middle row, and Ultra must open inside the visible menu box."""
+    m = _measure(390, 300, selected_effort=effort)
+    _assert_all_rows_reachable(m)
+    assert m["selectedEffort"] == effort, m
+    assert m["selectedVisibleOnOpen"], m
+    assert m["selectedTopOnOpen"] >= -1, m
+    assert m["selectedBottomOnOpen"] <= m["viewportH"] + 1, m
