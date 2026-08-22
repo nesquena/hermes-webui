@@ -5893,7 +5893,7 @@ main.main > #mainPlugin{display:none;}
    ═══════════════════════════════════════════════════════════════════ */
 :root {
   --msg-rail: 0;
-  --msg-max: 780px;
+  --msg-max: 2000px;
   --user-bubble-bg: var(--accent);
   --user-bubble-border: var(--accent-hover);
   --user-bubble-text: #fff;
