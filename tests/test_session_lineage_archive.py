@@ -332,6 +332,88 @@ def test_startup_recovery_replays_batch_journal_through_production_wiring(
     _assert_cold_archive_parity(lineage_session_store, False)
 
 
+@pytest.mark.parametrize("target_archived", [True, False], ids=["archive", "restore"])
+@pytest.mark.parametrize("leave_committed_journal", [True, False], ids=["journal-replay", "ordinary-restart"])
+def test_startup_backup_recovery_preserves_transactional_lineage_archive_state(
+    lineage_session_store,
+    monkeypatch,
+    target_archived,
+    leave_committed_journal,
+):
+    """Legacy transcript recovery must compose with lineage archive publication.
+
+    A stale rescue backup owns the longer transcript, not newer archive or other
+    session metadata.  Cover both startup immediately after a committed journal
+    was left behind and an ordinary later restart after journal cleanup.
+    """
+    import api.session_batch_transaction as transaction
+    from api.session_recovery import run_startup_session_recovery
+
+    sessions = _lineage_sessions(
+        lineage_session_store,
+        archived=not target_archived,
+    )
+    root_path = lineage_session_store / "lineage-root.json"
+    backup_path = root_path.with_suffix(".json.bak")
+    backup_payload = json.loads(root_path.read_text(encoding="utf-8"))
+    backup_payload.update(
+        {
+            "archived": not target_archived,
+            "title": "stale backup title",
+            "messages": [
+                {"role": "user", "content": "rescued prompt"},
+                {"role": "assistant", "content": "rescued answer"},
+            ],
+            "context_messages": [
+                {"role": "user", "content": "rescued prompt"},
+                {"role": "assistant", "content": "rescued answer"},
+            ],
+        }
+    )
+    backup_bytes = json.dumps(backup_payload, ensure_ascii=False, indent=2).encode("utf-8")
+    backup_path.write_bytes(backup_bytes)
+
+    original_remove = transaction._remove_path
+    if leave_committed_journal:
+        def leave_journal(path):
+            if path.name == transaction._JOURNAL_NAME:
+                raise OSError("injected crash before journal cleanup")
+            return original_remove(path)
+
+        monkeypatch.setattr(transaction, "_remove_path", leave_journal)
+
+    transaction.commit_session_archive_batch(sessions, target_archived)
+    journal_path = lineage_session_store / transaction._JOURNAL_NAME
+    assert journal_path.exists() is leave_committed_journal
+    monkeypatch.setattr(transaction, "_remove_path", original_remove)
+
+    run_startup_session_recovery(lineage_session_store)
+
+    assert not journal_path.exists()
+    assert backup_path.read_bytes() == backup_bytes
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    tip = json.loads(
+        (lineage_session_store / "lineage-tip.json").read_text(encoding="utf-8")
+    )
+    assert root["archived"] is target_archived
+    assert tip["archived"] is target_archived
+    assert root["title"] == "lineage-root"
+    assert [message["content"] for message in root["messages"]] == [
+        "rescued prompt",
+        "rescued answer",
+    ]
+    assert root["context_messages"] == backup_payload["context_messages"]
+    _assert_cold_archive_parity(lineage_session_store, target_archived)
+
+    # The durable rescue snapshot remains available, and a normal restart after
+    # journal cleanup is an idempotent no-op for both transcript and metadata.
+    images_after_recovery = _durable_images(lineage_session_store)
+    run_startup_session_recovery(lineage_session_store)
+    assert _durable_images(lineage_session_store) == images_after_recovery
+    assert backup_path.read_bytes() == backup_bytes
+    _assert_cold_archive_parity(lineage_session_store, target_archived)
+
+
 def test_startup_recovery_fails_closed_on_unrecoverable_batch_journal(
     lineage_session_store,
     monkeypatch,
