@@ -356,6 +356,13 @@ jobs:
           }
           trap cleanup EXIT
 
+          # The agent only binds port 8642 when API_SERVER_KEY is a usable
+          # value (>=16 chars). Generate a strong one for the smoke run so the
+          # gateway healthcheck passes and the dependent WebUI/dashboard can
+          # start; without a key the agent stays unhealthy by design (#6986).
+          API_SERVER_KEY="$(openssl rand -hex 32)"
+          export API_SERVER_KEY
+
           echo "::group::docker compose up"
           # --wait blocks until all services report healthy OR --wait-timeout fires.
           # Compose v2 returns nonzero on either failure mode.
@@ -365,6 +372,27 @@ jobs:
           echo "::group::container roster"
           docker compose -p "$PROJECT" -f "$COMPOSE_FILE" ps
           echo "::endgroup::"
+
+          # ----- Agent gateway /health probe on 8642 (two/three-container only) -----
+          # The single-container variant has no hermes-agent service and no port 8642.
+          # The healthcheck + service_healthy dependency already gate startup on the
+          # listener for multi-container variants; this explicitly observes the
+          # published loopback endpoint from the host (decisive verification for #6986).
+          if [ "${{ matrix.variant }}" != "single" ]; then
+            echo "::group::Probe agent gateway /health on 8642"
+            attempts=0
+            max_attempts=15
+            until curl --fail --silent --max-time 5 http://127.0.0.1:8642/health > /dev/null; do
+              attempts=$((attempts + 1))
+              if [ "$attempts" -ge "$max_attempts" ]; then
+                echo "❌ agent gateway /health on 8642 never returned 200 after $max_attempts attempts (~30s)"
+                exit 1
+              fi
+              sleep 2
+            done
+            echo "✅ agent gateway /health on 8642 = 200 after $attempts attempts"
+            echo "::endgroup::"
+          fi
 
           # ----- WebUI /health probe -----
           # Single-container: WebUI is on the host on 127.0.0.1:8787.

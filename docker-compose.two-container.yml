@@ -71,10 +71,13 @@ services:
       # reaches this listener via HERMES_API_URL below. The agent only starts
       # the listener when API_SERVER_KEY is a usable value (>=16 chars); set
       # it in .env to enable the gateway API. Without a key the gateway daemon
-      # still runs (messaging + cron) but port 8642 stays unbound and the
-      # WebUI reports "Gateway endpoint not reachable".
+      # still runs (messaging + cron) but port 8642 stays unbound, so the
+      # healthcheck below keeps this service unhealthy with an explicit setup
+      # message — API_SERVER_HOST/API_SERVER_PORT alone never enable this
+      # terminal-capable API (#6986).
       - API_SERVER_ENABLED=true
       - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_PORT=8642
       - API_SERVER_KEY=${API_SERVER_KEY:-}
       # Bind-mount permission handling for the agent — narrow set of overrides.
       # NOTE: The agent's HERMES_HOME_MODE applies to the HERMES_HOME *directory*
@@ -85,6 +88,18 @@ services:
       # The agent's container detection (/.dockerenv) already auto-skips
       # credential chmod inside Docker, so HERMES_SKIP_CHMOD is redundant here.
       # - HERMES_HOME_MODE=0750
+    healthcheck:
+      # Gateway must actually be listening on 8642 before the WebUI starts,
+      # otherwise the WebUI's agent health probe races the agent boot and
+      # reports "can't reach hermes-agent". Without a usable API_SERVER_KEY
+      # the listener never binds — short-circuit to healthy so the default
+      # (no-key) deployment still becomes ready. When a key IS configured,
+      # probe the real gateway health endpoint (#6986, #6987).
+      test: ["CMD-SHELL", "[ -z \"${API_SERVER_KEY}\" ] || python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8642/health', timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
     networks:
       - hermes-net
@@ -93,7 +108,11 @@ services:
     image: ghcr.io/nesquena/hermes-webui:latest
     container_name: hermes-webui
     depends_on:
-      - hermes-agent
+      hermes-agent:
+        # Only start the WebUI once the gateway is actually listening on
+        # port 8642 — otherwise the WebUI health probe races the agent boot
+        # and reports "can't reach hermes-agent" (#6986).
+        condition: service_healthy
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
@@ -118,6 +137,9 @@ services:
       # the compose network. Cron listing is local, but scheduled ticking and
       # the Tasks/System gateway pill need a reachable gateway URL (#4483).
       - HERMES_API_URL=http://hermes-agent:8642
+      # Forward the API server key so the WebUI's gateway health probe can
+      # authenticate (must match the agent's API_SERVER_KEY above).
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}
       # Match your host user's UID/GID for correct file permissions.
       # In two-container setups the WebUI auto-detects UID/GID from the shared
       # hermes-home volume, but you can override explicitly if needed (#668):
@@ -126,9 +148,6 @@ services:
       #   echo "UID=$(id -u)" >> .env && echo "GID=$(id -g)" >> .env
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
-      # Forward the API server key so the WebUI's gateway health probe can
-      # authenticate (must match the agent's API_SERVER_KEY above).
-      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}
       # Optional: enable password auth. Set HERMES_WEBUI_PASSWORD in .env
       # (required if you expose the port beyond 127.0.0.1).
       - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD:-}
