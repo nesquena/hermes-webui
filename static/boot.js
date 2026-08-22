@@ -3758,6 +3758,44 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
   }
+  // ?workspace=<path> (one-shot, symmetric to ?profile=) — route the boot
+  // into a fresh session bound to that workspace instead of restoring the
+  // saved one. Reuses the S._profileSwitchWorkspace one-shot contract that
+  // newSession() already consumes (same path as a profile-switch workspace).
+  // Combined with ?q=, this lets an external launcher open the agent on the
+  // right project with a prefilled composer. Path trust/existence decisions
+  // are the server's (resolve_trusted_workspace()); a rejected path falls
+  // back to the normal restore below.
+  const workspaceIntent=(typeof _workspaceQueryIntentFromLocation==='function')?_workspaceQueryIntentFromLocation():null;
+  if(workspaceIntent&&workspaceIntent.hasParam){
+    // Compound ?profile=&workspace= launch: if a valid profile switch was
+    // requested but did not complete (returned false or threw), creating the
+    // session now would silently bind the workspace to the wrong profile.
+    // Leave the workspace parameter in the URL so a retry after the profile
+    // issue is resolved still carries the intent.
+    const _profileSwitchPending=!!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!_profileSwitchCompleted);
+    if(_profileSwitchPending){
+      console.warn('[boot] workspace query deferred: profile switch did not complete');
+    }else{
+      if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+      if(workspaceIntent.valid){
+        try{
+          S._profileSwitchWorkspace=workspaceIntent.path;
+          await newSession(true,{worktree:false});
+          if(S.session){
+            try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+          }
+          S._bootReady=true;
+          syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+        }catch(e){
+          S._profileSwitchWorkspace=null;
+          console.warn('[boot] workspace query routing failed', e);
+        }
+      }else{
+        console.warn('[boot] ignored invalid workspace query', workspaceIntent.path);
+      }
+    }
+  }
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{

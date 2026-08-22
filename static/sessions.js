@@ -4190,6 +4190,40 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+function _workspaceQueryIntentFromLocation(){
+  // ?workspace=<path> — one-shot workspace routing at boot, symmetric to
+  // ?profile=. Any nonblank value is a routing candidate: trust, existence,
+  // directory, system-root and saved-workspace decisions belong to the
+  // server (resolve_trusted_workspace() behind POST /api/session/new), which
+  // canonicalizes cross-platform paths (Unix, Windows drive paths, ~ homes).
+  // No client-side restriction on the path language: server rejection falls
+  // back to the normal boot restore.
+  const empty={hasParam:false,valid:false,path:''};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    if(!qs.has('workspace')) return empty;
+    const path=String(qs.get('workspace')||'');
+    const trimmed=path.trim();
+    return {
+      hasParam:true,
+      valid:trimmed.length>0,
+      path:trimmed
+    };
+  }catch(_e){return empty;}
+}
+function _consumeWorkspaceQueryParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('workspace');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
