@@ -414,6 +414,338 @@ def test_reload_mcp_error_is_generic(monkeypatch):
     assert calls == ["shutdown"]
 
 
+def test_reload_mcp_uses_default_profile_authority(monkeypatch):
+    """`/reload-mcp` re-discovery must use the DEFAULT profile, not env.
+
+    Greptile P1: the reload previously keyed off the exec-time
+    HERMES_HOME env, which a concurrent stream can mutate — the reload
+    could capture another profile.  /reload-mcp is a global operation,
+    so its authority is deterministically the default profile (''):
+    even with HERMES_HOME set to another profile, the discovery closure
+    asserts the DEFAULT root override and the default readiness entry
+    is updated.
+    """
+    import os
+    from api import profiles
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    calls = []
+    override_token = "tok-123"
+
+    class _FakeOverride:
+        def set_hermes_home_override(self, home):
+            calls.append(("set", home))
+            return override_token
+
+        def reset_hermes_home_override(self, token):
+            calls.append(("reset", token))
+
+        def get_default_hermes_root(self):
+            calls.append("default_root")
+            return "/default/hermes/home"
+
+    monkeypatch.setattr(
+        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+    )
+
+    def shutdown():
+        calls.append("shutdown")
+
+    def discover():
+        calls.append("discover")
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+    monkeypatch.setenv("HERMES_HOME", "/profiles/alpha")
+
+    output = execute_agent_command("/reload-mcp")
+
+    assert ("set", "/default/hermes/home") in calls, (
+        "reload discovery must assert the DEFAULT profile home, never the "
+        "exec-time env (a concurrent stream can mutate it)"
+    )
+    captured_homes = [
+        entry[1]
+        for entry in calls
+        if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "set"
+    ]
+    assert "/profiles/alpha" not in captured_homes, (
+        "reload must never key off another profile's env value"
+    )
+    assert "discover" in calls
+    assert ("reset", override_token) in calls
+    assert "Reloaded MCP servers from configuration." in output
+    default_readiness = streaming._MCP_READINESS.get("/default/hermes/home")
+    assert default_readiness is not None, (
+        "reload must update the DEFAULT profile readiness authority "
+        "(canonical resolved home key)"
+    )
+    assert streaming._mcp_wait_readiness(default_readiness) == "completed"
+
+
+def test_reload_mcp_invalidates_other_profile_entries(monkeypatch):
+    """A global reload must invalidate every OTHER profile's readiness.
+
+    Regression (maintainer review round 9): the reload refreshed only its
+    own key, leaving default-path and named-profile entries falsely
+    'completed' after their servers were deleted by the global shutdown.
+    The reload now removes every other entry so each profile's next turn
+    re-runs discovery.
+    """
+    from api import profiles
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    class _FakeOverride:
+        def set_hermes_home_override(self, home):
+            return "tok"
+
+        def reset_hermes_home_override(self, token):
+            pass
+
+        def get_default_hermes_root(self):
+            return "/default/hermes/home"
+
+    monkeypatch.setattr(
+        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+    )
+
+    # Seed a stale named-profile entry and a stale default entry.
+    stale_named = streaming._McpReadiness()
+    stale_named.status = "completed"
+    streaming._MCP_READINESS["/profiles/beta"] = stale_named
+    stale_default = streaming._McpReadiness()
+    stale_default.status = "completed"
+    streaming._MCP_READINESS["/default/hermes/home"] = stale_default
+
+    def shutdown():
+        pass
+
+    def discover():
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+
+    execute_agent_command("/reload-mcp")
+
+    assert "/profiles/beta" not in streaming._MCP_READINESS, (
+        "named-profile readiness must be invalidated by a global reload"
+    )
+    refreshed = streaming._MCP_READINESS.get("/default/hermes/home")
+    assert refreshed is not None, (
+        "the reload's own canonical entry must stay (refreshed by the run)"
+    )
+    assert streaming._mcp_wait_readiness(refreshed) == "completed"
+
+
+def test_reload_mcp_aborts_when_owner_survives_join_cap(monkeypatch):
+    """A global reload fails CLOSED if a discovery owner survives the join cap.
+
+    Regression (Greptile review round 10): `_prepare_global_reload` used
+    a bounded join without verifying termination, then the reload
+    unconditionally shut down and rebuilt the registry — letting an old
+    discovery body overlap the rebuild and re-register old-config
+    servers.  The reload now aborts BEFORE shutdown when any owner is
+    still alive after the cap.
+    """
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    _old_cap = streaming._MCP_READINESS_WAIT_CAP_S
+    streaming._MCP_READINESS_WAIT_CAP_S = 0.1
+    try:
+        # A live discovery owner that outlives the (tiny) join cap.
+        readiness = streaming._McpReadiness()
+        release = threading.Event()
+
+        def long_discover():
+            release.wait(5.0)
+            return True
+
+        t = threading.Thread(
+            target=streaming._discovery_runner,
+            args=(
+                long_discover,
+                readiness,
+                readiness.event,
+                readiness.gen,
+                readiness.cancel,
+            ),
+            name="mcp-reload-test-survivor",
+            daemon=True,
+        )
+        readiness.thread = t
+        t.start()
+        streaming._MCP_READINESS["/profiles/zombie"] = readiness
+
+        calls = {"shutdown": 0, "discover": 0}
+
+        def shutdown():
+            calls["shutdown"] += 1
+
+        def discover():
+            calls["discover"] += 1
+            return []
+
+        _install_fake_mcp_tool(
+            monkeypatch, shutdown=shutdown, discover=discover, servers={}
+        )
+
+        output = execute_agent_command("/reload-mcp")
+        assert "aborted" in output.lower(), (
+            "reload must fail closed when a discovery owner survives "
+            "the join cap"
+        )
+        assert calls["shutdown"] == 0, (
+            "reload must not shut down the registry over a live owner"
+        )
+        assert calls["discover"] == 0, (
+            "reload must not re-discover while a live owner is still running"
+        )
+        # The survivor keeps running and resolves on its own.
+        release.set()
+        t.join(timeout=2.0)
+        assert readiness.status == "completed"
+    finally:
+        streaming._MCP_READINESS_WAIT_CAP_S = _old_cap
+
+
+def test_reload_mcp_legacy_agent_runs_inline(monkeypatch):
+    """Without the override API, reload discovery runs INLINE, never daemon.
+
+    Greptile P1: on older agents the retry previously ran discovery on a
+    background thread with no profile-local override, so another stream
+    mutating HERMES_HOME could make it register that stream's servers.
+    The inline path mirrors the stream worker's old-agent fallback.
+    """
+    from api import profiles
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    calls = []
+
+    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: None)
+
+    def shutdown():
+        calls.append("shutdown")
+
+    def discover():
+        calls.append("discover")
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+
+    retry_calls = []
+    wait_calls = []
+    monkeypatch.setattr(
+        streaming, "_mcp_retry_discovery", lambda *a, **k: retry_calls.append(a)
+    )
+    monkeypatch.setattr(
+        streaming, "_mcp_wait_readiness", lambda *a, **k: wait_calls.append(a)
+    )
+
+    output = execute_agent_command("/reload-mcp")
+
+    assert not retry_calls, "old-agent reload must not background discovery"
+    assert not wait_calls
+    assert "discover" in calls
+    assert "Reloaded MCP servers from configuration." in output
+
+
+def test_reload_mcp_does_not_stall_unrelated_first_turn(monkeypatch):
+    """A new-profile first turn never blocks for the reload's discovery wait.
+
+    Regression (Greptile review round 13): round 12 held the
+    owner-creation fence across the ENTIRE rebuild, so an unrelated
+    first turn for a NEW profile blocked until the reload's replacement
+    discovery completed (up to the readiness cap).  The fence now covers
+    only the destructive phase (prepare, shutdown, invalidation) and is
+    released before the additive phase, so new-profile owners can be
+    created while the replacement discovery runs.
+    """
+    import threading
+    import time
+
+    from api import profiles
+    from api import streaming
+    from api.commands import execute_agent_command
+
+    class _FakeOverride:
+        def set_hermes_home_override(self, home):
+            return "tok"
+
+        def reset_hermes_home_override(self, token):
+            pass
+
+        def get_default_hermes_root(self):
+            return "/default/hermes/home"
+
+    monkeypatch.setattr(
+        profiles, "_resolve_hermes_home_override", lambda: _FakeOverride()
+    )
+
+    gate = threading.Event()
+    discover_entered = threading.Event()
+
+    def shutdown():
+        pass
+
+    def discover():
+        discover_entered.set()
+        gate.wait(5.0)  # reload's replacement discovery is IN FLIGHT
+        return []
+
+    _install_fake_mcp_tool(monkeypatch, shutdown=shutdown, discover=discover, servers={})
+
+    reload_done = threading.Event()
+    reload_holder = {}
+
+    def _do_reload():
+        try:
+            reload_holder["output"] = execute_agent_command("/reload-mcp")
+        except Exception as exc:  # pragma: no cover - failure path
+            reload_holder["error"] = repr(exc)
+        reload_done.set()
+
+    rt = threading.Thread(target=_do_reload, daemon=True)
+    rt.start()
+    assert discover_entered.wait(2.0), "reload never entered replacement discovery"
+
+    # A first turn for a NEW profile tries to create an owner while the
+    # reload's replacement discovery is still in flight.  It must NOT
+    # stall: the additive phase is unfenced.
+    ensure_done = threading.Event()
+    ensure_holder = {}
+
+    def _do_ensure():
+        ensure_holder["readiness"] = streaming._ensure_mcp_discovery(
+            "/profiles/other", lambda: True, "t-other"
+        )
+        ensure_done.set()
+
+    et = threading.Thread(target=_do_ensure, daemon=True)
+    et.start()
+    time.sleep(0.3)  # gate still closed → replacement discovery in flight
+    assert ensure_done.is_set(), (
+        "a new-profile first turn must NOT block for the reload's "
+        "replacement discovery wait"
+    )
+
+    # Let the reload finish; the fenced creator's entry must survive
+    # (invalidation ran BEFORE any post-shutdown owner was created).
+    gate.set()
+    rt.join(timeout=3.0)
+    assert reload_done.is_set(), "reload did not finish"
+    et.join(timeout=3.0)
+    other = streaming._MCP_READINESS.get("/profiles/other")
+    assert other is not None, (
+        "a fresh post-reload registration must not be invalidated as stale"
+    )
+    assert streaming._mcp_wait_readiness(other) == "completed"
+    assert "Reloaded MCP servers from configuration." in reload_holder["output"]
+
+
 def test_reload_skills_command_formats_helper_diff(monkeypatch):
     """`/reload-skills` should summarize the shared helper diff in printable text."""
     def reload_skills():

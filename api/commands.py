@@ -7,6 +7,7 @@ so the frontend can still load with WEBUI_ONLY commands.
 from __future__ import annotations
 from contextlib import nullcontext
 import logging
+import os
 import threading
 from typing import Any
 
@@ -269,8 +270,137 @@ def _run_reload_mcp_command() -> str:
             with _lock:
                 old_servers = set(_servers.keys())
 
-            shutdown_mcp_servers()
-            new_tools = discover_mcp_tools()
+            # Route the re-discovery through the SAME readiness authority
+            # the stream worker uses (api.streaming), so a subsequent turn
+            # observes the fresh outcome instead of a stale 'completed' /
+            # 'failed' readiness recorded before this reload.  The command
+            # waits on the shared readiness event so its synchronous
+            # report below is still accurate.
+            #
+            # The authority is keyed by the CANONICAL resolved default
+            # profile-home path (the same key the startup kickoff and
+            # default-profile turns consult).  /reload-mcp is a GLOBAL
+            # operation (it shuts down and reconnects every configured
+            # server), so it deliberately does NOT key off the exec-time
+            # HERMES_HOME env: a concurrent stream can mutate that
+            # process-global while the command runs, which would make the
+            # reload capture another profile (Greptile P1).
+            from api.streaming import (
+                _MCP_READINESS_WAIT_CAP_S,
+                _MCP_RELOAD_FENCE,
+                _canonical_readiness_key,
+                _invalidate_mcp_readiness,
+                _mcp_retry_discovery,
+                _mcp_wait_readiness,
+                _prepare_global_reload,
+            )
+
+            def _reload_discover():
+                """Re-discover MCP tools; returns bool.
+
+                Installs the DEFAULT profile-home override (like the
+                stream worker's discovery closure), so a background
+                reload run can never read another stream's HERMES_HOME
+                after env mutation (Greptile P1).
+                """
+                _mcp_home_token = None
+                try:
+                    from api.profiles import _resolve_hermes_home_override
+                    _hc_mod = _resolve_hermes_home_override()
+                    if _hc_mod is not None:
+                        _mcp_home = getattr(
+                            _hc_mod, 'get_default_hermes_root', lambda: ''
+                        )()
+                        if _mcp_home:
+                            _mcp_home_token = _hc_mod.set_hermes_home_override(
+                                str(_mcp_home)
+                            )
+                    try:
+                        discover_mcp_tools()
+                        return True
+                    except Exception:
+                        return False
+                    finally:
+                        if _mcp_home_token is not None:
+                            _hc_mod.reset_hermes_home_override(_mcp_home_token)
+                except Exception:
+                    return False
+
+            # Coordinate the global shutdown with every live discovery
+            # owner (cancel + bounded join) so a body mid-discovery cannot
+            # re-register old-config servers after the registry is cleared.
+            # Fail CLOSED: if any owner survived the join cap, abort the
+            # reload rather than run a discovery body concurrently with a
+            # registry rebuild (Greptile review round 10).
+            #
+            # The owner-creation FENCE is held across the DESTRUCTIVE
+            # phase only: snapshot, join, shutdown, and readiness
+            # invalidation.  It is released BEFORE the replacement
+            # discovery (the additive phase), so unrelated FIRST turns
+            # for new profiles never stall for the reload's discovery
+            # wait (Greptile review round 13).  Round 12's fix held the
+            # fence across the whole rebuild; that traded a benign
+            # stale-churn window for a real first-turn stall, and this
+            # phase split resolves both: invalidation now runs BEFORE
+            # any post-shutdown registration, so a stream owner created
+            # during the rebuild is FRESH and never gets invalidated as
+            # stale, and no new body can register into the shutdown.
+            # The reload's own retry spawn skips the re-acquire
+            # (`_fence_held=True`) because threading.Lock is not
+            # reentrant; waiting turns are unaffected — they only wait
+            # on readiness events, never the fence.
+            with _MCP_RELOAD_FENCE:
+                if not _prepare_global_reload():
+                    return (
+                        "MCP reload aborted: a discovery run is still in "
+                        f"progress after waiting {int(_MCP_READINESS_WAIT_CAP_S)}s. "
+                        "Retry once it finishes."
+                    )
+                shutdown_mcp_servers()
+
+                # The global reload just shut down the registry: every
+                # OTHER profile's readiness is stale.  Remove those
+                # entries BEFORE any post-shutdown owner can be created
+                # (still inside the fence), so a fresh registration can
+                # never be invalidated out from under it.
+                _invalidate_mcp_readiness(except_key=_canonical_readiness_key(''))
+
+                try:
+                    from api.profiles import _resolve_hermes_home_override
+                    _reload_override_available = _resolve_hermes_home_override() is not None
+                except Exception:
+                    _reload_override_available = False
+
+                if _reload_override_available:
+                    _readiness = _mcp_retry_discovery(
+                        _canonical_readiness_key(''),
+                        _reload_discover,
+                        "mcp-reload",
+                        _fence_held=True,
+                    )
+                else:
+                    _readiness = None
+
+            # Fence released — the ADDITIVE phase (replacement
+            # discovery) runs unfenced: waiting on it never blocks
+            # unrelated first turns.  Concurrent registrations into the
+            # process-global `_servers` registry during the additive
+            # phase are the pre-existing multi-profile limitation (the
+            # registry is keyed by raw server name — documented in
+            # api/streaming.py); they converge on the next per-turn
+            # refresh and are not a reload-exclusivity defect.
+            if _readiness is not None:
+                _reload_status = _mcp_wait_readiness(_readiness)
+            else:
+                # Older agent: no context-local override — a background
+                # reload would read the process env while other streams
+                # mutate it.  Run inline (pre-PR semantics), mirroring the
+                # stream worker's old-agent path.  The env read stays
+                # pre-PR on these agents (no override API exists to scope
+                # it); this is the documented compatibility behavior.
+                _reload_status = (
+                    "completed" if _reload_discover() else "failed"
+                )
 
             with _lock:
                 connected_servers = set(_servers.keys())
@@ -291,9 +421,23 @@ def _run_reload_mcp_command() -> str:
         lines.append(f"Removed: {', '.join(sorted(removed))}")
 
     if connected_servers:
-        lines.append(f"{len(new_tools or [])} tool(s) available across {len(connected_servers)} server(s)")
+        _tool_count = 0
+        for _server_name in connected_servers:
+            try:
+                _tool_count += len(
+                    getattr(_servers[_server_name], "_registered_tool_names", [])
+                    or []
+                )
+            except Exception:
+                pass
+        lines.append(
+            f"{_tool_count} tool(s) available across {len(connected_servers)} server(s)"
+        )
     else:
         lines.append("No MCP servers connected")
+
+    if _reload_status == "failed":
+        lines.append("MCP discovery failed during reload — check the server logs")
 
     if not reconnected and not added and not removed:
         lines.append("Tooling state was already current")
