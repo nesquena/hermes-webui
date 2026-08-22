@@ -2584,6 +2584,10 @@
   .attach-chip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 0 0 3px;}
   .attach-chip button:hover{color:var(--accent);}
   .file-input-visually-hidden{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;overflow:hidden;}
+  .attach-choice-popup{position:absolute;left:10px;bottom:calc(100% + 6px);z-index:180;display:flex;flex-direction:column;min-width:180px;padding:6px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.24);}
+  .attach-choice-popup[hidden]{display:none;}
+  .attach-choice-popup button{display:flex;align-items:center;min-height:44px;width:100%;padding:8px 12px;border:0;border-radius:7px;background:transparent;color:var(--text);font:inherit;text-align:left;cursor:pointer;}
+  .attach-choice-popup button:hover,.attach-choice-popup button:focus-visible{background:var(--hover-bg);outline:none;}
   /* Image attachment chips show a thumbnail preview instead of a paperclip chip */
   .attach-chip--image{background:transparent;border-color:var(--border);padding:3px;border-radius:6px;}
   .attach-chip--audio,.attach-chip--video{max-width:260px;}
