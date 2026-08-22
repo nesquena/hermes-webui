@@ -616,7 +616,13 @@ function _cancelMessageVirtualizedRender(){
   }
 }
 function _messageIsRenderable(m){
-  if(!m||!m.role||m.role==='tool') return false;
+  // Automatic greetings are model input, not user-authored conversation. The
+  // marker covers the live optimistic turn; the exact prompt fallback keeps the
+  // internal turn transparent after the server reloads the persisted message.
+  const isAutoGreeting=m&&m.role==='user'&&(
+    m._auto_greeting===true || m.content==='Please greet me briefly.'
+  );
+  if(!m||!m.role||m.role==='tool'||isAutoGreeting) return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;

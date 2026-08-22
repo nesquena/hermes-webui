@@ -8781,6 +8781,8 @@ function _preferencesPayloadFromUi(){
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
   if(newChatOnWorkspaceSwitchCb) payload.new_chat_on_workspace_switch=newChatOnWorkspaceSwitchCb.checked;
+  const autoGreetNewChatCb=$('settingsAutoGreetNewChat');
+  if(autoGreetNewChatCb) payload.auto_greet_new_chat=autoGreetNewChatCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   Object.assign(payload,_speechPreferencesPayloadFromUi());
@@ -9707,6 +9709,15 @@ async function loadSettingsPanel(){
       newChatOnWorkspaceSwitchCb.checked=!!settings.new_chat_on_workspace_switch;
       window._newChatOnWorkspaceSwitch=newChatOnWorkspaceSwitchCb.checked;
       newChatOnWorkspaceSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    const autoGreetNewChatCb=$('settingsAutoGreetNewChat');
+    if(autoGreetNewChatCb){
+      autoGreetNewChatCb.checked=settings.auto_greet_new_chat===true;
+      window._autoGreetNewChat=autoGreetNewChatCb.checked;
+      autoGreetNewChatCb.addEventListener('change',()=>{
+        window._autoGreetNewChat=autoGreetNewChatCb.checked;
+        _schedulePreferencesAutosave();
+      },{once:false});
     }
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');

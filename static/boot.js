@@ -3340,6 +3340,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._defaultMessageMode=_persistDefaultMessageMode(s.default_message_mode||s.busy_input_mode);
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
+    window._autoGreetNewChat=s.auto_greet_new_chat===true;
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     // #6819: persist the resolved auto-follow value into the global mirror.
     // The mirror is NOT profile-keyed (the backend setting is one global
@@ -3853,10 +3854,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+  // If the user opted into automatic greetings, create the initial blank chat
+  // and let newSession() dispatch exactly one transparent greeting. This branch
+  // runs only when there is no restored session or composer draft, so reloads
+  // and resumed conversations do not repeat it.
+  if(window._autoGreetNewChat===true && !S.session && !_prefillHasDraftText(prefillIntent)){
+    await newSession(false);
+  }
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
-  // Start real-time gateway session sync if setting is enabled
+  // Start real-time gateway session sync if setting is enabled;
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
