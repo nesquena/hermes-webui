@@ -2722,11 +2722,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _currentActivityBurstId=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentActivityBurstId)||0)||0;
   let _currentLiveSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
   let _assistantSegmentSeq=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentLiveSegmentSeq)||0)||0;
+  // A direct reload can discard the browser's INFLIGHT recovery cursor (for
+  // example after a prior journalReplayFromStart handoff). Reconnecting without
+  // a cursor would replay the entire active run journal into the browser,
+  // which is enough to freeze/crash a tab even when the settled transcript is
+  // small. The metadata-only session response carries a cheap authoritative
+  // journal cursor; use it as the cold-attach floor when no browser cursor is
+  // available. This intentionally starts at the current live point: the
+  // settled transcript remains the source for history, while future SSE events
+  // continue to update the active turn.
+  const _runtimeJournalCursor=(
+    reconnecting&&S.session&&S.session.session_id===activeSid&&
+    S.session.active_stream_id===streamId&&
+    S.session.runtime_journal&&
+    String(S.session.runtime_journal.run_id||'')===String(streamId)
+  ) ? S.session.runtime_journal : null;
+  const _storedRunJournalSeq=Number(INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0;
+  const _runtimeRunJournalSeq=Number(_runtimeJournalCursor&&_runtimeJournalCursor.last_seq)||0;
+  const _storedRunJournalEventId=String(INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId||'');
+  const _runtimeRunJournalEventId=String(_runtimeJournalCursor&&_runtimeJournalCursor.last_event_id||'');
   let _lastRunJournalSeq=reconnecting
-    ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
+    ? Math.max(0,_storedRunJournalSeq||_runtimeRunJournalSeq)
     : 0;
   let _lastRunJournalEventId=reconnecting
-    ? String((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalEventId)||'')
+    ? (_storedRunJournalEventId||(_storedRunJournalSeq>0?'':_runtimeRunJournalEventId))
     : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
@@ -5342,7 +5361,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // same run. `after_event_id` keeps that cursor run-aware so a stale cursor
     // from an earlier interrupted stream cannot suppress a newer stream whose
     // sequence numbers started over from 1.
-    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}&after_event_id=${encodeURIComponent(_lastRunJournalEventId||'')}`;
+    const afterSeq=_runJournalReplayAfterSeq();
+    // Never request journal replay without a positive cursor. A missing cursor
+    // must not turn into a sequence-zero replay; for an active stream the bare
+    // SSE connection receives future events, and the replay-only path restores
+    // settled session state instead of asking the server for the full journal.
+    if(afterSeq<=0) return '';
+    return `&replay=1&after_seq=${encodeURIComponent(String(afterSeq))}&after_event_id=${encodeURIComponent(_lastRunJournalEventId||'')}`;
   }
 
   function _stableStringify(value){
@@ -7188,6 +7213,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
+    if(replayOnly&&!replayParams){
+      // Without a positive cursor, a dead stream must not fall through to the
+      // stream-not-found replay path, which would replay the journal from its
+      // beginning. Restore the settled transcript instead.
+      await _restoreSettledSession(null, {preserveVisibleOnShorterTerminalSnapshot:true});
+      return;
+    }
     _dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId,{
       startedAt:_extensionTurnStartedAt,
     });
