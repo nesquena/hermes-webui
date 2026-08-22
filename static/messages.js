@@ -4798,12 +4798,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const ref=raw.split(/[?#]/,1)[0];
     return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
   }
+  function _smdMediaTokenParts(source, matchOffset, rawRef, parent){
+    const value=String(source||'');
+    const offset=Number(matchOffset)||0;
+    const before=value.slice(0,offset);
+    if(before.endsWith('"')||before.endsWith("'")||/(?:&quot;|&#39;)$/.test(before)){
+      return _mediaTokenParts(value,offset,rawRef);
+    }
+    // Keep enough same-owner context to reconstruct a split HTML-entity quote
+    // opener. &quot; is the longest supported form (6 chars); literal quotes and
+    // &#39; are shorter and are covered by the same lookbehind window.
+    const prior=parent&&typeof parent.textContent==='string'?parent.textContent.slice(-6):'';
+    return _mediaTokenParts(prior+value,prior.length+offset,rawRef);
+  }
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
     const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
-    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+    const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
+    const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
+    if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
+    else if(!emitted&&entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
@@ -4858,7 +4873,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+      const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,m[1],parent):null;
+      const hasDetachedSuffix=!!(parts&&parts[1]);
+      if(matchEnd===combined.length && !hasDetachedSuffix && !_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
@@ -4868,7 +4885,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      if(parts&&_smdAppendMediaNode(parent,parts[0])){
+        if(parts[1]) writeCurrent(parts[1]);
+      }else{
+        writeCurrent(m[0]);
+      }
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated

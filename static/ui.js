@@ -2722,6 +2722,55 @@ function _mdImageHtml(alt, url){
   return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
 }
 
+function _mediaTokenParts(source, matchOffset, rawRef){
+  let ref=String(rawRef||'');
+  let suffix='';
+  const before=String(source||'').slice(0,Number(matchOffset)||0);
+  // Quotes are valid path/URL bytes, so detach one only when the prose has the
+  // same opener immediately before MEDIA:. The entity forms are what the real
+  // streaming parser passes after escaping text nodes.
+  for(const family of [
+    {value:'"', forms:['"','&quot;']},
+    {value:"'", forms:["'",'&#39;']},
+  ]){
+    if(!family.forms.some(form=>before.endsWith(form))) continue;
+    let quote='', closeAt=-1;
+    for(const form of family.forms){
+      const index=ref.lastIndexOf(form);
+      if(index>closeAt){ quote=form; closeAt=index; }
+    }
+    if(closeAt<=0) continue;
+    const afterQuote=ref.slice(closeAt+quote.length);
+    if(!/^[.,;:!?]*$/.test(afterQuote)) continue;
+    ref=ref.slice(0,closeAt);
+    suffix=family.value+afterQuote;
+    break;
+  }
+  const trailingPunctuation=ref.match(/[.,;:!?]+$/)?.[0]||'';
+  for(const delimiter of ['***','___','**','__','*','_','`']){
+    if(!before.endsWith(delimiter)) continue;
+    let candidate=ref;
+    let afterDelimiter='';
+    if(trailingPunctuation&&candidate.slice(0,-trailingPunctuation.length).endsWith(delimiter)){
+      candidate=candidate.slice(0,-trailingPunctuation.length);
+      afterDelimiter=trailingPunctuation;
+    }
+    if(candidate.endsWith(delimiter)&&candidate.length>delimiter.length){
+      ref=candidate.slice(0,-delimiter.length);
+      suffix=delimiter+afterDelimiter;
+      break;
+    }
+  }
+  const remoteValue=/^https?:\/\//i.test(ref);
+  const punctuation=remoteValue?null:ref.match(/[.,;:!?]+$/);
+  if(punctuation&&ref.length>punctuation[0].length){
+    ref=ref.slice(0,-punctuation[0].length);
+    suffix=punctuation[0]+suffix;
+  }
+  if(!ref||/^[*_`]+$/.test(ref)) return null;
+  return [ref,suffix];
+}
+
 function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(ref==null) return '';
   // data:image/* → inline <img>; any other data: scheme renders as inert
@@ -7591,9 +7640,11 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
-    media_stash.push(raw_ref);
-    return '\x00D'+(media_stash.length-1)+'\x00';
+  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
+    const parts=_mediaTokenParts(s,offset,raw_ref);
+    if(!parts) return token;
+    media_stash.push(parts[0]);
+    return '\x00D'+(media_stash.length-1)+'\x00'+parts[1];
   });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
   // Pre-pass: decode HTML entities first so markdown processing works correctly.

@@ -71,6 +71,7 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('_mediaTokenParts'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
@@ -221,6 +222,107 @@ class TestRendererSanitization:
         assert '&lt;img' in out
         assert '<img' not in out
         assert 'onerror' not in out or '&lt;img' in out
+
+
+class TestMediaTokenBoundaries:
+    @pytest.mark.parametrize(
+        "markdown, encoded_ref, preserved",
+        [
+            ("**MEDIA:/workspace/report.xlsx**", "%2Fworkspace%2Freport.xlsx", "<strong>"),
+            ("`MEDIA:/workspace/report.xlsx`", "%2Fworkspace%2Freport.xlsx", "<code>"),
+            ("_MEDIA:/workspace/report.xlsx_", "%2Fworkspace%2Freport.xlsx", "_</p>"),
+        ],
+    )
+    def test_markdown_and_sentence_suffix_stay_outside_media_ref(
+        self, driver_path, markdown, encoded_ref, preserved
+    ):
+        out = _render(driver_path, markdown)
+        assert f"path={encoded_ref}" in out
+        assert f"path={encoded_ref}%2A" not in out
+        assert f"path={encoded_ref}%60" not in out
+        assert f"path={encoded_ref}_" not in out
+        assert f"path={encoded_ref}." not in out
+        assert preserved in out
+
+    @pytest.mark.parametrize("punctuation", [".", ",", ";", ":", "!", "?", ")"])
+    def test_sentence_punctuation_stays_outside_media_ref(self, driver_path, punctuation):
+        encoded_ref = "%2Fworkspace%2Freport.xlsx"
+        out = _render(driver_path, f"MEDIA:/workspace/report.xlsx{punctuation}")
+        assert f"path={encoded_ref}" in out
+        assert f"path={encoded_ref}{punctuation}" not in out
+        assert punctuation in out
+
+    def test_unmatched_or_internal_delimiters_remain_in_media_ref(self, driver_path):
+        unmatched = _render(driver_path, "MEDIA:/workspace/report.xlsx*")
+        internal = _render(driver_path, "MEDIA:/workspace/report_name.xlsx")
+        assert "path=%2Fworkspace%2Freport.xlsx*" in unmatched
+        assert "path=%2Fworkspace%2Freport_name.xlsx" in internal
+
+    def test_query_and_fragment_remain_part_of_remote_media_ref(self, driver_path):
+        ref = "https://example.com/report.png?download=1#preview"
+        out = _render(driver_path, f"MEDIA:{ref}")
+        assert f'src="{ref}"' in out
+
+    @pytest.mark.parametrize("punctuation", [".", ",", ";", ":", "!", "?"])
+    @pytest.mark.parametrize("suffix_kind", ["query", "fragment"])
+    def test_remote_query_and_fragment_preserve_trailing_punctuation(
+        self, driver_path, punctuation, suffix_kind
+    ):
+        suffix = f"?signature=value{punctuation}"
+        if suffix_kind == "fragment":
+            suffix = f"#section{punctuation}"
+        ref = f"https://example.com/report.png{suffix}"
+        out = _render(driver_path, f"MEDIA:{ref}")
+        assert f'src="{ref}"' in out
+
+    def test_wrapped_remote_query_preserves_value_punctuation_and_detaches_markdown(self, driver_path):
+        ref = "https://example.com/report.png?signature=value."
+        out = _render(driver_path, f"**MEDIA:{ref}**.")
+        assert f'src="{ref}"' in out
+        assert "<strong>" in out
+        assert out.endswith(".</p>")
+
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_balanced_prose_quotes_stay_outside_local_media_ref(self, driver_path, quote):
+        ref = "/workspace/report.xlsx"
+        out = _render(driver_path, f"{quote}MEDIA:{ref}{quote}.")
+        assert "path=%2Fworkspace%2Freport.xlsx" in out
+        assert "%22" not in out
+        assert "path=%2Fworkspace%2Freport.xlsx'" not in out
+        assert out.endswith(f"{quote}.</p>")
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "https://example.com/report.png?signature=value!",
+            "https://example.com/report.png#preview!",
+        ],
+    )
+    def test_balanced_quotes_detach_without_truncating_remote_query_or_fragment(
+        self, driver_path, ref
+    ):
+        out = _render(driver_path, f'"MEDIA:{ref}".')
+        assert f'src="{ref}"' in out
+        assert out.endswith('".</p>')
+
+    def test_multiple_tokens_and_following_prose_keep_their_boundaries(self, driver_path):
+        out = _render(
+            driver_path,
+            "MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after",
+        )
+        assert "path=%2Ftmp%2Fone.png" in out
+        assert "path=%2Ftmp%2Ftwo.pdf" in out
+        assert " then " in out
+        assert " after" in out
+
+    def test_windows_path_is_preserved_as_the_media_ref(self, driver_path):
+        out = _render(driver_path, r"MEDIA:C:\Temp\report.xlsx")
+        assert "path=C%3A%5CTemp%5Creport.xlsx" in out
+
+    def test_bare_marker_remains_literal_text(self, driver_path):
+        out = _render(driver_path, "`MEDIA:`")
+        assert "<code>MEDIA:</code>" in out
+        assert "api/media?path=" not in out
 
 
 class TestCommonLLMShapes:

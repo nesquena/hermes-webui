@@ -2936,6 +2936,7 @@ from api.helpers import (
     strip_public_internal_fields,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
+    split_media_token_ref,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -20296,7 +20297,11 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         text = _message_content_text(message.get("content"))
         if "MEDIA:" not in text:
             continue
-        for ref in _MEDIA_TOKEN_RE.findall(text):
+        for match in _MEDIA_TOKEN_RE.finditer(text):
+            parts = split_media_token_ref(text, match)
+            if not parts:
+                continue
+            ref = parts[0]
             if "://" in ref:
                 continue
             try:

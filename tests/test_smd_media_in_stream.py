@@ -63,6 +63,7 @@ def _extract_js_function(src: str, name: str) -> str:
 def _run_real_smd_media_cases() -> dict:
     helpers = "\n".join(
         [
+            _extract_js_function(UI_JS, "_mediaTokenParts"),
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
             _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
@@ -70,6 +71,7 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
             _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTokenParts"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
@@ -199,7 +201,33 @@ def _run_real_smd_media_cases() -> dict:
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "const boundaries={\n"
+        "  bold:renderModes(['**MEDIA:/tmp/report.xlsx** ']),\n"
+        "  boldSplit:renderModes(['**MEDIA:/tmp/report.', 'xlsx** ']),\n"
+        "  trailingPeriod:renderModes(['MEDIA:/tmp/report.xlsx. ']),\n"
+        "  trailingPeriodEnd:renderModes(['MEDIA:/tmp/report.xlsx.']),\n"
+        "  bareMarker:renderModes(['`MEDIA:` ']),\n"
+        "  queryFragment:renderModes(['MEDIA:https://example.com/a.png?size=1#preview ']),\n"
+        "  wrappedRemoteQueryPunctuation:renderModes(['**MEDIA:https://example.com/a.png?signature=value.**. ']),\n"
+        "  quotedDouble:renderModes(['\"MEDIA:/tmp/report.xlsx\". ']),\n"
+        "  quotedSingleSplit:renderModes([\"'MEDIA:/tmp/report.\", \"xlsx'.\"]),\n"
+        "  entityQuotedDoubleSplit:renderModes(['&quot;', 'MEDIA:/tmp/report.xlsx&quot;. ']),\n"
+        "  entityQuotedSingleEnd:renderModes(['&#39;MEDIA:/tmp/report.xlsx&#39;.']),\n"
+        "  entityQuotedDoubleOpenerSplit:renderModes(['&quo', 't;MEDIA:/tmp/report.xlsx&quot;. ']),\n"
+        "  quotedRemoteQuery:renderModes(['\"MEDIA:https://example.com/a.png?signature=value!\". ']),\n"
+        "  quotedRemoteFragment:renderModes(['\"MEDIA:https://example.com/a.png#preview!\". ']),\n"
+        "  windowsPath:renderModes(['MEDIA:C:\\\\Temp\\\\report.xlsx ']),\n"
+        "  unmatchedDelimiter:renderModes(['MEDIA:/tmp/report.xlsx* ']),\n"
+        "  multiple:renderModes(['MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after']),\n"
+        "};\n"
+        "const punctuation={};\n"
+        "for(const mark of ['.',',',';',':','!','?',')']) punctuation[mark]=renderModes([`MEDIA:/tmp/report.xlsx${mark} `]);\n"
+        "const remoteSuffixPunctuation={query:{},fragment:{}};\n"
+        "for(const mark of ['.',',',';',':','!','?']){\n"
+        "  remoteSuffixPunctuation.query[mark]=renderModes([`MEDIA:https://example.com/a.png?signature=value${mark} `]);\n"
+        "  remoteSuffixPunctuation.fragment[mark]=renderModes([`MEDIA:https://example.com/a.png#section${mark} `]);\n"
+        "}\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, boundaries, punctuation, remoteSuffixPunctuation}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -387,7 +415,13 @@ class TestSmdMediaInStream(unittest.TestCase):
         block = MESSAGES_JS[idx:idx + 6500]
         self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
         self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
+        self.assertIn("const hasDetachedSuffix=", block)
+        self.assertIn("!hasDetachedSuffix", block)
+        self.assertIn("!_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])", block)
+        self.assertLess(
+            block.index("const parts="),
+            block.index("if(matchEnd===combined.length"),
+        )
         self.assertIn("unmatchedTail = candidate", block)
 
     def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
@@ -573,6 +607,92 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                 if mode == "fade":
                     self.assertTrue(result["fadeWords"])
                     self.assertEqual("".join(result["fadeWords"]), "MEow")
+
+    def test_real_smd_parser_keeps_suffixes_outside_media_refs(self):
+        for case_name in ("bold", "boldSplit", "trailingPeriod", "trailingPeriodEnd"):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx**"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx."', result["html"])
+
+        for punctuation, modes in self.cases["punctuation"].items():
+            for mode, result in modes.items():
+                with self.subTest(punctuation=punctuation, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertIn(punctuation, result["text"])
+
+    def test_real_smd_parser_preserves_unmatched_delimiter_in_ref(self):
+        for mode, result in self.cases["boundaries"]["unmatchedDelimiter"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('data-ref="/tmp/report.xlsx*"', result["html"])
+
+    def test_real_smd_parser_detaches_balanced_quotes_in_safe_fade_split_and_tail_paths(self):
+        for case_name in (
+            "quotedDouble",
+            "quotedSingleSplit",
+            "entityQuotedDoubleSplit",
+            "entityQuotedSingleEnd",
+            "entityQuotedDoubleOpenerSplit",
+        ):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx%22"', result["html"])
+                    self.assertNotIn("data-ref=\"/tmp/report.xlsx'\"", result["html"])
+                    self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_quoted_remote_query_and_fragment_values(self):
+        expected = {
+            "quotedRemoteQuery": "https://example.com/a.png?signature=value!",
+            "quotedRemoteFragment": "https://example.com/a.png#preview!",
+        }
+        for case_name, ref in expected.items():
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
+                    self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_remote_query_and_fragment_punctuation(self):
+        for suffix_kind, punctuation_cases in self.cases["remoteSuffixPunctuation"].items():
+            separator = "?signature=value" if suffix_kind == "query" else "#section"
+            for punctuation, modes in punctuation_cases.items():
+                expected = f"https://example.com/a.png{separator}{punctuation}"
+                for mode, result in modes.items():
+                    with self.subTest(
+                        suffix_kind=suffix_kind,
+                        punctuation=punctuation,
+                        mode=mode,
+                    ):
+                        self.assertIn(f'data-ref="{expected}"', result["html"])
+
+        wrapped_ref = "https://example.com/a.png?signature=value."
+        for mode, result in self.cases["boundaries"]["wrappedRemoteQueryPunctuation"].items():
+            with self.subTest(suffix_kind="wrapped_query", mode=mode):
+                self.assertIn(f'data-ref="{wrapped_ref}"', result["html"])
+                self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_other_requested_token_shapes(self):
+        for mode, result in self.cases["boundaries"]["bareMarker"].items():
+            with self.subTest(case="bareMarker", mode=mode):
+                self.assertIn("MEDIA:", result["text"])
+                self.assertNotIn('class="media-node"', result["html"])
+
+        expected = {
+            "queryFragment": "https://example.com/a.png?size=1#preview",
+            "windowsPath": r"C:\Temp\report.xlsx",
+        }
+        for case_name, ref in expected.items():
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
+
+        for mode, result in self.cases["boundaries"]["multiple"].items():
+            with self.subTest(case="multiple", mode=mode):
+                self.assertIn('data-ref="/tmp/one.png"', result["html"])
+                self.assertIn('data-path="/tmp/two.pdf"', result["html"])
+                self.assertIn("then", result["text"])
+                self.assertIn("after", result["text"])
 
 
 if __name__ == "__main__":
