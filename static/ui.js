@@ -7784,48 +7784,72 @@ function renderMd(raw){
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
-  function _renderListBlock(lines, ordered){
-    const marker=ordered?'\\d+\\. ':'[-*+] ';
-    let html=ordered?'<ol>':'<ul>';
-    let item=null;
-    const flush=()=>{
-      if(!item) return;
-      const body=item.parts.join('\n').trim();
-      const text=body;
-      let inner;
-      if(!ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
-      else if(!ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
-      else inner=inlineMd(text);
-      const valueAttr=item.value!==null?` value="${item.value}"`:'';
-      const styleAttr=item.indent?` style="margin-left:16px"`:'';
-      html+=`<li${valueAttr}${styleAttr}>${inner}</li>`;
-      item=null;
+  function _renderListBlock(lines){
+    // Single-pass mixed-marker list renderer (#6700). Builds a real nested
+    // <ul>/<ol> tree with a stack keyed by indentation depth + marker kind
+    // instead of rendering one marker family and re-parsing the generated
+    // HTML with the other. Only item text goes through inlineMd(); tags
+    // emitted here are never parsed as Markdown again.
+    const root={ordered:false,items:[]};   // container for top-level lists
+    const listStack=[];                    // listStack[k]: list open at depth k
+    const itemStack=[];                    // itemStack[k]: last item at depth k
+    const openList=(depth,ordered)=>{
+      const ln={ordered,items:[]};
+      // Attach to the nearest open ancestor item when indentation jumps by
+      // more than one level (e.g. 4-space indent straight from the top), so
+      // the new list nests under the right parent instead of detaching.
+      let parentItem=null;
+      for(let k=depth-1;k>=0;k--){
+        if(itemStack[k]){ parentItem=itemStack[k]; break; }
+      }
+      (parentItem?parentItem.sublists:root.items).push(ln);
+      listStack[depth]=ln;
+      return ln;
+    };
+    const openItem=(depth,ordered,value,content)=>{
+      for(let k=listStack.length-1;k>depth;k--) listStack.pop();
+      if(!listStack[depth]||listStack[depth].ordered!==ordered){
+        if(listStack[depth]) listStack.pop();
+        listStack[depth]=openList(depth,ordered);
+      }
+      const item={ordered,value,content:[content],sublists:[]};
+      listStack[depth].items.push(item);
+      itemStack[depth]=item;
+      for(let k=itemStack.length-1;k>depth;k--) itemStack.pop();
+      return item;
     };
     for(const raw of lines){
       const line=String(raw||'');
-      const nested=line.match(new RegExp(`^ {2,}(${marker})(.*)$`));
-      if(nested){
-        flush();
-        item={indent:true,value:ordered?parseInt(nested[1],10):null,parts:[nested[2]]};
-        continue;
+      const om=line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+      const um=line.match(/^(\s*)([-*+])\s+(.*)$/);
+      const m=om||um;
+      if(m){
+        const depth=m[1].length<2?0:Math.floor(m[1].length/2);
+        openItem(depth,!!om,om?parseInt(om[2],10):null,m[3]);
+      } else if(itemStack.length){
+        itemStack[itemStack.length-1].content.push(line.replace(/^ {2,}/,'').trim());
       }
-      const top=line.match(new RegExp(`^(?:  )?(${marker})(.*)$`));
-      if(top){
-        flush();
-        item={indent:false,value:ordered?parseInt(top[1],10):null,parts:[top[2]]};
-        continue;
-      }
-      if(!item) continue;
-      item.parts.push(line.replace(/^ {2,}/,'').trim());
     }
-    flush();
-    return html+(ordered?'</ol>':'</ul>');
+    const renderList=ln=>'<'+(ln.ordered?'ol':'ul')+'>'+ln.items.map(renderItem).join('')+'</'+(ln.ordered?'ol':'ul')+'>';
+    const renderItem=it=>{
+      const text=it.content.join('\n').trim();
+      let inner;
+      if(!it.ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+      else if(!it.ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+      else inner=inlineMd(text);
+      const valueAttr=it.value!==null?` value="${it.value}"`:'';
+      return `<li${valueAttr}>${inner}${it.sublists.map(renderList).join('')}</li>`;
+    };
+    return root.items.map(renderList).join('');
   }
-  function _renderLists(src, ordered){
+  function _renderLists(src){
+    // Single pass over source lines: collect a contiguous list region (any
+    // marker family, top-level or nested, plus continuation lines) and hand
+    // it to _renderListBlock, which builds the structural <ul>/<ol> tree.
     const lines=src.split('\n');
     const out=[];
-    const topRe=ordered?/^(?:  )?\d+\. /:/^(?:  )?[-*+] /;
-    const nestedRe=ordered?/^ {2,}\d+\. /:/^ {2,}[-*+] /;
+    const topRe=/^(?:  )?(?:\d+\.|[-*+]) /;
+    const nestedRe=/^ {2,}(?:\d+\.|[-*+]) /;
     const contRe=/^ {2,}\S/;
     let i=0;
     while(i<lines.length){
@@ -7852,18 +7876,16 @@ function renderMd(raw){
         }
         break;
       }
-      out.push(_renderListBlock(block,ordered));
+      out.push(_renderListBlock(block));
     }
     return out.join('\n');
   }
-  // Preserve continuation lines, nested indentation, and LaTeX placeholder lines
-  // inside list items without changing the wider markdown pipeline.
-  s=_renderLists(s,false);
-  // Ordered-list parsing intentionally runs on the post-unordered string; the
-  // unordered pass emits <ul> HTML that cannot satisfy the ordered-item regex.
-  // Keep continuation lines attached to their item and preserve explicit
-  // numbering via value= even when blank lines split the markdown.
-  s=_renderLists(s,true);
+  // Single-pass list stage (#6700): one parser handles both marker families
+  // with a stack keyed by indentation + marker kind, so mixed nested lists
+  // (ul→ol→ul) build valid <ul>/<ol> structure instead of re-parsing
+  // renderer-generated HTML as Markdown. value="N" is still emitted on every
+  // ordered <li> so explicit numbering survives blank-line splits (#886).
+  s=_renderLists(s);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
   // is handled by inlineMd() only — prevents double-linking.
@@ -8026,8 +8048,7 @@ function renderMd(raw){
     const a=_attrs(rawAttrs);
     if(name==='li'){
       const value=/^\d+$/.test(a.value||'')?` value="${esc(a.value)}"`:'';
-      const style=(a.style||'').replace(/\s+/g,'').toLowerCase()==='margin-left:16px'?` style="margin-left:16px"`:'';
-      return `<li${value}${style}>`;
+      return `<li${value}>`;
     }
     if(name==='span'){
       return `<span${_cls(a.class,['task-done','task-todo','katex-inline'])}${a['data-katex']==='inline'?' data-katex="inline"':''}>`;
