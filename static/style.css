@@ -5651,7 +5651,7 @@ main.main > #mainPlugin{display:none;}
 
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
-.cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
+.cron-new-dot{width:7px;height:7px;border-radius:50%;background:#e53e3e;flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
 .cron-agent-badge{flex-shrink:0;font-size:12px;line-height:1;}
 .cron-script-badge{flex-shrink:0;font-size:12px;line-height:1;opacity:.92;}
 .cron-script-job-banner{margin-bottom:12px;}
@@ -5662,7 +5662,7 @@ main.main > #mainPlugin{display:none;}
 .detail-badge.cron-mode-badge.script{background:rgba(148,163,184,.14);color:var(--text-secondary);}
 .detail-badge.cron-mode-badge.agent{background:rgba(99,179,237,.14);color:#90cdf4;}
 @keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
-.has-new-run{border-color:var(--success,#22c55e)!important;box-shadow:0 0 0 1px var(--success,#22c55e);}
+.has-new-run{border-color:#e53e3e!important;box-shadow:0 0 0 1px #e53e3e;}
 
 /* ── Background error banner ── */
 /* ── Archived sessions ── */
