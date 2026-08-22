@@ -2263,21 +2263,6 @@ function closeOtherLiveStreams(activeSid){
   }
 }
 
-function _registerLiveStream(activeSid,streamId,source){
-  const existingLive=LIVE_STREAMS[activeSid];
-  if(existingLive&&existingLive.source&&existingLive.source!==source){
-    try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
-  }
-  LIVE_STREAMS[activeSid]={streamId,source};
-  _touchLiveStreamUse(activeSid);
-  // Registration follows asynchronous status/replay probes. Re-arbitrate
-  // AFTER publishing so concurrent late completions cannot exceed the budget.
-  const foregroundSid=(S&&S.session&&S.session.session_id)
-    ?String(S.session.session_id)
-    :activeSid;
-  closeOtherLiveStreams(foregroundSid);
-}
-
 function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
   const runtime=typeof window!=='undefined'&&window.HermesExtensionSettings;
   const dispatch=runtime&&runtime._dispatchTurnLifecycle;
@@ -5859,6 +5844,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       });
     }
     return true;
+  }
+
+  function _registerLiveStream(activeSid,streamId,source){
+    const existingLive=LIVE_STREAMS[activeSid];
+    if(existingLive&&existingLive.source&&existingLive.source!==source){
+      try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
+    }
+    LIVE_STREAMS[activeSid]={streamId,source};
+    if(typeof _touchLiveStreamUse==='function') _touchLiveStreamUse(activeSid);
+    // Registration follows asynchronous status/replay probes. Re-arbitrate
+    // AFTER publishing so concurrent late completions cannot exceed the budget.
+    const foregroundSid=(S&&S.session&&S.session.session_id)
+      ?String(S.session.session_id)
+      :activeSid;
+    closeOtherLiveStreams(foregroundSid);
   }
 
   function _wireSSE(source){
