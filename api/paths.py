@@ -83,6 +83,67 @@ def _has_extended_attributes(path: Path) -> bool:
         raise
 
 
+# ``write()`` drops these from a file written by a non-superuser, so they can
+# only be applied *after* the payload lands. Sticky (``S_ISVTX``) survives a
+# write on both Linux and macOS and needs no restoration.
+_WRITE_CLEARED_MODE_BITS = stat.S_ISUID | stat.S_ISGID
+
+
+def _restore_write_cleared_mode_bits(
+    fd: int,
+    mode: int | None,
+    *,
+    path: str | Path | None = None,
+    best_effort: bool = False,
+) -> None:
+    """Re-apply setuid/setgid bits that writing the payload cleared.
+
+    POSIX requires ``write()`` to clear ``S_ISUID``/``S_ISGID`` when the writer
+    is not the superuser (``man 2 write``), so a ``chmod`` issued *before* the
+    content is written loses exactly the bits it just set. macOS clears setgid
+    unconditionally; Linux clears it only when the group-execute bit is also
+    set — ``S_ISGID`` without ``S_IXGRP`` denotes mandatory locking rather than
+    privilege — but drops setuid regardless. Re-applying the mode once the
+    bytes are down is the only ordering that preserves an administrator's
+    policy on every platform, and it is skipped entirely for ordinary modes so
+    the common ``0644``/``0664`` path issues no extra syscall.
+
+    Only the dropped bits are re-added, on top of whatever mode the inode
+    carries *now*: writing back the mode captured before the payload would
+    revert a permission change an administrator made while the write was in
+    flight.
+
+    A concurrent *revocation* of one of these bits cannot be distinguished
+    from the kernel's own clearing — both leave the inode without it — so a
+    ``chmod g-s`` landing inside the write is still re-applied. Callers invoke
+    this immediately after the ``flush()`` that issues the clearing
+    ``write(2)``, which is the earliest correct point and leaves a window no
+    wider than the kernel's own. Closing it entirely would require the chmod
+    to be atomic with the write, which POSIX does not offer. On the atomic
+    path the question is moot: the temp inode is private until ``os.replace``.
+
+    ``best_effort`` suppresses errors for callers that have already committed
+    their content. Restoring the bit is secondary to the write itself, and a
+    caller who may write the file without owning it (group-writable config)
+    could not ``chmod`` it before this function existed either — failing the
+    save outright would be a worse regression than losing the bit.
+    """
+    if mode is None or not mode & _WRITE_CLEARED_MODE_BITS:
+        return
+    try:
+        current = stat.S_IMODE(os.fstat(fd).st_mode)
+        desired = current | (mode & _WRITE_CLEARED_MODE_BITS)
+        if desired == current:
+            return
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, desired)
+        elif path is not None:
+            os.chmod(path, desired)
+    except OSError:
+        if not best_effort:
+            raise
+
+
 def _require_writable_target(write_path: Path) -> os.stat_result | None:
     """Reject writes to a read-only target before any replacement work.
 
@@ -124,6 +185,9 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     owner-only. Existing files copy uid/gid and mode onto the temp descriptor;
     new files use the active process umask, exactly as a normal
     ``open(..., "w")`` would.
+    Special mode bits need care: POSIX makes ``write()`` clear
+    ``S_ISUID``/``S_ISGID`` for a non-superuser writer, so the mode is
+    re-applied after the payload is written rather than only before it.
     (Unlike ``.env``, ``config.yaml`` holds no secrets and is not meant to be
     forced to ``0600``.)
 
@@ -159,6 +223,13 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     except FileNotFoundError:
         existing_stat = None
     mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    if existing_stat is not None and not stat.S_ISREG(existing_stat.st_mode):
+        # A non-regular target (FIFO, socket, device) never reaches the
+        # S_ISREG normalisation below, so its mode survives to the temp file.
+        # Ordinary bits are harmless there, but restoring setuid/setgid after
+        # the write would persist them onto the regular file that replaces it
+        # — a privilege bit the original write() had always stripped.
+        mode = stat.S_IMODE(existing_stat.st_mode) & ~_WRITE_CLEARED_MODE_BITS
 
     def _verify_symlink_target() -> None:
         if symlink_target is not None and path.resolve(strict=False) != symlink_target:
@@ -185,6 +256,21 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 with fallback_file:
                     fallback_file.write(text)
                     fallback_file.flush()
+                    # ``flush()`` issues the write(2) that clears the bits, so
+                    # restore here rather than after the fsync below: it is the
+                    # earliest correct point and keeps the window in which a
+                    # concurrent chmod could be clobbered as small as the
+                    # kernel allows. This path writes the live config inode, so
+                    # a cleared bit is lost from the real file rather than from
+                    # a discarded temp copy. Best-effort, because the content is
+                    # already committed and a group-writable config may be saved
+                    # by a non-owner who cannot chmod it at all.
+                    _restore_write_cleared_mode_bits(
+                        fallback_file.fileno(),
+                        stat.S_IMODE(opened_stat.st_mode),
+                        path=write_path,
+                        best_effort=True,
+                    )
                     os.fsync(fallback_file.fileno())
             finally:
                 if owns_fallback_fd:
@@ -240,6 +326,10 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         with f:
             f.write(text)
             f.flush()
+            # Restore before the fsync for the same reason as the in-place
+            # path; here the temp inode is still private, so no third party
+            # can observe or race it before os.replace commits.
+            _restore_write_cleared_mode_bits(f.fileno(), mode, path=tmp)
             os.fsync(f.fileno())
         _verify_symlink_target()
         os.replace(tmp, write_path)
