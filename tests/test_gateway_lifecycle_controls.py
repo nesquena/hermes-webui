@@ -93,6 +93,91 @@ def test_gateway_start_runs_profile_scoped_agent_cli_and_returns_status(monkeypa
     assert kwargs["text"] is True
 
 
+def test_gateway_lifecycle_env_injects_active_profile_home(monkeypatch, tmp_path):
+    """#6857: the lifecycle subprocess env must pin HERMES_HOME to the active
+    profile's resolved home (named profile)."""
+    from api import config, profiles, routes
+
+    agent_dir = _fake_agent(tmp_path)
+    monkeypatch.setattr(config, "_AGENT_DIR", agent_dir)
+    monkeypatch.setattr(config, "PYTHON_EXE", sys.executable)
+    named_home = tmp_path / "hermes" / "profiles" / "work"
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: named_home)
+    monkeypatch.setattr(
+        routes,
+        "_gateway_status_payload",
+        lambda: {
+            "running": True,
+            "configured": True,
+            "platforms": [],
+            "last_active": "",
+            "session_count": 0,
+            "health": {},
+        },
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="gateway started\n", stderr="")
+
+    monkeypatch.setattr(routes.subprocess, "run", fake_run)
+
+    handler, data = _call_post(monkeypatch, "/api/gateway/start", {"name": "telegram"})
+
+    assert handler.status == 200
+    assert data["ok"] is True
+    cmd, kwargs = calls[0]
+    assert cmd[2:] == ["--profile", "work", "gateway", "start"]
+    assert kwargs["env"]["HERMES_HOME"] == str(named_home)
+
+
+def test_gateway_lifecycle_env_overrides_stale_home_on_default_path(monkeypatch, tmp_path):
+    """#6857: after a named→default switch the process env can still hold the
+    stale named/deleted home; the default-path subprocess must receive the
+    canonical root home instead."""
+    from api import config, profiles, routes
+
+    agent_dir = _fake_agent(tmp_path)
+    monkeypatch.setattr(config, "_AGENT_DIR", agent_dir)
+    monkeypatch.setattr(config, "PYTHON_EXE", sys.executable)
+    stale_named_home = tmp_path / "hermes" / "profiles" / "deleted"
+    root_home = tmp_path / "hermes"
+    # Simulate the stale process-global env left by a named→default switch.
+    monkeypatch.setenv("HERMES_HOME", str(stale_named_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: root_home)
+    monkeypatch.setattr(
+        routes,
+        "_gateway_status_payload",
+        lambda: {
+            "running": True,
+            "configured": True,
+            "platforms": [],
+            "last_active": "",
+            "session_count": 0,
+            "health": {},
+        },
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="gateway stopped\n", stderr="")
+
+    monkeypatch.setattr(routes.subprocess, "run", fake_run)
+
+    handler, data = _call_post(monkeypatch, "/api/gateway/stop")
+
+    assert handler.status == 200
+    assert data["ok"] is True
+    cmd, kwargs = calls[0]
+    assert cmd[2:] == ["gateway", "stop"]  # no --profile on the default path
+    assert kwargs["env"]["HERMES_HOME"] == str(root_home)
+    assert kwargs["env"]["HERMES_HOME"] != str(stale_named_home)
+
+
 def test_gateway_action_contention_returns_409_without_spawning(monkeypatch, tmp_path):
     """A second lifecycle action while one holds the lock returns 409 and does
     NOT spawn an overlapping `hermes gateway` subprocess (server-side
