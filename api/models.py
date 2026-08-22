@@ -1367,7 +1367,13 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(
+        self,
+        touch_updated_at: bool = True,
+        skip_index: bool = False,
+        *,
+        expected_sidecar_sig: tuple | None = None,
+    ) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1444,6 +1450,8 @@ class Session:
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        if expected_sidecar_sig is not None and _sidecar_stat_signature(self.path) != expected_sidecar_sig:
+            return
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1514,6 +1522,12 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+            if expected_sidecar_sig is not None and _sidecar_stat_signature(self.path) != expected_sidecar_sig:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return
             _safe_replace(tmp, self.path)
         except Exception:
             try:
@@ -1580,15 +1594,15 @@ class Session:
             data[field] = normalized_values
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
-        if _collapsed_partials or (
-            _content_changed
-            and _pre_read_sig is not None
-            and _sidecar_stat_signature(p) == _pre_read_sig
-        ):
+        if _collapsed_partials or (_content_changed and _pre_read_sig is not None):
             try:
                 # Self-heal repaired content or bloated sessions on first full
                 # load without touching recency/index ordering.
-                session.save(touch_updated_at=False, skip_index=True)
+                session.save(
+                    touch_updated_at=False,
+                    skip_index=True,
+                    expected_sidecar_sig=_pre_read_sig if _content_changed else None,
+                )
             except Exception:
                 logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
         else:
