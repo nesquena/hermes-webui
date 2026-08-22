@@ -12,6 +12,7 @@ import errno
 import atexit
 import codecs
 import collections
+import logging
 import os
 import queue
 import shutil
@@ -181,7 +182,12 @@ _TERMINAL_DESCENDANT_REAPER_LIMIT = 64
 # reconnect keeps the session. Dead-process terminals are swept too as a
 # belt-and-suspenders for the reader-loop retire.
 _TERMINAL_IDLE_GRACE_SECONDS = 900  # 15 min unwatched -> reap
+logger = logging.getLogger(__name__)
+
 _TERMINAL_REAPER_INTERVAL_SECONDS = 60
+# How long to stay quiet about a REPEATING reaper failure before
+# reporting it again. A changed exception reports immediately.
+_TERMINAL_REAPER_LOG_COOLDOWN_SECONDS = 900
 _terminal_reaper_started = False
 _terminal_reaper_lock = threading.Lock()
 _terminal_reaper_thread: threading.Thread | None = None
@@ -507,13 +513,68 @@ def _reap_idle_terminals(now: float) -> int:
 
 
 def _terminal_reaper_loop() -> None:
+    """Reap idle terminals once per interval, forever.
+
+    Swallowing a failed pass is deliberate — a transient error must not kill the
+    daemon, and ``_MAX_TERMINALS`` still bounds the damage if reaping stops.
+    Swallowing it *silently* is not: a permanently broken pass then looks
+    identical to "nothing to reap", and the first evidence anyone gets is
+    terminal spawns failing against the cap, long after the cause is gone from
+    anyone's memory.
+
+    The breadcrumb is rate-limited because the alternative is worse than
+    silence. A persistent failure fires every ``_TERMINAL_REAPER_INTERVAL_SECONDS``
+    — 1440 identical tracebacks a day, which buries the log the operator would
+    need to diagnose it. So: report the first failure with its traceback, then
+    stay quiet about the same error until the cooldown elapses or the error
+    changes, and say how many reports were suppressed. A different exception
+    reports immediately — it is new information.
+
+    Recovery is logged too. Without it, "the errors stopped" is ambiguous
+    between "it started working" and "it is still broken and I muted it".
+    """
+    last_signature = None
+    last_report_at = 0.0
+    suppressed = 0
+    consecutive = 0
     while not _terminal_reaper_stop.wait(_TERMINAL_REAPER_INTERVAL_SECONDS):
         try:
             # Wall-clock, consistent with unwatched_since / last_activity.
             _reap_idle_terminals(time.time())
-        except Exception:
-            # Never let a transient error kill the reaper thread.
-            pass
+        except Exception as exc:
+            consecutive += 1
+            try:
+                signature = (type(exc).__name__, str(exc))
+                now = time.monotonic()
+                due = (now - last_report_at) >= _TERMINAL_REAPER_LOG_COOLDOWN_SECONDS
+                if signature != last_signature or due:
+                    logger.error(
+                        "terminal idle reaper pass failed (%d consecutive failure(s); "
+                        "%d report(s) suppressed since the last one). Idle terminals are "
+                        "not being reaped; _MAX_TERMINALS=%d still bounds the registry.",
+                        consecutive, suppressed, _MAX_TERMINALS, exc_info=True,
+                    )
+                    last_signature = signature
+                    last_report_at = now
+                    suppressed = 0
+                else:
+                    suppressed += 1
+            except Exception:
+                # Reporting the failure must never be what kills the reaper.
+                pass
+        else:
+            if consecutive:
+                try:
+                    logger.info(
+                        "terminal idle reaper recovered after %d failed pass(es)",
+                        consecutive,
+                    )
+                except Exception:
+                    pass
+            consecutive = 0
+            last_signature = None
+            last_report_at = 0.0
+            suppressed = 0
 
 
 def _ensure_terminal_reaper() -> None:
