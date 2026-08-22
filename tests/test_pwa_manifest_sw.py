@@ -198,6 +198,18 @@ class TestPWARoutes:
             "/sw.js must be public so service-worker updates never return login HTML"
         )
 
+    def test_session_login_is_public_auth_path(self):
+        src = AUTH.read_text(encoding="utf-8")
+        public_idx = src.find("PUBLIC_PATHS")
+        assert public_idx != -1, "auth.py must define PUBLIC_PATHS"
+        block = src[public_idx:public_idx + 400]
+        assert "'/session/login'" in block, (
+            "/session/login must be in PUBLIC_PATHS so that Cloudflare Access "
+            "resume requests are not intercepted by the auth middleware and "
+            "redirected to login?next=/session/login, which would create a "
+            "recursive redirect loop"
+        )
+
 
 class TestIndexHtmlIntegration:
     def test_index_links_manifest(self):

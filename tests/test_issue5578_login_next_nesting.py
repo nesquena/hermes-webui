@@ -95,6 +95,22 @@ class TestClientGuardsWired:
         assert "decodeURIComponent" in LOGIN_JS
         assert "2048" in LOGIN_JS
 
+    def test_login_js_blocks_session_login_path_explicitly(self):
+        # /session/login is the Cloudflare Access resume URL; using it as a ?next=
+        # value would loop back to the login page. The JS guard must block it
+        # explicitly in _safeNextPath (belt-and-suspenders alongside /login$/).
+        assert "'/session/login'" in LOGIN_JS, (
+            "_safeNextPath must explicitly reject '/session/login' as a next-path "
+            "target to prevent Cloudflare Access redirect loops"
+        )
+
+    def test_login_js_blocks_api_auth_prefix_in_safe_next(self):
+        # API auth paths must never be used as post-login redirect targets.
+        assert "'/api/auth/'" in LOGIN_JS, (
+            "_safeNextPath must reject /api/auth/* prefixes to prevent "
+            "redirect loops through auth endpoints"
+        )
+
     def test_workspace_js_skips_next_on_login_page(self):
         # The 401 handler must NOT append the whole login URL as next when it's
         # already on the login page (the recursion source).
