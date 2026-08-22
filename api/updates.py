@@ -519,18 +519,63 @@ def _read_agent_source_version(agent_dir: Path) -> str | None:
     return None
 
 
+# --- Agent-version gateway-health probe: single-flight TTL cache -------------
+# The probe must never run synchronously inside the /api/settings request path
+# (page-boot / Settings-open / profile-switch hot paths). We serve an immediate
+# value from this TTL cache and refresh it in a background daemon thread,
+# single-flight so concurrent requests never stack probes.
+_AGENT_VERSION_CACHE_TTL_SECONDS = 60.0
+# A failed probe publishes ``None`` with its own (shorter) backoff expiry, so
+# an outage does not turn every post-settlement request into another probe.
+_AGENT_VERSION_FAILURE_BACKOFF_SECONDS = 15.0
+_AGENT_VERSION_PROBE_DEADLINE_SECONDS = 1.5
+_AGENT_VERSION_MAX_BODY_BYTES = 64 * 1024
+
+# ONE lock guards BOTH the cache payload and the in-flight ownership, so cache
+# freshness and the single-flight claim are a single atomic scheduling decision:
+# no worker can start while a fresh positive OR negative result is still valid,
+# and two callers can never claim the refresh at the same time.
+_agent_version_cache = {'value': None, 'expires_at': 0.0}
+_agent_version_refresh_in_progress = False
+_agent_version_lock = threading.Lock()
+
+
 def _gateway_health_base_url() -> str:
-    """Return the configured/default Hermes Agent gateway base URL."""
-    raw = (
-        os.environ.get('GATEWAY_HEALTH_URL')
-        or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
-        or 'http://hermes-agent:8642'
-    ).strip()
-    if raw.endswith('/health/detailed'):
-        raw = raw[: -len('/health/detailed')]
-    elif raw.endswith('/health'):
-        raw = raw[: -len('/health')]
-    return raw.rstrip('/')
+    """Return the configured/default Hermes Agent gateway base URL.
+
+    Mirrors the canonical precedence in
+    ``api.agent_health._remote_gateway_base_url`` (#3281):
+    ``GATEWAY_HEALTH_URL`` > ``HERMES_GATEWAY_HEALTH_URL`` > ``HERMES_API_URL``
+    > ``HERMES_WEBUI_GATEWAY_BASE_URL``, falling back to the Docker default
+    ``http://hermes-agent:8642`` for local/single-container setups. Custom
+    two-container / remote-gateway deployments that set only
+    ``HERMES_API_URL`` or ``HERMES_WEBUI_GATEWAY_BASE_URL`` therefore probe the
+    right host instead of an unresolvable ``hermes-agent`` service name.
+
+    Any of these env vars may legitimately point AT a health endpoint
+    (e.g. ``GATEWAY_HEALTH_URL=http://host:8642/health``). Since the probe
+    appends ``/health`` / ``/health/detailed`` to the returned base, a
+    trailing health-path suffix is stripped first (same normalization and
+    suffix list as the canonical resolver), and surrounding whitespace is
+    ignored.
+    """
+    raw = 'http://hermes-agent:8642'
+    for var in (
+        'GATEWAY_HEALTH_URL',
+        'HERMES_GATEWAY_HEALTH_URL',
+        'HERMES_API_URL',
+        'HERMES_WEBUI_GATEWAY_BASE_URL',
+    ):
+        candidate = os.environ.get(var, '').strip()
+        if candidate:
+            raw = candidate
+            break
+    base = raw.rstrip('/')
+    for suffix in ('/health/detailed', '/health', '/v1/health', '/status'):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip('/')
+            break
+    return base
 
 
 def _version_from_gateway_health_payload(payload: object) -> str | None:
@@ -550,23 +595,108 @@ def _version_from_gateway_health_payload(payload: object) -> str | None:
 
 
 def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
-    """Best-effort cross-container gateway API fallback for Agent version."""
+    """Best-effort cross-container gateway API fallback for Agent version.
+
+    Uses ONE overall deadline across all probe paths (not per-path) and caps
+    the response body, so a slow or chatty gateway cannot stall the caller
+    past ``timeout``.
+    """
     base = _gateway_health_base_url()
     if not base:
         return None
     parsed = urlparse(base)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return None
+    deadline = time.monotonic() + timeout
     for path in ('/health', '/health/detailed'):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode('utf-8'))
-        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+            with urllib.request.urlopen(f'{base}{path}', timeout=remaining) as resp:
+                raw = resp.read(_AGENT_VERSION_MAX_BODY_BYTES + 1)
+                if len(raw) > _AGENT_VERSION_MAX_BODY_BYTES:
+                    # Oversized / slow-trickling body — treat as no answer so
+                    # an unbounded response cannot stall the probe deadline.
+                    continue
+                payload = json.loads(raw.decode('utf-8'))
+        except Exception:
+            # Every probe failure (OSError, URLError, TimeoutError, ValueError,
+            # http.client.IncompleteRead, bad JSON, ...) just moves to the next
+            # path; callers keep their fallback when nothing is detected.
             continue
         version = _version_from_gateway_health_payload(payload)
         if version:
             return version
     return None
+
+
+def get_cached_agent_version() -> str | None:
+    """Return the fresh cached gateway agent version, or ``None`` when cold.
+
+    Freshness is judged ONLY by ``expires_at`` — a ``None`` value from a recent
+    failed probe still carries its own backoff expiry, so callers keep the
+    ``AGENT_VERSION`` fallback while the scheduler refrains from re-probing.
+
+    Never performs network I/O — the caller serves an immediate value
+    (``AGENT_VERSION`` fallback when this returns ``None``) and refreshes the
+    cache outside the request thread via ``_schedule_agent_version_refresh``.
+    """
+    with _agent_version_lock:
+        if time.monotonic() < _agent_version_cache['expires_at']:
+            return _agent_version_cache['value']
+    return None
+
+
+def _schedule_agent_version_refresh() -> None:
+    """Single-flight, off-thread refresh of the cached agent version.
+
+    Safe to call on every settings request: cache freshness and in-flight
+    ownership are ONE atomic scheduling decision under a shared lock, so we
+    never start a worker while a fresh positive OR negative result is still
+    valid, and concurrent requests never stack probes.
+    """
+    global _agent_version_refresh_in_progress
+    claimed = False
+    with _agent_version_lock:
+        if _agent_version_refresh_in_progress:
+            return
+        if time.monotonic() < _agent_version_cache['expires_at']:
+            # Still fresh — a positive value or None-with-backoff. Either way
+            # the next probe must wait for the expiry.
+            return
+        _agent_version_refresh_in_progress = True
+        claimed = True
+
+    def _run() -> None:
+        global _agent_version_refresh_in_progress
+        try:
+            try:
+                version = _detect_agent_version_from_gateway_health(
+                    timeout=_AGENT_VERSION_PROBE_DEADLINE_SECONDS
+                )
+            except Exception:
+                version = None
+            ttl = (_AGENT_VERSION_CACHE_TTL_SECONDS if version
+                   else _AGENT_VERSION_FAILURE_BACKOFF_SECONDS)
+            with _agent_version_lock:
+                _agent_version_cache['value'] = version
+                _agent_version_cache['expires_at'] = time.monotonic() + ttl
+        finally:
+            # Settlement is finally-safe: ownership is released even if the
+            # probe or the cache write above raises unexpectedly.
+            with _agent_version_lock:
+                _agent_version_refresh_in_progress = False
+
+    try:
+        threading.Thread(target=_run, name='agent-version-refresh', daemon=True).start()
+    except Exception:
+        # start() failed — roll back the ownership WE claimed so the next
+        # request can retry instead of being blocked for the process lifetime.
+        if claimed:
+            with _agent_version_lock:
+                _agent_version_refresh_in_progress = False
+        raise
 
 
 def _detect_agent_version() -> str:
