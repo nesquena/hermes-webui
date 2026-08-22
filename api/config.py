@@ -9399,6 +9399,8 @@ SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
 ACTIVE_RUNS: dict = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
 LAST_RUN_FINISHED_AT: float | None = None
+# Sessions whose WebUI run just finished; consumed by the auto-brief worker.
+FINISHED_RUN_SESSION_IDS: set[str] = set()
 SERVER_START_TIME = time.time()
 
 
@@ -9481,9 +9483,24 @@ def unregister_active_run(stream_id: str) -> None:
         return
     global LAST_RUN_FINISHED_AT
     with ACTIVE_RUNS_LOCK:
-        ACTIVE_RUNS.pop(stream_id, None)
+        entry = ACTIVE_RUNS.pop(stream_id, None)
+        session_id = str((entry or {}).get("session_id") or "").strip()
+        if session_id:
+            FINISHED_RUN_SESSION_IDS.add(session_id)
         LAST_RUN_FINISHED_AT = time.time()
     unregister_stream_owner(stream_id)
+
+
+def claim_finished_run_session_ids() -> set[str]:
+    """Atomically claim sessions whose WebUI worker just finished.
+
+    Multiple concurrent runs are coalesced per session without losing distinct
+    conversations between auto-brief worker ticks.
+    """
+    with ACTIVE_RUNS_LOCK:
+        claimed = set(FINISHED_RUN_SESSION_IDS)
+        FINISHED_RUN_SESSION_IDS.clear()
+    return claimed
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
@@ -9715,6 +9732,11 @@ _SETTINGS_DEFAULTS = {
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
+    # Context brief auto-regeneration: worker toggle and per-session
+    # debounce interval. Model routing is owned by auxiliary.compression
+    # in Hermes Agent.
+    "context_brief_auto": False,
+    "context_brief_min_interval_seconds": 60,
     "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk

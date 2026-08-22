@@ -14064,6 +14064,16 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
+    if parsed.path == "/api/session/context-brief/status":
+        job_id = parse_qs(parsed.query).get("job_id", [""])[0].strip()
+        if not job_id:
+            return bad(handler, "Missing job_id")
+        from api.context_brief import brief_job_status
+        job = brief_job_status(job_id)
+        if not job:
+            return bad(handler, "job not found", 404)
+        return j(handler, {"ok": True, "job": job})
+
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -15935,6 +15945,14 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            # Remove the derivable context-brief cache with the session it
+            # summarizes (best-effort; never blocks the durable deletion).
+            try:
+                from api.context_brief import delete_stored_brief
+
+                delete_stored_brief(SESSION_DIR.parent, sid)
+            except Exception:
+                logger.debug("context brief cleanup failed for deleted session %s", sid, exc_info=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -16013,6 +16031,50 @@ def handle_post(handler, parsed) -> bool:
                 **worktree_retained,
             },
         )
+
+    if parsed.path == "/api/session/context-brief":
+        # Read-only session context brief for the Context panel: deterministic
+        # assembly (goal, todos, recent requests, verified outcomes, live
+        # state) + persisted LLM narrative annotated with staleness.
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body["session_id"]).strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session id", 400)
+        from api.context_brief import BriefError, get_auto_config, get_brief_payload
+        try:
+            brief = get_brief_payload(sid)
+            brief["auto"] = get_auto_config()
+        except BriefError as exc:
+            return bad(handler, str(exc), exc.status)
+        except Exception:
+            logger.exception("context brief build failed for %s", sid)
+            return bad(handler, "Failed to build context brief", status=500)
+        return j(handler, {"ok": True, "brief": brief})
+
+    if parsed.path == "/api/session/context-brief/refresh":
+        # Start (or refuse to duplicate) the background job that regenerates
+        # the LLM narrative layer. Runs as a job polled via
+        # GET /api/session/context-brief/status — aux-LLM generation can take
+        # minutes on long transcripts.
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body["session_id"]).strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session id", 400)
+        from api.context_brief import BriefError, start_brief_job
+        try:
+            job = start_brief_job(sid)
+        except BriefError as exc:
+            return bad(handler, str(exc), exc.status)
+        except Exception:
+            logger.exception("context brief refresh start failed for %s", sid)
+            return bad(handler, "Failed to start context brief refresh", status=500)
+        return j(handler, {"ok": True, "job": job})
 
     if parsed.path == "/api/session/clear":
         try:

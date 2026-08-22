@@ -3883,6 +3883,378 @@ function _legacyTodosFromMessages() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Context brief panel: deterministic session brief + LLM narrative layer
+// ────────────────────────────────────────────────────────────────────────────
+let _contextBriefJob = null;       // {jobId, sid} — one narrative job at a time
+let _contextBriefPollTimer = null;
+
+function _contextBriefSid(){
+  return (typeof S!=='undefined' && S.session && S.session.session_id) || null;
+}
+
+function _ctxBriefTs(ts){
+  const d = new Date(Number(ts)*1000);
+  return isNaN(d.getTime()) ? '' : d.toLocaleString();
+}
+
+// Minimal markdown subset (headings, bullets, italic note) rendered from
+// already-escaped text: no HTML injection surface, no dependency on the
+// streaming smd pipeline used by chat messages.
+function _ctxBriefMdLite(text){
+  const lines = String(text||'').split('\n');
+  let html = '', inList = false;
+  const closeList = () => { if (inList){ html += '</ul>'; inList = false; } };
+  for (const raw of lines){
+    const line = String(raw).replace(/\s+$/,'');
+    const heading = line.match(/^#{1,3}\s+(.*)$/);
+    if (heading){ closeList(); html += `<div class="ctx-brief-md-h">${esc(heading[1])}</div>`; continue; }
+    if (/^[-*]\s+/.test(line)){
+      if (!inList){ html += '<ul class="ctx-brief-md-ul">'; inList = true; }
+      html += `<li>${esc(line.replace(/^[-*]\s+/,''))}</li>`;
+      continue;
+    }
+    closeList();
+    if (!line.trim()){ html += '<div class="ctx-brief-md-gap"></div>'; continue; }
+    const trimmed = line.trim();
+    const italic = trimmed.length > 2 && trimmed.startsWith('_') && trimmed.endsWith('_');
+    html += `<div class="ctx-brief-md-p">${italic ? `<em>${esc(trimmed.slice(1,-1))}</em>` : esc(line)}</div>`;
+  }
+  closeList();
+  return html;
+}
+
+async function loadContextBrief(force){
+  await _loadBriefInto($('contextBriefPanel'), force);
+}
+
+async function loadWorkspaceContextBrief(force){
+  await _loadBriefInto($('workspaceContextPanel'), force);
+}
+
+
+async function _loadBriefInto(panel, force){
+  if (!panel) return;
+  const sid = _contextBriefSid();
+  if (!sid){
+    panel.dataset.briefSid = '';
+    panel.innerHTML = `<div class="ctx-brief-empty">${esc(t('context_brief_no_session'))}</div>`;
+    return;
+  }
+  if (!force && panel.dataset.briefSid === sid && panel.dataset.briefLoaded === '1') return;
+  panel.dataset.briefSid = sid;
+  panel.dataset.briefLoaded = '';
+  // Invalidate the actionable payload as soon as a load starts: consumers
+  // (Goal finish) must never act on data older than the last load attempt.
+  panel._briefData = null;
+  panel.innerHTML = `<div class="ctx-brief-empty">${esc(t('loading'))}</div>`;
+  // Per-panel generation counter: two visible panels must not cancel each other.
+  const seq = (panel._briefReqSeq = (panel._briefReqSeq || 0) + 1);
+  try {
+    const data = await api('/api/session/context-brief', {method:'POST', body: JSON.stringify({session_id: sid})});
+    // The session may have switched (or a newer load started) in flight.
+    if (panel._briefReqSeq !== seq) return;
+    if (panel.dataset.briefSid !== sid) return;
+    panel.dataset.briefLoaded = '1';
+    renderContextBrief(data && data.brief, panel);
+  } catch(e){
+    if (panel._briefReqSeq !== seq) return;
+    if (panel.dataset.briefSid !== sid) return;
+    panel.innerHTML = `<div class="ctx-brief-empty">${esc((e && e.message) || t('context_brief_error'))}</div>`;
+  }
+}
+
+function renderContextBrief(brief, panel){
+  panel = panel || $('contextBriefPanel');
+  if (!panel) return;
+  if (!brief){ panel.innerHTML = `<div class="ctx-brief-empty">${esc(t('context_brief_error'))}</div>`; return; }
+  panel._briefData = brief;
+  const meta = brief.meta || {};
+  const parts = [];
+
+  const metaBits = [];
+  if (meta.title) metaBits.push(`<strong>${esc(meta.title)}</strong>`);
+  if (Number.isFinite(meta.message_count)) metaBits.push(`${meta.message_count} ${esc(t('context_brief_messages'))}`);
+  if (meta.model) metaBits.push(esc(meta.model));
+  if (meta.updated_at){ const stamp = _ctxBriefTs(meta.updated_at); if (stamp) metaBits.push(esc(stamp)); }
+  parts.push(`<div class="ctx-brief-meta">${metaBits.join(' · ')}</div>`);
+
+  if (brief.goal){
+    const g = brief.goal;
+    const turns = (Number.isFinite(g.turns_used) && Number.isFinite(g.max_turns)) ? ` (${g.turns_used}/${g.max_turns})` : '';
+    parts.push(`<div class="ctx-brief-section"><div class="ctx-brief-h">${esc(t('context_brief_goal'))}</div><div class="ctx-brief-goal">${esc(g.text||'')} <span class="ctx-brief-dim">${esc(g.status||'')}${turns}</span></div></div>`);
+  }
+
+  const llm = brief.llm_brief;
+  if (llm && llm.text){
+    const gen = llm.generated_at ? _ctxBriefTs(llm.generated_at) : '';
+    const staleBadge = llm.stale ? `<span class="ctx-brief-badge-stale">${esc(t('context_brief_stale'))}</span>` : '';
+    // Stale badge gets an inline refresh button so regeneration is reachable
+    // without scrolling the whole narrative (mobile case).
+    const staleRefresh = llm.stale ? `<button type="button" class="ctx-brief-btn ctx-brief-btn-inline" onclick="_contextBriefRefresh(this)" title="${esc(t('context_brief_regenerate'))}" aria-label="${esc(t('context_brief_regenerate'))}">↻</button>` : '';
+    const fallbackNote = llm.source === 'fallback-template' ? ` · ${esc(t('context_brief_fallback'))}` : '';
+    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))} ${staleBadge}${staleRefresh}<span class="ctx-brief-dim ctx-brief-gen-date">${esc(gen)}${fallbackNote}</span></div><div class="ctx-brief-md">${_ctxBriefMdLite(llm.text)}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_regenerate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
+  } else {
+    parts.push(`<div class="ctx-brief-section ctx-brief-llm"><div class="ctx-brief-h">${esc(t('context_brief_summary'))}</div><div class="ctx-brief-dim ctx-brief-summary-hint">${esc(t('context_brief_summary_hint'))}</div><div class="ctx-brief-actions"><button type="button" class="ctx-brief-btn" onclick="_contextBriefRefresh(this)">${esc(t('context_brief_generate'))}</button><button type="button" class="ctx-brief-btn ctx-brief-btn-goal" onclick="_contextBriefGoalFinish(this)">${esc(t('context_goal_finish'))}</button></div></div>`);
+  }
+
+  // Conversation thread: requests and their conclusions read in sequence,
+  // asks aligned right, conclusions left — the panel mirrors the chat itself
+  // instead of forcing a lookup between two disjoint lists. The server sends
+  // the merged, transcript-ordered `timeline`; briefs cached before that field
+  // existed fall back to requests-then-conclusions so an old payload still renders.
+  const reqs = Array.isArray(brief.requests) ? brief.requests : [];
+  const reqCount = Number.isFinite(brief.request_count) ? brief.request_count : reqs.length;
+  const acc = brief.accomplished || {};
+  const concl = Array.isArray(acc.conclusions) ? acc.conclusions : [];
+  const conclCount = Number.isFinite(acc.conclusion_count) ? acc.conclusion_count : concl.length;
+  const compCount = Number.isFinite(acc.compression_count) ? acc.compression_count : (Array.isArray(acc.compressions) ? acc.compressions.length : 0);
+
+  let thread = Array.isArray(brief.timeline) ? brief.timeline : null;
+  if (!thread){
+    thread = reqs.map(r => ({role:'request', text: r.text || ''}))
+      .concat(concl.map(c => ({role:'conclusion', text: c.excerpt || ''})));
+  }
+  const threadRows = thread
+    .map(item => {
+      const isReq = String(item && item.role) === 'request';
+      const cls = isReq ? 'ctx-thread-request' : 'ctx-thread-conclusion';
+      const who = esc(t(isReq ? 'context_brief_thread_you' : 'context_brief_thread_agent'));
+      return `<div class="ctx-thread-row ${cls}"><div class="ctx-thread-bubble"><div class="ctx-thread-who">${who}</div><div class="ctx-thread-text">${esc((item && item.text) || '')}</div></div></div>`;
+    })
+    .join('');
+  const threadHtml = threadRows
+    ? `<div class="ctx-thread">${threadRows}</div>`
+    : `<div class="ctx-brief-dim">${esc(t('context_brief_empty_thread'))}</div>`;
+  const threadCounts = `<span class="ctx-brief-dim">(${reqCount} · ${conclCount})</span>`;
+  let threadBlock = `<div class="ctx-brief-section"><div class="ctx-brief-h">${esc(t('context_brief_thread'))} ${threadCounts}</div>${threadHtml}`;
+  if (compCount > 0) threadBlock += `<div class="ctx-brief-compressions">${compCount} ${esc(t('context_brief_compressions'))}</div>`;
+  parts.push(`${threadBlock}</div>`);
+
+  let remHtml = '';
+  const todos = brief.todos;
+  if (todos && Array.isArray(todos.items) && todos.items.length){
+    remHtml += `<ul class="ctx-brief-list">${todos.items.map(it => {
+      const status = String(it.status||'pending');
+      const cls = status === 'completed' ? 'ctx-todo-done' : (status === 'in_progress' ? 'ctx-todo-doing' : '');
+      const mark = status === 'completed' ? '✓' : (status === 'in_progress' ? '▶' : (status === 'cancelled' ? '✕' : '·'));
+      return `<li class="${cls}">${mark} ${esc(it.content||'')}</li>`;
+    }).join('')}</ul>`;
+  }
+  const flight = brief.in_flight || {};
+  const bgTasks = Array.isArray(flight.background_tasks) ? flight.background_tasks : [];
+  if (flight.active){
+    const bits = [];
+    if (flight.details && flight.details.active_stream_id) bits.push(esc(t('context_brief_live_stream')));
+    for (const bt of bgTasks) bits.push(`${esc(t('context_brief_live_background'))}: ${esc(bt.prompt || bt.task_id || '')}`);
+    if (bits.length) remHtml += `<div class="ctx-brief-live">${bits.map(b => `<div>${b}</div>`).join('')}</div>`;
+  }
+  if (!remHtml) remHtml = `<div class="ctx-brief-dim">${esc(t('context_brief_empty_remaining'))}</div>`;
+  parts.push(`<div class="ctx-brief-section"><div class="ctx-brief-h">${esc(t('context_brief_remaining'))}</div>${remHtml}</div>`);
+
+  panel.innerHTML = parts.join('');
+}
+
+async function _contextBriefRefresh(btn){
+  const sid = _contextBriefSid();
+  if (!sid) return;
+  if (_contextBriefJob){
+    // One narrative job at a time; tell the user instead of a silent no-op.
+    if (typeof showToast === 'function') showToast(t('context_brief_job_running'));
+    return;
+  }
+  // Feedback note goes to the panel hosting the clicked button (main rail or workspace tab).
+  const host = (btn && btn.closest) ? btn.closest('[data-brief-sid]') : null;
+  const panel = host || $('contextBriefPanel');
+  try {
+    const data = await api('/api/session/context-brief/refresh', {method:'POST', body: JSON.stringify({session_id: sid})});
+    const jobId = data && data.job && data.job.job_id;
+    if (!jobId) return;
+    _contextBriefJob = {jobId, sid};
+    if (panel && !panel.querySelector('.ctx-brief-generating')){
+      const note = document.createElement('div');
+      note.className = 'ctx-brief-generating';
+      note.textContent = t('context_brief_generating');
+      panel.prepend(note);
+    }
+    _pollContextBriefJob();
+  } catch(e){
+    if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
+  }
+}
+
+
+// Refresh visible brief panels when the background worker publishes a newer generation.
+let _contextBriefAutoTimer = null;
+function _startContextBriefAutoRefresh(){
+  if (_contextBriefAutoTimer) return;
+  _contextBriefAutoTimer = setInterval(async () => {
+    const panels = Array.from(document.querySelectorAll('[data-brief-sid]'))
+      .filter(p => p.dataset.briefLoaded === '1' && p.offsetParent !== null);
+    if (!panels.length) return;
+    const sid = _contextBriefSid();
+    if (!sid) return;
+    let data;
+    try {
+      const res = await fetch('/api/session/context-brief', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sid}),
+      });
+      data = await res.json();
+    } catch(_) { return; }
+    if (!data || !data.ok || !data.brief) return;
+    const newGen = ((data.brief.llm_brief || {}).generated_at) || 0;
+    for (const p of panels){
+      if (p.dataset.briefSid !== sid) continue;
+      const oldGen = (((p._briefData || {}).llm_brief || {}).generated_at) || 0;
+      if (newGen !== oldGen){
+        renderContextBrief(data.brief, p);
+      }
+    }
+  }, 45000);
+}
+_startContextBriefAutoRefresh();
+
+// Compose a /goal from the brief's remaining (pending + in_progress) todos and
+// send it to the conversation, so the agent finishes the "reste à faire" work.
+async function _contextBriefGoalFinish(btn){
+  const sid = _contextBriefSid();
+  if (!sid) return;
+  const host = btn && btn.closest ? btn.closest('[data-brief-sid]') : null;
+  // Never post todos from a stale panel into a different conversation.
+  if (!host || host.dataset.briefSid !== sid){
+    if (host) _loadBriefInto(host, true);
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  // The cached brief can predate todo changes made later in this same
+  // conversation (the render hooks intentionally reuse the briefLoaded
+  // dedupe). Force-fetch the brief now so the action is built from the live
+  // todo state and never relaunches work that is already completed.
+  await _loadBriefInto(host, true);
+  if (_contextBriefSid() !== sid || host.dataset.briefSid !== sid || host.dataset.briefLoaded !== '1'){
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  const brief = host._briefData;
+  const items = (brief && brief.todos && Array.isArray(brief.todos.items) ? brief.todos.items : [])
+    .filter(it => it && (it.status === 'pending' || it.status === 'in_progress'))
+    .map(it => String(it.content || '').trim())
+    .filter(Boolean);
+  if (!items.length){
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_none'));
+    return;
+  }
+  const capped = items.slice(0, 12);
+  const list = capped.map(s => `- ${s}`).join('\n');
+  const goalText = `${t('context_goal_finish_prefix')}\n${list}`;
+  const question = t('context_goal_finish_confirm').replace('{n}', String(capped.length));
+  const ok = await showConfirmDialog({
+    title: t('context_goal_finish'),
+    message: question,
+    confirmLabel: t('context_goal_finish'),
+    focusCancel: true,
+  });
+  if (!ok) return;
+  // The dialog is async: the user may have switched conversations while it
+  // was open. Re-validate before acting so the goal never starts in a
+  // different session than the brief it was built from.
+  if (_contextBriefSid() !== sid || host.dataset.briefSid !== sid){
+    _loadBriefInto(host, true);
+    if (typeof showToast === 'function') showToast(t('context_goal_finish_stale'));
+    return;
+  }
+  // A raw POST /api/goal starts the kickoff on the server but leaves this tab
+  // idle: no user bubble, no busy state, no SSE. Reload then hydrates via
+  // loadSession. Reuse cmdGoal (composer /goal) so the prompt and first
+  // tokens appear live without a refresh.
+  await _hydrateContextBriefGoalFinish(sid, goalText);
+}
+
+async function _hydrateContextBriefGoalFinish(sid, goalText){
+  if (typeof cmdGoal !== 'function') {
+    if (typeof showToast === 'function') showToast(t('context_brief_error'));
+    return false;
+  }
+  if (typeof S !== 'undefined' && S.session && S.session.session_id === sid && Array.isArray(S.messages)) {
+    S.messages.push({role:'user', content:goalText, _ts:Date.now()/1000});
+    if (typeof renderMessages === 'function') renderMessages();
+  }
+  try {
+    await cmdGoal(goalText);
+    return true;
+  } catch (e) {
+    if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
+    return false;
+  }
+}
+
+async function _pollContextBriefJob(){
+  clearTimeout(_contextBriefPollTimer);
+  const job = _contextBriefJob;
+  if (!job) return;
+  try {
+    const data = await api('/api/session/context-brief/status?job_id=' + encodeURIComponent(job.jobId));
+    const status = data && data.job;
+    if (status && status.status === 'running'){
+      _contextBriefPollTimer = setTimeout(_pollContextBriefJob, 1500);
+      return;
+    }
+    _contextBriefJob = null;
+    document.querySelectorAll('.ctx-brief-generating').forEach(n => n.remove());
+    if (status && status.status === 'done'){
+      // Reload only when the panel still shows the job's session; refresh both host panels.
+      if (_contextBriefSid() === job.sid){
+        loadContextBrief(true);
+        if (typeof loadWorkspaceContextBrief === 'function') loadWorkspaceContextBrief(true);
+      }
+    } else if (typeof showToast === 'function'){
+      showToast((status && status.error) || t('context_brief_error'));
+    }
+  } catch(e){
+    _contextBriefJob = null;
+    document.querySelectorAll('.ctx-brief-generating').forEach(n => n.remove());
+    // Poll failure (e.g. server restart mid-job) must not vanish silently.
+    if (typeof showToast === 'function') showToast(t('context_brief_error'));
+  }
+}
+
+// Banner shown above the message window when the session history is
+// truncated server-side (long conversations): one-tap path to the brief.
+function _contextBriefBannerNode(){
+  const bar = document.createElement('div');
+  bar.className = 'ctx-brief-banner';
+  const label = document.createElement('span');
+  label.className = 'ctx-brief-banner-label';
+  label.textContent = t('context_brief_banner');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ctx-brief-banner-btn';
+  btn.textContent = t('context_brief_banner_btn');
+  btn.onclick = () => {
+    // Opening the panel is not enough: on mobile the panel renders inside
+    // the sidebar drawer, on desktop it needs an expanded rail. Open the
+    // container first or the tap appears to do nothing (#skill convention).
+    try {
+      const isMobile = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+      const sidebar = document.querySelector('.sidebar');
+      if (isMobile){
+        if (sidebar && !sidebar.classList.contains('mobile-open')
+            && typeof toggleMobileSidebar === 'function'){
+          toggleMobileSidebar();
+        }
+      } else if (typeof _isSidebarCollapsed === 'function' && _isSidebarCollapsed()
+                 && typeof expandSidebar === 'function'){
+        expandSidebar();
+      }
+    } catch(_){ /* container helpers unavailable — still switch the panel */ }
+    if (typeof switchPanel === 'function') switchPanel('context');
+  };
+  bar.appendChild(label);
+  bar.appendChild(btn);
+  return bar;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Kanban: multi-board switcher + create/rename/archive modal
 // ────────────────────────────────────────────────────────────────────────────
 //
@@ -8712,6 +9084,8 @@ function _preferencesPayloadFromUi(){
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showQuotaChipCb=$('settingsShowQuotaChip');
   if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
+  const contextBriefAutoCb=$('settingsContextBriefAuto');
+  if(contextBriefAutoCb) payload.context_brief_auto=contextBriefAutoCb.checked;
   const showConversationOutlineCb=$('settingsShowConversationOutline');
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
@@ -9363,6 +9737,11 @@ async function loadSettingsPanel(){
         if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
         _schedulePreferencesAutosave();
       },{once:false});
+    }
+    const contextBriefAutoCb=$('settingsContextBriefAuto');
+    if(contextBriefAutoCb){
+      contextBriefAutoCb.checked=settings.context_brief_auto===true;
+      contextBriefAutoCb.addEventListener('change',()=>{_schedulePreferencesAutosave();});
     }
     const hideSuggestionsCb=$('settingsHideSuggestions');
     if(hideSuggestionsCb){
