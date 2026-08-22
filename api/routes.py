@@ -9753,12 +9753,28 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
+                # Sidecar-dominant merge: keep the watermark-aware append-only
+                # path so deleted/edited/undone turns stay dead (#2914/#4767).
+                # The single relaxation (#6637): when the session has NO
+                # truncation watermark/boundary, state.db rows the
+                # (stale/partial) sidecar never observed must not be dropped
+                # just because their timestamp sits at-or-below the sidecar's
+                # newest row — they are legitimate CLI-origin messages that
+                # were visible during prompt execution and must survive turn
+                # completion.  They are inserted chronologically by the merge.
                 return merge_session_messages_append_only(
                     sidecar_messages,
                     cli_messages,
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                     truncation_boundary=getattr(session, "truncation_boundary", None),
+                    keep_state_rows_missing_from_sidecar=(
+                        getattr(session, "truncation_watermark", None) in (None, "")
+                        and getattr(session, "truncation_boundary", None) in (None, "")
+                    ),
                 )
+            # CLI-dominant merge: state.db has rows the sidecar has not caught
+            # up to yet.  Chronological order keeps CLI lineage interleaved
+            # with sidecar rows instead of rendering it after the sidecar tail.
             merged_messages = []
             seen_message_keys = set()
             for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
@@ -9772,6 +9788,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 seen_message_keys.add(key)
                 merged_messages.append(msg)
             return merged_messages
+        # One source empty or they're identical — return whichever is non-empty
         return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
     return sidecar_messages
 

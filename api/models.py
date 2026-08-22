@@ -9802,6 +9802,7 @@ def merge_session_messages_append_only(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    keep_state_rows_missing_from_sidecar: bool = False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -9810,6 +9811,16 @@ def merge_session_messages_append_only(
     watermark is later advanced (new turn committed), this boundary is preserved
     so the empty-sidecar recovery can distinguish a legitimate prefix from a
     deleted suffix instead of guessing by dropping one turn pair.
+
+    ``keep_state_rows_missing_from_sidecar``: for display merges of CLI-origin
+    messaging sessions whose sidecar/state.db stores diverged (#6637).  Rows
+    at-or-below the sidecar's newest timestamp whose content is genuinely
+    absent from the sidecar (never observed by it) are inserted chronologically
+    instead of being dropped as presumed replays.  Only meaningful when NO
+    truncation watermark/boundary is active — with a watermark, the deleted
+    suffix is filtered out before this point, so deleted/edited/undone turns
+    are never resurrected (#2914/#4767).  Defaults to False so every other
+    caller keeps the conservative replay assumption.
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
@@ -10294,7 +10305,21 @@ def merge_session_messages_append_only(
                         _merge_session_display_metadata(merged_by_message_key.get(key), msg)
                         continue
                 else:
-                    if msg.get("role") == "user" and content_key not in seen_content_keys:
+                    # Default (replay assumption): only user rows with content
+                    # the sidecar never saw are re-attached.  With
+                    # keep_state_rows_missing_from_sidecar (#6637) non-user rows
+                    # whose content is genuinely absent from the sidecar are
+                    # re-attached too, inserted chronologically so CLI lineage
+                    # interleaves with the sidecar instead of rendering after
+                    # its tail.  Rows whose content IS in the sidecar remain
+                    # replays and are metadata-merged below regardless.
+                    if (
+                        content_key not in seen_content_keys
+                        and (
+                            msg.get("role") == "user"
+                            or keep_state_rows_missing_from_sidecar
+                        )
+                    ):
                         if _insert_state_message_chronologically(merged_messages, msg):
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
