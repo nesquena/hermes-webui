@@ -8125,18 +8125,34 @@ def _reject_non_finite_state_db_json_constant(value):
     raise ValueError(f"unsupported JSON constant: {value}")
 
 
+def _parse_finite_state_db_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"unsupported JSON float: {value}")
+    return parsed
+
+
 def _decode_state_db_content(value):
     """Decode Agent's structured-content storage form without widening it."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
     if not isinstance(value, str) or not value.startswith(_STATE_DB_CONTENT_JSON_PREFIX):
         return value
     try:
         decoded = json.loads(
             value[len(_STATE_DB_CONTENT_JSON_PREFIX):],
             parse_constant=_reject_non_finite_state_db_json_constant,
+            parse_float=_parse_finite_state_db_json_float,
         )
     except Exception:
         return value
-    return decoded if isinstance(decoded, list) else value
+    if not isinstance(decoded, list):
+        return value
+    try:
+        json.dumps(decoded, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except Exception:
+        return value
+    return decoded
 
 
 @dataclass(frozen=True)

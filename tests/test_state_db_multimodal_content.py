@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from api.helpers import _json_response_body
 import api.models as models
 from api.session_recovery import recover_missing_sidecars_from_state_db
 
@@ -85,6 +86,7 @@ def test_decode_state_db_content_accepts_only_json_lists():
         "\x00json:[NaN]",
         "\x00json:[Infinity]",
         "\x00json:[-Infinity]",
+        "\x00json:[1e999]",
     ],
 )
 def test_state_db_readers_keep_malformed_and_non_list_roots_as_strings(
@@ -109,6 +111,7 @@ def test_state_db_readers_keep_malformed_and_non_list_roots_as_strings(
     assert models._decode_state_db_content(raw) == raw
     assert isinstance(messages[0]["content"], str)
     assert messages[0]["content"] == raw
+    assert json.loads(_json_response_body(messages[0]))["content"] == raw
     assert keys == [expected_key]
 
 
@@ -116,6 +119,83 @@ def test_decode_state_db_content_keeps_plain_content_byte_for_byte():
     raw = "plain content\nwith\tspacing"
 
     assert models._decode_state_db_content(raw) == raw
+
+
+def test_decode_state_db_content_rejects_lone_surrogate_list():
+    raw = '\x00json:["\\ud800"]'
+
+    assert models._decode_state_db_content(raw) == raw
+    assert json.loads(_json_response_body({"content": models._decode_state_db_content(raw)})) == {
+        "content": raw,
+    }
+
+
+def test_decode_state_db_content_accepts_valid_surrogate_pair_list():
+    raw = '\x00json:["\\ud83d\\ude00"]'
+
+    decoded = models._decode_state_db_content(raw)
+
+    assert decoded == ["😀"]
+    assert json.loads(_json_response_body({"content": decoded})) == {"content": ["😀"]}
+
+
+def test_state_db_blob_content_is_replacement_text_through_reader_and_recovery(
+    tmp_path,
+    monkeypatch,
+):
+    db = tmp_path / "state.db"
+    structured_blob = b'\x00json:[{"type":"text","text":"caf\xc3"}]'
+    plain_blob = b"plain \xff text"
+    expected = [
+        [{"type": "text", "text": "caf�"}],
+        "plain � text",
+    ]
+    _make_state_db(
+        db,
+        [
+            {"role": "user", "content": structured_blob},
+            {"role": "assistant", "content": plain_blob},
+        ],
+    )
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL,
+            message_count INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO sessions (id, source, title, model, started_at, message_count)
+        VALUES (?, 'webui', 'Recovered BLOB', 'openai/gpt-5', 1000.0, 2)
+        """,
+        (SESSION_ID,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    messages = models.get_state_db_session_messages(SESSION_ID)
+
+    assert [message["content"] for message in messages] == expected
+    assert isinstance(messages[0]["content"][0]["text"], str)
+    assert isinstance(messages[1]["content"], str)
+    assert json.loads(_json_response_body({"messages": messages}))["messages"] == messages
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, db)
+
+    assert result["materialized"] == 1
+    sidecar = json.loads(
+        (tmp_path / f"{SESSION_ID}.json").read_text(encoding="utf-8")
+    )
+    assert [message["content"] for message in sidecar["messages"]] == expected
+    assert all(isinstance(message["content"], (str, list)) for message in sidecar["messages"])
 
 
 def test_get_state_db_session_messages_decodes_structured_content(tmp_path, monkeypatch):
