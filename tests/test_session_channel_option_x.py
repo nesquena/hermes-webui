@@ -26,13 +26,34 @@ def _js_function_decl(src: str, name: str) -> str:
     assert start != -1, f"{name}() not found"
     brace = src.find("){", start)
     assert brace != -1, f"{name}() body not found"
-    brace += 1
-    depth = 1
-    i = brace + 1
+    body_start = brace + 1
+    return src[start:body_start] + _js_braced_block(src, body_start)
+
+
+def _js_braced_block(src: str, brace: int) -> str:
+    """Extract a brace-balanced JavaScript block from its opening brace."""
+    assert 0 <= brace < len(src) and src[brace] == "{", "expected an opening brace"
+    depth = 0
     in_str = None
     escaped = False
-    while i < len(src) and depth:
+    line_comment = False
+    block_comment = False
+    i = brace
+    while i < len(src):
         ch = src[i]
+        next_ch = src[i + 1] if i + 1 < len(src) else ""
+        if line_comment:
+            if ch == "\n":
+                line_comment = False
+            i += 1
+            continue
+        if block_comment:
+            if ch == "*" and next_ch == "/":
+                block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
         if in_str:
             if escaped:
                 escaped = False
@@ -40,15 +61,26 @@ def _js_function_decl(src: str, name: str) -> str:
                 escaped = True
             elif ch == in_str:
                 in_str = None
-        elif ch in ('"', "'", "`"):
+            i += 1
+            continue
+        if ch == "/" and next_ch == "/":
+            line_comment = True
+            i += 2
+            continue
+        if ch == "/" and next_ch == "*":
+            block_comment = True
+            i += 2
+            continue
+        if ch in ('"', "'", "`"):
             in_str = ch
         elif ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
+            if depth == 0:
+                return src[brace : i + 1]
         i += 1
-    assert depth == 0, f"{name}() body did not close"
-    return src[start:i]
+    raise AssertionError("JavaScript block did not close")
 
 
 # ---------------------------------------------------------------------------
@@ -935,11 +967,9 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
-    # added inside loadSession pushed the fetch-error catch's stream restart past
-    # the old 14000-char cutoff.
-    fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 16000]
+    # Isolate the complete loadSession body structurally. The function has grown
+    # past the old fixed window as visit-ack and pane-generation helpers landed.
+    body = _js_function_decl(js, "loadSession")
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
@@ -973,7 +1003,10 @@ def test_load_session_rearms_stream_on_every_early_return():
     # but guarded against the self-healed-current (404'd) case so it never
     # spins the reconnect loop against a dead session_id.
     catch_ix = body.index("const _selfHealedCurrent")
-    catch_src = body[catch_ix:catch_ix + 2200]
+    catch_start = body.rfind("catch(e) {", 0, catch_ix)
+    assert catch_start != -1, "loadSession fetch-error catch not found"
+    catch_brace = body.find("{", catch_start)
+    catch_src = _js_braced_block(body, catch_brace)
     assert "!_selfHealedCurrent" in catch_src and "startSessionStream(currentSid)" in catch_src, (
         "fetch-error path must restart the on-screen stream, guarded against "
         "the self-healed-current (deleted/404) session"

@@ -49,8 +49,10 @@ def _function_body(name: str) -> str:
 def test_terminal_handlers_use_session_owned_cleanup_helpers():
     """Patch #1694 should centralize terminal cleanup behind owner-aware helpers."""
     attach_body = _function_body("attachLiveStream")
-    assert "function _clearOwnerInflightState()" in attach_body
+    assert "function _clearOwnerInflightState(source=null)" in attach_body
     owner_helper = _function_body("_clearOwnerInflightState")
+    assert "_ownsAttachmentSource(source)" in owner_helper
+    assert "_ownsAttachmentGeneration()" in owner_helper
     assert "delete INFLIGHT[activeSid]" in owner_helper
     assert "clearInflightState(activeSid)" in owner_helper
     assert "_clearActivePaneInflightIfOwner();" in owner_helper
@@ -63,7 +65,7 @@ def test_terminal_handlers_use_session_owned_cleanup_helpers():
 def test_done_event_does_not_clear_active_pane_for_background_session():
     """A background done event may clear its owner marker, not the active pane."""
     body = _event_body("done")
-    assert "_clearOwnerInflightState();" in body
+    assert "_clearOwnerInflightState(source);" in body
     assert "clearInflight();clearInflightState(activeSid)" not in body
     assert "delete INFLIGHT[activeSid];\n      clearInflight();" not in body
     assert "renderSessionList();setBusy(false)" not in body
@@ -74,7 +76,7 @@ def test_error_and_cancel_events_do_not_blanket_stop_active_pane_polling():
     """Background app errors/cancels must not stop another pane's prompt polling."""
     for event_name in ("apperror", "cancel"):
         body = _event_body(event_name)
-        assert "_clearOwnerInflightState();" in body, event_name
+        assert "_clearOwnerInflightState(source);" in body, event_name
         assert "_clearApprovalForOwner" in body, event_name
         assert "_clearClarifyForOwner" in body, event_name
         assert "stopApprovalPolling();stopClarifyPolling();" not in body, event_name
@@ -86,7 +88,7 @@ def test_reconnect_settled_and_error_paths_keep_cleanup_session_scoped():
     restore_body = _function_body("_restoreSettledSession")
     error_body = _function_body("_handleStreamError")
     combined = restore_body + "\n" + error_body
-    assert combined.count("_clearOwnerInflightState();") >= 2
+    assert combined.count("_clearOwnerInflightState(source);") >= 2
     assert "delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid)" not in combined
     assert "stopApprovalPolling();stopClarifyPolling();" not in combined
     assert "renderSessionList();setBusy(false)" not in combined
@@ -182,7 +184,7 @@ def test_active_reconnect_uses_run_journal_replay_cursor():
     assert active_status_idx != -1, "active reconnect branch not found"
     assert replay_status_idx != -1, "replay reconnect branch not found"
     active_block = body[active_status_idx:replay_status_idx]
-    assert "${_runJournalReplayParams()}" in active_block
+    assert "_openOwnedSSE(_runJournalReplayParams())" in active_block
     assert "after_seq" in _function_body("_runJournalReplayParams")
     assert "after_event_id" in _function_body("_runJournalReplayParams")
 
@@ -200,8 +202,9 @@ def test_attach_live_stream_registers_one_source_per_session_stream():
     error_body = _event_body("error")
 
     assert "const LIVE_STREAMS={};" in MESSAGES_JS
-    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
+    assert "LIVE_STREAMS[activeSid]={streamId,generation:_attachmentGeneration,source};" in wire_body
+    assert "_ownsAttachmentGeneration()" in wire_body
     assert "existingLive.source.close();" in wire_body
     assert "if(source&&live.source!==source) return;" in close_body
     assert "existingLive&&existingLive.streamId===streamId" in attach_body
-    assert "_closeSource(source);" in error_body
+    assert "_closeTransportOnly(source);" in error_body

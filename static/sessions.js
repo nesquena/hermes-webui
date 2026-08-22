@@ -24,6 +24,11 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+// Pane navigation has a separate owner from message-refresh loads. Automatic
+// same-session refreshes may supersede one another, but they must not revoke a
+// pending New Chat pane commit; only a genuinely newer navigation advances
+// this generation.
+let _paneNavigationGeneration = 0;
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -1398,6 +1403,14 @@ async function newSession(flash, options={}){
     return _newSessionInFlight;
   }
   _setNewSessionPending(true);
+  // New Chat is a pane navigation even though it does not call loadSession().
+  // Invalidate older loadSession(force) continuations from the previous pane so
+  // a late external refresh cannot put the composer back on that old session.
+  if(typeof _loadSessionGeneration==='number') _loadSessionGeneration += 1;
+  const _newSessionPaneGeneration = typeof _paneNavigationGeneration==='number'
+    ? ++_paneNavigationGeneration
+    : null;
+  if(typeof _loadingSessionId!=='undefined') _loadingSessionId = null;
   _newSessionInFlight=(async()=>{
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
@@ -1501,7 +1514,15 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    const _newSessionGeneration=_newSessionPaneGeneration;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // Do not let a newer sidebar load be overwritten by this response.
+    if(_newSessionGeneration!==null && _paneNavigationGeneration!==_newSessionGeneration) return;
+    // The New Chat commit now owns the pane. Invalidate any same-session
+    // message refresh that began after New Chat started but before its POST
+    // resolved, and release its loading marker before painting the new session.
+    if(typeof _loadSessionGeneration==='number') _loadSessionGeneration += 1;
+    if(typeof _loadingSessionId!=='undefined') _loadingSessionId = null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -1738,8 +1759,17 @@ async function loadSession(sid){
   }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
+  // A same-session force refresh owns only the load-generation slot. A real
+  // pane navigation (cross-session load, boot restore, or explicit sidebar
+  // target) also advances the dedicated pane owner so a pending New Chat
+  // response can yield only to genuinely newer navigation.
+  const _loadPaneGeneration = sameSessionForceReload
+    ? _paneNavigationGeneration
+    : ++_paneNavigationGeneration;
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _isCurrentLoad = () => _loadingSessionId === sid
+    && _loadSessionGeneration === _loadGeneration
+    && _paneNavigationGeneration === _loadPaneGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -2135,7 +2165,11 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {
+        force:_keepStaleUntilLoaded,
+        loadGeneration:_loadGeneration,
+        paneNavigationGeneration:_loadPaneGeneration,
+      });
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2241,7 +2275,11 @@ async function loadSession(sid){
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {
+        force:_keepStaleUntilLoaded,
+        loadGeneration:_loadGeneration,
+        paneNavigationGeneration:_loadPaneGeneration,
+      });
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -3148,7 +3186,17 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
+  const _loadPaneGeneration = Number.isFinite(opts.paneNavigationGeneration)
+    ? Number(opts.paneNavigationGeneration)
+    : null;
+  const _ownsPaneNavigation = () => (
+    _loadPaneGeneration === null
+    || typeof _paneNavigationGeneration === 'undefined'
+    || _paneNavigationGeneration === _loadPaneGeneration
+  );
+  const _ownsLoad = () => _loadingSessionId === sid
+    && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration)
+    && _ownsPaneNavigation();
   if (!_ownsLoad()) return;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {

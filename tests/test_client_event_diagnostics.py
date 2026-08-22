@@ -17,6 +17,15 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 
 
+def _chat_sse_error_prefix_through_diagnostic():
+    listener_start = MESSAGES_JS.index("source.addEventListener('error',async e=>")
+    listener_end = MESSAGES_JS.index("source.addEventListener('cancel',e=>", listener_start)
+    listener_block = MESSAGES_JS[listener_start:listener_end]
+    diagnostic_start = listener_block.index("recordClientSSEError('chat-response'")
+    diagnostic_end = listener_block.index("\n", diagnostic_start)
+    return listener_block[:diagnostic_end]
+
+
 def test_client_event_log_sanitizes_and_whitelists_fields():
     payload = {
         "event": "sse_error",
@@ -144,15 +153,13 @@ def test_sessions_js_reports_gateway_sse_errors_with_browser_context():
 
 
 def test_messages_js_reports_chat_sse_errors_with_stream_identity():
-    error_block_start = MESSAGES_JS.index("source.addEventListener('error',async e=>")
-    error_block = MESSAGES_JS[error_block_start:error_block_start + 900]
+    error_block = _chat_sse_error_prefix_through_diagnostic()
     assert "recordClientSSEError('chat-response'" in error_block
     assert "session_id:activeSid" in error_block
     assert "stream_id:streamId" in error_block
 
 
 def test_messages_js_keeps_finalized_stream_guard_before_diagnostic_report():
-    error_block_start = MESSAGES_JS.index("source.addEventListener('error',async e=>")
-    error_block = MESSAGES_JS[error_block_start:error_block_start + 900]
+    error_block = _chat_sse_error_prefix_through_diagnostic()
     assert "_streamFinalized" in error_block
     assert error_block.index("_streamFinalized") < error_block.index("recordClientSSEError")

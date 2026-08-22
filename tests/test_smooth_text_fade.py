@@ -766,7 +766,11 @@ def test_stream_fade_smd_write_self_heal_sets_silent_prefix_on_rewind():
     fade on every already-visible word — the full-message blink. The prefix is
     computed in RENDERED-text space (old node text vs new node text), never in
     source space (#6783 review)."""
-    write_block = function_block(MESSAGES_JS, "_smdWrite")
+    write_block = slice_between(
+        MESSAGES_JS,
+        "function _smdWrite(",
+        "\n  // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.",
+    )
     script = (
         write_block
         + r"""

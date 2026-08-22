@@ -107,7 +107,9 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
     assert "const _loadGeneration = ++_loadSessionGeneration" in body, (
         "loadSession() must increment and capture per-call generation"
     )
-    assert "const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration" in body
+    assert "const _isCurrentLoad = () => _loadingSessionId === sid" in body
+    assert "&& _loadSessionGeneration === _loadGeneration" in body
+    assert "&& _paneNavigationGeneration === _loadPaneGeneration" in body
     assert "loadGeneration:_loadGeneration" in body, (
         "loadSession() must thread generation into _ensureMessagesLoaded()"
     )
@@ -118,7 +120,10 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
         "loadSession() should check ownership in multiple await/catch paths, "
         "including stale _ensureMessagesLoaded catch branches"
     )
-    ensure_call = _normalise_ws("await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});")
+    ensure_call = _normalise_ws(
+        "await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, "
+        "loadGeneration:_loadGeneration, paneNavigationGeneration:_loadPaneGeneration,});"
+    )
     assert ensure_call in norm, (
         "loadSession() must pass generation into _ensureMessagesLoaded() for stale-owner checks"
     )
@@ -140,6 +145,236 @@ def test_ensure_messages_loaded_ownership_guard_pre_and_post_await():
         "_ensureMessagesLoaded needs pre/post await ownership guards"
     )
     assert "_loadGeneration" in body, "_ensureMessagesLoaded should read generation from opts"
+
+
+_SESSION_HARNESS_BOOTSTRAP = r"""
+(() => {
+  document.body.innerHTML = '<div id="msgInner"></div>'
+    + '<textarea id="msg"></textarea><select id="modelSelect"></select>';
+  window.S = {
+    session: {session_id: 'sid-old', message_count: 1, updated_at: 1},
+    messages: [{role: 'assistant', content: 'old transcript'}],
+    toolCalls: [], pendingFiles: [], busy: false, activeStreamId: null,
+    activeProfile: 'default', activeProfileIsDefault: true,
+  };
+  window.INFLIGHT = {};
+  window._activeProject = null;
+  window.NO_PROJECT_FILTER = '__all_projects__';
+  window._sessionSourceFilter = 'webui';
+  window._allSessions = [];
+  window._allSessionsScope = {};
+  window._profilesCache = {profiles: []};
+  window._defaultModel = null;
+  window._activeProvider = null;
+  window._profileDefaultWorkspace = null;
+  window._pendingSessionToolsets = null;
+  window._newSessionInFlight = null;
+
+  const pending = [];
+  window.__pendingRequests = pending;
+  window.__requestLog = [];
+  window.api = (url, options) => new Promise((resolve, reject) => {
+    const request = {
+      url: String(url),
+      method: String((options && options.method) || 'GET'),
+      resolve, reject, settled: false,
+    };
+    pending.push(request);
+    window.__requestLog.push({url: request.url, method: request.method});
+  });
+  window.__requestMatches = (request, kind) => {
+    if (request.settled) return false;
+    if (kind === 'new') return request.method === 'POST' && request.url === '/api/session/new';
+    if (kind === 'metadata') return request.method === 'GET' && request.url.includes('messages=0');
+    if (kind === 'messages') return request.method === 'GET' && request.url.includes('messages=1');
+    return false;
+  };
+  window.__resolveRequest = (kind, value) => {
+    const request = pending.find((candidate) => window.__requestMatches(candidate, kind));
+    if (!request) throw new Error('missing pending ' + kind + ' request');
+    request.settled = true;
+    request.resolve(value);
+    return request.url;
+  };
+  window.$ = (id) => document.getElementById(id);
+  window.t = () => '';
+  window.getModelLabel = (model) => String(model || '');
+})();
+"""
+
+_SESSION_HARNESS_OVERRIDES = r"""
+(() => {
+  // These are presentation and side-effect seams outside the pane ownership
+  // invariant. The session/navigation functions remain production code loaded
+  // from static/sessions.js below.
+  const noops = [
+    '_rearmActiveSessionStream', 'stopApprovalPolling', 'hideApprovalCard',
+    'stopSessionStream', '_updateYoloPill', 'stopClarifyPolling',
+    'hideClarifyCard', '_captureSameSessionForceReloadHint',
+    '_clearSameSessionForceReloadHint', '_uploadPendingFilesSyncProgressForSession',
+    '_clearPendingSelections', '_clearQueueCardDisplay', '_hydrateTodosFromSession',
+    '_resolveSessionModelForDisplaySoon', 'syncTopbar', '_setSessionViewedCount',
+    '_setActiveSessionUrl', 'startSessionStream', 'clearLiveToolCards',
+    'updateQueueBadge', 'setStatus', 'setComposerStatus', 'updateSendBtn',
+    'renderMessages', 'renderSessionArtifacts', '_renderPendingPromptsForActiveSession',
+    '_restoreComposerDraft', '_hideHandoffHint', '_checkAndShowHandoffHint',
+    '_deferWorkspaceRefreshForSession', '_fetchYoloState', 'startApprovalPolling',
+    'startClarifyPolling', 'resumeManualCompressionForSession',
+    '_acknowledgeSessionVisit', '_clearDeferredActiveSessionExternalRefresh',
+    '_clearEmptyComposerModelOverride', '_rememberNewChatDraftSession',
+    'populateModelDropdown', 'refreshSessionList', 'loadDir', 'clearCompressionUi',
+  ];
+  for (const name of noops) window[name] = () => {};
+  window._saveComposerDraftNow = () => Promise.resolve();
+  window._deferSessionSideEffect = (_sid, fn) => Promise.resolve(fn());
+  window._resolveSessionIdFromSidebarLineage = (sid) => sid;
+  window._isMessageReaderUnpinned = () => false;
+  window._isSessionActivelyViewedForList = () => true;
+  window._readEmptyComposerModelOverride = () => null;
+  window._readPersistedModelState = () => null;
+  window._messageReloadLimitForSession = () => 2;
+  window._currentMessageRenderWindowSize = () => 1;
+  window._messageRenderableMessageCount = () => 1;
+  window._msgLimitMax = 500;
+  window._MSG_LIMIT_MAX = 500;
+  window._newSessionInFlight = null;
+})();
+"""
+
+
+def _open_production_sessions_page():
+    """Load the complete production sessions.js in a real browser page."""
+    playwright = pytest.importorskip("playwright.sync_api")
+    runner = playwright.sync_playwright().start()
+    browser = runner.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.set_content("<html><body></body></html>")
+    page.evaluate(_SESSION_HARNESS_BOOTSTRAP)
+    page.add_script_tag(path=str(REPO / "static" / "sessions.js"))
+    page.evaluate(_SESSION_HARNESS_OVERRIDES)
+    return runner, browser, page
+
+
+def _wait_for_request(page, kind):
+    page.wait_for_function(
+        "kind => window.__pendingRequests.some(request => window.__requestMatches(request, kind))",
+        arg=kind,
+        timeout=5000,
+    )
+
+
+def _session_metadata(sid, message_count):
+    return {
+        "session": {
+            "session_id": sid,
+            "message_count": message_count,
+            "updated_at": message_count,
+            "last_message_at": message_count,
+            "active_stream_id": None,
+            "messages": [],
+        }
+    }
+
+
+def _session_messages(sid, message_count, content):
+    return {
+        "session": {
+            "session_id": sid,
+            "message_count": message_count,
+            "_messages_truncated": False,
+            "_messages_offset": 0,
+            "messages": [{"role": "assistant", "content": content}],
+            "tool_calls": [],
+        }
+    }
+
+
+def _new_session_response():
+    return {
+        "session": {
+            "session_id": "sid-new",
+            "title": "Untitled",
+            "message_count": 0,
+            "messages": [],
+            "workspace": "/tmp",
+            "model": "test-model",
+        }
+    }
+
+
+def test_new_session_survives_automatic_same_session_force_refresh():
+    """A refresh of the current pane must not orphan a pending New Chat create."""
+    runner, browser, page = _open_production_sessions_page()
+    try:
+        page.evaluate("() => { window.__newDone = newSession(false, {}); }")
+        _wait_for_request(page, "new")
+
+        # This is the production automatic-refresh route used by focus/visibility
+        # reconciliation; it probes metadata before entering loadSession(force).
+        page.evaluate("() => { window.__refreshDone = refreshActiveSessionIfExternallyUpdated('focus'); }")
+        _wait_for_request(page, "metadata")
+        page.evaluate(
+            "payload => window.__resolveRequest('metadata', payload)",
+            _session_metadata("sid-old", 2),
+        )
+
+        # Complete the automatic same-session force refresh before resolving the
+        # New Chat POST. The pending create must still own the next pane commit.
+        _wait_for_request(page, "metadata")
+        page.evaluate(
+            "payload => window.__resolveRequest('metadata', payload)",
+            _session_metadata("sid-old", 2),
+        )
+        _wait_for_request(page, "messages")
+        page.evaluate(
+            "payload => window.__resolveRequest('messages', payload)",
+            _session_messages("sid-old", 2, "refreshed old transcript"),
+        )
+        page.evaluate("() => window.__refreshDone")
+
+        page.evaluate(
+            "payload => window.__resolveRequest('new', payload)",
+            _new_session_response(),
+        )
+        page.evaluate("() => window.__newDone")
+        result = page.evaluate("() => ({sid: S.session && S.session.session_id, messages: S.messages})")
+        assert result["sid"] == "sid-new", "the created server session must become the active pane"
+        assert result["messages"] == [], "New Chat must keep its empty transcript"
+    finally:
+        browser.close()
+        runner.stop()
+
+
+def test_new_session_yields_to_newer_cross_session_sidebar_navigation():
+    """A genuinely newer sidebar navigation still owns the pane over New Chat."""
+    runner, browser, page = _open_production_sessions_page()
+    try:
+        page.evaluate("() => { window.__newDone = newSession(false, {}); }")
+        _wait_for_request(page, "new")
+        page.evaluate("() => { window.__sidebarDone = loadSession('sid-atlas', {force: true}); }")
+        _wait_for_request(page, "metadata")
+        page.evaluate(
+            "payload => window.__resolveRequest('metadata', payload)",
+            _session_metadata("sid-atlas", 2),
+        )
+        _wait_for_request(page, "messages")
+        page.evaluate(
+            "payload => window.__resolveRequest('messages', payload)",
+            _session_messages("sid-atlas", 2, "atlas transcript"),
+        )
+        page.evaluate("() => window.__sidebarDone")
+
+        page.evaluate(
+            "payload => window.__resolveRequest('new', payload)",
+            _new_session_response(),
+        )
+        page.evaluate("() => window.__newDone")
+        result = page.evaluate("() => ({sid: S.session && S.session.session_id, messages: S.messages})")
+        assert result["sid"] == "sid-atlas", "newer sidebar navigation must remain active"
+        assert result["messages"] == [{"role": "assistant", "content": "atlas transcript"}]
+    finally:
+        browser.close()
+        runner.stop()
 
 
 _NODE_SCRIPT_TEMPLATE = r'''
@@ -206,6 +441,7 @@ function createEnvironment() {
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._paneNavigationGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;

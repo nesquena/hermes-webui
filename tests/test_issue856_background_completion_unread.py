@@ -91,7 +91,7 @@ def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     done_block = _done_block()
 
     marker_idx = done_block.find("_markSessionCompletionUnread(completedSid")
-    cleanup_idx = done_block.find("_clearOwnerInflightState();")
+    cleanup_idx = done_block.find("_clearOwnerInflightState(source);")
     if cleanup_idx == -1:
         cleanup_idx = done_block.find("delete INFLIGHT[activeSid];")
     cache_idx = done_block.find("_markSessionCompletedInList(completedSession, activeSid);")
