@@ -1,7 +1,21 @@
-function _markSessionViewed(sid, messageCount) {
+function _messageRuntimeContextForRow(row = null) {
+  if(typeof _createSidebarRuntimeContext!=='function') return null;
+  return _createSidebarRuntimeContext([
+    ...(Array.isArray(_allSessions)?_allSessions:[]),
+    ...(typeof S!=='undefined'&&S&&S.session?[S.session]:[]),
+    ...(row?[row]:[]),
+  ], typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:[]);
+}
+
+function _markSessionViewed(sid, messageCount, row = null, runtimeContext=null) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  _setSessionViewedCount(sid, next);
+  const stateRow=row || (typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid?S.session:null);
+  const operationContext=runtimeContext||(
+    typeof _messageRuntimeContextForRow==='function'
+      ?_messageRuntimeContextForRow(stateRow)
+      :null);
+  _setSessionViewedCount(sid, next, stateRow, operationContext);
 }
 
 function _apiUrl(path) {
@@ -90,8 +104,10 @@ function _isSessionActivelyViewed(sid) {
 
 function _markActiveSessionViewedOnReturn() {
   if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;
-  _markSessionViewed(S.session.session_id, S.session.message_count || (S.messages&&S.messages.length) || 0);
-  if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(S.session.session_id);
+  const activeRow=S.session;
+  const operationContext=_messageRuntimeContextForRow(activeRow);
+  _markSessionViewed(activeRow.session_id, activeRow.message_count || (S.messages&&S.messages.length) || 0, activeRow, operationContext);
+  if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(activeRow.session_id, activeRow, operationContext);
   if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
@@ -2128,6 +2144,11 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  const _messageOperationRow=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id===activeSid)
+    ?S.session:null;
+  const _messageOperationContext=typeof _messageRuntimeContextForRow==='function'
+    ?_messageRuntimeContextForRow(_messageOperationRow)
+    :null;
   const reconnecting=!!options.reconnecting;
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
@@ -6146,6 +6167,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};
         const completedSid=completedSession.session_id||activeSid;
+        const _completionOperationContext=typeof _messageRuntimeContextForRow==='function'
+          ?_messageRuntimeContextForRow(completedSession)
+          :null;
         const completedMessageCount=completedSession.message_count != null
           ? completedSession.message_count
           : (
@@ -6158,12 +6182,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               )
           );
         if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
-          _markSessionCompletionUnread(completedSid, completedMessageCount);
+          _markSessionCompletionUnread(completedSid, completedMessageCount, null, completedSession, _completionOperationContext);
         }
-        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
+        if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount, completedSession, _completionOperationContext);
         _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
-          _markSessionCompletedInList(completedSession, activeSid);
+          _markSessionCompletedInList(completedSession, activeSid, _completionOperationContext);
         }
         _clearApprovalForOwner();
         _clearClarifyForOwner('terminal');
@@ -6318,7 +6342,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // No-reply guard (#373): if agent returned nothing, show inline error
           if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
           if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
-          if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
+          if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount, d.session, _completionOperationContext);
           // Cooldown: prevent refreshActiveSessionIfExternallyUpdated from
           // force-reloading immediately after "done" — the event already
           // delivered the final messages and tool calls.
@@ -6661,12 +6685,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
             if(S.session&&S.session.session_id===activeSid){
               S.messages=_filterRecoveryControlMessages(S.messages||[]);
-              _markSessionViewed(activeSid, S.messages.length);
+              _markSessionViewed(activeSid, S.messages.length, S.session, _messageOperationContext);
               renderMessages({preserveScroll:true});
             }
           })();
         } else {
-          _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
+          _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length, S.session||_messageOperationRow, _messageOperationContext);
           renderMessages({preserveScroll:true});
         }
       }else if(typeof trackBackgroundError==='function'){
@@ -6870,7 +6894,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         clearLiveToolCards();if(!assistantText)removeThinking();
-        _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
+        _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length, sessionPayload, _messageOperationContext);
         renderMessages({preserveScroll:true});
         if(_wasFollowingAtCancel && typeof scrollToBottom==='function') scrollToBottom();
         return true;
@@ -6905,7 +6929,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtCancelFb && typeof scrollToBottom==='function') scrollToBottom();
-            _markSessionViewed(activeSid, S.messages.length);
+            _markSessionViewed(activeSid, S.messages.length, S.session, _messageOperationContext);
           }
         }finally{
           _dispatchExtensionTurnLifecycle('turn:cancel',activeSid,streamId,{
@@ -7001,8 +7025,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
       const completedSid=session.session_id||activeSid;
+      const _completionOperationContext=typeof _messageRuntimeContextForRow==='function'
+        ?_messageRuntimeContextForRow(session)
+        :null;
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
-        _markSessionCompletionUnread(completedSid, session.message_count);
+        _markSessionCompletionUnread(completedSid, session.message_count, null, session, _completionOperationContext);
       }
       const isActiveSession=_isSessionCurrentPane(activeSid);
       if(isActiveSession){
@@ -7058,7 +7085,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
           S.toolCalls=[];
         }
-        if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
+        if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length, session, _completionOperationContext);
         // Expand render window so the settled render doesn't hide Activity.
         if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
           _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
@@ -7135,7 +7162,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // read history are left where they were (the near-bottom guard above is
       // false for them).
       if(_wasFollowingAtDisconnect && typeof scrollToBottom==='function') scrollToBottom();
-      _markSessionViewed(activeSid, S.messages.length);
+      _markSessionViewed(activeSid, S.messages.length, S.session||_messageOperationRow, _messageOperationContext);
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
@@ -8371,8 +8398,10 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     const pid = String(d.task_id || '');
     const _viewed = typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid);
     if (_viewed) {
-      try { _markSessionViewed(sid, (S&&S.session&&S.session.session_id===sid)?(S.session.message_count??(S.messages&&S.messages.length)??0):0); } catch(_){}
-      try { if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid); } catch(_){}
+      const activeRow=(S&&S.session&&S.session.session_id===sid)?S.session:null;
+      const operationContext=_messageRuntimeContextForRow(activeRow);
+      try { _markSessionViewed(sid, activeRow?(activeRow.message_count??(S.messages&&S.messages.length)??0):0, activeRow, operationContext); } catch(_){}
+      try { if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid, activeRow, operationContext); } catch(_){}
     } else {
       // T4 drop-when-focused: suppress toast only; ack below still fires.
       try {

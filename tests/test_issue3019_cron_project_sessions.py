@@ -91,5 +91,6 @@ def test_agent_side_cron_rows_keep_project_chip_visibility():
 def test_session_list_project_filter_can_reveal_default_hidden_cron_rows():
     src = ( __import__("pathlib").Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
 
-    assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in src
-    assert "if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;" in src
+    assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar, lineageIndex, runtimeContext=null)" in src
+    assert "const project=lineageIndex?lineageIndex.projectFor(s):s.project_id;" in src
+    assert "if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&project===_activeProject)) continue;" in src

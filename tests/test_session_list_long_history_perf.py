@@ -309,11 +309,11 @@ def test_sessions_api_runtime_overlay_sorts_active_rows_first(monkeypatch):
 def test_frontend_session_list_sorts_effective_streaming_rows_first():
     src = (pathlib.Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
 
-    assert "function _sessionSidebarSortCompare(a, b)" in src
-    assert "function _sessionRunningSortRank(session)" in src
-    assert "_isSessionEffectivelyStreaming(session)" in src
+    assert "function _sessionSidebarSortCompare(a, b, runtimeContext=null)" in src
+    assert "function _sessionRunningSortRank(session, runtimeContext=null)" in src
+    assert "_isSessionEffectivelyStreaming(session,runtimeContext)" in src
     assert "session.active_stream_id && session.has_pending_user_message" in src
-    assert "const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);" in src
+    assert "const orderedSessions=[...sessions].sort((a,b)=>_sessionSidebarSortCompare(a,b,runtimeContext));" in src
 
 
 def test_frontend_session_date_buckets_use_runtime_sort_timestamp():

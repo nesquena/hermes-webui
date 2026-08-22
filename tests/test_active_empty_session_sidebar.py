@@ -5,8 +5,8 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
 def test_active_empty_session_is_injected_into_sidebar_rows():
-    assert "function _sessionRowsWithActiveEphemeralSession(rows)" in SESSIONS_JS
-    helper_start = SESSIONS_JS.index("function _sessionRowsWithActiveEphemeralSession(rows)")
+    assert "function _sessionRowsWithActiveEphemeralSession(rows, runtimeContext=null)" in SESSIONS_JS
+    helper_start = SESSIONS_JS.index("function _sessionRowsWithActiveEphemeralSession(rows, runtimeContext=null)")
     helper_end = SESSIONS_JS.index("function renderSessionListFromCache()", helper_start)
     helper = SESSIONS_JS[helper_start:helper_end]
 
@@ -26,9 +26,9 @@ def test_sidebar_search_uses_active_ephemeral_rows_before_filtering():
     render_end = SESSIONS_JS.index("function _showProjectPicker", render_start)
     render_body = SESSIONS_JS[render_start:render_end]
 
-    assert "const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions);" in render_body
+    assert "const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions,runtimeContext);" in render_body
     assert "const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);" in render_body
-    assert "const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);" in render_body
+    assert "const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows,runtimeContext);" in render_body
 
 
 def test_active_row_reinjection_gated_to_zero_message_ephemeral_only():
@@ -37,7 +37,7 @@ def test_active_row_reinjection_gated_to_zero_message_ephemeral_only():
     that already has messages and was filtered out by the search query must stay
     filtered — re-adding it would pollute unrelated search results with the current
     chat."""
-    start = SESSIONS_JS.index("function _ensureActiveSessionRowPresent(rows, sourceRows)")
+    start = SESSIONS_JS.index("function _ensureActiveSessionRowPresent(rows, sourceRows, runtimeContext=null)")
     end = SESSIONS_JS.index("function clearOptimisticSessionStreaming", start)
     body = SESSIONS_JS[start:end]
 

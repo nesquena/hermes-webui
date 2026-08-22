@@ -64,7 +64,7 @@ def test_delete_action_repaints_sidebar_before_loading_remaining_sessions():
     body = _function_block(SESSIONS_JS, "deleteSession")
 
     api_call = "const deleteRequest=api('/api/session/delete'"
-    optimistic = "_optimisticallyRemoveSessionFromList(sid);"
+    optimistic = "_optimisticallyRemoveSessionFromList(sid,session,operationContext);"
     remaining_fetch = "const remaining=await api('/api/sessions'+_sessionListQueryString());"
     full_refresh = "await renderSessionList();"
 

@@ -135,12 +135,12 @@ def test_plain_mouse_hover_does_not_mark_session_row_dragging():
 def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
     messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
 
-    assert "function _isSessionLocallyStreaming(s)" in SESSIONS_JS
+    assert "function _isSessionLocallyStreaming(s, runtimeContext=null)" in SESSIONS_JS
     assert "isActive && Boolean(S.busy)" in SESSIONS_JS
-    assert "function _purgeStaleInflightEntries()" in SESSIONS_JS
+    assert "function _purgeStaleInflightEntries(runtimeContext=null)" in SESSIONS_JS
     assert "delete INFLIGHT[sid];" in SESSIONS_JS
-    assert "function _isSessionEffectivelyStreaming(s)" in SESSIONS_JS
-    assert "const ownStreaming=_isSessionEffectivelyStreaming(s)" in SESSIONS_JS
+    assert "function _isSessionEffectivelyStreaming(s, runtimeContext=null)" in SESSIONS_JS
+    assert "const ownStreaming=_isSessionEffectivelyStreaming(s,runtimeContext)" in SESSIONS_JS
     assert "if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();" in messages_js
 
 

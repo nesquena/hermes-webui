@@ -556,7 +556,7 @@ def test_frontend_handler_requires_event_id_to_surface():
     """Source-grep: _handleBgTaskCompleteEvent ignores events without event_id."""
     js = (REPO_ROOT / "static" / "messages.js").read_text()
     fn_ix = js.index("function _handleBgTaskCompleteEvent")
-    fn_src = js[fn_ix:fn_ix + 1800]
+    fn_src = js[fn_ix:fn_ix + 2600]
     # event_id is extracted from the payload.
     assert "d.event_id" in fn_src
     # Missing event_id short-circuits before any dedupe / ack.

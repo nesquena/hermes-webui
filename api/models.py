@@ -5760,17 +5760,35 @@ def _active_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
-def _agent_state_db_path(*, profile=None) -> Path | None:
+def _agent_state_db_path(*, profile=None, fallback_to_active=True) -> Path | None:
     """Return agent ``state.db`` for *profile*, or ``None`` when unavailable."""
     if isinstance(profile, str) and profile:
+        if not fallback_to_active:
+            from api.profiles import _is_isolated_profile_mode, _profiles_match, get_active_profile_name
+            if _is_isolated_profile_mode() and not _profiles_match(profile, get_active_profile_name()):
+                return None
         db_path = _get_profile_home(profile) / 'state.db'
-        if not db_path.exists():
+        if not db_path.exists() and fallback_to_active:
             db_path = _active_state_db_path()
     else:
         db_path = _active_state_db_path()
     if not db_path.exists():
         return None
     return db_path
+
+
+def _sidebar_state_db_path(profile: str | None) -> Path | None:
+    """Resolve a sidebar row's database without crossing profile boundaries."""
+    from api.profiles import _PROFILE_ID_RE, _is_root_profile, get_active_profile_name
+
+    if profile is None:
+        active_profile = get_active_profile_name() or 'default'
+        if _is_root_profile(active_profile):
+            return _active_state_db_path()
+        profile = 'default'
+    if not _is_root_profile(profile) and not _PROFILE_ID_RE.fullmatch(profile):
+        return None
+    return _agent_state_db_path(profile=profile, fallback_to_active=False)
 
 
 def agent_session_rows_existing(
@@ -6094,20 +6112,34 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
         _cap = int(_os.environ.get("HERMES_WEBUI_STATE_DB_OVERRIDE_TOP_N", "300"))
     except (TypeError, ValueError):
         _cap = 300
-    all_ids = {str(s.get('session_id')) for s in sessions if s.get('session_id')}
     if _cap > 0 and len(sessions) > _cap:
-        count_ids = {str(s.get('session_id')) for s in sessions[:_cap] if s.get('session_id')}
+        count_priority = {id(s) for s in sessions[:_cap]}
     else:
-        count_ids = None  # cap disabled / under cap -> count every row too
-    try:
-        metadata = _read_state_db_sidebar_overrides(
-            _active_state_db_path(),
-            all_ids,
-            count_session_ids=count_ids,
-        )
-    except Exception:
-        return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata)
+        count_priority = None  # cap disabled / under cap -> count every row too
+    sessions_by_profile: dict[str | None, list[dict]] = {}
+    for session in sessions:
+        raw_profile = session.get('profile_scope') or session.get('profile')
+        profile = str(raw_profile).strip() if raw_profile else None
+        sessions_by_profile.setdefault(profile, []).append(session)
+
+    for profile, profile_sessions in sessions_by_profile.items():
+        try:
+            state_db_path = _sidebar_state_db_path(profile)
+            if state_db_path is None:
+                continue
+            all_ids = {str(s.get('session_id')) for s in profile_sessions if s.get('session_id')}
+            count_ids = (
+                {str(s.get('session_id')) for s in profile_sessions if id(s) in count_priority and s.get('session_id')}
+                if count_priority is not None else None
+            )
+            metadata = _read_state_db_sidebar_overrides(
+                state_db_path,
+                all_ids,
+                count_session_ids=count_ids,
+            )
+        except Exception:
+            continue
+        _apply_sidebar_state_db_override_metadata(profile_sessions, metadata)
 
 
 def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: dict[str, dict]) -> None:
@@ -6213,28 +6245,38 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         candidates = sessions[:_cap]
     else:
         candidates = sessions
-    try:
-        metadata = read_session_lineage_metadata(
-            _active_state_db_path(),
-            {str(s.get('session_id')) for s in candidates if s.get('session_id')},
-        )
-    except Exception:
-        return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata)
-    for session in sessions:
-        sid = session.get('session_id')
-        if sid in metadata:
-            entry = dict(metadata[sid])
-            for key in (
-                '_state_db_title',
-                '_state_db_source',
-                '_state_db_source_tag',
-                '_state_db_raw_source',
-                '_state_db_session_source',
-                '_state_db_source_label',
-            ):
-                entry.pop(key, None)
-            session.update(entry)
+    candidates_by_profile: dict[str | None, list[dict]] = {}
+    for session in candidates:
+        raw_profile = session.get('profile_scope') or session.get('profile')
+        profile = str(raw_profile).strip() if raw_profile else None
+        candidates_by_profile.setdefault(profile, []).append(session)
+
+    for profile, profile_candidates in candidates_by_profile.items():
+        try:
+            state_db_path = _sidebar_state_db_path(profile)
+            if state_db_path is None:
+                continue
+            metadata = read_session_lineage_metadata(
+                state_db_path,
+                {str(s.get('session_id')) for s in profile_candidates if s.get('session_id')},
+            )
+        except Exception:
+            continue
+        _apply_sidebar_state_db_override_metadata(profile_candidates, metadata)
+        for session in profile_candidates:
+            sid = session.get('session_id')
+            if sid in metadata:
+                entry = dict(metadata[sid])
+                for key in (
+                    '_state_db_title',
+                    '_state_db_source',
+                    '_state_db_source_tag',
+                    '_state_db_raw_source',
+                    '_state_db_session_source',
+                    '_state_db_source_label',
+                ):
+                    entry.pop(key, None)
+                session.update(entry)
 
 
 def _diag_stage(diag, name: str) -> None:

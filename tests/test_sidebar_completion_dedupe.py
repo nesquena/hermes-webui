@@ -40,7 +40,7 @@ _markSessionCompletedInList({{
   title: 'After done',
   message_count: 3,
   parent_session_id: 'old',
-}}, 'old');
+}}, 'old', null);
 console.log(JSON.stringify({{
   rows: _allSessions,
   oldStreaming: _sessionStreamingById.has('old'),

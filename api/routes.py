@@ -2683,18 +2683,36 @@ def _hidden_archived_sidebar_reference_sessions(
     `_attachChildSessionsToSidebarRows()` can suppress its visible child rows
     instead of rendering them as orphan top-level conversations (#4293).
     """
+    def scope_key(row: dict) -> tuple[str, str, str]:
+        source = "cli" if _is_cli_session_for_settings(row) else "webui"
+        profile = _session_list_cache_profile_scope(
+            row.get("profile_scope") or row.get("profile")
+        )
+        project = row.get("project_id")
+        return source, profile, "" if project is None else str(project)
+
+    def identity_key(row: dict, session_id: str) -> tuple[str, str, str, str]:
+        return (*scope_key(row), str(session_id))
+
+    def base_identity_key(row: dict, session_id: str) -> tuple[str, str, str]:
+        source, profile, _project = scope_key(row)
+        return source, profile, str(session_id)
+
     archived_by_id = {
-        str(row.get("session_id")): row
+        identity_key(row, row.get("session_id")): row
         for row in archived_rows
         if isinstance(row, dict) and row.get("archived") and row.get("session_id")
     }
+    archived_by_base: dict[tuple[str, str, str], list[tuple[tuple[str, str, str, str], dict]]] = {}
+    for key, row in archived_by_id.items():
+        archived_by_base.setdefault(base_identity_key(row, row.get("session_id")), []).append((key, row))
     if not archived_by_id:
         return []
 
     references: list[dict] = []
-    added: set[str] = set()
+    added: set[tuple[str, str, str, str]] = set()
     visible_ids = {
-        str(row.get("session_id"))
+        identity_key(row, row.get("session_id"))
         for row in visible_rows
         if isinstance(row, dict) and row.get("session_id")
     }
@@ -2702,19 +2720,30 @@ def _hidden_archived_sidebar_reference_sessions(
     for row in visible_rows:
         if not isinstance(row, dict):
             continue
-        parent_id = str(row.get("parent_session_id") or "").strip()
-        seen: set[str] = set()
-        while parent_id and parent_id not in seen:
-            seen.add(parent_id)
-            if parent_id in visible_ids:
-                break
-            parent = archived_by_id.get(parent_id)
-            if not parent:
-                break
-            if parent_id not in added:
-                references.append(parent)
-                added.add(parent_id)
-            parent_id = str(parent.get("parent_session_id") or "").strip()
+        pending = [(row, str(row.get("parent_session_id") or "").strip())]
+        visited: set[tuple[str, str, str, str]] = set()
+        while pending:
+            scope_row, parent_id = pending.pop(0)
+            if not parent_id:
+                continue
+            if scope_row.get("project_id") is None:
+                parent_candidates = archived_by_base.get(base_identity_key(scope_row, parent_id), [])
+            else:
+                parent_key = identity_key(scope_row, parent_id)
+                parent_candidates = (
+                    [(parent_key, archived_by_id[parent_key])]
+                    if parent_key in archived_by_id else []
+                )
+            for parent_key, parent in parent_candidates:
+                if parent_key in visited:
+                    continue
+                visited.add(parent_key)
+                if parent_key in visible_ids:
+                    continue
+                if parent_key not in added:
+                    references.append(parent)
+                    added.add(parent_key)
+                pending.append((parent, str(parent.get("parent_session_id") or "").strip()))
 
     return references
 
@@ -10282,6 +10311,7 @@ from api.models import (
     _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
+    _agent_state_db_path,
     load_projects,
     save_projects,
     import_cli_session,
@@ -10688,6 +10718,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "archived",
     "project_id",
     "profile",
+    "profile_scope",
     "input_tokens",
     "output_tokens",
     "estimated_cost",
@@ -10752,6 +10783,7 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
         for key, value in dict(session).items()
         if key in _SIDEBAR_SESSION_RESPONSE_FIELDS
     }
+    item["profile_scope"] = _session_list_cache_profile_scope(item.get("profile"))
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
     _redact_sidebar_title_fields(item, redact_enabled)
@@ -14035,10 +14067,22 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"session": public_session_projection(sess)})
 
     if parsed.path == "/api/session/lineage/report":
-        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        query = parse_qs(parsed.query)
+        sid = query.get("session_id", [""])[0]
         if not sid:
             return bad(handler, "session_id required", 400)
-        report = read_session_lineage_report(_active_state_db_path(), sid)
+        profile = query.get("profile", [""])[0].strip() or None
+        if profile:
+            from api.profiles import _PROFILE_ID_RE
+            if not _PROFILE_ID_RE.fullmatch(profile):
+                return bad(handler, "invalid profile", 400)
+        state_db_path = (
+            _agent_state_db_path(profile=profile, fallback_to_active=False)
+            if profile else _active_state_db_path()
+        )
+        if state_db_path is None:
+            return bad(handler, "Session not found", 404)
+        report = read_session_lineage_report(state_db_path, sid)
         if not report.get("found"):
             return bad(handler, "Session not found", 404)
         return j(handler, report)

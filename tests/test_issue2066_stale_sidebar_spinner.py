@@ -30,8 +30,9 @@ def test_cache_render_purges_stale_non_streaming_inflight_entries():
     render_block = _function_block("renderSessionListFromCache", "_showProjectPicker")
 
     assert "const sessionsById = new Map();" in purge_block
-    assert "if (s && s.session_id) sessionsById.set(s.session_id, s);" in purge_block
-    assert "const s = sessionsById.get(sid);" in purge_block
+    assert "if (s && s.session_id) {" in purge_block
+    assert "sessionsById.get(s.session_id).push(s);" in purge_block
+    assert "const s=candidates.find(item=>" in purge_block
     assert "_allSessionsById" not in purge_block
     # Non-streaming sessions that ARE in _allSessions are purged (original #2066
     # semantics).  Sessions absent from _allSessions are also purged (adds #2092
@@ -41,7 +42,7 @@ def test_cache_render_purges_stale_non_streaming_inflight_entries():
     assert "!s.is_streaming" in purge_block
     assert "delete INFLIGHT[sid];" in purge_block
     assert "clearInflightState(sid);" in purge_block
-    assert "_purgeStaleInflightEntries();" in render_block
+    assert "_purgeStaleInflightEntries(runtimeContext);" in render_block
 
 
 def test_stale_inflight_purge_executes_without_undeclared_session_map():

@@ -145,7 +145,7 @@ def test_streaming_zero_message_sessions_stay_visible_after_reload():
     """In-flight sessions may have zero saved messages during reload recovery."""
     with open('static/sessions.js', encoding="utf-8") as f:
         src = f.read()
-    assert "_isSessionEffectivelyStreaming(s)" in src, \
+    assert "_isSessionEffectivelyStreaming(s,runtimeContext)" in src, \
         "Streaming sessions must bypass the zero-message sidebar filter"
     assert "!!s.active_stream_id" in src, \
         "Sessions with persisted active stream IDs must remain visible after reload"

@@ -165,12 +165,12 @@ def test_server_absent_optimistic_first_turn_rows_are_not_kept_forever():
     """A local first-turn sidebar row must expire when /api/chat/start never persisted it."""
     body = _function_body(SESSIONS_JS, "_mergeOptimisticFirstTurnSessions")
 
-    assert "_shouldKeepLocalOnlyOptimisticSessionRow(local)" in body, (
+    assert "_shouldKeepLocalOnlyOptimisticSessionRow(local,operationContext)" in body, (
         "server-absent optimistic rows need an explicit keep/drop gate"
     )
-    keep_idx = body.index("if(_shouldKeepLocalOnlyOptimisticSessionRow(local))")
+    keep_idx = body.index("if(_shouldKeepLocalOnlyOptimisticSessionRow(local,operationContext))")
     append_idx = body.index("merged.push({...local,is_streaming:true});")
-    drop_idx = body.index("_dropStaleOptimisticSessionRow(sid);", append_idx)
+    drop_idx = body.index("_dropStaleOptimisticSessionRow(sid,operationContext);", append_idx)
     assert keep_idx < append_idx < drop_idx, (
         "local optimistic rows may only be appended inside the explicit keep gate"
     )

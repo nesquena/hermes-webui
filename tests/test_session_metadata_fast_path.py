@@ -29,7 +29,7 @@ def test_full_message_load_updates_viewed_count_after_metadata_fast_path():
         "_acknowledgeSessionVisit(S.session.session_id,Number(data.session.message_count||0),"
         in compact
     )
-    assert "_setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));" in src
+    assert "_setSessionViewedCount(sid, Number(S.session.message_count || msgs.length), S.session, loadRuntimeContext);" in src
 
 
 def test_lazy_message_load_skips_model_resolution():
