@@ -6694,6 +6694,26 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     return []
 
 
+def _hermes_cli_supports_opencode_go_live_catalog() -> bool:
+    """Whether the installed Agent has Go-specific model discovery.
+
+    Hermes core versions before 0.20.5 route ``opencode-go`` through a
+    generic public catalog. That lookup can return a convincing non-empty
+    list containing models the Go relay rejects with 404, so absence or an
+    unparseable/prerelease version must fail closed to WebUI's static Go list.
+    """
+    try:
+        import hermes_cli
+
+        version = str(getattr(hermes_cli, "__version__", "")).strip()
+    except Exception:
+        return False
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        return False
+    return tuple(int(part) for part in match.groups()) >= (0, 20, 5)
+
+
 def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> list[dict]:
     """Convert Hermes CLI model ids into WebUI picker model entries."""
     formatter = _format_ollama_label if provider_id in ("ollama", "ollama-cloud") else None
@@ -8082,6 +8102,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not raw_models:
                         if pid == "moa":
                             raw_models = _moa_preset_models_from_config(cfg)
+                        elif (
+                            pid == "opencode-go"
+                            and not _hermes_cli_supports_opencode_go_live_catalog()
+                        ):
+                            # Before core v0.20.5 this resolver returned the
+                            # generic public catalog, including models that
+                            # 404 on the Go tier. Use the curated Go fallback.
+                            raw_models = []
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,

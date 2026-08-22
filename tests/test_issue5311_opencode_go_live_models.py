@@ -32,10 +32,18 @@ def _scrub_provider_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def _install_fake_hermes_cli(monkeypatch, *, provider_id: str, live_ids, raise_on_lookup: bool = False):
+def _install_fake_hermes_cli(
+    monkeypatch,
+    *,
+    provider_id: str,
+    live_ids,
+    core_version: str = "0.20.5",
+    raise_on_lookup: bool = False,
+):
     """Install a hermes_cli stub that reports one authenticated provider."""
     fake_pkg = types.ModuleType("hermes_cli")
     fake_pkg.__path__ = []
+    fake_pkg.__version__ = core_version
 
     fake_models = types.ModuleType("hermes_cli.models")
     fake_models.list_available_providers = lambda: [
@@ -123,6 +131,26 @@ def test_opencode_go_probes_live_catalog(monkeypatch, tmp_path):
     assert all(m.get("label") for m in group["models"])
 
 
+def test_opencode_go_old_core_ignores_nonempty_generic_catalog(monkeypatch, tmp_path):
+    """Pre-v0.20.5 cores must not leak their generic public catalog into Go."""
+    _scrub_provider_env(monkeypatch)
+    calls = _install_fake_hermes_cli(
+        monkeypatch,
+        provider_id="opencode-go",
+        live_ids=["go-ineligible-old-core-sentinel"],
+        core_version="0.20.4",
+    )
+    _configure(monkeypatch, tmp_path, provider="opencode-go")
+
+    result = config.get_available_models()
+    group = _provider_group(result, "opencode-go")
+
+    assert calls == []
+    ids = _ids(group)
+    assert "go-ineligible-old-core-sentinel" not in ids
+    assert "kimi-k3" in ids
+
+
 def test_opencode_go_static_fallback_when_probe_fails(monkeypatch, tmp_path):
     """Offline / CLI failure must fall back to the curated static list."""
     _scrub_provider_env(monkeypatch)
@@ -168,9 +196,9 @@ def test_opencode_go_config_allowlist_still_wins(monkeypatch, tmp_path):
 
 
 # ── Static fallback list contract ─────────────────────────────────────
-# The remaining tests pin the offline fallback list itself. It is an exact
-# mirror of Hermes core's curated ``opencode-go`` list
-# (hermes_cli/models.py) — core owns the sync duty against the live
+# The remaining tests pin the offline fallback list itself to Hermes core's
+# v0.20.5 release contract (commit fcbd1076, tag v2026.8.19). Core owns the
+# sync duty against the live
 # https://opencode.ai/zen/go/v1/models endpoint and
 # https://opencode.ai/docs/go/, and WebUI only mirrors. This catches drift
 # in either direction: ids core added (kimi-k3, gpt-5.6-luna, glm-5.3,
@@ -228,9 +256,24 @@ def _opencode_go_static_models():
     raise AssertionError("_PROVIDER_MODELS assignment not found")
 
 
-def test_opencode_go_static_models_match_core_curated_list():
+def test_opencode_go_static_models_match_v0205_release_snapshot():
     models = _opencode_go_static_models()
     assert [model["id"] for model in models] == EXPECTED_OPENCODE_GO_MODEL_IDS
+
+
+def test_opencode_go_static_models_match_installed_core_curated_list():
+    """Exercise the actual Agent contract for the supported release pair."""
+    import pytest
+
+    hermes_cli = pytest.importorskip(
+        "hermes_cli", reason="hermes-agent is not a WebUI test dependency"
+    )
+    if not config._hermes_cli_supports_opencode_go_live_catalog():
+        pytest.skip(f"installed hermes-agent {hermes_cli.__version__} predates v0.20.5")
+    models_mod = pytest.importorskip("hermes_cli.models")
+    assert [model["id"] for model in _opencode_go_static_models()] == models_mod._PROVIDER_MODELS[
+        "opencode-go"
+    ]
 
 
 def test_opencode_go_recent_additions_have_human_labels():
