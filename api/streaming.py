@@ -22,6 +22,7 @@ import time
 import traceback
 import copy
 import inspect
+import types
 from pathlib import Path
 from typing import Optional
 
@@ -48,7 +49,7 @@ from api.config import (
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
-    coerce_reasoning_effort_for_model,
+    resolve_effective_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -139,6 +140,41 @@ def get_stream_runtime_snapshot() -> dict[str, object]:
         # late unexpected failure must not discard successful sibling counts.
         return result
     return result
+
+
+def _bind_session_reasoning_effort(agent, config_data, session_effort):
+    """Keep a session override authoritative across Agent runtime model swaps."""
+    if not session_effort:
+        return
+    if getattr(agent, "_webui_session_reasoning_bound", False):
+        return
+    agent._webui_session_reasoning_bound = True
+
+    def apply():
+        effort = resolve_effective_reasoning_effort(
+            config_data,
+            getattr(agent, "model", None),
+            provider_id=getattr(agent, "provider", None),
+            base_url=getattr(agent, "base_url", None),
+            session_effort=session_effort,
+        )
+        agent.reasoning_config = parse_reasoning_effort(effort)
+
+    def bind(method_name):
+        original = getattr(agent, method_name, None)
+        if not callable(original):
+            return
+
+        def wrapped(self, *args, **kwargs):
+            result = original(*args, **kwargs)
+            if method_name != "_try_activate_fallback" or result:
+                apply()
+            return result
+
+        setattr(agent, method_name, types.MethodType(wrapped, agent))
+
+    bind("switch_model")
+    bind("_try_activate_fallback")
 
 
 def _session_payload_with_full_messages(session, *, tool_calls=None):
@@ -10197,18 +10233,16 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # CLI-parity reasoning effort: read agent.reasoning_effort from the
-            # active profile's config.yaml (the same key the CLI writes via
-            # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
-            # the key is absent or invalid, pass None → agent uses its default.
+            # Session effort wins; otherwise use Hermes Agent's shared resolver
+            # (per-model override > global effort).
             try:
-                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
-                _effort = coerce_reasoning_effort_for_model(
-                    _effort_raw,
+                _session_effort = getattr(s, 'reasoning_effort', None)
+                _effort = resolve_effective_reasoning_effort(
+                    _cfg,
                     resolved_model,
                     provider_id=resolved_provider,
                     base_url=resolved_base_url,
+                    session_effort=_session_effort,
                 )
                 _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:
@@ -10466,6 +10500,8 @@ def _run_agent_streaming(
                             logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
                         logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
+
+            _bind_session_reasoning_effort(agent, _cfg, _session_effort)
 
             # Store agent instance for cancel/interrupt propagation
             with STREAMS_LOCK:

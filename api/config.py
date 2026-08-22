@@ -3357,7 +3357,7 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def parse_reasoning_effort(effort):
@@ -3368,10 +3368,12 @@ def parse_reasoning_effort(effort):
     ``{"enabled": True, "effort": <level>}`` for any of
     ``VALID_REASONING_EFFORTS``.
     """
-    if not effort or not str(effort).strip():
+    if effort is False:
+        return {"enabled": False}
+    if effort is None or not str(effort).strip():
         return None
     eff = str(effort).strip().lower()
-    if eff == "none":
+    if eff in {"none", "false", "disabled", "off", "no"}:
         return {"enabled": False}
     if eff in VALID_REASONING_EFFORTS:
         return {"enabled": True, "effort": eff}
@@ -3701,12 +3703,16 @@ def _filter_reasoning_efforts_for_provider(
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
     # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
-    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
+    # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max —
+    # but Agent's provider-specific ``ultra`` extension is not accepted by any
+    # of these OpenAI-family APIs.
     if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
-            return [eff for eff in normalized if eff != "max"]
+        if bare.startswith("gpt-5"):
+            if _is_gpt_5_6_reasoning_model(bare):
+                return [eff for eff in normalized if eff != "ultra"]
+            return [eff for eff in normalized if eff not in {"max", "ultra"}]
     # Providers whose native ladder tops out below 'max' must NOT advertise it,
     # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
@@ -3728,9 +3734,13 @@ def _filter_reasoning_efforts_for_provider(
     # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
     zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
     if zai_supports is True:
-        return normalized
+        # Z.AI documents max/xhigh/high/medium/low/minimal; ``ultra`` is an
+        # Agent-level extension, not part of this provider's native ladder.
+        return [eff for eff in normalized if eff != "ultra"]
     if zai_supports is False:
         return []
+    if provider == "zai":
+        return [eff for eff in normalized if eff != "ultra"]
     return normalized
 
 
@@ -4327,11 +4337,85 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def resolve_effective_reasoning_effort(
+    config_data: dict,
+    model_id: str | None,
+    *,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+    session_effort: str | None = None,
+) -> str:
+    """Resolve session > per-model > global effort, then clamp to capability."""
+    raw_effort = str(session_effort or "").strip().lower()
+    if not raw_effort:
+        resolved = None
+        try:
+            from hermes_constants import resolve_reasoning_config
+
+            resolved = resolve_reasoning_config(config_data, model_id or "")
+        except (ImportError, ModuleNotFoundError):
+            # hermes-webui's CI and standalone installs do not necessarily ship
+            # hermes-agent on sys.path. Preserve the same resolution contract
+            # locally instead of silently disabling reasoning in that case.
+            agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else {}
+            agent_cfg = agent_cfg if isinstance(agent_cfg, dict) else {}
+            overrides = agent_cfg.get("reasoning_overrides")
+            overrides = overrides if isinstance(overrides, dict) else {}
+            model_raw = str(model_id or "").strip()
+            if model_raw.startswith("@") and ":" in model_raw:
+                model_raw = model_raw.split(":", 1)[1]
+            candidates = []
+            seen = set()
+
+            def add(value):
+                value = str(value or "")
+                if value and value not in seen:
+                    seen.add(value)
+                    candidates.append(value)
+
+            def add_variants(value):
+                add(value)
+                add(value.replace(".", "-"))
+                add(value.replace("-", "."))
+                add(re.sub(r"(\d)-(\d)", r"\1.\2", value))
+                add(re.sub(r"(\d)\.(\d)", r"\1-\2", value))
+
+            add_variants(model_raw)
+            parts = model_raw.split("/")
+            if len(parts) >= 2:
+                add_variants(parts[-1])
+            if len(parts) >= 3:
+                add_variants("/".join(parts[1:]))
+            override = None
+            for key in candidates:
+                if key not in overrides:
+                    continue
+                parsed = parse_reasoning_effort(overrides[key])
+                if parsed is not None:
+                    override = overrides[key]
+                    break
+            if override is None:
+                override = agent_cfg.get("reasoning_effort", "")
+            parsed = parse_reasoning_effort(override)
+            resolved = parsed
+        except Exception:
+            resolved = None
+        if isinstance(resolved, dict):
+            raw_effort = "none" if resolved.get("enabled") is False else str(resolved.get("effort") or "")
+    return coerce_reasoning_effort_for_model(
+        raw_effort,
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    session_effort: str | None = None,
 ) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
@@ -4358,6 +4442,14 @@ def get_reasoning_status(
             if not resolve_base_url and model_cfg.get("base_url"):
                 resolve_base_url = str(model_cfg["base_url"]).strip()
 
+    effort_raw = resolve_effective_reasoning_effort(
+        config_data,
+        resolve_model,
+        provider_id=resolve_provider,
+        base_url=resolve_base_url,
+        session_effort=session_effort,
+    )
+
     supported_efforts = resolve_model_reasoning_efforts(
         resolve_model,
         provider_id=resolve_provider,
@@ -4379,12 +4471,7 @@ def get_reasoning_status(
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         # Report the COERCED effort so boot/status/chip read paths agree with
         # what streaming actually sends. (Codex review of the drop-max alignment.)
-        "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
-            resolve_model,
-            provider_id=resolve_provider,
-            base_url=resolve_base_url,
-        ),
+        "reasoning_effort": effort_raw,
         "supported_efforts": supported_efforts,
         "supports_reasoning_effort": bool(supported_efforts),
         # Whether the composer should render ANY reasoning control. True for any
@@ -9275,6 +9362,10 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         "approval_events": False,
         "run_approval_response": False,
         "approval_identity_v1": False,
+        # Advertised reasoning-effort ladder (features.reasoning_efforts).
+        # None = the gateway predates the advertisement; callers must assume
+        # the legacy six-level model_options contract (no 'max'/'ultra').
+        "reasoning_efforts": None,
         "capabilities_reachable": False,
         "probe_error": None,
         "fetched_at": 0.0,
@@ -9293,6 +9384,13 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         caps["approval_events"] = bool(features.get("approval_events"))
         caps["run_approval_response"] = bool(features.get("run_approval_response"))
         caps["approval_identity_v1"] = bool(features.get("approval_identity_v1"))
+        raw_efforts = features.get("reasoning_efforts")
+        if isinstance(raw_efforts, (list, tuple)):
+            caps["reasoning_efforts"] = [
+                str(level).strip().lower()
+                for level in raw_efforts
+                if isinstance(level, str) and str(level).strip()
+            ]
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"

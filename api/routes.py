@@ -13393,12 +13393,20 @@ def handle_get(handler, parsed) -> bool:
         model_id = (query.get("model", [""])[0] or "").strip() or None
         provider_id = (query.get("provider", [""])[0] or "").strip() or None
         base_url = (query.get("base_url", [""])[0] or "").strip() or None
+        session_id = (query.get("session_id", [""])[0] or "").strip()
+        session_effort = None
+        if session_id and _session_id_visible_to_request_profile(handler, session_id, emit_error=False):
+            try:
+                session_effort = getattr(get_session(session_id, metadata_only=True), "reasoning_effort", None)
+            except (KeyError, PermissionError):
+                session_effort = None
         return j(
             handler,
             get_reasoning_status(
                 model_id=model_id,
                 provider_id=provider_id,
                 base_url=base_url,
+                session_effort=session_effort,
             ),
         )
 
@@ -15400,6 +15408,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
+                reasoning_effort=getattr(session, "reasoning_effort", None),
                 messages=copy.deepcopy(session.messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
@@ -15827,6 +15836,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
+        raw_effort = None
+        if "reasoning_effort" in body:
+            from api.config import VALID_REASONING_EFFORTS
+
+            raw_effort = str(body.get("reasoning_effort") or "").strip().lower()
+            if raw_effort and raw_effort != "none" and raw_effort not in VALID_REASONING_EFFORTS:
+                return bad(handler, f"Unknown reasoning effort '{raw_effort}'", 400)
         old_ws = getattr(s, "workspace", "")
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
@@ -15855,6 +15871,12 @@ def handle_post(handler, parsed) -> bool:
                     )
                     s.threshold_tokens = 0
                     s.last_prompt_tokens = 0
+                    from api.config import _evict_session_agent
+
+                    _evict_session_agent(body["session_id"])
+            if "reasoning_effort" in body:
+                if raw_effort != str(getattr(s, "reasoning_effort", None) or ""):
+                    s.reasoning_effort = raw_effort or None
                     from api.config import _evict_session_agent
 
                     _evict_session_agent(body["session_id"])
@@ -16273,6 +16295,7 @@ def handle_post(handler, parsed) -> bool:
             workspace=source.workspace,
             model=source.model,
             model_provider=getattr(source, "model_provider", None),
+            reasoning_effort=getattr(source, "reasoning_effort", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
             messages=forked_messages,
@@ -23350,6 +23373,14 @@ def _start_run(
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
 
         try:
+            from api.config import resolve_effective_reasoning_effort
+
+            runner_reasoning_effort = resolve_effective_reasoning_effort(
+                get_config(),
+                model,
+                provider_id=model_provider,
+                session_effort=getattr(s, "reasoning_effort", None),
+            ) or None
             adapter = build_runtime_adapter(
                 legacy_adapter_factory=_legacy_adapter_factory,
                 runner_client_factory=_runtime_runner_client_factory,
@@ -23365,6 +23396,7 @@ def _start_run(
                     profile=getattr(s, "profile", None),
                     provider=model_provider,
                     model=model,
+                    reasoning_effort=runner_reasoning_effort,
                     source=source,
                     metadata={"route": route},
                 )
@@ -23770,6 +23802,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 workspace=getattr(source, "workspace", get_last_workspace()),
                 model=getattr(source, "model", None),
                 model_provider=getattr(source, "model_provider", None),
+                reasoning_effort=getattr(source, "reasoning_effort", None),
                 messages=[],
                 tool_calls=[],
                 pinned=False,

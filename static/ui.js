@@ -5174,6 +5174,8 @@ function _reasoningEffortContext(){
 
 function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
+  const session=S&&S.session;
+  if(session&&session.session_id) params.set('session_id',session.session_id);
   const qs=params.toString();
   return qs?('?'+qs):'';
 }
@@ -5270,24 +5272,36 @@ let _lastReasoningFetchKey=null;
 // profile switch that resets the cache and refetches the same default model but
 // a different agent.reasoning_effort) — #4650 review.
 let _reasoningFetchSeq=0;
+// Per-session generation token for effort MUTATIONS. Two rapid selections for
+// the SAME session both pass the session-ID fence; without ordering, the older
+// request settling last would overwrite the newer chip/session value and show a
+// misleading confirmation toast (Greptile P1 on #6629). Each click bumps its
+// session's generation and the callbacks only apply while still the newest.
+let _reasoningMutationSeqBySession={};
 
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
   const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  // Bind the response to the session visible at dispatch time. A newly loaded
+  // session may use the same model/provider while this request is still live.
+  const requestedSessionId=(S&&S.session&&S.session.session_id)||null;
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
   api('/api/reasoning'+key).then(function(st){
-    // Ignore a stale/superseded response: only the most recent dispatch may
-    // apply, so an older in-flight GET can't poison the current chip (#4650).
-    if(seq!==_reasoningFetchSeq) return;
+    // Ignore a stale/superseded response: only the most recent dispatch for the
+    // still-visible session may apply, so an older in-flight GET cannot poison
+    // the current chip (#4650, #6629).
+    const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+    if(seq!==_reasoningFetchSeq||currentSessionId!==requestedSessionId) return;
     _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
   }).catch(function(){
     // Same staleness guard on failure: a stale error must neither hide the chip
-    // nor clear a newer fetch's key. Only the latest dispatch clears the key so
-    // routine syncs retry after a genuine transient failure.
-    if(seq!==_reasoningFetchSeq) return;
+    // nor clear a newer fetch's key. Only the latest dispatch for the same
+    // visible session clears the key after a genuine transient failure.
+    const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+    if(seq!==_reasoningFetchSeq||currentSessionId!==requestedSessionId) return;
     _lastReasoningFetchKey=null;
     _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
   });
@@ -5400,16 +5414,38 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      const session=S&&S.session;
+      // Fence every mutation callback to the session that owned the click. The
+      // request may settle after navigation, when applying its value or toast
+      // would misrepresent the newly visible conversation.
+      const requestedSessionId=(session&&session.session_id)||null;
+      // Same-session ordering fence (Greptile P1): two rapid selections for one
+      // session may settle out of order; only the NEWEST dispatch for this
+      // session may apply its result or toast. '~none' scopes the profile-wide
+      // (session-less) mutations under the same rule.
+      const seqKey=requestedSessionId||'~none';
+      const seq=(_reasoningMutationSeqBySession[seqKey]||0)+1;
+      _reasoningMutationSeqBySession[seqKey]=seq;
+      const isCurrentMutation=function(){
+        const currentSessionId=(S&&S.session&&S.session.session_id)||null;
+        return currentSessionId===requestedSessionId&&_reasoningMutationSeqBySession[seqKey]===seq;
+      };
+      const request=requestedSessionId
+        ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:requestedSessionId,reasoning_effort:effort})})
+        :api('/api/reasoning',{method:'POST',body:JSON.stringify(Object.assign({effort:effort},_reasoningEffortContext()))});
+      request
         .then(function(st){
-          // For Default (effort=''), the returned reasoning_effort is '' (clear)
-          // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
+          if(!isCurrentMutation()) return;
+          if(session) session.reasoning_effort=effort||null;
+          const display=effort||'Auto';
+          if(!effort) fetchReasoningChip();
+          else _applyReasoningChip(effort, st||{});
           showToast('🧠 Reasoning effort set to '+display);
         })
-        .catch(function(){showToast('🧠 Failed to set effort');});
+        .catch(function(){
+          if(!isCurrentMutation()) return;
+          showToast('🧠 Failed to set effort');
+        });
       closeReasoningDropdown();
     }
   }
