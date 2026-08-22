@@ -1,5 +1,11 @@
 """Regression coverage for stale composer_draft restoration after send."""
 from pathlib import Path
+import json
+import shutil
+import subprocess
+import textwrap
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
@@ -11,6 +17,280 @@ def _block(source: str, start_marker: str, end_marker: str) -> str:
     start = source.index(start_marker)
     end = source.index(end_marker, start)
     return source[start:end]
+
+
+def _draft_save_helper_block() -> str:
+    start = SESSIONS_JS.find("let _draftSaveTimer = null;")
+    end = SESSIONS_JS.find("function _restoreComposerDraft(draft, targetSid, opts={}) {")
+    assert start != -1, "draft helper block start marker not found"
+    assert end != -1, "draft helper block end marker not found"
+    return SESSIONS_JS[start:end]
+
+
+def _run_draft_save_helper(caller: str, api_responses: list[dict]) -> dict:
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+
+    harness = textwrap.dedent(
+        """
+        const responses = %(responses)s;
+        const filesInput = %(files)s;
+        const initialSid = 'sid_old';
+        const expectedPayload = {
+          text: 'hello from harness',
+          files: _composerDraftFilesForPersist(filesInput),
+        };
+        let callIndex = 0;
+        const state = {
+          calls: [],
+          rememberCalls: [],
+          warns: [],
+          expectedPayload,
+        };
+
+        const originalWarn = console.warn;
+        console.warn = (...args) => {
+          state.warns.push(args.map((value) => String(value)).join(' '));
+          if (typeof originalWarn === 'function') {
+            originalWarn.apply(console, args);
+          }
+        };
+
+        async function api(path, opts) {
+          const body = (typeof opts.body === 'string') ? JSON.parse(opts.body) : {};
+          state.calls.push(body);
+          const next = responses[callIndex++];
+          if (!next) {
+            throw new Error('unexpected /api/session/draft call');
+          }
+          if (next.throw) {
+            const err = new Error(next.error || 'draft draft save failed');
+            if (next.status) {
+              err.status = Number(next.status);
+            }
+            if (typeof next.body === 'string') {
+              err.body = next.body;
+            } else if (next.body) {
+              err.body = JSON.stringify(next.body);
+            }
+            throw err;
+          }
+          if (Number(next.status) === 409) {
+            const err = new Error(next.error || 'Session moved');
+            err.status = 409;
+            err.body = typeof next.body === 'string' ? next.body : JSON.stringify(next.body || {});
+            throw err;
+          }
+          return Object.assign({ok: true}, next.response || {});
+        }
+
+        setTimeout = (fn, _ms) => {
+          if (typeof fn === 'function') fn();
+          return 0;
+        };
+        clearTimeout = () => {};
+
+        %(draft_helpers)s
+
+        const S = { session: { session_id: initialSid, profile: 'default' } };
+        const _rememberComposerDraftPayloadStateOriginal = _rememberComposerDraftPayloadState;
+        _rememberComposerDraftPayloadState = (sid, text, files) => {
+          state.rememberCalls.push({
+            sid,
+            text: String(text || ''),
+            files: Array.isArray(files) ? files.filter(Boolean) : [],
+          });
+          _rememberComposerDraftPayloadStateOriginal(sid, text, files);
+        };
+
+        (async () => {
+          if ('%(caller)s' === 'immediate') {
+            await _saveComposerDraftNow(initialSid, expectedPayload.text, filesInput);
+          } else {
+            _saveComposerDraft(initialSid, expectedPayload.text, filesInput);
+            await new Promise(resolve => setImmediate(resolve));
+          }
+          console.log(JSON.stringify({
+            calls: state.calls,
+            rememberCalls: state.rememberCalls,
+            knownPayloadSids: Array.from(_composerDraftKnownPayloadSessions).sort(),
+            localDraft: S.session.composer_draft || null,
+            expectedPayload,
+            warns: state.warns,
+            ok: true,
+          }));
+        })().catch(error => {
+          const serialized = {
+            ok: false,
+            error: String(error && error.message ? error.message : error || ''),
+            status: error && Number(error.status),
+            calls: state.calls,
+            rememberCalls: state.rememberCalls,
+            knownPayloadSids: Array.from(_composerDraftKnownPayloadSessions).sort(),
+            localDraft: S.session.composer_draft || null,
+            expectedPayload,
+            warns: state.warns,
+          };
+          console.log(JSON.stringify(serialized));
+        });
+        """
+    ) % {
+        "responses": json.dumps(api_responses),
+        "files": json.dumps(
+            [
+                {
+                    "name": "proof.txt",
+                    "size": 42,
+                    "type": "text/plain",
+                    "path": "/tmp/proof.txt",
+                    "lastModified": 123,
+                    "extra": "ignored",
+                },
+            ]
+        ),
+        "draft_helpers": _draft_save_helper_block(),
+        "caller": caller,
+    }
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+@pytest.mark.parametrize("caller", ["debounced", "immediate"])
+@pytest.mark.parametrize("scenario", ["changed-200", "structured-409"])
+def test_draft_save_paths_use_authoritative_session_id_after_rotation(caller, scenario):
+    if scenario == "changed-200":
+        responses = [{"status": 200, "response": {"ok": True, "session_id": "sid_authoritative"}}]
+    else:
+        responses = [
+            {
+                "status": 409,
+                "error": "Session moved",
+                "body": {
+                    "error": "Session moved",
+                    "code": "session_moved",
+                    "session_id": "sid_authoritative",
+                },
+            },
+            {"status": 200, "response": {"ok": True, "session_id": "sid_authoritative"}},
+        ]
+
+    out = _run_draft_save_helper(caller, responses)
+    assert out["ok"] is True
+
+    expected_sid = "sid_authoritative"
+    old_sid = "sid_old"
+    if scenario == "changed-200":
+        assert len(out["calls"]) == 1
+        first = out["calls"][0]
+        assert first["session_id"] == old_sid
+    else:
+        assert len(out["calls"]) == 2
+        assert out["calls"][0]["session_id"] == old_sid
+        assert out["calls"][1]["session_id"] == expected_sid
+
+    first_call = out["calls"][0]
+    last_call = out["calls"][-1]
+    assert first_call["text"] == out["expectedPayload"]["text"]
+    assert last_call["text"] == out["expectedPayload"]["text"]
+    assert first_call["files"] == out["expectedPayload"]["files"]
+    assert last_call["files"] == out["expectedPayload"]["files"]
+    assert out["rememberCalls"][0]["sid"] == expected_sid
+    assert len(out["rememberCalls"]) == 1
+    assert out["knownPayloadSids"] == [expected_sid]
+    if scenario == "structured-409":
+        assert last_call["session_id"] == expected_sid
+    else:
+        assert first_call["session_id"] == old_sid
+
+
+@pytest.mark.parametrize("caller", ["debounced", "immediate"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "second-redirect",
+        "replay-failure",
+        "invalid-sid",
+    ],
+)
+def test_draft_save_paths_reject_replayed_authority_or_bad_response(caller, scenario):
+    if scenario == "second-redirect":
+        responses = [
+            {
+                "status": 409,
+                "error": "Session moved",
+                "body": {
+                    "error": "Session moved",
+                    "code": "session_moved",
+                    "session_id": "sid_authoritative",
+                },
+            },
+            {
+                "status": 409,
+                "error": "Session moved",
+                "body": {
+                    "error": "Session moved",
+                    "code": "session_moved",
+                    "session_id": "sid_authoritative",
+                },
+            },
+        ]
+    elif scenario == "replay-failure":
+        responses = [
+            {
+                "status": 409,
+                "error": "Session moved",
+                "body": {
+                    "error": "Session moved",
+                    "code": "session_moved",
+                    "session_id": "sid_authoritative",
+                },
+            },
+            {
+                "throw": True,
+                "status": 503,
+                "error": "server down",
+            },
+        ]
+    else:
+        responses = [
+            {
+                "status": 200,
+                "response": {
+                    "ok": True,
+                    "session_id": "sid_!@#",
+                },
+            },
+        ]
+
+    out = _run_draft_save_helper(caller, responses)
+    sid_old = "sid_old"
+    assert out["calls"]
+    assert out["rememberCalls"] == []
+    for call in out["calls"]:
+        assert call["text"] == out["expectedPayload"]["text"]
+        assert call["files"] == out["expectedPayload"]["files"]
+    if caller == "immediate":
+        assert out["knownPayloadSids"] == []
+    else:
+        assert out["knownPayloadSids"] == [sid_old]
+    if scenario == "second-redirect":
+        assert len(out["calls"]) == 2
+    elif scenario == "replay-failure":
+        assert len(out["calls"]) == 2
+    else:
+        assert len(out["calls"]) == 1
+
+    if caller == "immediate":
+        assert out["ok"] is False
+        assert out["error"]
+        assert out["status"] in (None, 409, 500, 503)
+        assert not out["warns"]
+    else:
+        assert out["ok"] is True
+        assert out["warns"]
+        assert out["localDraft"] == out["expectedPayload"]
 
 
 def test_clear_composer_draft_suppresses_same_session_stale_restore():

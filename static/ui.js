@@ -8173,7 +8173,16 @@ function lockComposerForClarify(placeholderText){
   // card is active (and survives page refresh / syncs across clients).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraftNow === 'function') {
-    _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    const saveText = String(input.value || '');
+    const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
+    try {
+      const saveResult = _saveComposerDraftNow(sid, saveText, saveFiles);
+      if (saveResult && typeof saveResult.catch === 'function') {
+        saveResult.catch((error)=>_handleComposerDraftPostFailure(error,sid,saveText,saveFiles));
+      }
+    } catch (error) {
+      _handleComposerDraftPostFailure(error,sid,saveText,saveFiles);
+    }
   }
   if(!_composerLockState){
     _composerLockState={

@@ -798,6 +798,7 @@ class TestIssue765FollowupHardening:
         streaming.py performs inside the compression rotation block.
         """
         from api.config import (
+            _alias_session_agent_lock,
             _get_session_agent_lock,
             SESSION_AGENT_LOCKS,
             SESSION_AGENT_LOCKS_LOCK,
@@ -808,12 +809,9 @@ class TestIssue765FollowupHardening:
         # Acquire the lock under the old ID
         old_lock = _get_session_agent_lock(old_sid)
 
-        # Simulate the migration that streaming.py does during compression:
-        # alias new_sid → held _agent_lock reference, then pop old_sid.
+        # Simulate the migration that streaming.py does during compression.
         _agent_lock = old_lock
-        with SESSION_AGENT_LOCKS_LOCK:
-            SESSION_AGENT_LOCKS[new_sid] = _agent_lock
-            SESSION_AGENT_LOCKS.pop(old_sid, None)
+        _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
 
         # Now looking up the new ID must return the exact same Lock object
         new_lock = _get_session_agent_lock(new_sid)
@@ -823,15 +821,12 @@ class TestIssue765FollowupHardening:
             f"got {new_lock!r} vs {old_lock!r}"
         )
 
-        # The old ID entry must no longer exist (it was popped)
-        with SESSION_AGENT_LOCKS_LOCK:
-            assert old_sid not in SESSION_AGENT_LOCKS, (
-                f"Old session ID {old_sid!r} must be removed from "
-                f"SESSION_AGENT_LOCKS after rotation"
-            )
+        # Late old-ID callers must stay serialized with the continuation.
+        assert _get_session_agent_lock(old_sid) is old_lock
 
         # Cleanup
         with SESSION_AGENT_LOCKS_LOCK:
+            SESSION_AGENT_LOCKS.pop(old_sid, None)
             SESSION_AGENT_LOCKS.pop(new_sid, None)
 
     def test_lock_rotation_migration_survives_old_id_already_pruned(self):

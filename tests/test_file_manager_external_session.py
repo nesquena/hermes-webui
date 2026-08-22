@@ -629,7 +629,9 @@ def test_compression_lock_alias_keeps_old_and_new_ids_on_one_live_lock():
     streaming_source = (Path(__file__).parents[1] / "api" / "streaming.py").read_text(
         encoding="utf-8"
     )
-    assert "_alias_session_agent_lock(old_sid, new_sid, _agent_lock)" in streaming_source
+    assert "_migrate_compression_session_ownership(s, old_sid, new_sid, _agent_lock)" in streaming_source
+    assert "SESSION_AGENT_LOCKS[old_sid] = agent_lock" in streaming_source
+    assert "SESSION_AGENT_LOCKS[new_sid] = agent_lock" in streaming_source
 
 
 def test_get_session_for_file_ops_does_not_fallback_existing_untrusted_workspace(

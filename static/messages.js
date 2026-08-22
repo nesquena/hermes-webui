@@ -1289,7 +1289,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // actually typed, not the transformed send payload.
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
   const restore=String(draftText||'');
-  const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  const files=Array.isArray(filesSnapshot)?[...filesSnapshot]:[];
   if(!restore&&!files.length) return false;
 
   // Only mutate the VISIBLE composer / staged tray when the failed send belongs
@@ -1325,22 +1325,36 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // session-switch save path already persisted this session's composer).
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
-      try{
-        const stillVisible=(S.session&&S.session.session_id)===sid;
-        if(stillVisible){
-          const inp=$('msg');
-          const liveText=inp?String(inp.value||''):restore;
-          _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
-        } else if(!restoredVisible){
-          // Background failure (sid was never the visible session): no live
-          // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
-        }
-        // else: restored the visible composer, then the user switched away — the
+      let persistedText=restore;
+      let persistedFiles=files;
+      const stillVisible=(S.session&&S.session.session_id)===sid;
+      if(stillVisible){
+        const inp=$('msg');
+        const liveText=inp?String(inp.value||''):restore;
+        persistedText=liveText;
+        persistedFiles=S.pendingFiles?[...S.pendingFiles]:files;
+      } else if(!restoredVisible){
+        // Background failure (sid was never the visible session): no live
+        // composer to read, so persist the captured snapshot — it's the only copy.
+        persistedText=restore;
+        persistedFiles=files;
+      } else {
+        // Restored the visible composer, then user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
-      }catch(_){ }
+        return;
+      }
+      try{
+        const result=_saveComposerDraftNow(sid,persistedText,persistedFiles);
+        if(result&&typeof result.catch==='function'){
+          return result.catch((error)=>_handleComposerDraftPostFailure(error,sid,persistedText,persistedFiles));
+        }
+        return result;
+      }catch(error){
+        _handleComposerDraftPostFailure(error,sid,persistedText,persistedFiles);
+        return;
+      }
     };
-    if(clearPromise&&typeof clearPromise.then==='function') clearPromise.then(_persist,_persist);
+    if(clearPromise&&typeof clearPromise.then==='function') clearPromise.then(_persist,_persist).catch(()=>{});
     else _persist();
   }
 
