@@ -43,6 +43,8 @@
   :root[data-font-size="xlarge"] .session-item { font-size: 17px; }
   :root[data-font-size="small"] .session-meta { font-size: 10px; }
   :root[data-font-size="large"] .session-meta { font-size: 13px; }
+
+  .session-touch-sentinel { padding: 12px 8px; text-align: center; color: var(--muted); font-size: 12px; }
   :root[data-font-size="xlarge"] .session-meta { font-size: 15px; }
   :root[data-font-size="small"] .session-title-input { font-size: 11px; }
   :root[data-font-size="large"] .session-title-input { font-size: 15px; }

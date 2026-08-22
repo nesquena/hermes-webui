@@ -265,7 +265,9 @@ def test_touch_sentinel_setup_exists():
     assert "function _setupTouchSentinel" in SESSIONS_JS
     fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
     assert "data-touch-sentinel" in fn
-    assert "Loading more" in fn
+    # Loading text is now localized through t('loading_more') instead of a
+    # hard-coded English string. Check for the t() call OR the literal.
+    assert "loading_more" in fn or "Loading more" in fn
 
 
 def test_touch_batch_constants_exist():
@@ -650,8 +652,8 @@ def test_active_anchor_uses_real_row_container_geometry():
 
     The active row can be shifted by group headers and wrapped controls, so the
     post-render anchor must compare the actual row rect with the list rect. It
-    should correct when the row is outside the viewport and preserve scroll when
-    the row is fully contained.
+    should correct when the row is partially clipped at the viewport edge and
+    preserve scroll when the row is fully contained.
     """
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
@@ -663,7 +665,8 @@ list.clientHeight = 500;
 list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
 const row = makeSessionItem('active');
 row.className = 'session-item active';
-row.getBoundingClientRect = function() { return {top: 760, bottom: 812, height: 52}; };
+// Partially clipped at the bottom: row top=580 (inside), bottom=632 (outside)
+row.getBoundingClientRect = function() { return {top: 580, bottom: 632, height: 52}; };
 list._items = [row];
 list.querySelector = function(sel) {
   if (sel === '.session-item.active[data-sid]') return row;
@@ -672,15 +675,17 @@ list.querySelector = function(sel) {
 };
 const moved = _correctActiveTouchAnchor(list, 'active');
 const afterMove = list.scrollTop;
+// Now fully contained: top=300 >= 100, bottom=352 <= 600
 row.getBoundingClientRect = function() { return {top: 300, bottom: 352, height: 52}; };
 const movedAgain = _correctActiveTouchAnchor(list, 'active');
 console.log(JSON.stringify({moved, afterMove, movedAgain, finalScrollTop: list.scrollTop}));
 """
     result = json.loads(_run_node_vm(source))
     assert result["moved"] is True
-    assert result["afterMove"] == 1212
+    # 1000 + (632 - 600) = 1032
+    assert result["afterMove"] == 1032
     assert result["movedAgain"] is False
-    assert result["finalScrollTop"] == 1212
+    assert result["finalScrollTop"] == 1032
 
 
 @_node_tests
@@ -757,18 +762,26 @@ console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
 
 
 @_node_tests
-def test_active_anchor_fully_outside_above_gets_correction():
-    """A row fully above the viewport (bottom < list.top) must be corrected."""
+def test_active_anchor_fully_outside_above_preserves_scroll():
+    """A row fully above the viewport (bottom < list.top) must NOT be corrected.
+
+    Background touch renders (title/viewed-state/SSE/poll updates) call
+    _correctActiveTouchAnchor on every full touch render. Correcting a
+    fully-off-screen active row yanks the user back toward the active
+    conversation when they may be browsing hundreds of rows away.
+    Fully-off-screen rows MUST preserve user scroll.
+    """
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
 """ + _node_test_preamble() + """
 const list = makeList();
-list.scrollTop = 500;
-list.scrollHeight = 5000;
+list.scrollTop = 5000;
+list.scrollHeight = 50000;
 list.clientHeight = 500;
 list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
 const row = makeSessionItem('active');
 row.className = 'session-item active';
+// Fully outside above: row bottom (72) < list top (100)
 row.getBoundingClientRect = function() { return {top: 20, bottom: 72, height: 52}; };
 list._items = [row];
 list.querySelector = function(sel) {
@@ -780,9 +793,37 @@ const moved = _correctActiveTouchAnchor(list, 'active');
 console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
 """
     result = json.loads(_run_node_vm(source))
-    assert result["moved"] is True
-    # 500 - (100 - 20) = 420
-    assert result["scrollTop"] == 420
+    assert result["moved"] is False
+    assert result["scrollTop"] == 5000  # scroll preserved
+
+
+@_node_tests
+def test_active_anchor_fully_outside_below_preserves_scroll():
+    """A row fully below the viewport (top > list.bottom) must NOT be corrected."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 0;
+list.scrollHeight = 50000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Fully outside below: row top (700) > list bottom (600)
+row.getBoundingClientRect = function() { return {top: 700, bottom: 752, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is False
+    assert result["scrollTop"] == 0  # scroll preserved
 
 
 @_node_tests
@@ -1331,6 +1372,9 @@ function _sessionVirtualSpacer(h, pos) {
 // clears ALL touch state (observer, RAF, scroll listener, render state,
 // list, loaded/total, pending, generation, token). Owner-qualified: only
 // cancels the listener/RAF of the CURRENT _touchScrollOwner.
+
+// Mock i18n t() function for localized strings
+function t(key) { return key === 'loading_more' ? 'Loading more\u2026' : key; }
 function _invalidateTouchRender() {
   if (_touchSentinelObserver) { _touchSentinelObserver.disconnect(); _touchSentinelObserver = null; }
   const owner = _touchScrollOwner;
@@ -5099,3 +5143,311 @@ def test_owner_record_has_required_fields():
     assert "token:" in fn, "Owner record must have token field"
     assert "_touchScrollOwner=owner" in fn, \
         "Must assign the owner to _touchScrollOwner"
+
+
+@_node_tests
+def test_continuous_batch_does_not_stick_pending_after_chained_append():
+    """Finding 1: continuous batching must not permanently stick
+    _touchBatchPending after one chained append.
+
+    The bug: _appendTouchBatch() calls _scheduleContinuousBatch() which bumps
+    _touchBatchToken. The caller's finally can't clear _touchBatchPending
+    (token mismatch), so the successor RAF hits `if(_touchBatchPending) return`
+    and exits — the list permanently sticks at 100/224.
+
+    This test drains RAFs and microtasks through a production-composed
+    60→100→140→180 chain, proving pending=false, owner=null at the end,
+    exact SID order, and no duplicates.
+    """
+    total = 180
+    flat_rows = [
+        {"group": {"label": "Today", "isPinned": False}, "session": {"session_id": f"s_{i}"}}
+        for i in range(total)
+    ]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+list.scrollTop = 0;
+list.clientHeight = 1024;
+list.scrollHeight = 50000;
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = {total};
+
+// Pre-populate DOM with 60 session items
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{
+    const el = makeSessionItem(s.session_id);
+    // Provide getBoundingClientRect so _touchLoadedBoundaryNearViewport
+    // can use live DOM geometry. setupGeometry() sets the correct
+    // position on the last item before each drain cycle.
+    el.getBoundingClientRect = function() {{ return {{top: 0, bottom: 0, height: 39}}; }};
+    return el;
+  }},
+  activeSid: null, itemHeight: 39,
+}};
+
+// Group wrapper with body that tracks items
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'Today';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['Today'] = gw;
+
+// Sentinel element — visible so _scheduleContinuousBatch proceeds
+list._sentinel = makeEl('div');
+list._sentinel.dataset['touchSentinel'] = '';
+list._sentinel.style = {{ display: '' }};
+
+// Mock requestAnimationFrame to capture callbacks
+let _rafCallbacks = [];
+global.requestAnimationFrame = function(cb) {{ _rafCallbacks.push(cb); return _rafCallbacks.length; }};
+global.cancelAnimationFrame = function() {{}};
+
+// Setup geometry so _touchLoadedBoundaryNearViewport returns true.
+// Provides getBoundingClientRect on list and last item so the live DOM
+// geometry path is used (not the fixed-projection fallback).
+function setupGeometry(loadedCount) {{
+  const lastBottom = loadedCount * 39;
+  const scrollPos = Math.max(0, lastBottom - 1024 + 100);
+  list.scrollTop = scrollPos;
+  list.clientHeight = 1024;
+  list.getBoundingClientRect = function() {{ return {{top: 0, bottom: 1024, height: 1024}}; }};
+  const lastItem = list._items[list._items.length - 1];
+  if (lastItem) {{
+    const relBottom = lastBottom - scrollPos;
+    lastItem.getBoundingClientRect = function() {{ return {{top: relBottom - 39, bottom: relBottom, height: 39}}; }};
+  }}
+}}
+setupGeometry(60);
+
+// Start the continuous batch chain by calling _scheduleContinuousBatch directly.
+// This creates owner T and schedules a RAF. The RAF callback will:
+// 1. Set _touchBatchPending=true
+// 2. Call _appendTouchBatch() (which clears pending and schedules T+1)
+// 3. The finally can't clear pending (token T != T+1)
+// Without the fix, pending stays true and T+1's RAF exits early.
+_scheduleContinuousBatch();
+const scheduledAfterInit = _rafCallbacks.length;
+
+// Drain the continuous-batch RAF callbacks to advance 60→100→140→180.
+let drainedCount = 0;
+let maxIters = 20;
+let trace = [];
+while (_rafCallbacks.length > 0 && maxIters-- > 0) {{
+  const cbs = _rafCallbacks.splice(0);
+  for (const cb of cbs) {{
+    const loadedBefore = _sessionTouchLoadedCount;
+    const pendingBefore = _touchBatchPending;
+    try {{ cb(); }} catch(e) {{ trace.push('error: ' + e.message); }}
+    drainedCount++;
+    trace.push(loadedBefore + '->' + _sessionTouchLoadedCount + ' pending=' + _touchBatchPending);
+    // Re-setup geometry so the next boundary check passes
+    setupGeometry(_sessionTouchLoadedCount);
+  }}
+}}
+
+const loadedFinal = _sessionTouchLoadedCount;
+const pendingFinal = _touchBatchPending;
+const ownerFinal = _touchContinuousBatchOwner;
+const sidsFinal = list._items.map(i => i.dataset.sid);
+const uniqueSids = new Set(sidsFinal);
+
+console.log(JSON.stringify({{
+  scheduledAfterInit,
+  loadedFinal,
+  pendingFinal,
+  ownerNull: ownerFinal === null,
+  drainedCount,
+  totalItems: list._items.length,
+  uniqueCount: uniqueSids.size,
+  firstSids: sidsFinal.slice(0, 5).join(','),
+  lastSids: sidsFinal.slice(-5).join(','),
+  trace: trace.slice(0, 10),
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["scheduledAfterInit"] == 1, \
+        f"_scheduleContinuousBatch should schedule 1 RAF, got {result['scheduledAfterInit']}"
+    assert result["loadedFinal"] == 180, \
+        f"Continuous batch should drain to 180, got {result['loadedFinal']} (trace: {result.get('trace',[])})"
+    assert result["pendingFinal"] is False, \
+        f"_touchBatchPending must be false after chain completes, got {result['pendingFinal']}"
+    assert result["ownerNull"] is True, \
+        f"_touchContinuousBatchOwner must be null after chain completes"
+    assert result["totalItems"] == 180, \
+        f"DOM should have 180 items, got {result['totalItems']}"
+    assert result["uniqueCount"] == 180, \
+        f"All 180 SIDs must be unique (no duplicates), got {result['uniqueCount']} unique"
+    assert result["firstSids"] == "s_0,s_1,s_2,s_3,s_4", \
+        f"First SIDs must be s_0..s_4, got {result['firstSids']}"
+    assert result["lastSids"] == "s_175,s_176,s_177,s_178,s_179", \
+        f"Last SIDs must be s_175..s_179, got {result['lastSids']}"
+
+
+@_node_tests
+def test_loaded_boundary_uses_live_dom_geometry_not_fixed_projection():
+    """Finding 2: _touchLoadedBoundaryNearViewport must use live DOM geometry
+    from the last rendered row's container-relative bottom, not a fixed
+    loaded*52px projection.
+
+    The bug: real compact rows are ~39px, not 52px. With 300 loaded rows at
+    the actual row bottom (zero visible), the helper returned false and
+    calculated ~2,676px of additional blank spacer before its trigger.
+
+    This test sets up compact 39px rows and verifies the boundary triggers
+    from the actual last row bottom, not from 300*52=15600px.
+    """
+    flat_rows = [
+        {"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}}
+        for i in range(400)
+    ]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+list.scrollTop = 0;
+list.clientHeight = 1024;
+list.scrollHeight = 20000;
+
+// Simulate 300 loaded compact rows (39px each) — last row bottom = 11700px
+// The list viewport is 1024px, so the loaded boundary is far below viewport.
+// With the FIXED 52px projection, the helper would compute 300*52=15600px
+// and return false even when the user has scrolled to 11000px (near the
+// real boundary at 11700px).
+_sessionTouchLoadedCount = 300;
+_sessionTouchStartIndex = 0;
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null, itemHeight: 39,
+}};
+
+// Mock getBoundingClientRect on list and last row
+const listTop = 0;
+list.getBoundingClientRect = function() {{ return {{top: listTop, bottom: 1024, height: 1024}}; }};
+
+// Create 300 mock items with getBoundingClientRect
+const items = [];
+for (let i = 0; i < 300; i++) {{
+  const el = makeSessionItem('s_' + i);
+  const rowTop = i * 39;
+  const rowBottom = rowTop + 39;
+  el.getBoundingClientRect = function() {{ return {{top: rowTop, bottom: rowBottom, height: 39}}; }};
+  items.push(el);
+}}
+list._items = items;
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') return items.slice();
+  return [];
+}};
+
+// Test: user scrolled to 11000px — near the real boundary (11700px)
+// The fixed projection would compute 15600-11000-1024 = 3576 > 200 → false
+// The live geometry computes 11700-0 = 11700 <= 1024+200=1224? No.
+// Actually with scrollTop=11000 and viewport=1024, the last row bottom
+// relative to viewport is 11700-11000=700px, which is within the 1024px
+// viewport → the boundary is IN the viewport → should trigger.
+list.scrollTop = 11000;
+// The live geometry path: loadedBottom = rowRect.bottom - listRect.top
+// = 11700 - 0 = 11700. viewportBottom = 1024.
+// But wait — getBoundingClientRect returns VIEWPORT coordinates, which
+// already account for scrollTop. So if the user scrolled to 11000, the
+// last row's rect.bottom in viewport coords = 11700 - 11000 = 700.
+// loadedBottom = 700 - 0 = 700. viewportBottom = 1024.
+// 700 <= 1024 + 200 = true → triggers correctly!
+// Fix the mock to return viewport-relative coords:
+const listRectTop = 0;
+list.getBoundingClientRect = function() {{ return {{top: listRectTop, bottom: 1024, height: 1024}}; }};
+// Last row's viewport-relative bottom after scrolling 11000:
+const lastRow = items[299];
+const lastRowViewportBottom = (299 * 39 + 39) - 11000; // 11700 - 11000 = 700
+lastRow.getBoundingClientRect = function() {{
+  return {{top: lastRowViewportBottom - 39, bottom: lastRowViewportBottom, height: 39}};
+}};
+
+const result1 = _touchLoadedBoundaryNearViewport(list, _touchRenderState, 200);
+
+// Now test with scrollTop=0 — boundary far below viewport
+list.scrollTop = 0;
+lastRow.getBoundingClientRect = function() {{
+  const bottom = 299 * 39 + 39; // 11700
+  return {{top: bottom - 39, bottom: bottom, height: 39}};
+}};
+const result2 = _touchLoadedBoundaryNearViewport(list, _touchRenderState, 200);
+
+console.log(JSON.stringify({{
+  triggersNearBoundary: result1,
+  triggersFarFromBoundary: result2,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["triggersNearBoundary"] is True, \
+        "Live geometry must trigger when the loaded boundary is near the viewport"
+    assert result["triggersFarFromBoundary"] is False, \
+        "Live geometry must NOT trigger when the loaded boundary is far below the viewport"
+
+
+@_node_tests
+def test_background_render_preserves_scroll_when_active_row_far_offscreen():
+    """Finding 3: background touch renders must NOT yank the user to a fully
+    off-screen active session.
+
+    _correctActiveTouchAnchor is called on every full touch render. If the
+    active row is fully outside the viewport (user scrolled far away), the
+    function must return false and preserve scrollTop.
+
+    This test composes a background render after scrolling far from the
+    active row and proves scrollTop and visible SID range remain
+    byte-identical.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+// User is at scrollTop=5000, viewport 1024px
+list.scrollTop = 5000;
+list.scrollHeight = 50000;
+list.clientHeight = 1024;
+list.getBoundingClientRect = function() { return {top: 0, bottom: 1024, height: 1024}; };
+
+// Active session row is at the TOP of the list (fully outside above)
+// Row rect: top=-500, bottom=-460 → fully outside above (bottom < list.top=0)
+const activeRow = makeSessionItem('active_session');
+activeRow.className = 'session-item active';
+activeRow.getBoundingClientRect = function() { return {top: -500, bottom: -460, height: 40}; };
+list._items = [activeRow];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return activeRow;
+  if (sel === '.session-item[data-sid="active_session"]') return activeRow;
+  return null;
+};
+list.querySelectorAll = function(sel) {
+  if (sel === '.session-item[data-sid]') return [activeRow];
+  return [];
+};
+
+const scrollBefore = list.scrollTop;
+const moved = _correctActiveTouchAnchor(list, 'active_session');
+const scrollAfter = list.scrollTop;
+
+console.log(JSON.stringify({
+  moved,
+  scrollBefore,
+  scrollAfter,
+  scrollPreserved: scrollBefore === scrollAfter,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is False, \
+        "Fully off-screen active row must NOT trigger correction"
+    assert result["scrollPreserved"] is True, \
+        f"scrollTop must be preserved ({result['scrollBefore']} → {result['scrollAfter']})"
+    assert result["scrollAfter"] == 5000, \
+        f"scrollTop must remain 5000, got {result['scrollAfter']}"

@@ -1095,6 +1095,7 @@ const LOCALES = {
     scheduled_jobs: 'Scheduled jobs',
     new_job: 'New job',
     loading: 'Loading...',
+    loading_more: 'Loading more\u2026',
     search_skills: 'Search skills...',
     new_skill: 'New skill',
     personal_memory: 'Personal memory',
