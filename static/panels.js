@@ -11209,6 +11209,12 @@ function _buildProviderQuotaCard(status){
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
     body=windowHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
+  }else if(status.status==='available'&&quota&&quota.balances){
+    // Multi-currency balance (Venice /billing/balance): USD + DIEM rows.
+    body=`
+      <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_usd_balance'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.balances.usd))}</strong></div>
+      <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_diem_balance'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.balances.diem))}</strong></div>
+    `;
   }else if(status.status==='available'&&quota){
     body=`
       <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_remaining'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
