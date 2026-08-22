@@ -99,6 +99,16 @@ const cases = {{
     {{ _usedModel: 'k3-256k', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
   customPrefixNoProvenanceTaggedSame: _localModelSwitchText(
     {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:local:llama3:8b' }}),
+  customHostPortNoProvenanceSame: _localModelSwitchText(
+    {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:localhost:11434:llama3:8b' }}),
+  customIpPortNoProvenanceSame: _localModelSwitchText(
+    {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:192.168.1.5:11434:llama3:8b' }}),
+  customDnsPortNoProvenanceSame: _localModelSwitchText(
+    {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:ollama.internal:11434:llama3:8b' }}),
+  customSlugNumericTaggedSame: _localModelSwitchText(
+    {{ _usedModel: '11434:llama3:8b', _requestedModel: '@custom:local:11434:llama3:8b' }}),
+  customHostPortNoProvenanceDifferent: _localModelSwitchText(
+    {{ _usedModel: 'qwen2.5:8b', _requestedModel: '@custom:localhost:11434:llama3:8b' }}),
   customPrefixNoProvenanceDifferent: _localModelSwitchText(
     {{ _usedModel: 'k3-128k', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
   customPrefixContradictoryProvenance: _localModelSwitchText(
@@ -295,6 +305,13 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["notationOnlyCustom"] == ""
     assert cases["customPrefixNoProvenanceSame"] == ""
     assert cases["customPrefixNoProvenanceTaggedSame"] == ""
+    assert cases["customHostPortNoProvenanceSame"] == ""
+    assert cases["customIpPortNoProvenanceSame"] == ""
+    assert cases["customDnsPortNoProvenanceSame"] == ""
+    assert cases["customSlugNumericTaggedSame"] == ""
+    assert cases["customHostPortNoProvenanceDifferent"] == (
+        "Model switched: @custom:localhost:11434:llama3:8b → qwen2.5:8b"
+    )
     assert "k3-256k" in cases["customPrefixNoProvenanceDifferent"]
     assert "k3-128k" in cases["customPrefixNoProvenanceDifferent"]
     assert cases["customPrefixContradictoryProvenance"]

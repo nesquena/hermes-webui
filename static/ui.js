@@ -5155,7 +5155,7 @@ function _bareModelId(modelId, providerId){
   // Mirror of api/streaming.py::_bare_model_id — remove only the routing prefix,
   // then keep the complete bare model (including slash namespaces and tags).
   // Older messages can lack provider provenance, so recognize both the ordinary
-  // @provider:model grammar and the two-segment @custom:<slug>:<model> grammar.
+  // @provider:model grammar and custom @custom:<slug>:<model> route hints.
   let m=String(modelId||'').trim();
   if(!m)return'';
   const provider=String(providerId||'').trim();
@@ -5163,7 +5163,18 @@ function _bareModelId(modelId, providerId){
   if(prefix&&m.toLowerCase().startsWith(prefix.toLowerCase())){
     m=m.slice(prefix.length);
   }else if(!provider&&m.toLowerCase().startsWith('@custom:')){
-    const splitAt=m.indexOf(':','@custom:'.length);
+    let splitAt=m.indexOf(':','@custom:'.length);
+    const portSplit=m.indexOf(':',splitAt+1);
+    if(splitAt>=0&&portSplit>=0){
+      const host=m.slice('@custom:'.length,splitAt);
+      const port=m.slice(splitAt+1,portSplit);
+      const portNumber=Number(port);
+      const endpointHost=host.toLowerCase()==='localhost'||host.includes('.');
+      if(endpointHost&&/^\d+$/.test(port)&&portNumber>=1&&portNumber<=65535){
+        // Match the shared Python grammar's custom host:port provider shape.
+        splitAt=portSplit;
+      }
+    }
     if(splitAt>=0)m=m.slice(splitAt+1);
   }else if(!provider&&m.charAt(0)==='@'&&m.indexOf(':')>=0){
     // A non-custom provider is one grammar segment. These compatibility paths
