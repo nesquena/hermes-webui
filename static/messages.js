@@ -2882,6 +2882,63 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const cursor=Number(_runJournalReplayAfterSeq&&_runJournalReplayAfterSeq());
     return (Number.isFinite(cursor)?cursor:0)+_anchorLocalSeq;
   }
+  function _anchorHasArtifactReference(localId, workspaceRoot, path){
+    const artifacts=_anchorRegistry&&_anchorRegistry.anchor&&_anchorRegistry.anchor.artifacts;
+    return Array.isArray(artifacts)&&artifacts.some(event=>
+      event&&event.source_event_type==='artifact_reference'&&(
+        event.local_id===localId ||
+        (
+          typeof workspaceRoot==='string'
+          && typeof path==='string'
+          && event.payload&&event.payload.workspace_root===workspaceRoot
+          && event.payload.path===path
+        )
+      )
+    );
+  }
+  function _attachTurnArtifactsFromToolCall(tc){
+    if(!tc||tc.is_error||typeof turnArtifactReferencesFromToolCall!=='function') return;
+    const toolCallId = typeof tc.tool_call_id === 'string'
+      ? tc.tool_call_id.trim()
+      : typeof tc.tid === 'string'
+        ? tc.tid.trim()
+        : typeof tc.id === 'string'
+          ? tc.id.trim()
+          : '';
+    const artifactSessionId = (
+      typeof tc.session_id === 'string'
+        ? tc.session_id.trim()
+        : typeof activeSid === 'string'
+          ? activeSid
+          : ''
+    );
+    if(!toolCallId) return;
+    for(const [index,artifact] of turnArtifactReferencesFromToolCall(tc).entries()){
+      const artifactObj = artifact && typeof artifact === 'object' ? artifact : null;
+      const path = typeof artifactObj.path === 'string' ? artifactObj.path : '';
+      const workspaceRoot = typeof artifactObj.workspace_root === 'string' ? artifactObj.workspace_root.trim() : '';
+      const artifactCallId = typeof artifactObj.tool_call_id === 'string' ? artifactObj.tool_call_id.trim() : '';
+      if(!artifactCallId || artifactCallId!==toolCallId) continue;
+      if(!path) continue;
+      const localId=`artifact:${toolCallId}:${index}:${workspaceRoot}:${path}`;
+      if(_anchorHasArtifactReference(localId,workspaceRoot,path)) continue;
+      // A distinct anchor event must not reuse the tool_complete SSE event id.
+      _applyToAnchor('artifact_reference',{
+        local_id:localId,
+        seq:_nextAnchorLocalSeq(),
+        path,
+        workspace_root:workspaceRoot,
+        session_id:(
+          typeof artifactObj.session_id === 'string'
+            ? artifactObj.session_id.trim()
+            : artifactSessionId
+        ),
+        tool_name: typeof artifactObj.tool_name === 'string' ? artifactObj.tool_name.trim() : String(tc.name||'tool'),
+        tool_call_id:artifactCallId,
+        source:'live_tool_complete',
+      },null,null,{render:false});
+    }
+  }
   function _anchorSegmentSeq(){
     const seq=Number(_assistantSegmentSeq||_currentLiveSegmentSeq||0);
     return Number.isFinite(seq)&&seq>0?seq:1;
@@ -3757,6 +3814,45 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return scene;
   }
   let _persistAnchorSceneWarned=false;
+  function _settleTurnArtifactSceneForSession(scene, session){
+    if(!scene||typeof scene!=='object'||!Array.isArray(scene.artifacts)||!scene.artifacts.length) return scene;
+    const completedSessionId=typeof (session&&session.session_id)==='string'?session.session_id.trim():'';
+    const completedWorkspace=typeof (session&&session.workspace)==='string'?session.workspace.replace(/\/+$/,'').trim():'';
+    const artifacts=[];
+    for(const artifact of scene.artifacts){
+      const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:null;
+      if(!payload||payload.source!=='live_tool_complete'){
+        artifacts.push(artifact);
+        continue;
+      }
+      const artifactWorkspace=typeof payload.workspace_root==='string'?payload.workspace_root.replace(/\/+$/,'').trim():'';
+      const artifactSessionId=(
+        typeof payload.session_id==='string'
+          ? payload.session_id
+          : typeof artifact.session_id==='string'
+            ? artifact.session_id
+            : ''
+      ).trim();
+      if(
+        !completedSessionId
+        || !completedWorkspace
+        || !artifactWorkspace
+        || artifactWorkspace!==completedWorkspace
+        || !artifactSessionId
+        || artifactSessionId!==activeSid
+      ) continue;
+      artifacts.push({
+        ...artifact,
+        session_id:completedSessionId,
+        payload:{
+          ...payload,
+          session_id:completedSessionId,
+          owner:{session_id:completedSessionId,workspace_root:artifactWorkspace},
+        },
+      });
+    }
+    return {...scene,artifacts};
+  }
   function _anchorSceneMessageOffsetForPersist(){
     const raw=(typeof _oldestIdx!=='undefined')?_oldestIdx:0;
     const offset=Number(raw);
@@ -3768,8 +3864,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!Number.isFinite(idx)||idx<0) return messageIndex;
     return idx+(Number.isFinite(off)&&off>0?Math.floor(off):0);
   }
-  function _persistSettledAnchorScene(message, scene, messageIndex){
-    if(!activeSid||!message||!scene||typeof api!=='function') return;
+  function _persistSettledAnchorScene(message, scene, messageIndex, session){
+    const ownerSessionId=typeof (session&&session.session_id)==='string'
+      ? session.session_id.trim()
+      : activeSid;
+    if(!ownerSessionId||!message||!scene||typeof api!=='function') return;
     try{
       const messageOffset=_anchorSceneMessageOffsetForPersist();
       api('/api/session/anchor-scene',{
@@ -3777,7 +3876,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         timeoutMs:8000,
         timeoutToast:false,
         body:JSON.stringify({
-          session_id:activeSid,
+          session_id:ownerSessionId,
           stream_id:streamId,
           message_index:_anchorSceneAbsoluteMessageIndexForPersist(messageIndex,messageOffset),
           message_window_index:messageIndex,
@@ -3829,7 +3928,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
     );
   }
-  function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
+  function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null, settlementSession=null){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
     let lastAsst=targetMessage;
     let lastAsstIndex=Number.isInteger(targetIndex)?targetIndex:-1;
@@ -3847,7 +3946,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(!lastAsst) return false;
     const projectedScene=_projectLiveAnchorActivityScene();
-    const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    let scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
+    const settlementOwner=settlementSession&&typeof settlementSession==='object'
+      ? settlementSession
+      : ((typeof S!=='undefined'&&S&&S.session)?S.session:null);
+    if(typeof _settleTurnArtifactSceneForSession==='function'){
+      scene=_settleTurnArtifactSceneForSession(scene,settlementOwner);
+    }
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
@@ -3863,7 +3968,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       lastAsst._anchor_stream_id=streamId;
       lastAsst._anchor_activity_scene=scene;
       lastAsst._anchor_scene_persist_key=sceneKey;
-      _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
+      if(settlementOwner) _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, settlementOwner);
+      else _persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);
       return hasWorklogRows;
     }
     return false;
@@ -5548,6 +5654,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     if(d.args!==undefined) tc.args=d.args;
     if(d.snippet!==undefined) tc.snippet=d.snippet;
+    if(Array.isArray(d.artifacts)) tc.artifacts=d.artifacts;
     tc._liveToolCallSignature = _toolCallSignature(tc,tc.activityBurstId,tc.activitySegmentSeq);
     tc.activityBurstId = Number.isFinite(Number(tc.activityBurstId))
       ? Number(tc.activityBurstId)
@@ -5573,6 +5680,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.done=true;
       if(typeof d.is_error==='boolean') tc.is_error=d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
+      if(Array.isArray(d.artifacts)) tc.artifacts=d.artifacts;
       if(tc.started_at===undefined||tc.started_at===null) tc.started_at=Date.now()/1000;
       if(!tc.tid) tc.tid=explicitTid||_liveToolTid(d,tc.activityBurstId,tc.activitySegmentSeq);
     } else {
@@ -5896,6 +6004,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
       if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true});
       _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e);
+      _attachTurnArtifactsFromToolCall(tc);
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6281,7 +6390,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
             }
           }
-          _attachProjectedAnchorSceneToLastAssistant(S.messages);
+          _attachProjectedAnchorSceneToLastAssistant(S.messages, null, null, completedSession);
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
             const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;

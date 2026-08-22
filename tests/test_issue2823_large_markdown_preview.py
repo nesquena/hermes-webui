@@ -43,7 +43,10 @@ def test_large_markdown_force_render_affordance_exists():
     assert "onclick=\"forceRenderMarkdownPreview()\"" in index_html
     assert "function forceRenderMarkdownPreview()" in WORKSPACE_JS
     assert "function setLargeMarkdownForceRenderVisible(visible)" in WORKSPACE_JS
-    assert "openFile(_previewCurrentPath,{forceRichMarkdown:true})" in WORKSPACE_JS
+    assert "openFile(_previewCurrentPath,{" in WORKSPACE_JS
+    assert "forceRichMarkdown:true" in WORKSPACE_JS
+    assert "owner:_previewOwner" in WORKSPACE_JS
+    assert "_preserveArtifactPath:_previewPreserveArtifactPath" in WORKSPACE_JS
 
 
 def test_markdown_render_helper_runs_render_md_and_katex():

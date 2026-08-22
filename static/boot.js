@@ -2218,6 +2218,10 @@ $('importFileInput').onchange=async(e)=>{
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
 function clearPreview(opts={}){
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
+  // Invalidate the captured preview owner/generation before touching pane DOM.
+  // This also pauses/removes any audio/video sink held by previewMediaWrap;
+  // clearing only the image and iframe src values leaves native media loading.
+  if(typeof _clearNativePreviewSinks==='function') _clearNativePreviewSinks();
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   const closePanelAfter=_workspacePanelMode==='preview'&&!keepPanelOpen;
@@ -2229,7 +2233,10 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  _previewCurrentPath='';
+  if(typeof _previewOwner!=='undefined') _previewOwner=null;
+  if(typeof _previewPreserveArtifactPath!=='undefined') _previewPreserveArtifactPath=false;
+  _previewCurrentMode='';_previewDirty=false;
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();

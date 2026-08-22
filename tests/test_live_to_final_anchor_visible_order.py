@@ -873,7 +873,7 @@ function _completeSettledAnchorSceneForTurn(messages,index,projected){{ return p
 function _anchorSceneHasOwnedOutcomes(){{ return false; }}
 function _anchorSceneHasWorklogWorthyRows(){{ return true; }}
 function _persistSettledAnchorScene(message,nextScene,index){{ persisted.push({{message,index,nextScene}}); }}
-function _attachProjectedAnchorSceneToLastAssistant(messages,targetMessage=null,targetIndex=null){{{attach}}}
+function _attachProjectedAnchorSceneToLastAssistant(messages,targetMessage=null,targetIndex=null,settlementSession=null){{{attach}}}
 function _anchorSceneMessageRef(message){{{message_ref}}}
 function _settledAnchorRetryOwnerKey(messages,targetIndex,retryStreamId){{{owner_key}}}
 function _retrySettledAnchorScene(targetMessage,targetIndex,retryStreamId,retryRegistry,retryOwnerKey){{{retry}}}
@@ -1034,7 +1034,7 @@ def test_settled_final_answer_gets_anchor_activity_above_it():
     group = _function_body(UI_JS, "_anchorSceneWorklogGroup")
     attach = _function_body(MESSAGES_JS, "_attachProjectedAnchorSceneToLastAssistant")
 
-    assert "_attachProjectedAnchorSceneToLastAssistant(S.messages);" in done
+    assert "_attachProjectedAnchorSceneToLastAssistant(S.messages, null, null, completedSession);" in done
     assert "lastAsst._anchor_activity_scene=scene" in attach
     assert "beforeAnchor:true" in settled
     assert "collapsed:true" in settled or "live:false" in settled
@@ -1046,7 +1046,9 @@ def test_done_sets_turn_duration_before_persisting_anchor_scene():
     done = _event_listener_body(MESSAGES_JS, "done")
 
     duration_idx = done.index("lastAsst._turnDuration=d.usage.duration_seconds;")
-    attach_idx = done.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
+    attach_idx = done.index(
+        "_attachProjectedAnchorSceneToLastAssistant(S.messages, null, null, completedSession);"
+    )
     assert duration_idx < attach_idx
 
 
@@ -1055,9 +1057,12 @@ def test_settled_anchor_scene_is_persisted_as_ui_metadata():
     persist = _function_body(MESSAGES_JS, "_persistSettledAnchorScene")
     msg_ref = _function_body(MESSAGES_JS, "_anchorSceneMessageRef")
 
-    assert "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex);" in attach
+    assert (
+        "_persistSettledAnchorScene(lastAsst, scene, lastAsstIndex, settlementOwner);"
+        in attach
+    )
     assert "api('/api/session/anchor-scene'" in persist
-    assert "session_id:activeSid" in persist
+    assert "session_id:ownerSessionId" in persist
     assert "stream_id:streamId" in persist
     assert "const messageOffset=_anchorSceneMessageOffsetForPersist();" in persist
     assert "message_index:_anchorSceneAbsoluteMessageIndexForPersist(messageIndex,messageOffset)" in persist
@@ -1075,7 +1080,8 @@ def test_settled_anchor_scene_persists_the_full_assistant_turn_not_only_tail():
     rows_by_message = _function_body(MESSAGES_JS, "_anchorSceneRowsByMessageIndex")
     reasoning_text = _function_body(MESSAGES_JS, "_anchorSceneMessageReasoningText")
 
-    assert "const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);" in attach
+    assert "let scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);" in attach
+    assert "scene=_settleTurnArtifactSceneForSession(scene,settlementOwner);" in attach
     assert "for(let idx=lastAsstIndex-1;idx>=0;idx-=1)" in complete
     assert "messages.slice(turnStart+1,lastAsstIndex+1)" in complete
     assert "message.reasoning||message._reasoning||message.reasoning_content||message.thinking" in reasoning_text

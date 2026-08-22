@@ -6498,6 +6498,16 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .workspace-artifact-directory-tail{flex:0 0 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;}
   .workspace-artifact-meta{display:inline-block;margin-top:4px;padding:1px 5px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.3;}
 .workspace-artifacts-count{opacity:.65;font-size:11px;}
+.turn-artifact-list{display:grid;gap:6px;margin-top:12px;padding-top:8px;border-top:1px solid var(--border);}
+.turn-artifact-item{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface-subtle);color:var(--text);font:inherit;text-align:left;cursor:pointer;}
+.turn-artifact-item:hover{border-color:var(--accent);background:var(--surface-hover,var(--surface-subtle));}
+.turn-artifact-item:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.turn-artifact-toggle{justify-self:start;min-height:44px;border:0;background:transparent;color:var(--accent);padding:10px 12px;font:inherit;font-size:12px;text-align:left;text-decoration:underline;cursor:pointer;touch-action:manipulation;}
+.turn-artifact-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px;}
+.turn-artifact-icon{display:grid;flex:0 0 20px;place-items:center;color:var(--muted);}
+.turn-artifact-icon svg{width:18px;height:18px;}
+.turn-artifact-path{min-width:0;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:12px;line-height:1.4;}
+@media(max-width:600px){.turn-artifact-item{min-height:44px;box-sizing:border-box;}}
 .rightpanel[data-active-tab="artifacts"] .breadcrumb-bar,.rightpanel[data-active-tab="artifacts"] .file-tree,.rightpanel[data-active-tab="artifacts"] #wsEmptyState{display:none!important;}
 .rightpanel[data-active-tab="artifacts"] .workspace-artifacts{display:block;}
 .rightpanel[data-active-tab="files"] .workspace-artifacts{display:none!important;}

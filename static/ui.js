@@ -14384,6 +14384,132 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   group.removeAttribute('data-worklog-rows-deferred');
   return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
 }
+function _turnArtifactWorkspacePath(path, workspaceRoot){
+  if(typeof path!=='string'||typeof workspaceRoot!=='string') return '';
+  let value=String(path||'');
+  if(value.startsWith('./')) return '';
+  if(!value||value.length>512||value.includes('://')||/[\\\0]/.test(value)||value.startsWith('~/')||/^[A-Za-z]:/.test(value)) return '';
+  const workspace=String(S&&S.session&&S.session.workspace||'').replace(/\/+$/,'');
+  if(!workspace||String(workspaceRoot||'').replace(/\/+$/,'')!==workspace||value.startsWith('/')) return '';
+  const parts=value.split('/');
+  if(parts.some(part=>!part||part==='.'||part==='..')) return '';
+  return value;
+}
+function _turnArtifactEntriesFromScene(scene){
+  const artifacts=scene&&Array.isArray(scene.artifacts)?scene.artifacts:[];
+  const seen=new Set();
+  const entries=[];
+  const currentSessionId = S&&S.session&&typeof S.session.session_id==='string' ? S.session.session_id : '';
+  for(const artifact of artifacts){
+    if(!artifact||typeof artifact!=='object'||Array.isArray(artifact)) continue;
+    const artifactType=artifact && typeof artifact.type === 'string' ? artifact.type : artifact && typeof artifact.source_event_type === 'string' ? artifact.source_event_type : '';
+    const isReference = artifactType === 'artifact_reference';
+    const payload=artifact&&artifact.payload&&typeof artifact.payload==='object'?artifact.payload:{};
+    const payloadSessionId=(
+      typeof payload.session_id==='string'
+        ? payload.session_id
+        : typeof artifact.session_id==='string'
+          ? artifact.session_id
+          : ''
+    ).trim();
+    if(
+      !isReference
+      || typeof payload.path!=='string'
+      || typeof payload.workspace_root!=='string'
+      || typeof payload.tool_name!=='string'
+      || typeof payload.tool_call_id!=='string'
+      || !payloadSessionId
+    ) continue;
+    const toolName=payload.tool_name.replace(/^functions\./,'');
+    const toolCallId=payload.tool_call_id.trim();
+    const sessionId=payloadSessionId;
+    if(sessionId!==currentSessionId) continue;
+    if(!['write_file','patch'].includes(toolName)||!toolCallId) continue;
+    const path=_turnArtifactWorkspacePath(payload.path,payload.workspace_root);
+    if(!path||seen.has(path)) continue;
+    seen.add(path);
+    entries.push({
+      path,
+      workspace_root: payload.workspace_root.replace(/\/+$/,''),
+      session_id: sessionId,
+      tool_name: toolName,
+      tool_call_id: toolCallId,
+      type: artifactType,
+      owner: {
+        session_id: sessionId,
+        workspace_root: payload.workspace_root.replace(/\/+$/,''),
+      },
+    });
+  }
+  return entries;
+}
+function _turnArtifactEntriesForMessage(message, rawIdx){
+  void rawIdx;
+  return _turnArtifactEntriesFromScene(message&&message._anchor_activity_scene);
+}
+function _renderTurnArtifactListForMessage(message, segment, rawIdx){
+  if(!message||!segment) return false;
+  segment.querySelectorAll(':scope > [data-turn-artifact-list="1"]').forEach(node=>node.remove());
+  const entries=_turnArtifactEntriesForMessage(message,rawIdx);
+  if(!entries.length) return false;
+  const list=document.createElement('div');
+  list.className='turn-artifact-list';
+  list.setAttribute('data-turn-artifact-list','1');
+  const items=document.createElement('div');
+  items.className='turn-artifact-items';
+  items.setAttribute('role','list');
+  items.setAttribute('aria-label',typeof t==='function'?t('turn_artifact_list_label'):'Turn artifacts');
+  const itemsId=`turn-artifact-items-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  items.id=itemsId;
+  items.setAttribute('data-turn-artifact-items','1');
+  const collapsedLimit=5;
+  let expanded=message._turnArtifactListExpanded===true;
+  const toggle=entries.length>collapsedLimit?document.createElement('button'):null;
+  if(toggle){
+    toggle.type='button';
+    toggle.className='turn-artifact-toggle';
+    toggle.setAttribute('aria-controls',itemsId);
+  }
+  const renderItems=()=>{
+    items.replaceChildren();
+    const visibleEntries=expanded?entries:entries.slice(0,collapsedLimit);
+    for(const entry of visibleEntries){
+      const row=document.createElement('div');
+      row.setAttribute('role','listitem');
+      const item=document.createElement('button');
+      item.type='button';
+      item.className='turn-artifact-item';
+      item.title=entry.path;
+      const icon=document.createElement('span');
+      icon.className='turn-artifact-icon';
+      icon.setAttribute('aria-hidden','true');
+      icon.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path><path d="M8 13h8"></path><path d="M8 17h8"></path></svg>';
+      const label=document.createElement('span');
+      label.className='turn-artifact-path';
+      label.textContent=entry.path;
+      item.append(icon,label);
+      item.addEventListener('click',()=>{
+        if(typeof openArtifactPath==='function') openArtifactPath(entry);
+      });
+      row.appendChild(item);
+      items.appendChild(row);
+    }
+    if(toggle){
+      toggle.setAttribute('aria-expanded',expanded?'true':'false');
+      toggle.textContent=expanded
+        ? (typeof t==='function'?t('turn_artifact_show_fewer'):'Show fewer artifacts')
+        : (typeof t==='function'?t('turn_artifact_more',entries.length-collapsedLimit):`+${entries.length-collapsedLimit} more`);
+    }
+  };
+  if(toggle) toggle.addEventListener('click',()=>{ expanded=!expanded; message._turnArtifactListExpanded=expanded; renderItems(); });
+  renderItems();
+  list.appendChild(items);
+  if(toggle) list.appendChild(toggle);
+  const footer=typeof segment.querySelector==='function'?segment.querySelector(':scope > .msg-foot'):null;
+  if(footer&&footer.parentNode===segment&&typeof segment.insertBefore==='function') segment.insertBefore(list,footer);
+  else segment.appendChild(list);
+  return true;
+}
 function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
   if(S.activeStreamId&&isLiveAnchorActivitySceneOwner(S.activeStreamId)) return;
   // Worklog reason-mirroring (folding intermediate prose into a top Worklog rail
@@ -15300,6 +15426,16 @@ function renderCompressionUi(){
 // to a session whose rendered transcript inputs are unchanged.
 // Keyed by session_id. Only used on cross-session navigation, never for
 // in-session updates (new messages, edits, stream events).
+function _messagesHaveTurnArtifacts(messages){
+  return Array.isArray(messages)&&messages.some(message=>{
+    const scene=message&&message._anchor_activity_scene;
+    return !!(scene&&Array.isArray(scene.artifacts)&&scene.artifacts.length);
+  });
+}
+function _sessionHtmlCacheEligible(sid, hasTransientTranscriptUi, messages){
+  // Artifact controls own event handlers that cannot survive innerHTML restore.
+  return !!sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi&&!_messagesHaveTurnArtifacts(messages);
+}
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 // #5966 (Codex F3): persist which capped Transparent-Stream turns the user has
@@ -16598,7 +16734,7 @@ function renderMessages(options){
   // Also skip cache for transient transcript cards such as /compress and
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
-  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+  if(sid&&sid!==_sessionHtmlCacheSid&&_sessionHtmlCacheEligible(sid,hasTransientTranscriptUi,S.messages)){
     const renderSignature=_messageRenderCacheSignature();
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
@@ -17404,6 +17540,10 @@ function renderMessages(options){
   for(const [rawIdx,seg] of assistantSegments){
     const msg=S.messages[rawIdx];
     if(!msg||!msg._anchor_activity_scene||!seg) continue;
+    const scene=msg._anchor_activity_scene;
+    const sceneOwnsActivity=_anchorSceneSceneHasWorklogWorthyRows(scene)
+      || String(scene.mode||'').trim()==='hide_all_activity';
+    if(!sceneOwnsActivity) continue;
     const turn=seg.closest('.assistant-turn');
     if(!turn) continue;
     turn.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
@@ -17827,8 +17967,13 @@ function renderMessages(options){
   }
   for(const [rawIdx,seg] of assistantSegments){
     const msg=S.messages[rawIdx];
-    if(msg&&msg._anchor_activity_scene){
-      _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
+    if(msg){
+      if(msg._anchor_activity_scene){
+        _renderSettledAnchorSceneForMessage(msg, seg, rawIdx);
+      }
+      if(typeof _renderTurnArtifactListForMessage==='function'){
+        _renderTurnArtifactListForMessage(msg, seg, rawIdx);
+      }
     }
   }
   _restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);
@@ -18179,7 +18324,7 @@ function renderMessages(options){
   // guard keeps standalone renderMessages() test harnesses (which don't define
   // the helper) working — absent helper == not armed == cache normally.
   const _keepOpenArmed=(typeof _isKeepSettledWorklogOpenArmed==='function')&&_isKeepSettledWorklogOpenArmed();
-  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi&&!_keepOpenArmed){
+  if(_sessionHtmlCacheEligible(sid,hasTransientTranscriptUi,S.messages)&&!_keepOpenArmed){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){

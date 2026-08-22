@@ -61,6 +61,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.turn_artifacts import landed_artifact_descriptors, normalize_tool_name, tool_result_is_error
 
 logger = logging.getLogger(__name__)
 
@@ -4006,6 +4007,12 @@ def _sanitize_anchor_activity_scene(scene):
     if len(rows) > _ANCHOR_ACTIVITY_SCENE_MAX_ROWS:
         raise ValueError("scene.activity_rows is too large")
     scene_copy = copy.deepcopy(scene)
+    raw_artifacts = scene_copy.get("artifacts")
+    scene_copy["artifacts"] = (
+        [artifact for artifact in raw_artifacts if isinstance(artifact, dict)]
+        if isinstance(raw_artifacts, list)
+        else []
+    )
     encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
@@ -8923,6 +8930,519 @@ def _messages_for_limited_payload(messages) -> list:
     return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
 
 
+def _turn_artifact_result_candidates(value) -> list:
+    """Flatten provider result wrappers without inventing result content."""
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        return [value]
+    candidates = []
+    for part in value:
+        if not isinstance(part, dict):
+            if part not in (None, ""):
+                candidates.append(part)
+            continue
+        part_type = str(part.get("type") or "").lower()
+        if part_type in {"text", "input_text", "output_text"}:
+            text = part.get("text") or part.get("input_text") or part.get("output_text")
+            if text not in (None, ""):
+                candidates.append(text)
+            continue
+        if part_type == "tool_result":
+            for key in ("content", "result", "output"):
+                candidates.extend(_turn_artifact_result_candidates(part.get(key)))
+            continue
+        candidates.append(part)
+    return candidates
+
+
+def _turn_artifact_declarations_from_message(message) -> list[tuple[str, str]]:
+    """Normalize OpenAI tool_calls and Anthropic tool_use declarations."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
+        return []
+    declarations = []
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, list):
+        declarations.extend(call for call in raw_calls if isinstance(call, dict))
+    content = message.get("content")
+    if isinstance(content, list):
+        declarations.extend(
+            part
+            for part in content
+            if isinstance(part, dict) and str(part.get("type") or "").lower() == "tool_use"
+        )
+    normalized = []
+    for call in declarations:
+        call_id = _anchor_scene_tool_id(call)
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        raw_name = call.get("name") or call.get("tool_name") or function.get("name")
+        normalized.append((call_id, normalize_tool_name(raw_name)))
+    return normalized
+
+
+def _turn_artifact_result_messages(message) -> list[dict]:
+    """Normalize OpenAI/Anthropic result rows to role:tool-shaped records."""
+    if not isinstance(message, dict):
+        return []
+    role = str(message.get("role") or "").lower()
+    if role == "tool":
+        normalized = dict(message)
+        normalized["tool_call_id"] = str(
+            message.get("tool_call_id") or message.get("tool_use_id") or ""
+        ).strip()
+        return [normalized]
+    if role != "user":
+        return []
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    results = []
+    for part in content:
+        if not isinstance(part, dict) or str(part.get("type") or "").lower() != "tool_result":
+            continue
+        result = {
+            "role": "tool",
+            "tool_call_id": str(
+                part.get("tool_use_id")
+                or part.get("tool_call_id")
+                or part.get("call_id")
+                or ""
+            ).strip(),
+            "name": part.get("name") or part.get("tool_name"),
+            "is_error": part.get("is_error") is True,
+        }
+        for key in ("content", "result", "output"):
+            if key in part:
+                result[key] = part.get(key)
+        results.append(result)
+    return results
+
+
+def _turn_artifact_user_message_is_tool_result(message) -> bool:
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    return all(
+        isinstance(part, dict) and str(part.get("type") or "").lower() == "tool_result"
+        for part in content
+    )
+
+
+def _turn_artifact_descriptors_from_tool_result(
+    message,
+    *,
+    workspace_root: str,
+    session_id: str = "",
+) -> list[dict]:
+    """Return only paired, canonical landed mutations from one tool row."""
+    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
+        return []
+    if message.get("is_error") is True:
+        return []
+    name = normalize_tool_name(message.get("name") or message.get("tool_name"))
+    tool_call_id = str(message.get("tool_call_id") or message.get("tool_use_id") or "").strip()
+    if not tool_call_id:
+        return []
+    result_candidates = []
+    for value in (message.get("content"), message.get("result"), message.get("output")):
+        result_candidates.extend(_turn_artifact_result_candidates(value))
+    if any(tool_result_is_error(candidate) for candidate in result_candidates):
+        return []
+    for candidate in result_candidates:
+        descriptors = landed_artifact_descriptors(
+            name,
+            candidate,
+            workspace_root=workspace_root,
+            tool_call_id=tool_call_id,
+            session_id=session_id,
+        )
+        if descriptors:
+            return descriptors
+    return []
+
+
+def _declared_turn_tool_calls(messages) -> dict[str, str]:
+    declarations: dict[str, str] = {}
+    invalid: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict) or str(message.get("role") or "").lower() != "assistant":
+            continue
+        for call_id, name in _turn_artifact_declarations_from_message(message):
+            if not call_id or not name:
+                continue
+            if call_id in declarations or call_id in invalid:
+                invalid.add(call_id)
+                declarations.pop(call_id, None)
+                continue
+            declarations[call_id] = name
+    return {call_id: name for call_id, name in declarations.items() if call_id not in invalid}
+
+
+def _final_turn_artifact_paths(
+    messages,
+    *,
+    workspace_root: str,
+    session_id: str = "",
+) -> dict[int, list[dict]]:
+    """Return paired, landed artifact descriptors keyed by final answer index."""
+    source = list(messages or [])
+    paths_by_final_index = {}
+    replay_session_id = str(session_id or "").strip()
+
+    def _invalidate_call(
+        call_id: str,
+        *,
+        invalid_calls: set[str],
+        declared_calls: dict[str, str],
+        descriptors_by_id: dict[str, list[dict]],
+        result_order: list[str],
+    ) -> None:
+        if not call_id:
+            return
+        invalid_calls.add(call_id)
+        declared_calls.pop(call_id, None)
+        descriptors_by_id.pop(call_id, None)
+        if call_id in result_order:
+            result_order.remove(call_id)
+
+    user_indexes = [
+        idx
+        for idx, message in enumerate(source)
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and not _turn_artifact_user_message_is_tool_result(message)
+    ]
+    for position, turn_start in enumerate(user_indexes):
+        turn_end = user_indexes[position + 1] if position + 1 < len(user_indexes) else len(source)
+        final_idx = next(
+            (
+                idx
+                for idx in range(turn_end - 1, turn_start, -1)
+                if isinstance(source[idx], dict)
+                and source[idx].get("role") == "assistant"
+                and str(source[idx].get("content") or "").strip()
+            ),
+            None,
+        )
+        if final_idx is None:
+            continue
+        declared_calls: dict[str, str] = {}
+        observed_declarations: set[str] = set()
+        invalid_calls: set[str] = set()
+        descriptors_by_id: dict[str, list[dict]] = {}
+        result_order: list[str] = []
+        consumed_calls: set[str] = set()
+
+        turn_messages = source[turn_start + 1 : final_idx]
+        for message in turn_messages:
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").lower() == "assistant":
+                for call_id, name in _turn_artifact_declarations_from_message(message):
+                    if not call_id:
+                        continue
+                    if call_id in observed_declarations:
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
+                        continue
+                    observed_declarations.add(call_id)
+                    if call_id in invalid_calls:
+                        continue
+                    if not name:
+                        _invalidate_call(
+                            call_id,
+                            invalid_calls=invalid_calls,
+                            declared_calls=declared_calls,
+                            descriptors_by_id=descriptors_by_id,
+                            result_order=result_order,
+                        )
+                        continue
+                    declared_calls[call_id] = name
+                continue
+            for result_message in _turn_artifact_result_messages(message):
+                tool_call_id = str(result_message.get("tool_call_id") or "").strip()
+                if not tool_call_id or tool_call_id in invalid_calls:
+                    if tool_call_id:
+                        invalid_calls.add(tool_call_id)
+                    continue
+                if tool_call_id not in declared_calls:
+                    invalid_calls.add(tool_call_id)
+                    continue
+                declared_name = declared_calls[tool_call_id]
+                result_name = normalize_tool_name(
+                    result_message.get("name") or result_message.get("tool_name")
+                )
+                if result_name and result_name != declared_name:
+                    _invalidate_call(
+                        tool_call_id,
+                        invalid_calls=invalid_calls,
+                        declared_calls=declared_calls,
+                        descriptors_by_id=descriptors_by_id,
+                        result_order=result_order,
+                    )
+                    continue
+                if tool_call_id in consumed_calls:
+                    _invalidate_call(
+                        tool_call_id,
+                        invalid_calls=invalid_calls,
+                        declared_calls=declared_calls,
+                        descriptors_by_id=descriptors_by_id,
+                        result_order=result_order,
+                    )
+                    continue
+                consumed_calls.add(tool_call_id)
+                normalized_result = {
+                    **result_message,
+                    "name": declared_name,
+                    "tool_call_id": tool_call_id,
+                }
+                descriptors_for_call = _turn_artifact_descriptors_from_tool_result(
+                    normalized_result,
+                    workspace_root=workspace_root,
+                    session_id=replay_session_id,
+                )
+                if not descriptors_for_call:
+                    _invalidate_call(
+                        tool_call_id,
+                        invalid_calls=invalid_calls,
+                        declared_calls=declared_calls,
+                        descriptors_by_id=descriptors_by_id,
+                        result_order=result_order,
+                    )
+                    continue
+                if tool_call_id in invalid_calls:
+                    continue
+                descriptors_by_id[tool_call_id] = descriptors_for_call
+                result_order.append(tool_call_id)
+        descriptors = []
+        seen = set()
+        for result_id in result_order:
+            if result_id in invalid_calls:
+                continue
+            for descriptor in descriptors_by_id.get(result_id, []):
+                key = (descriptor["workspace_root"], descriptor["path"])
+                if key not in seen:
+                    seen.add(key)
+                    descriptors.append(descriptor)
+        if descriptors:
+            paths_by_final_index[final_idx] = descriptors
+    return paths_by_final_index
+
+
+def _artifact_only_anchor_scene(message) -> dict:
+    """Build the smallest activity_scene_v1 projection for replayed artifact evidence."""
+    return {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "identity": {"source_message_refs": [_assistant_anchor_scene_message_ref(message)]},
+        "lifecycle": {},
+        "final_answer": _anchor_scene_message_text(message),
+        "final_message_ref": _assistant_anchor_scene_message_ref(message),
+        "terminal_state": None,
+        "activity_rows": [],
+        "artifacts": [],
+        "side_effects": [],
+    }
+
+
+_HISTORICAL_ARTIFACT_REPLAY_ROOT_BUDGET = 8
+
+
+def _attach_replayed_turn_artifacts_to_anchor_scenes(
+    messages,
+    paths_by_final_index,
+    *,
+    message_offset=0,
+    replay_source_messages=None,
+    replay_session_id="",
+) -> list:
+    """Merge transcript-derived artifact evidence into the existing Anchor projection.
+
+    The normal replay pass derives descriptors against the session's current
+    workspace.  If that root changed since the artifact was persisted, retry
+    only the roots already present in the persisted scene and keep exact
+    transcript-backed matches.  ``source`` is deliberately not evidence here:
+    the full transcript must re-prove each descriptor under its historical root.
+    """
+    if not isinstance(messages, list) or not isinstance(paths_by_final_index, dict):
+        return messages
+
+    historical_paths_by_root: dict[str, dict[int, list[dict]]] = {}
+
+    def _canonical_root(value) -> str:
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        try:
+            return str(Path(value.strip()).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            return value.strip().rstrip("/")
+
+    def _persisted_artifact_identity(artifact) -> dict | None:
+        if not isinstance(artifact, dict):
+            return None
+        artifact_type = artifact.get("type") or artifact.get("source_event_type")
+        if artifact_type != "artifact_reference":
+            return None
+        payload = artifact.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        values = {**artifact, **payload}
+        path = values.get("path")
+        raw_session_id = values.get("session_id")
+        raw_tool_name = values.get("tool_name")
+        raw_tool_call_id = values.get("tool_call_id")
+        workspace_root = _canonical_root(values.get("workspace_root"))
+        if not isinstance(path, str) or not path.strip() or not workspace_root:
+            return None
+        if not all(
+            isinstance(value, str)
+            for value in (raw_session_id, raw_tool_name, raw_tool_call_id)
+        ):
+            return None
+        session_id = raw_session_id.strip()
+        tool_name = normalize_tool_name(raw_tool_name)
+        tool_call_id = raw_tool_call_id.strip()
+        if not session_id or not tool_name or not tool_call_id:
+            return None
+        return {
+            # Typed artifact paths are exact identities.  Use strip only for
+            # the empty check above; trimming here could silently select a
+            # different sibling file during historical-root recovery.
+            "path": path,
+            "workspace_root": workspace_root,
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
+        }
+
+    trusted_replay_session_id = str(replay_session_id or "").strip()
+
+    def _trusted_persisted_artifacts_for_scene(scene) -> tuple[list[dict], set[str]]:
+        if not isinstance(scene, dict) or not trusted_replay_session_id:
+            return [], set()
+        persisted = []
+        roots = set()
+        for artifact in scene.get("artifacts") or []:
+            identity = _persisted_artifact_identity(artifact)
+            if identity is None or identity["session_id"] != trusted_replay_session_id:
+                continue
+            persisted.append(identity)
+            roots.add(identity["workspace_root"])
+        return persisted, roots
+
+    historical_candidate_roots: set[str] = set()
+    if isinstance(replay_source_messages, list) and trusted_replay_session_id:
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            persisted, roots = _trusted_persisted_artifacts_for_scene(
+                message.get("_anchor_activity_scene")
+            )
+            # A scene with multiple roots is already rejected below and is not
+            # a trusted candidate for response-wide historical replay.
+            if persisted and len(roots) == 1:
+                historical_candidate_roots.update(roots)
+    historical_replay_allowed = (
+        len(historical_candidate_roots) <= _HISTORICAL_ARTIFACT_REPLAY_ROOT_BUDGET
+    )
+
+    def _historical_descriptors_for_root(root: str) -> dict[int, list[dict]]:
+        cached = historical_paths_by_root.get(root)
+        if cached is not None:
+            return cached
+        if not isinstance(replay_source_messages, list):
+            historical_paths_by_root[root] = {}
+            return historical_paths_by_root[root]
+        cached = _final_turn_artifact_paths(
+            replay_source_messages,
+            workspace_root=root,
+            session_id=str(replay_session_id or "").strip(),
+        )
+        historical_paths_by_root[root] = cached
+        return cached
+
+    def _historical_descriptors_for_scene(scene, absolute_idx: int) -> list[dict]:
+        if not isinstance(scene, dict) or not isinstance(replay_source_messages, list):
+            return []
+        persisted, roots = _trusted_persisted_artifacts_for_scene(scene)
+        # A settled assistant turn has one session/workspace owner.  Multiple
+        # historical roots cannot be authoritative for the same turn and would
+        # otherwise multiply the full-transcript replay cost, so fail closed.
+        if not persisted or len(roots) != 1:
+            return []
+        candidates_by_key = {}
+        for root in roots:
+            for descriptor in _historical_descriptors_for_root(root).get(absolute_idx) or []:
+                if not isinstance(descriptor, dict):
+                    continue
+                key = (
+                    descriptor.get("path"),
+                    _canonical_root(descriptor.get("workspace_root")),
+                    str(descriptor.get("session_id") or "").strip(),
+                    normalize_tool_name(descriptor.get("tool_name")),
+                    str(descriptor.get("tool_call_id") or "").strip(),
+                )
+                candidates_by_key[key] = descriptor
+        retained = []
+        seen = set()
+        for identity in persisted:
+            key = (
+                identity["path"],
+                identity["workspace_root"],
+                identity["session_id"],
+                identity["tool_name"],
+                identity["tool_call_id"],
+            )
+            descriptor = candidates_by_key.get(key)
+            if descriptor is None or key in seen:
+                continue
+            seen.add(key)
+            retained.append(descriptor)
+        return retained
+
+    out = list(messages)
+    for local_idx, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        absolute_idx = int(message_offset or 0) + local_idx
+        descriptors = paths_by_final_index.get(absolute_idx) or []
+        scene = message.get("_anchor_activity_scene")
+        if not descriptors and historical_replay_allowed:
+            descriptors = _historical_descriptors_for_scene(scene, absolute_idx)
+        if not descriptors and not (
+            isinstance(scene, dict) and scene.get("version") == "activity_scene_v1"
+        ):
+            continue
+        next_scene = dict(scene) if isinstance(scene, dict) and scene.get("version") == "activity_scene_v1" else _artifact_only_anchor_scene(message)
+        artifacts = []
+        seen = set()
+        for descriptor in descriptors:
+            if not isinstance(descriptor, dict):
+                continue
+            path = descriptor.get("path")
+            workspace_root = descriptor.get("workspace_root")
+            if not isinstance(path, str) or not isinstance(workspace_root, str):
+                continue
+            path = path.strip()
+            workspace_root = workspace_root.strip()
+            key = (workspace_root, path)
+            if not path or not workspace_root:
+                continue
+            seen.add(key)
+            artifacts.append({"type": "artifact_reference", "payload": {**descriptor, "source": "transcript_replay"}})
+        next_scene["artifacts"] = artifacts
+        next_message = dict(message)
+        next_message["_anchor_activity_scene"] = next_scene
+        out[local_idx] = next_message
+    return out
+
+
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -13685,6 +14205,11 @@ def handle_get(handler, parsed) -> bool:
                 _summary_message_count = None
                 _summary_last_message_at = None
             if load_messages:
+                _final_turn_artifacts = _final_turn_artifact_paths(
+                    _all_msgs,
+                    workspace_root=str(getattr(s, "workspace", "") or ""),
+                    session_id=str(getattr(s, "session_id", "") or ""),
+                )
                 _truncated_msgs, _messages_offset = _message_window_for_display(
                     _all_msgs,
                     msg_limit=msg_limit,
@@ -13698,6 +14223,13 @@ def handle_get(handler, parsed) -> bool:
                     getattr(s, "anchor_activity_scenes", None),
                     message_offset=_messages_offset,
                     tool_calls=getattr(s, "tool_calls", None),
+                )
+                _truncated_msgs = _attach_replayed_turn_artifacts_to_anchor_scenes(
+                    _truncated_msgs,
+                    _final_turn_artifacts,
+                    message_offset=_messages_offset,
+                    replay_source_messages=_all_msgs,
+                    replay_session_id=str(getattr(s, "session_id", "") or ""),
                 )
             else:
                 _truncated_msgs = []
