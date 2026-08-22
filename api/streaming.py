@@ -5997,6 +5997,30 @@ def _message_identity(msg):
     )
 
 
+def _message_replay_content_is_text_only(content):
+    if not isinstance(content, list) or not content:
+        return False
+    text_keys = {"text", "content", "input_text", "output_text"}
+    for part in content:
+        if not isinstance(part, dict):
+            return False
+        if str(part.get("type") or "").lower() not in {
+            "",
+            "text",
+            "input_text",
+            "output_text",
+        }:
+            return False
+        fields = [key for key in text_keys if key in part]
+        if (
+            set(part) - text_keys - {"type"}
+            or len(fields) != 1
+            or not isinstance(part[fields[0]], str)
+        ):
+            return False
+    return True
+
+
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
@@ -6013,6 +6037,7 @@ def _message_replay_key(msg):
         isinstance(msg, dict)
         and not msg.get("_partial")
         and isinstance(msg.get("content"), (list, dict))
+        and not _message_replay_content_is_text_only(msg.get("content"))
     ):
         return (
             *_session_message_visible_key(msg, normalize_workspace_prefix=True),

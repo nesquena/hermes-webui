@@ -9582,7 +9582,10 @@ def _session_message_visible_key(
     # prefix matching.  Without this, all tool-calling messages map to
     # ("assistant", "") and the merge treats state.db rows as replays.
     _tc = msg.get("tool_calls")
-    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    content_shape = (
+        "structured" if isinstance(msg.get("content"), (list, dict)) else "scalar"
+    )
+    _tc_key = f"{content_shape}:{json.dumps(_tc, sort_keys=True, default=str) if _tc else ''}"
     role = str(msg.get("role") or "")
     # Fold the state.db workspace wrapper out of scalar and structured user
     # content so exact reconciliation does not depend on the fuzzy fallback.
@@ -9611,13 +9614,37 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
-    return {"keys": visible_keys, "by_role": by_role, "loose_by_key": {}}
+    return {
+        "keys": visible_keys,
+        "by_role": by_role,
+        "loose_by_key": {},
+        "shape_by_key": {},
+    }
 
 
 _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
 
 
-def _visible_duplicate_shape_and_text(content: str) -> tuple[bool, str]:
+def _visible_duplicate_key_shape(key: tuple) -> bool | None:
+    try:
+        identity = key[2]
+    except (TypeError, IndexError):
+        return None
+    if isinstance(identity, str):
+        if identity.startswith("structured:"):
+            return True
+        if identity.startswith("scalar:"):
+            return False
+    return None
+
+
+def _visible_duplicate_shape_and_text(
+    content: str,
+    *,
+    structured: bool | None = None,
+) -> tuple[bool, str]:
+    if structured is False:
+        return False, content
     try:
         parsed = json.loads(content)
     except (TypeError, ValueError):
@@ -9651,19 +9678,31 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         lookup = _build_visible_duplicate_lookup(visible_keys)
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
-    visible_structured, visible_text = _visible_duplicate_shape_and_text(content)
+    visible_structured, visible_text = _visible_duplicate_shape_and_text(
+        content,
+        structured=_visible_duplicate_key_shape(visible_key),
+    )
+    shape_by_key = lookup.setdefault("shape_by_key", {})
     for existing_key in lookup.get("by_role", {}).get(role, []):
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
         if role != existing_role or sidecar != existing_sidecar or not existing_content:
             continue
-        existing_structured, existing_text = _visible_duplicate_shape_and_text(existing_content)
+        if existing_key not in shape_by_key:
+            shape_by_key[existing_key] = _visible_duplicate_shape_and_text(
+                existing_content,
+                structured=_visible_duplicate_key_shape(existing_key),
+            )
+        existing_structured, existing_text = shape_by_key[existing_key]
         if visible_structured and existing_structured:
             continue
         if visible_structured != existing_structured:
-            if max(len(visible_text), len(existing_text)) <= 200_000 and visible_text and existing_text and (
-                visible_text in existing_text or existing_text in visible_text
+            if (
+                max(len(visible_text), len(existing_text)) <= 200_000
+                and visible_text
+                and existing_text
+                and visible_text == existing_text
             ):
                 return existing_key
             continue

@@ -123,6 +123,39 @@ def test_small_visible_set_preserves_fuzzy_recovery():
     assert models._matching_visible_duplicate(fuzzy_only, keys) in keys
 
 
+def test_visible_duplicate_lookup_caches_existing_key_parses(monkeypatch):
+    import api.models as models
+
+    rich = [
+        {"type": "text", "text": "describe"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]
+    existing = models._session_message_visible_key({"role": "user", "content": rich})
+    lookup = models._build_visible_duplicate_lookup({existing})
+    candidate = models._session_message_visible_key(
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,BB=="}},
+            ],
+        }
+    )
+    loads = 0
+    real_loads = models.json.loads
+
+    def counted_loads(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(models.json, "loads", counted_loads)
+    for _ in range(3):
+        assert models._matching_visible_duplicate(candidate, {existing}, lookup) is None
+
+    assert loads == 4  # candidate once per probe, existing key once for the shared lookup
+
+
 def test_large_mixed_shape_reconciliation_preserves_image_identity():
     import api.models as models
 

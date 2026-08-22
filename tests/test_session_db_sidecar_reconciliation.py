@@ -48,6 +48,40 @@ def test_recover_missing_sidecars_from_state_db_materializes_webui_row(tmp_path)
     assert [m["content"] for m in data["messages"]] == ["message 1", "message 2"]
 
 
+def test_recovery_preserves_sqlite_zero_in_projection_and_sidecar(tmp_path, monkeypatch):
+    import api.models as models
+
+    db = tmp_path / "state.db"
+    sid = "state_zero_content"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content, timestamp REAL)"
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, 'webui', 'Zero', 'test-model', 1.0, 1)",
+        (sid,),
+    )
+    conn.execute(
+        "INSERT INTO messages VALUES (1, ?, 'user', ?, 1.0)",
+        (sid, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    projected = models.get_state_db_session_messages(sid)
+    assert projected[0]["content"] == 0
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, db)
+
+    assert result["materialized"] == 1
+    recovered = json.loads((tmp_path / f"{sid}.json").read_text(encoding="utf-8"))
+    assert recovered["messages"][0]["content"] == 0
+
+
 def test_recover_missing_sidecars_from_state_db_skips_deleted_webui_tombstone(tmp_path, monkeypatch):
     import api.models as _m
     monkeypatch.setattr(_m, "SESSION_DIR", tmp_path)

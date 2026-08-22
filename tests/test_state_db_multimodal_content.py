@@ -501,9 +501,26 @@ def test_reconciled_model_context_preserves_structured_state_db_content(
 
 
 def test_replay_key_keeps_scalar_and_image_turns_distinct():
-    from api.streaming import _message_replay_key
+    from api.streaming import (
+        _dedupe_replayed_context_messages,
+        _message_replay_key,
+        _strip_replayed_prefix,
+    )
 
     scalar = {"role": "user", "content": "describe this image"}
+    text_only = {
+        "role": "user",
+        "content": [{"type": "text", "text": "describe this image"}],
+    }
     structured = {"role": "user", "content": _rich_content()}
 
+    assert _message_replay_key(scalar) == _message_replay_key(text_only)
     assert _message_replay_key(scalar) != _message_replay_key(structured)
+    assert _message_replay_key(scalar) != _message_replay_key(
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "describe this image", "cache_control": {}}],
+        }
+    )
+    assert _strip_replayed_prefix([scalar], [text_only]) == []
+    assert _dedupe_replayed_context_messages([scalar], [text_only]) == [scalar]

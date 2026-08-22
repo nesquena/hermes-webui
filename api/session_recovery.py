@@ -559,7 +559,7 @@ def _read_state_db_missing_sidecar_rows(
                     ).fetchall():
                         message = {
                             'role': msg['role'],
-                            'content': _decode_state_db_content(msg['content'] or ''),
+                            'content': _decode_state_db_content(msg['content']),
                         }
                         if msg['timestamp'] is not None:
                             message['timestamp'] = msg['timestamp']

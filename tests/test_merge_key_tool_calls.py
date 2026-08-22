@@ -10,6 +10,8 @@ a single key, losing tool calls during merge.
 """
 from __future__ import annotations
 
+import json
+
 from api import models
 from api.models import (
     _matching_visible_duplicate,
@@ -95,6 +97,50 @@ class TestVisibleKeyToolCalls:
         kb = _session_message_visible_key(b)
         assert ka != kb
         assert _matching_visible_duplicate(ka, {kb}) is None
+
+    def test_scalar_canonical_json_does_not_collide_with_structured_content(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+        }
+        structured = {"role": "user", "content": rich}
+
+        scalar_key = _session_message_visible_key(scalar)
+        structured_key = _session_message_visible_key(structured)
+
+        assert scalar_key != structured_key
+        merged = merge_session_messages_append_only([scalar], [structured])
+        assert merged == [scalar, structured]
+
+    def test_mixed_shape_fuzzy_match_requires_equal_visible_text(self):
+        structured = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+            ],
+        }
+        structured_key = _session_message_visible_key(structured)
+        equal_scalar_key = _session_message_visible_key(
+            {"role": "user", "content": "describe"}
+        )
+        longer_scalar_key = _session_message_visible_key(
+            {"role": "user", "content": "describe with details"}
+        )
+        scalar_key = _session_message_visible_key(
+            {"role": "user", "content": "describe"}
+        )
+
+        assert _matching_visible_duplicate(equal_scalar_key, {structured_key}) == structured_key
+        assert _matching_visible_duplicate(longer_scalar_key, {structured_key}) is None
+        assert _matching_visible_duplicate(
+            _session_message_visible_key({"role": "user", "content": "describe with details"}),
+            {scalar_key},
+        ) == scalar_key
 
 
 # ── merge_session_messages_append_only end-to-end ───────────────────────────
