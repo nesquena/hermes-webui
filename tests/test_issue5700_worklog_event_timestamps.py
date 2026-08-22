@@ -246,6 +246,7 @@ global._findLatestVisibleLiveAssistant = () => null;
 global._toolWorklogListEl = () => null;
 global._activityKeyForLiveTurn = () => 'activity-key';
 global._assistantTurnBlocks = () => null;
+global.isTransparentLiveMode = () => typeof global.isTransparentStream === 'function' && global.isTransparentStream();
 eval(extractFunc('_activityClockLabel'));
 eval(extractFunc('_activityFullClockLabel'));
 eval(extractFunc('_timestampSeconds'));

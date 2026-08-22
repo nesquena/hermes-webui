@@ -124,6 +124,9 @@ if(src.indexOf('function _anchorSceneActiveMode') !== -1){{
 }}else{{
   eval("function _anchorSceneActiveMode(){{ return activeMode; }}");
 }}
+if(src.indexOf('function _anchorSceneSettledMode') !== -1){{
+  eval(extractFunc('_anchorSceneSettledMode'));
+}}
 if(src.indexOf('function _anchorSceneRowDisplayHintForMode') !== -1){{
   eval(extractFunc('_anchorSceneRowDisplayHintForMode'));
 }}else{{
@@ -351,15 +354,15 @@ def test_live_ui_legacy_paths_exit_when_anchor_scene_owns_the_turn():
     assert ':not([data-anchor-scene-owner="1"])' in remove
 
 
-@pytest.mark.skipif("_anchorSceneActiveMode()" not in MESSAGES_JS, reason="base branch lacks the active-mode helper")
-def test_anchor_scene_projection_tracks_active_mode():
+@pytest.mark.skipif("_anchorSceneLiveMode()" not in MESSAGES_JS, reason="base branch lacks the live-mode helper")
+def test_anchor_scene_projection_tracks_contextual_modes():
     render_live = _function_body(MESSAGES_JS, "_renderAnchorLiveScene")
-    project_live = _function_body(MESSAGES_JS, "_projectLiveAnchorActivityScene")
+    project_settled = _function_body(MESSAGES_JS, "_projectLiveAnchorActivityScene")
 
-    assert "_anchorSceneActiveMode()" in render_live
-    assert "_anchorSceneActiveMode()" in project_live
+    assert "_anchorSceneLiveMode()" in render_live
+    assert "_anchorSceneSettledMode()" in project_settled
     assert "mode:'compact_worklog'" not in render_live
-    assert "mode:'compact_worklog'" not in project_live
+    assert "mode:'compact_worklog'" not in project_settled
 
 
 @pytest.mark.skipif("_anchorSceneActiveMode()" not in MESSAGES_JS, reason="base branch lacks the active-mode helper")
@@ -1359,6 +1362,7 @@ global.$=(id)=>{{
 }};
 let transparentMode=true;
 global.chatActivityMode=()=>transparentMode?'transparent_stream':'compact_worklog';
+global.chatActivityLiveMode=()=>transparentMode?'transparent_stream':'compact_worklog';
 global.isTransparentStream=()=>transparentMode;
 global.isCompactWorklogMode=()=>!transparentMode;
 global._anchorSceneRowsForRendering=(scene)=>scene.activity_rows||[];
