@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.js_source_loader import node_validated_read_options, node_validated_read_snippet
+
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -27,11 +29,12 @@ def _run_reasoning_scene(
 ) -> dict:
     assert NODE, "node is required for the #5720 browser-chain regression"
     env = os.environ.copy()
-    env.setdefault("ISSUE5720_UI_JS", str(ROOT / "static" / "ui.js"))
-    env.setdefault("ISSUE5720_MESSAGES_JS", str(ROOT / "static" / "messages.js"))
-    env.setdefault(
-        "ISSUE5720_ANCHORS_JS",
-        str(ROOT / "static" / "assistant_turn_anchors.js"),
+    # Assign (not setdefault): a stale value left in the process-global env by
+    # an earlier test must not redirect the harness to the wrong file (#6972).
+    env["ISSUE5720_UI_JS"] = str(ROOT / "static" / "ui.js")
+    env["ISSUE5720_MESSAGES_JS"] = str(ROOT / "static" / "messages.js")
+    env["ISSUE5720_ANCHORS_JS"] = str(
+        ROOT / "static" / "assistant_turn_anchors.js",
     )
     env["ISSUE5720_ACTIVITY_MODE"] = activity_mode
     if fail_first_anchor_render:
@@ -199,12 +202,25 @@ def test_later_deferred_anchor_paint_remains_hidden_in_final_answer_only_mode():
     assert result["anchor_reasoning_text"] == "Plan step"
 
 
-_NODE_SCENE = r"""
-const fs = require('fs');
-const uiSrc = fs.readFileSync(process.env.ISSUE5720_UI_JS, 'utf8');
-const messagesSrc = fs.readFileSync(process.env.ISSUE5720_MESSAGES_JS, 'utf8');
-const anchorsSrc = fs.readFileSync(process.env.ISSUE5720_ANCHORS_JS, 'utf8');
-
+# Build the Node scene using the shared validated-read snippet to avoid
+# hand-maintained divergence (issue #6972). The snippet defines
+# `readValidated(path, options?)` with per-attempt identity validation,
+# zero-byte reject, and tail-sentinel checking; every source is read with
+# the registered EOF tail enforced (extraction parity with the Python path).
+_NODE_SCENE = (
+    node_validated_read_snippet()
+    + (
+        "\nconst uiSrc = readValidated(process.env.ISSUE5720_UI_JS, "
+        + node_validated_read_options(ROOT / "static" / "ui.js")
+        + ");\n"
+        "const messagesSrc = readValidated(process.env.ISSUE5720_MESSAGES_JS, "
+        + node_validated_read_options(ROOT / "static" / "messages.js")
+        + ");\n"
+        "const anchorsSrc = readValidated(process.env.ISSUE5720_ANCHORS_JS, "
+        + node_validated_read_options(ROOT / "static" / "assistant_turn_anchors.js")
+        + ");\n"
+    )
+    + r"""
 function extractFunc(src, name){
   const start = src.indexOf('function ' + name);
   if(start < 0){
@@ -672,3 +688,4 @@ process.stdout.write(JSON.stringify({
   multi_segment_exact_fallback:multiSegmentExactFallback,
 }));
 """
+)

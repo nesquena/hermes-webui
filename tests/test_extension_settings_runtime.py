@@ -7,9 +7,12 @@ import textwrap
 
 import pytest
 
+from tests.js_source_loader import node_validated_read_options, node_validated_read_snippet
 
 ROOT = Path(__file__).parent.parent
 EXTENSION_SETTINGS_JS = ROOT / "static" / "extension_settings.js"
+
+_VALIDATED_READ = node_validated_read_snippet()
 
 
 def _run_node(script: str):
@@ -60,7 +63,9 @@ def test_extension_settings_runtime_normalizes_persists_resets_and_clears():
             removeItem(key) {{ store.delete(key); }}
           }}
         }};
-        eval(fs.readFileSync({str(EXTENSION_SETTINGS_JS)!r}, 'utf8'));
+{_VALIDATED_READ}
+        const settingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r}, {node_validated_read_options(EXTENSION_SETTINGS_JS)});
+        eval(settingsSrc);
 
         const settings = window.HermesExtensionSettings.settingsForExtension('demo.ext');
         assert.deepStrictEqual(settings.schema.map(field => field.key), ['flag', 'mode', 'count']);
@@ -180,7 +185,9 @@ def test_hermes_ext_register_runtime_identity_and_reload_lifecycle():
             removeItem(key) {{ removes += 1; store.delete(key); }}
           }}
         }};
-        eval(fs.readFileSync({str(EXTENSION_SETTINGS_JS)!r}, 'utf8'));
+        {_VALIDATED_READ}
+        const settingsSrc = readValidated({str(EXTENSION_SETTINGS_JS)!r}, {node_validated_read_options(EXTENSION_SETTINGS_JS)});
+        eval(settingsSrc);
 
         const forgedMetadata = {{
           id: 'forged.ext',

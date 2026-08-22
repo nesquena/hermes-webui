@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.js_source_loader import read_extraction_source, read_js_source
+
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = ROOT / "static" / "ui.js"
@@ -27,11 +29,13 @@ PHASE0_DOC_PATH = (
 
 def _read_required_text(path: Path, label: str) -> str:
     assert path.exists(), f"{label} not found at {path}"
-    return path.read_text(encoding="utf-8")
+    return read_js_source(path)
 
 
 def _ui_js() -> str:
-    return _read_required_text(UI_JS_PATH, "static/ui.js")
+    # ui.js undergoes brace-matched function extraction downstream, so it
+    # must be read through the extraction entry point (EOF tail enforced).
+    return read_extraction_source(UI_JS_PATH)
 
 
 def _phase0_doc() -> str:
