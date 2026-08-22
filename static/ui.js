@@ -2473,23 +2473,333 @@ function _openMermaidLightbox(svgEl) {
   document.addEventListener('keydown', lb._keyHandler);
   return lb;
 }
+/* Mount pinch/pan/zoom gestures on an enlarged-image lightbox stage.
+ * Mirrors the Mermaid viewer's gesture architecture (see
+ * _mountMermaidViewer): Pointer Events drive single-finger drag/pan,
+ * Touch Events drive two-finger pinch-to-zoom, and the mouse wheel
+ * zooms anchored at the cursor. `touch-action: none` on the viewport
+ * is required so the browser never claims the touch sequence.
+ * state.pendingNav is set by _navigateLightbox to keep the zoom level
+ * while re-centring when switching to the next/previous image. */
+function _mountImgLightboxZoom(viewport, canvas, img, lb) {
+  const state = {
+    boxH: 0,
+    boxW: 0,
+    canvas,
+    dragOriginX: 0,
+    dragOriginY: 0,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragged: false,
+    dragging: false,
+    fitScale: 1,
+    img,
+    pendingNav: false,
+    pinchStartCX: 0,
+    pinchStartCY: 0,
+    pinchStartDist: 0,
+    pinchStartScale: 1,
+    pinchStartX: 0,
+    pinchStartY: 0,
+    pinching: false,
+    scale: 1,
+    viewport,
+    x: 0,
+    y: 0,
+  };
+
+  function _imgViewportSize() {
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+    return {
+      width: Math.max(1, (rect && rect.width) || viewport.clientWidth || 1),
+      height: Math.max(1, (rect && rect.height) || viewport.clientHeight || 1),
+    };
+  }
+
+  function _imgClampPan() {
+    // Keep the transformed canvas inside the clipped viewport: an axis
+    // whose scaled size fits inside the stage gets centered, an overflow
+    // axis is clamped so the image can never be dragged wholly out of
+    // view (no reset path existed before — closing and reopening the
+    // lightbox was the only recovery). Called from _imgApplyTransform so
+    // every pan/pinch/wheel/resize/nav path is covered.
+    const size = _imgViewportSize();
+    const scaledW = state.boxW * state.scale;
+    const scaledH = state.boxH * state.scale;
+    if(scaledW <= size.width){
+      state.x = (size.width - scaledW) / 2;
+    } else {
+      state.x = Math.max(size.width - scaledW, Math.min(0, state.x));
+    }
+    if(scaledH <= size.height){
+      state.y = (size.height - scaledH) / 2;
+    } else {
+      state.y = Math.max(size.height - scaledH, Math.min(0, state.y));
+    }
+  }
+
+  function _imgApplyTransform() {
+    _imgClampPan();
+    canvas.style.transform = 'translate(' + Math.round(state.x) + 'px,' + Math.round(state.y) + 'px) scale(' + state.scale + ')';
+    canvas.style.transformOrigin = '0 0';
+  }
+
+  function _imgMinScale() {
+    return Math.min(0.25, state.fitScale);
+  }
+
+  function _imgFitScale() {
+    const size = _imgViewportSize();
+    // Cap at 1 to preserve the pre-PR no-upscale behavior
+    // (img{max-width:90vw;max-height:90vh;object-fit:contain} constrained
+    // oversized images but left small ones at intrinsic size). An unbounded
+    // ratio on a tiny image (e.g. 50px in a 900px viewport -> 18) would
+    // exceed the 8x zoom max, so the first wheel gesture would snap from 18
+    // to 8 instead of zooming smoothly. state.fitScale stores this bounded
+    // value because _imgMinScale() and the at-fit resize comparison depend
+    // on it.
+    return Math.min(1, size.width / state.boxW, size.height / state.boxH);
+  }
+
+  function _imgSetScale(nextScale, anchorX, anchorY) {
+    const bounded = Math.max(_imgMinScale(), Math.min(8, nextScale));
+    if(!Number.isFinite(bounded) || !state.boxW || !state.boxH) return;
+    const size = _imgViewportSize();
+    const focusX = Number.isFinite(anchorX) ? anchorX : size.width / 2;
+    const focusY = Number.isFinite(anchorY) ? anchorY : size.height / 2;
+    if(state.scale){
+      const ratio = bounded / state.scale;
+      state.x = focusX - (focusX - state.x) * ratio;
+      state.y = focusY - (focusY - state.y) * ratio;
+    }
+    state.scale = bounded;
+    _imgApplyTransform();
+  }
+
+  function _fit() {
+    const size = _imgViewportSize();
+    if(!state.boxW || !state.boxH) return;
+    const fitScale = _imgFitScale();
+    state.fitScale = fitScale;
+    state.scale = fitScale;
+    state.x = (size.width - state.boxW * fitScale) / 2;
+    state.y = (size.height - state.boxH * fitScale) / 2;
+    _imgApplyTransform();
+  }
+
+  function _centerPan() {
+    const size = _imgViewportSize();
+    state.x = (size.width - state.boxW * state.scale) / 2;
+    state.y = (size.height - state.boxH * state.scale) / 2;
+    _imgApplyTransform();
+  }
+
+  function _onImgLoad() {
+    const nw = img.naturalWidth || img.width || 0;
+    const nh = img.naturalHeight || img.height || 0;
+    state.boxW = nw || 800;
+    state.boxH = nh || 450;
+    canvas.style.width = state.boxW + 'px';
+    canvas.style.height = state.boxH + 'px';
+    if(state.pendingNav){
+      state.pendingNav = false;
+      // The new image has its own fit baseline. Navigation keeps the user's
+      // zoom level, but a stale fitScale from the previous image would skew
+      // _imgMinScale() (zoom-out clamp) and the at-fit resize comparison:
+      // e.g. a small first image (fit 1.0) followed by a huge one (fit 0.1)
+      // would clamp zoom-out at 0.25 and make the real fit unreachable.
+      // Recompute only the baseline and re-clamp the kept scale to the new
+      // image's constraints.
+      state.fitScale = _imgFitScale();
+      state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));
+      _centerPan();
+    } else {
+      _fit();
+    }
+  }
+
+  function _imgOnPointerDown(e) {
+    if(state.pinching) return;
+    if(e.button != null && e.button !== 0) return;
+    state.dragging = true;
+    state.dragged = false;
+    state.dragOriginX = Number(e.clientX) || 0;
+    state.dragOriginY = Number(e.clientY) || 0;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    viewport.classList.add('is-panning');
+    if(viewport.setPointerCapture){
+      try{ viewport.setPointerCapture(e.pointerId); }catch(_){}
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _imgOnPointerMove(e) {
+    if(state.pinching || !state.dragging) return;
+    const dx = (Number(e.clientX) || 0) - state.dragOriginX;
+    const dy = (Number(e.clientY) || 0) - state.dragOriginY;
+    if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    state.x = state.dragStartX + dx;
+    state.y = state.dragStartY + dy;
+    _imgApplyTransform();
+  }
+
+  function _imgEndPointerDrag() {
+    if(!state.dragging) return;
+    state.dragging = false;
+    viewport.classList.remove('is-panning');
+  }
+
+  function _onViewportClick(e) {
+    const wasDragged = state.dragged;
+    state.dragged = false;
+    // Suppress the browser's post-drag click (pointerdown+up on the same
+    // element closes the lightbox right after a pan) and clicks on the
+    // transformed canvas (image pixels). An undragged click on the
+    // viewport's own letterboxed area must bubble to the lightbox backdrop
+    // handler so clicking empty space around a fitted image still closes
+    // the dialog — the img is pointer-events:none, so clicks on visible
+    // pixels target the canvas while letterboxed clicks target the viewport.
+    if(wasDragged || e.target !== viewport){
+      if(e.stopPropagation) e.stopPropagation();
+    }
+  }
+
+  function _imgTouchDist(touches) {
+    if(!touches || touches.length < 2) return 0;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function _imgOnTouchStart(e) {
+    if(e.touches.length === 2){
+      state.pinching = true;
+      state.pinchStartDist = _imgTouchDist(e.touches);
+      state.pinchStartScale = state.scale;
+      state.pinchStartX = state.x;
+      state.pinchStartY = state.y;
+      const rect = viewport.getBoundingClientRect();
+      state.pinchStartCX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+      state.pinchStartCY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
+      _imgEndPointerDrag();
+      if(e.preventDefault) e.preventDefault();
+    }
+  }
+
+  function _imgOnTouchMove(e) {
+    if(!state.pinching || e.touches.length < 2) return;
+    const rect = viewport.getBoundingClientRect();
+    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
+    const currDist = _imgTouchDist(e.touches);
+    if(state.pinchStartDist > 0 && state.pinchStartScale > 0){
+      const rawScale = state.pinchStartScale * (currDist / state.pinchStartDist);
+      const boundedScale = Math.max(_imgMinScale(), Math.min(8, rawScale));
+      const ratio = boundedScale / state.pinchStartScale;
+      state.scale = boundedScale;
+      state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
+      state.y = cy - (state.pinchStartCY - state.pinchStartY) * ratio;
+      _imgApplyTransform();
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _imgOnTouchEnd(e) {
+    if(e.touches.length < 2 && state.pinching){
+      state.pinching = false;
+      state.dragged = true;
+    }
+  }
+
+  function _imgZoomFromWheel(e) {
+    if(e.preventDefault) e.preventDefault();
+    const rect = viewport.getBoundingClientRect();
+    const anchorX = Number.isFinite(e.clientX) ? e.clientX - rect.left : undefined;
+    const anchorY = Number.isFinite(e.clientY) ? e.clientY - rect.top : undefined;
+    const factor = Math.exp((-(Number(e.deltaY) || 0)) * 0.0015);
+    _imgSetScale(state.scale * factor, anchorX, anchorY);
+  }
+
+  function _onResize() {
+    if(lb._imgZoomResizeTimer && typeof clearTimeout === 'function') clearTimeout(lb._imgZoomResizeTimer);
+    lb._imgZoomResizeTimer = setTimeout(() => {
+      lb._imgZoomResizeTimer = null;
+      const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
+      if(wasAtFit || !state.boxW){
+        _fit();
+      } else {
+        _centerPan();
+      }
+    }, 120);
+  }
+
+  viewport.onpointerdown = _imgOnPointerDown;
+  viewport.onpointermove = _imgOnPointerMove;
+  viewport.onpointerup = _imgEndPointerDrag;
+  viewport.onpointercancel = _imgEndPointerDrag;
+  viewport.onpointerleave = _imgEndPointerDrag;
+  viewport.onwheel = _imgZoomFromWheel;
+  viewport.onclick = _onViewportClick;
+  viewport.addEventListener('touchstart', _imgOnTouchStart, {passive: false});
+  viewport.addEventListener('touchmove', _imgOnTouchMove, {passive: false});
+  viewport.addEventListener('touchend', _imgOnTouchEnd);
+  viewport.addEventListener('touchcancel', function _imgOnTouchCancel(){ state.pinching = false; });
+
+  if(window && typeof window.addEventListener === 'function'){
+    window.addEventListener('resize', _onResize);
+    lb._imgZoomResizeHandler = _onResize;
+  }
+
+  // Expose keyboard-operable fit/zoom so the lightbox is not pointer-only.
+  state.fit = _fit;
+  state.zoomBy = function(factor){
+    _imgSetScale(state.scale * factor);
+  };
+
+  if(img.complete && img.naturalWidth){
+    _onImgLoad();
+  }
+  // Always attach onload — a cached/fast image may have taken the sync
+  // branch above, but navigation (src swap) still needs the handler.
+  img.onload = _onImgLoad;
+
+  return state;
+}
+
 function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
   lb.setAttribute('aria-modal', 'true');
   lb.setAttribute('aria-label', alt || 'Image');
+  // Zoomable stage: viewport (clip + gestures) > canvas (transform) > img.
+  const viewport = document.createElement('div');
+  viewport.className = 'img-lightbox-viewport';
+  const canvas = document.createElement('div');
+  canvas.className = 'img-lightbox-canvas';
   const img = document.createElement('img');
   img.src = src;
   img.alt = alt || '';
-  img.onclick = e => e.stopPropagation();
+  img.draggable = false;
+  canvas.appendChild(img);
+  viewport.appendChild(canvas);
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
-  lb.appendChild(img);
+  // Fit/reset control — zoom is not pointer-only; a keyboard/button path
+  // recovers the image after it has been zoomed/panned out of view.
+  const fitBtn = document.createElement('button');
+  fitBtn.className = 'img-lightbox-fit';
+  fitBtn.setAttribute('aria-label', t('img_lightbox_fit_title'));
+  fitBtn.setAttribute('title', t('img_lightbox_fit_title'));
+  fitBtn.textContent = t('img_lightbox_fit');
+  fitBtn.onclick = e => { e.stopPropagation(); if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); };
+  lb.appendChild(viewport);
   lb.appendChild(cls);
+  lb.appendChild(fitBtn);
   // Prev/Next navigation — store index and images on lb so a single set of
   // handlers reads live values without closure churn on every nav.
   lb._navIndex = index;
@@ -2514,9 +2824,16 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   }
   lb.onclick = () => _closeImgLightbox(lb);
   document.body.appendChild(lb);
+  // Mount zoom gestures AFTER the stage is in the DOM — a synchronously
+  // decoded image (data: URL or cache-hit) otherwise measures a 0x0
+  // viewport and fit-zooms to a near-zero scale.
+  lb._zoom = _mountImgLightboxZoom(viewport, canvas, img, lb);
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
     if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    if(e.key==='f' || e.key==='F'){ if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); return; }
+    if(e.key==='+' || e.key==='='){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1.25); return; }
+    if(e.key==='-' || e.key==='_'){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1/1.25); return; }
     if(lb._navImages){
       if(e.key==='ArrowLeft'){ e.preventDefault(); _navigateLightbox(lb, -1); }
       if(e.key==='ArrowRight'){ e.preventDefault(); _navigateLightbox(lb, 1); }
@@ -2536,6 +2853,9 @@ function _navigateLightbox(lb, direction) {
   lbImg.src = nextImg.src;
   lbImg.alt = nextImg.alt || '';
   lb.setAttribute('aria-label', nextImg.alt || 'Image');
+  // Keep the current zoom level when switching images (re-centre on the
+  // new image once it loads) — matches native photo-gallery behaviour.
+  if(lb._zoom) lb._zoom.pendingNav = true;
   // Update counter via stored reference — no DOM query.
   if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
 }
@@ -2548,6 +2868,13 @@ function _closeImgLightbox(lb) {
   if(lb._mermaidResizeTimer && typeof clearTimeout === 'function'){
     clearTimeout(lb._mermaidResizeTimer);
     lb._mermaidResizeTimer = null;
+  }
+  if(lb._imgZoomResizeHandler && window && typeof window.removeEventListener === 'function'){
+    window.removeEventListener('resize', lb._imgZoomResizeHandler);
+  }
+  if(lb._imgZoomResizeTimer && typeof clearTimeout === 'function'){
+    clearTimeout(lb._imgZoomResizeTimer);
+    lb._imgZoomResizeTimer = null;
   }
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
