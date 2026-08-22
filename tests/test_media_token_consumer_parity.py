@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from types import SimpleNamespace
 from unittest import mock
@@ -49,6 +50,51 @@ def test_wrapped_inner_punctuation_matches_renderer_share_auth_and_snapshot(
     with mock.patch.object(routes, "get_session", return_value=session):
         assert routes._session_media_token_allows_image_path(
             "s-media-parity", image, {"image/png"}
+        )
+
+    monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(tmp_path / "media_snapshots")
+    )
+    messages = [{"role": "assistant", "content": text}]
+    assert annotate_media_snapshots(messages) == 1
+    snapshots = messages[0]["_media_snapshots"]
+    assert str(image.resolve()) in snapshots
+    assert len(snapshots[str(image.resolve())]) == 64
+
+
+@pytest.mark.parametrize(
+    ("entity_quote", "literal_quote"),
+    [("&quot;", '"'), ("&#39;", "'")],
+)
+def test_entity_balanced_local_media_matches_renderer_stream_server_consumers(
+    media_parity_driver, tmp_path, monkeypatch, entity_quote, literal_quote
+):
+    from api import routes, shares
+    from api.helpers import split_media_token_ref
+    from api.media_snapshots import annotate_media_snapshots
+
+    image = tmp_path / "ok.png"
+    _write_png(image)
+    text = f"{entity_quote}MEDIA:{image}{entity_quote}."
+    encoded = urllib.parse.quote(str(image), safe="")
+
+    match = re.search(r"MEDIA:([^\s\)\]]+)", text)
+    assert match is not None
+    assert split_media_token_ref(text, match) == (str(image), f"{literal_quote}.")
+
+    rendered = _render(media_parity_driver, text)
+    assert f"path={encoded}" in rendered
+    assert f"path={encoded}%26" not in rendered
+
+    shared = shares._embed_share_media(text, allowed_roots=(tmp_path,))
+    assert "data:image/png;base64," in shared
+    assert shares._PLACEHOLDER not in shared
+
+    session = SimpleNamespace(messages=[{"role": "assistant", "content": text}])
+    with mock.patch.object(routes, "get_session", return_value=session):
+        assert routes._session_media_token_allows_image_path(
+            "s-media-entity-parity", image, {"image/png"}
         )
 
     monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
