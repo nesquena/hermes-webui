@@ -279,7 +279,7 @@
         </div>
       </div>
       <div class="panel-head-sub" style="padding:0 12px 8px">
-        <select id="insightsPeriod" onchange="loadInsights()" style="width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px">
+        <select id="insightsPeriod" class="insights-period-select" onchange="loadInsights()">
           <option value="7">7 days</option>
           <option value="30" selected>30 days</option>
           <option value="90">90 days</option>
@@ -1101,7 +1101,7 @@
             </div>
             <div class="settings-field" style="margin-top:8px">
               <label for="settingsStructuredCodeMode" data-i18n="settings_label_structured_code">JSON/YAML code blocks</label>
-              <select id="settingsStructuredCodeMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              <select id="settingsStructuredCodeMode" style="width:100%;padding:8px;background-color:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="auto" data-i18n="settings_option_structured_code_auto">Auto: Tree for long blocks</option>
                 <option value="on" data-i18n="settings_option_structured_code_on">Tree by default</option>
                 <option value="off" data-i18n="settings_option_structured_code_off">Raw by default</option>
@@ -1154,7 +1154,7 @@
               <label for="settingsModelChip" data-i18n="settings_label_model">Default Model</label>
               <div class="model-advanced-row">
                 <button type="button" id="settingsModelChip" class="settings-model-chip" aria-haspopup="listbox" aria-expanded="false">Default Model</button>
-                <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                <select id="settingsModel" style="width:100%;padding:8px;background-color:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
                 <button type="button" id="mainAdvancedBtn" class="model-advanced-btn" title="Advanced options" aria-label="Advanced options for main model"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
                 <div class="model-dropdown settings-model-dropdown" id="settingsModelDropdown"></div>
               </div>
@@ -1192,7 +1192,7 @@
             </div>
             <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
-              <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              <select id="settingsSendKey" style="width:100%;padding:8px;background-color:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="enter">Enter (Shift+Enter for newline)</option>
                 <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>
                 <option value="shift+enter">Shift+Enter (Enter for newline)</option>
@@ -1200,7 +1200,7 @@
             </div>
             <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
-              <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+              <select id="settingsLanguage" style="width:100%;padding:8px;background-color:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
