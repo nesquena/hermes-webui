@@ -13,6 +13,7 @@ import sys
 import threading
 import types
 import urllib.error
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -773,6 +774,160 @@ def test_codex_account_usage_subprocess_keeps_legacy_reason_when_pool_misses(mon
     assert snapshot["available"] is False
     assert snapshot["unavailable_reason"] == "Codex account limits are not available for this credential."
     assert snapshot["fetched_at"] == "2030-03-17T12:30:00Z"
+
+
+def test_codex_singleton_duration_reaches_quota_payload_and_production_labels(monkeypatch, capsys, tmp_path):
+    """The no-pool probe must recover durations dropped by the installed Agent parser."""
+    import api.providers as providers
+
+    provider_payload = {
+        "plan_type": "pro",
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 15,
+                "reset_at": "2030-03-17T17:30:00Z",
+                "limit_window_seconds": 18_000,
+            },
+            "secondary_window": {
+                "used_percent": 40,
+                "reset_at": "2030-03-24T12:30:00Z",
+                "limit_window_seconds": 604_800,
+            },
+        },
+    }
+
+    @dataclass(frozen=True)
+    class AccountUsageWindow:
+        label: str
+        used_percent: float | None = None
+        reset_at: datetime | None = None
+        detail: str | None = None
+
+    @dataclass(frozen=True)
+    class AccountUsageSnapshot:
+        provider: str
+        source: str
+        fetched_at: datetime
+        title: str = "Account limits"
+        plan: str | None = None
+        windows: tuple[AccountUsageWindow, ...] = ()
+        details: tuple[str, ...] = ()
+        unavailable_reason: str | None = None
+
+        @property
+        def available(self):
+            return bool(self.windows or self.details) and not self.unavailable_reason
+
+    parsed_snapshots = []
+
+    def fake_fetch_account_usage(provider, *, base_url=None, api_key=None):
+        windows = []
+        rate_limit = provider_payload["rate_limit"]
+        for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
+            window = rate_limit[key]
+            windows.append(AccountUsageWindow(
+                label=label,
+                used_percent=float(window["used_percent"]),
+                reset_at=datetime.fromisoformat(window["reset_at"].replace("Z", "+00:00")),
+            ))
+        snapshot = AccountUsageSnapshot(
+            provider=provider,
+            source="usage_api",
+            fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+            plan="Pro",
+            windows=tuple(windows),
+        )
+        parsed_snapshots.append(snapshot)
+        return snapshot
+
+    def fake_resolve_codex_usage_credentials(base_url, api_key):
+        assert base_url is None
+        assert api_key is None
+        return "singleton-token", "https://chatgpt.com/backend-api/codex", "acct-singleton"
+
+    class EmptyPool:
+        def entries(self):
+            return []
+
+        def select(self):
+            raise AssertionError("the no-pool quota probe must not rotate credential selection")
+
+    seen_requests = []
+
+    def fake_urlopen(req, timeout):
+        seen_requests.append((req, timeout))
+        return _FakeResponse(json.dumps(provider_payload).encode("utf-8"))
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    account_usage_mod.AccountUsageWindow = AccountUsageWindow
+    account_usage_mod.AccountUsageSnapshot = AccountUsageSnapshot
+    account_usage_mod.fetch_account_usage = fake_fetch_account_usage
+    account_usage_mod._resolve_codex_usage_credentials = fake_resolve_codex_usage_credentials
+    credential_pool_mod = types.ModuleType("agent.credential_pool")
+    credential_pool_mod.load_pool = lambda provider: EmptyPool()
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", credential_pool_mod)
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "openai-codex", ""])
+
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+
+    worker_payload = json.loads(capsys.readouterr().out.strip())
+    assert tuple(AccountUsageWindow.__dataclass_fields__) == ("label", "used_percent", "reset_at", "detail")
+    assert len(parsed_snapshots) == 1
+    assert [window["limit_window_seconds"] for window in worker_payload["windows"]] == [18_000, 604_800]
+    assert len(seen_requests) == 1
+    request, timeout = seen_requests[0]
+    assert request.full_url == "https://chatgpt.com/backend-api/wham/usage"
+    assert request.headers["Authorization"] == "Bearer singleton-token"
+    assert request.headers["Chatgpt-account-id"] == "acct-singleton"
+    assert timeout == 4.0
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        providers,
+        "_agent_fetch_account_usage_for_home",
+        lambda *_args, **_kwargs: providers._account_usage_payload_to_snapshot(worker_payload),
+    )
+    old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
+    try:
+        result = providers.get_provider_quota(refresh=True)
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    windows = result["account_limits"]["windows"]
+    assert [window["limit_window_seconds"] for window in windows] == [18_000, 604_800]
+
+    node = shutil.which("node")
+    if node is not None:
+        panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+        start = panels.index("function _formatProviderQuotaWindowLabel")
+        end = panels.index("\nfunction _formatProviderQuotaLastChecked", start)
+        helper = panels[start:end]
+        script = f"""
+const translations = {{
+  provider_quota_session_limit: '5-hour limit',
+  provider_quota_weekly_limit: 'Weekly limit',
+  provider_quota_usage_limit: 'Usage limit',
+  provider_quota_window_fallback: 'Window'
+}};
+function t(key) {{ return translations[key] || key; }}
+{helper}
+const limits = {json.dumps(result["account_limits"])};
+process.stdout.write(JSON.stringify(limits.windows.map(window =>
+  _formatProviderQuotaWindowLabel(limits, window)
+)));
+"""
+        rendered = subprocess.run(
+            [node, "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert json.loads(rendered.stdout) == ["5-hour limit", "Weekly limit"]
 
 
 def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
@@ -1908,3 +2063,58 @@ def test_account_usage_semaphore_caps_concurrency(monkeypatch, tmp_path):
     finally:
         unblock.set()
         _restore_config(old_cfg, old_mtime)
+
+
+def test_codex_singleton_backfill_matches_windows_by_label_not_position(monkeypatch):
+    """The Agent object and the WebUI probe are two separate requests.
+
+    If the Agent skipped a window (used_percent missing) its list is shorter, so a
+    positional join would hand the Session duration to the Weekly window. That is the
+    same mislabeling this change exists to prevent, so the join is keyed on label.
+    """
+    import api.providers as providers
+    from types import SimpleNamespace
+
+    # The embedded worker imports the Agent at module scope; stub it so the
+    # source can be exec'd here the same way the other worker tests do.
+    agent_pkg = types.ModuleType("agent")
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    account_usage_mod.fetch_account_usage = lambda *_a, **_k: None
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+
+    # Exec only the definitions: the worker source ends with a CLI driver that
+    # reads sys.argv and would run a real fetch.
+    source = providers._ACCOUNT_USAGE_SUBPROCESS_CODE
+    definitions = source.split('if len(sys.argv) > 1')[0]
+    assert "_codex_singleton_payload" in definitions
+    namespace = {"__name__": "__not_main__"}
+    exec(definitions, namespace)
+
+    # Agent dropped the Session window entirely and carries no duration.
+    agent_snapshot = SimpleNamespace(
+        provider="openai-codex",
+        windows=(SimpleNamespace(label="Weekly", used_percent=42.0, reset_at=None, detail=None),),
+    )
+    # The WebUI's own probe still sees both windows, Session first.
+    raw_snapshot = SimpleNamespace(
+        provider="openai-codex",
+        windows=(
+            SimpleNamespace(
+                label="Session", used_percent=7.0, reset_at=None, detail=None,
+                limit_window_seconds=18_000,
+            ),
+            SimpleNamespace(
+                label="Weekly", used_percent=42.0, reset_at=None, detail=None,
+                limit_window_seconds=604_800,
+            ),
+        ),
+    )
+    namespace["_fetch_codex_singleton_snapshot"] = lambda *_a, **_k: raw_snapshot
+
+    payload = namespace["_codex_singleton_payload"](agent_snapshot)
+    windows = payload["windows"]
+
+    assert [window["label"] for window in windows] == ["Weekly"]
+    # A positional join would have written 18000 here, mislabeling Weekly as 5-hour.
+    assert windows[0]["limit_window_seconds"] == 604_800

@@ -477,6 +477,57 @@ def _fetch_codex_entry_snapshot(entry):
     return _codex_snapshot_from_usage_payload(payload), True, None
 
 
+def _fetch_codex_singleton_snapshot(api_key=None):
+    try:
+        from agent.account_usage import _resolve_codex_usage_credentials
+
+        access_token, base_url, account_id = _resolve_codex_usage_credentials(None, api_key)
+        headers = _codex_usage_headers(access_token)
+        if account_id:
+            headers["ChatGPT-Account-ID"] = str(account_id).strip()
+        request = urllib_request.Request(
+            _resolve_codex_usage_url(base_url),
+            headers=headers,
+        )
+        with urllib_request.urlopen(request, timeout=_CODEX_POOL_USAGE_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+        return _codex_snapshot_from_usage_payload(payload)
+    except Exception:
+        return None
+
+
+def _codex_singleton_payload(snapshot, api_key=None):
+    payload = _snapshot_payload(snapshot)
+    windows = payload.get("windows") if isinstance(payload, dict) else None
+    if windows and all(window.get("limit_window_seconds") is not None for window in windows):
+        return payload
+
+    raw_payload = _snapshot_payload(_fetch_codex_singleton_snapshot(api_key))
+    if not isinstance(raw_payload, dict):
+        return payload
+    if not isinstance(payload, dict):
+        return raw_payload
+
+    # Join on label rather than position. Both parsers walk the same fixed
+    # (primary_window, secondary_window) order, but they issue separate requests
+    # and each skips a window whose used_percent is missing. If one list is short
+    # a positional join would hand Session's duration to Weekly, which is the
+    # mislabeling this change exists to prevent.
+    raw_by_label = {}
+    for raw_window in raw_payload.get("windows") or ():
+        label = str(raw_window.get("label") or "").strip().lower()
+        if label and label not in raw_by_label:
+            raw_by_label[label] = raw_window
+    for window in windows or ():
+        if window.get("limit_window_seconds") is not None:
+            continue
+        raw_window = raw_by_label.get(str(window.get("label") or "").strip().lower())
+        if raw_window is None:
+            continue
+        window["limit_window_seconds"] = raw_window.get("limit_window_seconds")
+    return payload
+
+
 def _best_remaining_by_window(rows):
     best = {}
     for row in rows:
@@ -668,6 +719,8 @@ def _fetch_snapshot(provider, api_key, env_var=None):
             pool_snapshot = _fetch_codex_account_usage_from_pool()
             if isinstance(getattr(pool_snapshot, "pool", None), dict):
                 snapshot = pool_snapshot
+            else:
+                return _codex_singleton_payload(snapshot, api_key)
         return _snapshot_payload(snapshot)
     finally:
         if env_var and api_key:
