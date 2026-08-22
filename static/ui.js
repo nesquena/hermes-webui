@@ -9560,313 +9560,173 @@ function autoReadLastAssistant(){
   speechSynthesis.speak(utter);
 }
 
-// ── Per-tab identity (multi-tab isolation) ──
+// ── Per-document identity (multi-tab isolation) ──
 //
-// localStorage is shared by every tab on the same origin, so any key that
-// describes "the" active conversation is really a single global slot that all
-// tabs fight over. Opening conversation A in tab 1 and conversation B in tab 2
-// made the last writer win: reload restored the wrong session, the reconnect
-// banner pointed at another tab's stream, and inflight transcript snapshots
-// from one tab were merged into another tab's chat.
-//
-// sessionStorage IS per-tab (and survives reload / is copied on tab
-// duplication), so we mint a stable tab id there and namespace all
-// tab-scoped runtime state with it. localStorage remains the storage
-// backend (sessionStorage would be lost by some PWA/BFCache restores), but
-// every entry is now explicitly owned by exactly one tab.
+// localStorage is shared by every document on the same origin, so an inherited
+// tab id cannot be made authoritative with a localStorage read/write/verify
+// sequence: those operations are not a transaction. Instead, every new
+// JavaScript document mints a fresh cryptographic id and never adopts the id
+// copied in sessionStorage by Duplicate Tab or session restore. Scoped state is
+// mirrored in this browsing context's sessionStorage, then restored under the
+// fresh id on reload. Two documents therefore never need to arbitrate a shared
+// identity, and no localStorage operation is treated as atomic.
 const TAB_ID_KEY = 'hermes-webui-tab-id';
-const TAB_ID_CLAIM_KEY = 'hermes-webui-tab-claims';
-function _newTabId(){
-  try{
-    if(typeof window!=='undefined'&&window.crypto&&typeof window.crypto.randomUUID==='function'){
-      return window.crypto.randomUUID();
-    }
-  }catch(_){}
-  return 't'+Date.now().toString(36)+Math.random().toString(36).slice(2,10);
-}
-// Duplicating a tab (Chrome "Duplicate", or a PWA restore) COPIES sessionStorage,
-// so the clone would start life with the original tab's id and both tabs would
-// write to the same per-tab keys — reintroducing exactly the cross-talk this
-// fix removes. Ownership is therefore AUTHORITATIVE, not timer-based: every JS
-// context mints a per-context nonce (kept only on `window`, never in
-// sessionStorage, so a clone can never inherit it) and records
-// `{nonce, ts, released}` for its tab id in a shared registry. An id whose
-// record carries a foreign nonce and is not explicitly released is NEVER
-// reusable — no heartbeat gap, sleep, or timer throttling can make it reusable.
-// (Previously a missed 45s lease let a duplicated tab keep the original's id.)
-//
-// Reload safety: pagehide marks the record `released` (keeping nonce+ts), so a
-// normal refresh re-claims the same id and keeps its in-flight recovery state.
-// Crash-restore is the accepted trade-off: an unreleased foreign record is
-// indistinguishable from a live duplicate, so a restored tab mints a fresh id
-// (losing its recovery snapshot) instead of risking a collision.
-const _TAB_CLAIM_HEARTBEAT_MS = 15000;
-// Throttle for the ownership revalidation performed before every scoped
-// read/write (see _revalidateTabOwnership). Correctness does not depend on
-// this value; it only bounds how often the registry round-trip happens.
-const _TAB_OWNER_REVALIDATE_MS = 5000;
-// Retention window for RELEASED ownership records and for the legacy "seen"
-// heuristic. A released tab's keys are kept this long because the browser can
-// resurrect its sessionStorage (reload, bfcache, Ctrl+Shift+T reopen). It is
-// never used to declare a CLAIMED (unreleased) tab dead — an unreleased
-// ownership record always wins over any elapsed-time heuristic.
-const _TAB_SEEN_TTL_MS = 24 * 60 * 60 * 1000;
-const TAB_ID_SEEN_KEY = 'hermes-webui-tab-seen';
-// Storage key bases for per-tab state. Declared HERE, before the helpers that
-// reference them, so _gcOrphanTabKeys() can never hit a temporal-dead-zone
-// ReferenceError — its body is inside a try/catch, so such an error would make
-// garbage collection a silent no-op and let localStorage grow unbounded.
+const TAB_ID_RELEASED_BASE = 'hermes-webui-tab-released';
+const _TAB_RELEASED_TTL_MS = 24 * 60 * 60 * 1000;
 const INFLIGHT_KEY_BASE = 'hermes-webui-inflight'; // legacy/global (migration only)
 const INFLIGHT_STATE_KEY_BASE = 'hermes-webui-inflight-state';
 const ACTIVE_SESSION_KEY_LEGACY = 'hermes-webui-session';
-// Explicit per-tab "no session" tombstone (see _forgetActiveSession): after a
-// tab forgets its session on purpose, the shared legacy fallback must not
-// bleed back into it on the next read.
 const ACTIVE_SESSION_TOMBSTONE_BASE = 'hermes-webui-session-none';
-// Per-context ownership nonce. Lives ONLY on `window` (one per JS execution
-// context): a duplicated tab copies sessionStorage but gets a fresh window, so
-// it can never present the original context's nonce during arbitration.
-function _hermesTabNonce(){
-  if(typeof window==='undefined') return 'default-nonce';
-  if(!window.__hermesTabNonce) window.__hermesTabNonce=_newTabId();
-  return window.__hermesTabNonce;
-}
-// Ownership registry: {tabId: {nonce, ts, released}}. Returns null (NOT {})
-// when the stored value is malformed, so callers can fail safe — a GC pass
-// must treat "unreadable registry" as "assume every tab is alive", and a
-// claimer must mint a fresh id instead of reusing a possibly-owned one.
-function _readTabClaims(){
-  let raw=null;
-  try{ raw=localStorage.getItem(TAB_ID_CLAIM_KEY); }catch(_){ return null; }
-  if(raw==null) return {};
-  let reg=null;
-  try{ reg=JSON.parse(raw); }catch(_){ return null; }
-  if(!reg||typeof reg!=='object'||Array.isArray(reg)) return null;
-  const out={};
-  for(const [id,rec] of Object.entries(reg)){
-    // Entries without a nonce cannot prove ownership (foreign/corrupt shapes);
-    // drop them — their tab, if alive, simply re-claims on its next
-    // revalidation pass.
-    if(!rec||typeof rec!=='object'||typeof rec.nonce!=='string'||!rec.nonce) continue;
-    const ts=Number(rec.ts);
-    out[id]={nonce:rec.nonce, ts:Number.isFinite(ts)?ts:0, released:!!rec.released};
-  }
-  return out;
-}
-function _writeTabClaims(reg){
-  try{ localStorage.setItem(TAB_ID_CLAIM_KEY, JSON.stringify(reg)); return true; }
-  catch(_){ return false; }
-}
-// Seen-registry updates are read-modify-write on a single localStorage key, and
-// two tabs can interleave between the read and the write (localStorage offers
-// no transaction). A blind whole-object write would drop the record a
-// concurrent tab just added, so this helper re-reads immediately before
-// writing and only ever touches the caller's OWN id: `stamp` refreshes it,
-// `drop` removes it, and every other tab's entry is carried over untouched
-// (minus TTL expiry).
-function _updateTabRegistry(key, id, ttlMs, drop){
-  if(!id) return;
+const TAB_ACTIVE_SESSION_MIRROR_KEY = 'hermes-webui-tab-active-session';
+const TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY = 'hermes-webui-tab-active-session-none';
+const TAB_INFLIGHT_MIRROR_KEY = 'hermes-webui-tab-inflight';
+const TAB_INFLIGHT_STATE_MIRROR_KEY = 'hermes-webui-tab-inflight-state';
+
+function _newTabId(){
   try{
-    let reg={};
-    try{ reg=JSON.parse(localStorage.getItem(key)||'{}')||{}; }catch(_){ reg={}; }
-    if(typeof reg!=='object'||!reg) reg={};
-    const now=Date.now();
-    for(const [k,v] of Object.entries(reg)){
-      if(!v||typeof v!=='number'||(now-v)>ttlMs) delete reg[k];
+    if(typeof window==='undefined'||!window.crypto) return '';
+    if(typeof window.crypto.randomUUID==='function') return window.crypto.randomUUID();
+    if(typeof window.crypto.getRandomValues==='function'){
+      const bytes=new Uint8Array(16);
+      window.crypto.getRandomValues(bytes);
+      // RFC 4122 version/variant bits make the fallback the same 122-bit UUID
+      // identity class as randomUUID().
+      bytes[6]=(bytes[6]&15)|64;
+      bytes[8]=(bytes[8]&63)|128;
+      const hex=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+      return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
     }
-    if(drop) delete reg[id]; else reg[id]=now;
-    localStorage.setItem(key, JSON.stringify(reg));
+  }catch(_){}
+  return '';
+}
+function _scopedTabKey(base,id){
+  const owner=id||_hermesTabId();
+  // Without a cryptographic per-document identity, shared localStorage is not
+  // safe. Throw so existing guarded callers degrade to no recovery instead of
+  // reading or writing a shared fallback key.
+  if(!owner) throw new Error('secure per-document storage identity unavailable');
+  return base+'::'+owner;
+}
+function _mirrorTabValue(key,value){
+  try{
+    if(value==null) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key,String(value));
   }catch(_){}
 }
-// "Seen" registry: records the last time a tab id was active. Only a
-// heuristic for keys with NO ownership record (pre-upgrade leftovers) — the
-// ownership registry above is the authority for everything else (#2386 quota).
-function _touchTabSeen(id){
-  _updateTabRegistry(TAB_ID_SEEN_KEY, id, _TAB_SEEN_TTL_MS, false);
+function _restoreDocumentScopedState(id){
+  if(!id) return;
+  try{
+    const active=sessionStorage.getItem(TAB_ACTIVE_SESSION_MIRROR_KEY);
+    const tombstone=sessionStorage.getItem(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY);
+    if(active){
+      window.__hermesActiveSession=active;
+      window.__hermesActiveSessionKnown=true;
+      localStorage.setItem(_scopedTabKey(ACTIVE_SESSION_KEY_LEGACY,id),active);
+      localStorage.removeItem(_scopedTabKey(ACTIVE_SESSION_TOMBSTONE_BASE,id));
+    }else if(tombstone){
+      window.__hermesActiveSession=null;
+      window.__hermesActiveSessionKnown=true;
+      localStorage.setItem(_scopedTabKey(ACTIVE_SESSION_TOMBSTONE_BASE,id),tombstone);
+      localStorage.removeItem(_scopedTabKey(ACTIVE_SESSION_KEY_LEGACY,id));
+    }
+  }catch(_){}
+  try{
+    const marker=sessionStorage.getItem(TAB_INFLIGHT_MIRROR_KEY);
+    if(marker!=null) localStorage.setItem(_scopedTabKey(INFLIGHT_KEY_BASE,id),marker);
+  }catch(_){}
+  try{
+    const raw=sessionStorage.getItem(TAB_INFLIGHT_STATE_MIRROR_KEY);
+    if(raw!=null){
+      const parsed=JSON.parse(raw);
+      if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
+        const restamped={};
+        for(const [sid,entry] of Object.entries(parsed)){
+          if(sid&&entry&&typeof entry==='object'&&!Array.isArray(entry)){
+            restamped[sid]={...entry,tabId:id};
+          }
+        }
+        localStorage.setItem(_scopedTabKey(INFLIGHT_STATE_KEY_BASE,id),JSON.stringify(restamped));
+        sessionStorage.setItem(TAB_INFLIGHT_STATE_MIRROR_KEY,JSON.stringify(restamped));
+      }
+    }
+  }catch(_){}
 }
-// Remove per-tab keys whose owning tab is provably gone. Without this, every
-// new tab would leave `<base>::<uuid>` entries behind and slowly fill the
-// origin's localStorage quota (#2386).
-//
-// Fail-safe rules (maintainer re-gate, PR #7084):
-//   * A malformed ownership registry DISABLES GC entirely — corrupt JSON must
-//     never be interpreted as "no tab is alive".
-//   * An id with an UNRELEASED ownership record is authoritatively alive and is
-//     never collected, no matter how much time elapsed (a suspended laptop or
-//     throttled background tab misses heartbeats without dying).
-//   * An id with a RELEASED record is collected only after the release grace
-//     window (so a reloading tab can re-claim first).
-//   * Only ids with NO record at all (pre-upgrade leftovers) fall back to the
-//     seen-TTL heuristic — and a malformed seen registry likewise disables GC.
+// GC is based only on an explicit, per-id pagehide record. Each release marker
+// has its own key, so concurrent documents never perform a shared-map
+// read-modify-write. Missing or malformed markers fail closed and retain state;
+// elapsed heartbeats are never used as proof that a live/frozen document died.
 function _gcOrphanTabKeys(){
   try{
-    const claims=_readTabClaims();
-    if(claims===null) return; // fail safe: unreadable registry ⇒ collect nothing
-    let seenRaw=null;
-    try{ seenRaw=localStorage.getItem(TAB_ID_SEEN_KEY); }catch(_){ return; }
-    let seen={};
-    if(seenRaw!=null){
-      try{ seen=JSON.parse(seenRaw); }catch(_){ return; } // fail safe
-      if(!seen||typeof seen!=='object'||Array.isArray(seen)) return; // fail safe
-    }
     const now=Date.now();
-    const prefixes=[INFLIGHT_KEY_BASE+'::', INFLIGHT_STATE_KEY_BASE+'::', ACTIVE_SESSION_KEY_LEGACY+'::', ACTIVE_SESSION_TOMBSTONE_BASE+'::'];
+    const statePrefixes=[
+      INFLIGHT_KEY_BASE+'::',
+      INFLIGHT_STATE_KEY_BASE+'::',
+      ACTIVE_SESSION_KEY_LEGACY+'::',
+      ACTIVE_SESSION_TOMBSTONE_BASE+'::',
+    ];
+    const releasePrefix=TAB_ID_RELEASED_BASE+'::';
     const doomed=[];
     for(let i=0;i<localStorage.length;i++){
       const key=localStorage.key(i);
       if(!key) continue;
-      const prefix=prefixes.find(p=>key.indexOf(p)===0);
+      const prefix=statePrefixes.find(p=>key.indexOf(p)===0);
       if(!prefix) continue;
       const owner=key.slice(prefix.length);
       if(!owner) continue;
-      const rec=Object.prototype.hasOwnProperty.call(claims,owner)?claims[owner]:null;
-      if(rec){
-        if(!rec.released) continue;                    // authoritatively alive
-        if((now-rec.ts)<=_TAB_SEEN_TTL_MS) continue;   // reload/reopen window
-        doomed.push(key);
-        continue;
-      }
-      // No ownership record: legacy leftovers only. Recent "seen" ⇒ keep.
-      const seenTs=Number(seen[owner]);
-      if(Number.isFinite(seenTs)&&(now-seenTs)<=_TAB_SEEN_TTL_MS) continue;
+      const releasedRaw=localStorage.getItem(releasePrefix+owner);
+      if(releasedRaw==null) continue;
+      const releasedAt=Number(releasedRaw);
+      if(!Number.isFinite(releasedAt)||(now-releasedAt)<=_TAB_RELEASED_TTL_MS) continue;
       doomed.push(key);
     }
     for(const key of doomed){
       try{ localStorage.removeItem(key); }catch(_){}
     }
-    // Prune long-dead registry entries so the registries themselves stay
-    // bounded. Unreleased records are never pruned (authoritative liveness).
-    try{
-      let changed=false;
-      for(const [id,rec] of Object.entries(claims)){
-        if(rec.released&&(now-rec.ts)>_TAB_SEEN_TTL_MS){ delete claims[id]; changed=true; }
+    const staleReleaseKeys=[];
+    for(let i=0;i<localStorage.length;i++){
+      const key=localStorage.key(i);
+      if(!key||key.indexOf(releasePrefix)!==0) continue;
+      const releasedAt=Number(localStorage.getItem(key));
+      if(Number.isFinite(releasedAt)&&(now-releasedAt)>_TAB_RELEASED_TTL_MS){
+        staleReleaseKeys.push(key);
       }
-      if(changed) _writeTabClaims(claims);
-    }catch(_){}
-    try{
-      let changed=false;
-      for(const [id,ts] of Object.entries(seen)){
-        const n=Number(ts);
-        if(!Number.isFinite(n)||(now-n)>_TAB_SEEN_TTL_MS){ delete seen[id]; changed=true; }
-      }
-      if(changed) localStorage.setItem(TAB_ID_SEEN_KEY, JSON.stringify(seen));
-    }catch(_){}
+    }
+    for(const key of staleReleaseKeys){
+      try{ localStorage.removeItem(key); }catch(_){}
+    }
   }catch(_){}
 }
-// Collision arbitration. Attempts to take ownership of `id` for THIS context's
-// nonce. Succeeds when the id is unrecorded, already ours, or explicitly
-// released; fails when a foreign unreleased record exists (a live duplicate —
-// regardless of the record's age) or when the registry is unreadable (a
-// possibly-live owner must never be raced). Compare-and-swap shaped: re-reads
-// immediately before writing and verifies its own write landed, so two
-// simultaneous claimers cannot both believe they won.
-function _claimTabOwnership(id){
-  const nonce=_hermesTabNonce();
-  const reg=_readTabClaims();
-  if(reg===null) return false; // fail safe: cannot prove the id is free
-  const rec=Object.prototype.hasOwnProperty.call(reg,id)?reg[id]:null;
-  if(rec&&rec.nonce!==nonce&&!rec.released) return false;
-  reg[id]={nonce, ts:Date.now(), released:false};
-  if(!_writeTabClaims(reg)) return false;
-  // Verify: another context interleaving between our read and write loses if
-  // its write landed after ours; re-read to confirm ownership stuck.
-  const check=_readTabClaims();
-  if(check===null) return false;
-  const mine=Object.prototype.hasOwnProperty.call(check,id)?check[id]:null;
-  return !!(mine&&mine.nonce===nonce&&!mine.released);
-}
-function _claimTabId(id){
-  // A fresh id may still collide with a concurrent claimer; arbitration
-  // re-checks after each mint. Bounded retries keep boot non-blocking even
-  // with a hostile registry — the final fallback id is context-local.
-  let candidate=id;
-  for(let attempt=0;attempt<4;attempt++){
-    if(_claimTabOwnership(candidate)) return candidate;
-    candidate=_newTabId();
-  }
-  return candidate;
-}
-function _releaseTabId(){
+function _releaseTabId(event){
+  // A BFCache pagehide does not end the document; pageshow resumes the same
+  // in-memory identity. Only a real teardown proves this id is no longer used.
+  if(event&&event.persisted) return;
   try{
     if(typeof window==='undefined'||!window.__hermesTabId) return;
-    const reg=_readTabClaims();
-    if(reg===null) return;
-    const id=window.__hermesTabId;
-    const rec=Object.prototype.hasOwnProperty.call(reg,id)?reg[id]:null;
-    // Only the owner may release: releasing a record that a newer context
-    // re-claimed would hand our id to the next duplicate.
-    if(!rec||rec.nonce!==_hermesTabNonce()) return;
-    reg[id]={nonce:rec.nonce, ts:Date.now(), released:true};
-    _writeTabClaims(reg);
-  }catch(_){}
-}
-// Ownership revalidation — the authoritative gate run before every scoped
-// read/write (throttled). If another context stole or re-claimed this tab's id
-// (clone arbitration race, registry clobber), THIS context must stop using the
-// id immediately and mint a fresh one; otherwise its next scoped write would
-// land in the thief's keyspace.
-function _revalidateTabOwnership(){
-  if(typeof window==='undefined'||!window.__hermesTabId) return;
-  const now=Date.now();
-  if(window.__hermesTabOwnerCheckedAt&&(now-window.__hermesTabOwnerCheckedAt)<_TAB_OWNER_REVALIDATE_MS) return;
-  window.__hermesTabOwnerCheckedAt=now;
-  try{
-    const nonce=_hermesTabNonce();
-    const reg=_readTabClaims();
-    if(reg===null){
-      // Registry unreadable: keep the current id (fail safe — do NOT churn
-      // identities on transient corruption; GC is disabled in this state too).
-      return;
-    }
-    const rec=Object.prototype.hasOwnProperty.call(reg,window.__hermesTabId)?reg[window.__hermesTabId]:null;
-    if(rec&&rec.nonce===nonce&&!rec.released){
-      reg[window.__hermesTabId]={nonce, ts:now, released:false};
-      _writeTabClaims(reg);
-      _touchTabSeen(window.__hermesTabId);
-      return;
-    }
-    // Record missing (pruned / first write lost) or released (bfcache restore
-    // after pagehide): arbitration decides — re-claim succeeds unless a
-    // foreign UNRELEASED record owns the id.
-    if(_claimTabOwnership(window.__hermesTabId)){ _touchTabSeen(window.__hermesTabId); return; }
-    // Foreign owner (or lost arbitration): abandon this id NOW, before any
-    // scoped read/write can touch the other tab's keyspace.
-    const fresh=_claimTabId(_newTabId());
-    window.__hermesTabId=fresh;
-    try{ sessionStorage.setItem(TAB_ID_KEY,fresh); }catch(_){}
-    _touchTabSeen(fresh);
+    localStorage.setItem(_scopedTabKey(TAB_ID_RELEASED_BASE,window.__hermesTabId),String(Date.now()));
   }catch(_){}
 }
 function _hermesTabId(){
   if(typeof window==='undefined') return 'default';
-  if(window.__hermesTabId){ _revalidateTabOwnership(); return window.__hermesTabId; }
-  let id='';
-  try{ id=sessionStorage.getItem(TAB_ID_KEY)||''; }catch(_){ id=''; }
-  const claimed=_claimTabId(id||_newTabId());
-  if(claimed!==id){
-    try{ sessionStorage.setItem(TAB_ID_KEY,claimed); }catch(_){}
+  if(window.__hermesTabId) return window.__hermesTabId;
+  const id=_newTabId();
+  if(!id){
+    window.__hermesTabAuthorityUnavailable=true;
+    return null;
   }
-  window.__hermesTabId=claimed;
-  window.__hermesTabOwnerCheckedAt=Date.now();
-  _touchTabSeen(claimed);
-  // Reclaim keys left behind by tabs that are gone for good.
+  // Deliberately overwrite (never adopt) any id inherited through copied
+  // sessionStorage. Recovery values are mirrored separately and are re-stamped
+  // under this document's fresh identity before scoped access begins.
+  window.__hermesTabId=id;
+  try{ sessionStorage.setItem(TAB_ID_KEY,id); }catch(_){}
+  _restoreDocumentScopedState(id);
   _gcOrphanTabKeys();
   try{
-    if(!window.__hermesTabClaimTimer){
-      // Refresh the ownership stamp while alive. NOTE: liveness does NOT
-      // depend on this timer (an unreleased record never expires); the stamp
-      // only feeds the released/seen grace windows.
-      window.__hermesTabClaimTimer=setInterval(()=>{
-        try{ _revalidateTabOwnership(); }catch(_){}
-      }, _TAB_CLAIM_HEARTBEAT_MS);
-      // Mark released on unload so a plain refresh keeps the same id (and
-      // therefore its in-flight recovery snapshot) instead of being treated as
-      // a clone. The "seen" entry is deliberately NOT removed here: it is what
-      // lets a reloading tab keep its keys while still allowing eventual GC.
-      window.addEventListener('pagehide', _releaseTabId);
+    if(!window.__hermesTabReleaseBound){
+      window.__hermesTabReleaseBound=true;
+      window.addEventListener('pagehide',_releaseTabId);
     }
   }catch(_){}
-  return claimed;
+  return id;
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──
@@ -9874,59 +9734,95 @@ function _hermesTabId(){
 // starting a turn can no longer overwrite the first tab's reconnect marker.
 // (INFLIGHT_KEY_BASE / INFLIGHT_STATE_KEY_BASE are declared with the per-tab
 // identity helpers above so the storage GC can reference them safely.)
-function _inflightKey(){ return INFLIGHT_KEY_BASE+'::'+_hermesTabId(); }
-function _inflightStateKey(){ return INFLIGHT_STATE_KEY_BASE+'::'+_hermesTabId(); }
-// Back-compat aliases: several call sites (and tests) reference these names
-// directly. They now resolve per tab via the accessors above.
-if(typeof window!=='undefined'){
-  Object.defineProperty(window, '_inflightKey()', {get:_inflightKey, configurable:true});
-  Object.defineProperty(window, '_inflightStateKey()', {get:_inflightStateKey, configurable:true});
-}
+function _inflightKey(){ return _scopedTabKey(INFLIGHT_KEY_BASE); }
+function _inflightStateKey(){ return _scopedTabKey(INFLIGHT_STATE_KEY_BASE); }
 
 // Tab-scoped active session. The legacy global 'hermes-webui-session' key is
 // still written (so an unrelated/older tab and the boot fallback keep working),
 // but each tab ALSO records its own last-opened session and prefers it on
 // reload. Without this, reloading tab 1 could restore whatever conversation
 // tab 2 opened most recently.
-function _activeSessionKey(){ return ACTIVE_SESSION_KEY_LEGACY+'::'+_hermesTabId(); }
-function _activeSessionTombstoneKey(){ return ACTIVE_SESSION_TOMBSTONE_BASE+'::'+_hermesTabId(); }
+function _activeSessionKey(){ return _scopedTabKey(ACTIVE_SESSION_KEY_LEGACY); }
+function _activeSessionTombstoneKey(){ return _scopedTabKey(ACTIVE_SESSION_TOMBSTONE_BASE); }
 function _rememberActiveSession(sid){
   if(!sid) return;
+  if(!_hermesTabId()) return;
+  window.__hermesActiveSession=sid;
+  window.__hermesActiveSessionKnown=true;
   try{ localStorage.setItem(_activeSessionKey(), sid); }catch(_){}
   // Opening a session supersedes any earlier "no session" tombstone.
   try{ localStorage.removeItem(_activeSessionTombstoneKey()); }catch(_){}
+  _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,sid);
+  _mirrorTabValue(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,null);
   // Keep the legacy key in sync for boot fallback + older code paths.
   try{ localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, sid); }catch(_){}
 }
 function _rememberedActiveSession(){
+  if(!_hermesTabId()) return null;
+  if(window.__hermesActiveSessionKnown) return window.__hermesActiveSession||null;
   // This tab's own choice always wins over the shared/global slot.
   // Returns null when nothing is stored, matching the original
   // localStorage.getItem() contract this helper replaced.
   try{
     const own=localStorage.getItem(_activeSessionKey());
-    if(own) return own;
-  }catch(_){}
+    if(own){
+      window.__hermesActiveSession=own;
+      window.__hermesActiveSessionKnown=true;
+      return own;
+    }
+  }catch(_){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
   // Explicit per-tab tombstone: this tab deliberately forgot its session, so
   // the shared legacy fallback must NOT bleed back in (another tab may keep
   // rewriting it). Only a brand-new tab — no scoped value AND no tombstone —
   // may consult the legacy slot.
-  try{ if(localStorage.getItem(_activeSessionTombstoneKey())) return null; }catch(_){}
+  try{
+    if(localStorage.getItem(_activeSessionTombstoneKey())){
+      window.__hermesActiveSession=null;
+      window.__hermesActiveSessionKnown=true;
+      return null;
+    }
+  }catch(_){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
   let legacy=null;
-  try{ legacy=localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY); }catch(_){ return null; }
+  try{ legacy=localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY); }catch(_){
+    window.__hermesActiveSession=null;
+    window.__hermesActiveSessionKnown=true;
+    return null;
+  }
   // One-shot adoption (upgrade path): copy the legacy value into this tab's
   // scoped slot so every later read/forget goes through tab-owned state and a
   // concurrent tab rewriting the shared slot can no longer change what THIS
   // tab restores.
-  if(legacy){ try{ localStorage.setItem(_activeSessionKey(), legacy); }catch(_){} }
+  if(legacy){
+    try{ localStorage.setItem(_activeSessionKey(), legacy); }catch(_){}
+    _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,legacy);
+  }
+  // The shared legacy slot is a one-shot boot fallback. Cache even an empty
+  // result so another document cannot change this document's later reads when
+  // scoped storage is unavailable or quota constrained.
+  window.__hermesActiveSession=legacy||null;
+  window.__hermesActiveSessionKnown=true;
   return legacy;
 }
 function _forgetActiveSession(expectedSid){
+  if(!_hermesTabId()) return;
+  window.__hermesActiveSession=null;
+  window.__hermesActiveSessionKnown=true;
   let own=null;
   try{ own=localStorage.getItem(_activeSessionKey()); }catch(_){}
   try{ localStorage.removeItem(_activeSessionKey()); }catch(_){}
   // Persist an explicit "no session" tombstone so the legacy fallback cannot
   // resurrect a forgotten (possibly dead/404) session on the next read.
   try{ localStorage.setItem(_activeSessionTombstoneKey(), String(Date.now())); }catch(_){}
+  _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,null);
+  _mirrorTabValue(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,String(Date.now()));
   // The legacy key is SHARED: it is the first-paint fallback for a brand-new
   // tab (which has no scoped key yet) and for any older client. Only clear it
   // when it still points at the session THIS tab is forgetting — otherwise one
@@ -9980,6 +9876,7 @@ function _getInflightStateLimits(){
 // the legacy entries so they are consumed exactly once. Invalid or stale
 // legacy payloads are removed without migrating.
 function _migrateLegacyInflight(){
+  if(!_hermesTabId()) return;
   if(typeof window!=='undefined'){
     if(window.__hermesLegacyInflightMigrated) return;
     window.__hermesLegacyInflightMigrated=true;
@@ -9996,7 +9893,9 @@ function _migrateLegacyInflight(){
         const streamOk=parsed&&(parsed.streamId==null||typeof parsed.streamId==='string');
         if(sid&&streamOk&&Number.isFinite(ts)&&(now-ts)<=10*60*1000
            &&localStorage.getItem(_inflightKey())==null){
-          localStorage.setItem(_inflightKey(), JSON.stringify({sid, streamId:parsed.streamId||null, ts}));
+          const adopted=JSON.stringify({sid, streamId:parsed.streamId||null, ts});
+          localStorage.setItem(_inflightKey(),adopted);
+          _mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY,adopted);
         }
       }catch(_){}
       // One-shot: the legacy slot is consumed (or invalidated) exactly once,
@@ -10022,7 +9921,9 @@ function _migrateLegacyInflight(){
             fresh[sid]={...entry, tabId:_hermesTabId()};
           }
           if(Object.keys(fresh).length&&localStorage.getItem(_inflightStateKey())==null){
-            localStorage.setItem(_inflightStateKey(), JSON.stringify(fresh));
+            const adopted=JSON.stringify(fresh);
+            localStorage.setItem(_inflightStateKey(),adopted);
+            _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,adopted);
           }
         }
       }catch(_){}
@@ -10107,14 +10008,18 @@ function _writeInflightStateMap(all){
   }
   if(json.length>limits.jsonChars){
     localStorage.removeItem(_inflightStateKey());
+    _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,null);
     return false;
   }
   localStorage.setItem(_inflightStateKey(),json);
+  _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,json);
   return true;
 }
 function saveInflightState(sid, state){
   if(!sid||!state) return;
-  const entry={..._compactInflightState(state),updated_at:Date.now(),tabId:_hermesTabId()};
+  const tabId=_hermesTabId();
+  if(!tabId) return;
+  const entry={..._compactInflightState(state),updated_at:Date.now(),tabId};
   try{
     const all=_readInflightStateMap();
     all[sid]=entry;
@@ -10126,6 +10031,7 @@ function saveInflightState(sid, state){
       _writeInflightStateMap({[sid]:entry});
     }catch(_){
       try{localStorage.removeItem(_inflightStateKey());}catch(__){}
+      _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,null);
     }
   }
 }
@@ -10134,12 +10040,11 @@ function loadInflightState(sid, streamId){
   const all=_readInflightStateMap();
   const entry=all[sid];
   if(!entry) return null;
-  // Tab ownership: entries are stored under a per-tab key, but a duplicated tab
-  // inherits sessionStorage (hence the same tab id) and legacy entries written
-  // before this fix carry no owner at all. Reject any snapshot that explicitly
-  // belongs to a DIFFERENT tab so one tab's live transcript can never be
-  // merged into another tab's conversation.
-  if(entry.tabId && entry.tabId!==_hermesTabId()) return null;
+  // Every accepted snapshot is stamped with this document's fresh identity.
+  // Reload mirrors are re-stamped during _restoreDocumentScopedState(); an
+  // absent or foreign stamp is unverifiable and therefore rejected.
+  const tabId=_hermesTabId();
+  if(!tabId||entry.tabId!==tabId) return null;
   if(streamId&&entry.streamId&&entry.streamId!==streamId) return null;
   if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000){
     clearInflightState(sid);
@@ -10153,8 +10058,14 @@ function clearInflightState(sid){
     const all=_readInflightStateMap();
     if(!(sid in all)) return;
     delete all[sid];
-    if(Object.keys(all).length) localStorage.setItem(_inflightStateKey(), JSON.stringify(all));
-    else localStorage.removeItem(_inflightStateKey());
+    if(Object.keys(all).length){
+      const json=JSON.stringify(all);
+      localStorage.setItem(_inflightStateKey(),json);
+      _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,json);
+    }else{
+      localStorage.removeItem(_inflightStateKey());
+      _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,null);
+    }
   }catch(_){ }
 }
 
@@ -10578,6 +10489,7 @@ function restoreLiveTurnHtmlForSession(sid){
 
 function markInflight(sid, streamId) {
   const payload=JSON.stringify({sid, streamId, ts: Date.now()});
+  _mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY,payload);
   try{
     localStorage.setItem(_inflightKey(), payload);
   }catch(err){
@@ -10589,7 +10501,8 @@ function markInflight(sid, streamId) {
   }
 }
 function clearInflight() {
-  localStorage.removeItem(_inflightKey());
+  _mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY,null);
+  try{ localStorage.removeItem(_inflightKey()); }catch(_){}
 }
 function showReconnectBanner(msg) {
   $('reconnectMsg').textContent = msg || 'A response may have been in progress when you last left.';
@@ -11736,8 +11649,11 @@ async function checkInflightOnBoot(sid) {
   // Rollout migration: adopt a valid pre-upgrade (unsuffixed) reconnect marker
   // under this tab's scoped key before reading, or the in-flight recovery that
   // existed before the per-tab upgrade would be silently discarded.
-  try{ _migrateLegacyInflight(); }catch(_){}
-  const raw = localStorage.getItem(_inflightKey());
+  let raw=null;
+  try{
+    _migrateLegacyInflight();
+    raw=localStorage.getItem(_inflightKey());
+  }catch(_){ return; }
   if (!raw) return;
   try {
     const {sid: inflightSid, streamId, ts} = JSON.parse(raw);
