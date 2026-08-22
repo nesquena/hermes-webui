@@ -7853,11 +7853,37 @@ def _is_canonical_continuable_cli_source(cli_meta: dict, state_db_source: str = 
     )
 
 
+def _stamp_explicit_foreign_readonly(session, cli_meta=None) -> bool:
+    """Stamp live foreign ``read_only`` onto ``session``. Return True if locked.
+
+    A stale WebUI sidecar can keep ``read_only=False`` after the
+    authoritative foreign record is later locked. Decision, advertise,
+    and action must all use that live value — not the sidecar snapshot.
+    """
+    if session is None:
+        return False
+    if bool(getattr(session, "explicit_foreign_readonly", False)):
+        return True
+    if cli_meta is not None:
+        locked = bool(cli_meta.get("read_only"))
+    else:
+        try:
+            sid = str(getattr(session, "session_id", "") or "")
+            live = _lookup_cli_session_metadata(sid) if sid else {}
+            locked = bool((live or {}).get("read_only"))
+        except Exception:
+            locked = False
+    if locked:
+        session.explicit_foreign_readonly = True
+        return True
+    return False
+
+
 def _activate_canonical_continuation(session):
     """Keep the original session id in memory; never persist a writable sidecar."""
     if session is None:
         return None
-    if bool(getattr(session, "explicit_foreign_readonly", False)):
+    if _stamp_explicit_foreign_readonly(session):
         return None
     session.canonical_continuation = True
     session.read_only = True
@@ -12596,6 +12622,7 @@ def handle_get(handler, parsed) -> bool:
             original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
+            _stamp_explicit_foreign_readonly(s, cli_meta)
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
@@ -21955,6 +21982,12 @@ def _handle_chat_start(handler, body, diag=None):
                 # against the original state.db session id. Do not persist
                 # a writable WebUI sidecar — that would fork history.
                 s = _activate_canonical_continuation(synth)
+                if s is None:
+                    return bad(
+                        handler,
+                        "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                        403,
+                    )
             else:
                 try:
                     synth.save()
@@ -21988,10 +22021,30 @@ def _handle_chat_start(handler, body, diag=None):
             synth, reason = _claim_or_synthesize_cli_session(body["session_id"])
             if reason == "canonical_continuation" and synth is not None:
                 s = _activate_canonical_continuation(synth)
+                if s is None:
+                    return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
             else:
                 return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        if s is None:
+            return bad(
+                handler,
+                "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                403,
+            )
+        if _session_requires_cli_metadata_lookup(s) and _stamp_explicit_foreign_readonly(s):
+            return bad(
+                handler,
+                "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                403,
+            )
         if session_uses_canonical_continuation(s):
             s = _activate_canonical_continuation(s)
+            if s is None:
+                return bad(
+                    handler,
+                    "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                    403,
+                )
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         active_profile = _get_active_profile_name()
@@ -25540,7 +25593,11 @@ def _handle_session_import_cli(handler, body):
                 (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
                 or _is_subagent_child_session_id(sid)
             )
-        if session_uses_canonical_continuation(existing) or _is_canonical_continuable_cli_source(cli_meta or {}):
+        if _stamp_explicit_foreign_readonly(existing, cli_meta):
+            existing.canonical_continuation = False
+            existing.read_only = True
+            changed = False
+        elif session_uses_canonical_continuation(existing) or _is_canonical_continuable_cli_source(cli_meta or {}):
             existing.canonical_continuation = True
             changed = False
         if changed:

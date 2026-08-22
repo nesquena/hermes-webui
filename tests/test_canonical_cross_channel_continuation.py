@@ -538,3 +538,152 @@ def test_streamed_turn_persists_to_state_db_not_sidecar(monkeypatch, isolated_st
     assert reply in contents
     assert sid == session.session_id
 
+
+def _persist_stale_writable_sidecar(isolated_state_db, sid, *, source="telegram"):
+    from collections import OrderedDict
+
+    import api.models as models
+    from api.models import Session
+
+    models.SESSIONS = OrderedDict()
+    sess = Session(
+        session_id=sid,
+        title=f"Stale {source}",
+        workspace="/tmp",
+        model="test-model",
+        messages=[{"role": "user", "content": "old sidecar turn"}],
+        is_cli_session=True,
+        source_tag=source,
+        raw_source=source,
+        session_source="messaging",
+        read_only=False,
+        canonical_continuation=False,
+    )
+    sess.save(touch_updated_at=False)
+    sidecar = isolated_state_db["sessions_dir"] / f"{sid}.json"
+    assert sidecar.exists()
+    return sess, sidecar
+
+
+def test_chat_start_403s_when_stale_sidecar_loses_to_foreign_readonly(
+    routes_module, monkeypatch, isolated_state_db
+):
+    sid = "20260822_telegram_stale_sidecar_locked"
+    _make_state_db(
+        isolated_state_db["db"], sid, message_count=2,
+        title="Locked later", source="telegram", cwd="/tmp",
+    )
+    _persist_stale_writable_sidecar(isolated_state_db, sid)
+    monkeypatch.setattr(
+        routes_module,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {
+            "session_id": sid,
+            "source_tag": "telegram",
+            "raw_source": "telegram",
+            "session_source": "messaging",
+            "read_only": True,
+        },
+    )
+    captured = {}
+    _stub_chat_start(routes_module, monkeypatch, captured)
+    handler = _FakePostHandler(
+        {"session_id": sid, "message": "should stay locked"},
+        path="/api/chat/start",
+    )
+    routes_module._handle_chat_start(
+        handler,
+        {"session_id": sid, "message": "should stay locked"},
+    )
+    assert handler.status == 403
+    assert "read-only" in _response_json(handler)["error"].lower()
+    assert "session" not in captured
+
+
+def test_chat_start_continues_stale_sidecar_when_foreign_still_allows(
+    routes_module, monkeypatch, isolated_state_db
+):
+    sid = "20260822_telegram_stale_sidecar_open"
+    _make_state_db(
+        isolated_state_db["db"], sid, message_count=2,
+        title="Still open", source="telegram", cwd="/tmp",
+    )
+    _sess, sidecar = _persist_stale_writable_sidecar(isolated_state_db, sid)
+    monkeypatch.setattr(
+        routes_module,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {
+            "session_id": sid,
+            "source_tag": "telegram",
+            "raw_source": "telegram",
+            "session_source": "messaging",
+        },
+    )
+    captured = {}
+    _stub_chat_start(routes_module, monkeypatch, captured)
+    handler = _FakePostHandler(
+        {"session_id": sid, "message": "continue stale sidecar"},
+        path="/api/chat/start",
+    )
+    routes_module._handle_chat_start(
+        handler,
+        {"session_id": sid, "message": "continue stale sidecar"},
+    )
+    assert handler.status == 200
+    assert _response_json(handler)["session_id"] == sid
+    assert captured["session"].session_id == sid
+    assert captured["session"].canonical_continuation is True
+    saved = sidecar.read_text(encoding="utf-8")
+    assert "continue stale sidecar" not in saved
+
+
+def test_import_cli_does_not_advertise_locked_stale_sidecar(
+    routes_module, monkeypatch, isolated_state_db
+):
+    sid = "20260822_telegram_import_stale_locked"
+    _make_state_db(
+        isolated_state_db["db"], sid, message_count=2,
+        title="Import locked", source="telegram", cwd="/tmp",
+    )
+    _persist_stale_writable_sidecar(isolated_state_db, sid)
+    monkeypatch.setattr(
+        routes_module,
+        "_resolve_cli_import_metadata",
+        lambda _sid, **_kw: {
+            "session_id": sid,
+            "source_tag": "telegram",
+            "raw_source": "telegram",
+            "session_source": "messaging",
+            "title": "Import locked",
+            "model": "test-model",
+            "read_only": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {
+            "session_id": sid,
+            "source_tag": "telegram",
+            "raw_source": "telegram",
+            "session_source": "messaging",
+            "read_only": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "get_cli_session_messages",
+        lambda _sid, **_kw: [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ],
+    )
+    monkeypatch.setattr(routes_module, "_check_csrf", lambda _h: True)
+    monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *a, **k: True)
+    handler = _FakePostHandler({"session_id": sid}, path="/api/session/import_cli")
+    routes_module._handle_session_import_cli(handler, {"session_id": sid})
+    payload = _response_json(handler)
+    assert handler.status == 200
+    assert payload["session"]["canonical_continuation"] is False
+    assert payload["session"]["read_only"] is True
+
