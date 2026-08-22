@@ -43,7 +43,12 @@ def test_handle_post_does_not_shadow_get_active_profile_name():
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "api.profiles":
             for alias in node.names:
-                assert alias.name != "get_active_profile_name", (
+                # What matters is the BOUND name: `import x as _alias` binds
+                # only `_alias` and cannot shadow the module-level symbol.
+                # Checking alias.name alone flagged safe aliased imports
+                # (TARS gate review: alias-blind AST guard).
+                bound = alias.asname or alias.name
+                assert bound != "get_active_profile_name", (
                     "local import shadows module-level get_active_profile_name"
                 )
 
