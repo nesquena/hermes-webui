@@ -2448,6 +2448,28 @@
   .katex-block .katex-html{text-align:center;}
   .msg-body .katex{font-size:1.1em;}
   .msg-body .katex-display{margin:8px 0;}
+  /* ── KaTeX robustness (radical visibility) ───────────────────────────────
+     The MathML accessibility layer is a duplicate of the equation that
+     renders with thin system-font radicals (√) which vanish on dark themes.
+     Pin it to the sr-only pattern so it can never surface visually, even if
+     the vendored katex.min.css clip rule is overridden. */
+  .msg-body .katex-mathml,
+  .msg-body .katex .katex-mathml{
+    position:absolute !important;
+    clip:rect(1px,1px,1px,1px) !important;
+    clip-path:inset(50%) !important;
+    width:1px !important;height:1px !important;
+    overflow:hidden !important;padding:0 !important;border:0 !important;
+    white-space:nowrap !important;
+  }
+  /* Radical strokes render crisply. The SVG fill color is already supplied by
+     the vendored katex.min.css (.katex svg{fill:currentColor;...}), which
+     loads after style.css — no need to repeat it here. */
+  .msg-body .katex .sqrt,
+  .msg-body .katex .mord.sqrt{
+    text-rendering:geometricPrecision;
+    -webkit-font-smoothing:antialiased;
+  }
   .msg-files{display:flex;flex-wrap:wrap;gap:6px;padding-left:30px;margin-bottom:10px;}
   .msg-file-badge{display:flex;align-items:center;gap:5px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:6px;padding:4px 9px;font-size:12px;color:var(--accent-text);}
   /* MEDIA: inline image rendering (feat #450) */
