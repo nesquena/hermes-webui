@@ -5,6 +5,7 @@
 document.addEventListener('DOMContentLoaded', function () {
   var form = document.getElementById('login-form');
   var input = document.getElementById('pw');
+  var toggleBtn = document.getElementById('pw-toggle');
   var passkeyBtn = document.getElementById('passkey-login');
 
   if (!form || !input) return;
@@ -81,6 +82,22 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   form.addEventListener('submit', doLogin);
+
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', function () {
+      var showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      toggleBtn.setAttribute('aria-pressed', showing ? 'false' : 'true');
+      toggleBtn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+      toggleBtn.setAttribute('title', showing ? 'Show password' : 'Hide password');
+      toggleBtn.textContent = showing ? '👁' : '●';
+      input.focus();
+      try {
+        var end = input.value.length;
+        input.setSelectionRange(end, end);
+      } catch (_) {}
+    });
+  }
 
   function b64uToBytes(s) {
     s = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
@@ -164,8 +181,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function setFormDisabled(disabled) {
       if (input) input.disabled = disabled;
-      var btn = form.querySelector('button');
-      if (btn) btn.disabled = disabled;
+      var buttons = form.querySelectorAll('button');
+      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = disabled;
     }
 
     function probe() {
