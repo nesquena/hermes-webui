@@ -15955,9 +15955,9 @@ def handle_post(handler, parsed) -> bool:
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
         try:
-            from api.upload import _session_attachment_dir
+            from api.upload import remove_session_attachments
 
-            shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
+            remove_session_attachments(sid)
         except Exception:
             logger.debug("Failed to clean attachment dir for deleted session %s", sid)
         # Remove the turn-journal shards and the run-journal directory so a
@@ -20729,16 +20729,19 @@ def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
 
     # Chat uploads now live in a per-session attachment inbox outside the
     # workspace. Keep the public URL stable while scoping fallback lookup to
-    # the requesting session's own attachment directory.
+    # the requesting session's own attachment directories. The write root
+    # follows the active terminal backend (legacy STATE_DIR/attachments for
+    # local/ssh-style backends, sandbox cache/documents/webui-attachments for
+    # docker/modal), so reads consider BOTH compatible roots: a backend switch
+    # or an upgrade must not orphan previously uploaded attachments.
     try:
-        from api.upload import _session_attachment_dir
+        from api.upload import resolve_session_attachment
 
-        attachment_root = _session_attachment_dir(sid)
-        attachment_target = safe_resolve(attachment_root, rel)
+        resolved = resolve_session_attachment(sid, rel)
+        if resolved is not None:
+            return resolved
     except Exception:
         return None
-    if attachment_target.exists() and attachment_target.is_file():
-        return attachment_root, attachment_target
     return None
 
 
