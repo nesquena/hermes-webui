@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import api.models as models
+from api.session_recovery import recover_missing_sidecars_from_state_db
 
 
 pytestmark = pytest.mark.requires_agent_modules
@@ -181,6 +182,58 @@ def test_state_db_rich_sidecar_row_deduplicates_without_flattening(
     )
 
     assert merged == sidecar
+
+
+def test_missing_sidecar_recovery_decodes_rich_state_db_content(
+    tmp_path,
+    monkeypatch,
+):
+    db = tmp_path / "state.db"
+    content = _rich_content()
+    _make_state_db(
+        db,
+        [{"role": "user", "content": _encoded_content(content)}],
+    )
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL,
+            message_count INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO sessions (id, source, title, model, started_at, message_count)
+        VALUES (?, 'webui', 'Recovered multimodal', 'openai/gpt-5', 1000.0, 1)
+        """,
+        (SESSION_ID,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    result = recover_missing_sidecars_from_state_db(tmp_path, db)
+
+    assert result["materialized"] == 1
+    sidecar = json.loads(
+        (tmp_path / f"{SESSION_ID}.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["messages"][0]["content"] == content
+    assert sidecar["messages"][0]["content"] != _encoded_content(content)
+
+    merged = models.merge_session_messages_append_only(
+        sidecar["messages"],
+        models.get_state_db_session_messages(SESSION_ID),
+    )
+
+    assert sum(message["role"] == "user" for message in merged) == 1
+    assert merged[0]["content"] == content
 
 
 @pytest.mark.parametrize(

@@ -549,6 +549,8 @@ def _read_state_db_missing_sidecar_rows(
                     continue
                 message_rows: list[dict] = []
                 if {'session_id', 'role', 'content'}.issubset(message_cols):
+                    from api.models import _decode_state_db_content
+
                     order = "timestamp, id" if 'timestamp' in message_cols and 'id' in message_cols else "rowid"
                     ts_expr = 'timestamp' if 'timestamp' in message_cols else 'NULL AS timestamp'
                     for msg in conn.execute(
@@ -557,7 +559,7 @@ def _read_state_db_missing_sidecar_rows(
                     ).fetchall():
                         message = {
                             'role': msg['role'],
-                            'content': msg['content'] or '',
+                            'content': _decode_state_db_content(msg['content'] or ''),
                         }
                         if msg['timestamp'] is not None:
                             message['timestamp'] = msg['timestamp']
