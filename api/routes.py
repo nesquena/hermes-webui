@@ -260,6 +260,16 @@ _MANUAL_COMPRESSION_JOBS_LOCK = threading.Lock()
 _MANUAL_COMPRESSION_JOB_TTL_SECONDS = 10 * 60
 _CRON_OUTPUT_CONTENT_LIMIT = 8000
 _CRON_OUTPUT_HEADER_CONTEXT = 200
+# Cap on reading whole operator-authored files (cron run outputs, skill linked
+# files) into memory. These handlers used to read_text() the whole file then
+# often slice it down — a multi-MB cron output was fully loaded (and, for the
+# run-detail endpoint, fully serialized into the JSON response) before any
+# truncation. Mirror the git-diff DIFF_SIZE_LIMIT (api/workspace_git.py) bound:
+# files at or under the cap are returned verbatim; larger files are read only up
+# to the cap and flagged truncated so a client can fetch the full file another
+# way. The cap is on BYTES read, not chars.
+_FILE_READ_MAX_BYTES = 512 * 1024
+_CRON_TRUNCATION_DIVIDER = "\n\n--- [output truncated: large section omitted] ---\n\n"
 _MESSAGING_RAW_SOURCES = {str(s).strip().lower() for s in MESSAGING_SOURCES}
 _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
     "path": None,
@@ -1432,6 +1442,39 @@ def _cron_response_marker_index(text: str) -> int:
     return min(candidates) if candidates else -1
 
 
+def _split_response_marker_prefix(head_raw: bytes, tail_raw: bytes) -> str:
+    """Return the head-side prefix of a Response heading that provably straddled
+    the exact head/tail boundary of ADJACENT windows, else ``""``.
+
+    Proof requirements (all must hold):
+    (a) Adjacent windows via the caller — the caller only invokes this helper
+        when ``not gap_case`` so head and tail touch in the true file.
+    (b) A FULL head read via the caller — ``len(head_raw) == head_len`` so the
+        head bytes represent the exact file prefix up to the boundary.
+    (c) The heading fragment begins at a line start in the head — either
+        ``k == len(head_raw)`` (the entire head is the prefix: the file itself
+        starts with the heading) OR the byte immediately before the prefix is a
+        newline (``head_raw[-(k + 1):-(k)] == b"\\n"``).
+    When satisfied, the head's final bytes equal a proper non-empty prefix of a
+    Response heading AND the tail's first bytes equal the matching remainder —
+    their concatenation reconstructs real source bytes, never invented ones.
+    Gap windows or short head reads cannot prove a split. (#6141 r12 #1, R1)
+    """
+    for heading in ("## Response", "# Response"):
+        for k in range(1, len(heading)):
+            prefix = heading[:k].encode("ascii")
+            suffix = heading[k:].encode("ascii")
+            if head_raw.endswith(prefix) and tail_raw.startswith(suffix):
+                # Accept only if the prefix starts a line in the head file bytes.
+                if k == len(head_raw):
+                    # Entire head is the prefix — the file itself starts with heading.
+                    return heading[:k]
+                if head_raw[-(k + 1) : -k] == b"\n":
+                    # Byte immediately before the prefix is a newline.
+                    return heading[:k]
+    return ""
+
+
 def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIMIT) -> str:
     """Return a bounded cron output window that preserves useful response text.
 
@@ -1454,6 +1497,316 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
     return text[-limit:]
 
 
+def _read_text_bounded(
+    path, *, max_bytes: int = _FILE_READ_MAX_BYTES, tail: bool = False
+) -> tuple[str, bool, bool]:
+    """Read up to ``max_bytes`` of a text file, returning
+    ``(text, truncated, ok)``.
+
+    Guards against loading a huge operator-authored file (cron run output, skill
+    linked file) wholesale into memory. Files at or under the cap are read in
+    full; larger files are read only up to the cap (decoding on a byte boundary
+    with errors="replace" so a truncated multibyte sequence is safe) and the
+    ``truncated`` flag is set so the caller can surface it to the client. The
+    cap mirrors the git-diff DIFF_SIZE_LIMIT bound.
+
+    Memory-safety contract (#6141 gate round 2):
+
+    - The file is opened ONCE in binary mode and ``os.fstat`` is taken on that
+      descriptor, so there is no stat→open check-use gap.
+    - EVERY read is capped — including the small-file branch. The pinned size
+      from fstat guards the seek, but the read itself asks for at most
+      ``max_bytes + 1`` bytes so a same-inode growth between fstat and read
+      cannot read past the cap; if more than ``max_bytes`` comes back, the file
+      grew under us and we report it truncated rather than returning the whole
+      grown content.
+    - On any OSError (missing/unreadable file, fstat failure, read failure) the
+      function returns ``("", False, False)`` — the ``ok=False`` third element
+      distinguishes a real read failure from a legitimate empty file so callers
+      (the cron batch) do not charge budget for failed reads.
+
+    ``tail=True`` reads the TRAILING ``max_bytes`` (seek-to-end) instead of the
+    leading bytes — used by cron output reads where the ``## Response`` section
+    the UI most wants lives at the END of the file, so a pure head cap would
+    drop exactly that section when the preceding prompt/front-matter is large.
+    A line split at the seek boundary is discarded. A first line starting exactly
+    at the boundary (the preceding byte is a newline) is complete and kept.
+    (#6141 r10)
+    """
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        # Missing/unreadable file. ok=False distinguishes this from a real empty
+        # file so the cron batch does not charge budget for failed reads.
+        return "", False, False
+    try:
+        try:
+            st = os.fstat(fh.fileno())
+        except OSError:
+            return "", False, False
+        size = st.st_size
+        if size <= max_bytes:
+            # Cap the read at max_bytes + 1: if the file grew between fstat and
+            # read (same inode), we get > max_bytes and report truncated rather
+            # than returning the whole grown content unbounded. (#6141 r2 #1)
+            try:
+                raw = fh.read(max_bytes + 1)
+            except OSError:
+                return "", False, False
+            if len(raw) > max_bytes:
+                # File grew under us — return only the cap, flagged truncated.
+                return raw[:max_bytes].decode("utf-8", errors="replace"), True, True
+            return raw.decode("utf-8", errors="replace"), False, True
+        # Over cap: read only max_bytes. Head or tail per ``tail``.
+        try:
+            if tail:
+                # Start one byte earlier so the boundary byte itself is in the
+                # window: if it is a newline, the first window line is COMPLETE
+                # (kept — only the boundary byte is stripped); otherwise the
+                # first line is partial and is still dropped below.
+                fh.seek(max(0, size - max_bytes - 1))
+                raw = fh.read(max_bytes + 1)
+            else:
+                raw = fh.read(max_bytes)
+        except OSError:
+            return "", False, False
+    finally:
+        fh.close()
+    text = raw.decode("utf-8", errors="replace")
+    if tail:
+        # Drop the partial first line at the seek boundary — BUT only if doing so
+        # leaves something behind. If the whole window is a single line (no
+        # newline, or the only newline is the trailing one), we keep it only to
+        # avoid returning an empty window; completeness is not proven there.
+        # With the one-byte-earlier window, a leading "\n" means the first line
+        # is complete and only that byte is stripped.
+        nl = text.find("\n")
+        if nl >= 0 and nl + 1 < len(text):
+            text = text[nl + 1:]
+        else:
+            # No interior newline to strip — clamp to the last max_bytes bytes to
+            # honor the documented "up to max_bytes" bound. Beware: raw[-0:] is
+            # the whole raw, so guard max_bytes > 0 explicitly. (#6141 r11)
+            text = raw[-max_bytes:].decode("utf-8", errors="replace") if max_bytes > 0 else ""
+    return text, True, True
+
+
+def _read_cron_output_bounded(
+    path, *, max_bytes: int = _FILE_READ_MAX_BYTES, budget: int | None = None
+) -> tuple[str, bool, bool, int, bool]:
+    """Read a cron output .md file preserving BOTH the frontmatter/usage block
+    AND the response body, under a byte bound, with one pinned file identity.
+
+    Cron output layout is front-matter (model/timestamp/usage), then ``## Prompt``
+    (potentially huge), then ``## Response`` (the reply the UI most wants) as the
+    LAST section. A head cap can drop or split the ``## Response`` marker/body;
+    a tail cap drops the frontmatter.
+
+    Memory-safety + identity contract (#6141 gate rounds 2-4):
+
+    - The file is opened ONCE and ``os.fstat`` pins the size on that descriptor.
+      Head and tail are read from the SAME descriptor against the SAME pinned
+      size, so a replacement between two separate opens cannot combine
+      frontmatter from inode A with a response body from inode B.
+    - Head and tail byte ranges are DISJOINT: in the adjacent case (``size <=
+      2*cap``) head = ``[0, cap)``. When ``size > 2*cap`` the tail starts at
+      ``size - cap - 1`` (the gap case) — the head ends at ``cap-1`` and the tail
+      begins one byte earlier than before this change so the boundary byte
+      (immediately before the tail) is included in the tail window, making
+      first-line completeness provable; when ``size <= 2*cap`` the tail starts at
+      ``cap`` (the adjacent case) and begins exactly where the head ended. The
+      returned body therefore never contains more bytes than the source.
+    - The first tail line is dropped only when it is PROVEN PARTIAL. When the byte
+      immediately before the tail on this descriptor is a newline (the tail boundary
+      landed exactly on a line boundary), the first tail line is complete and kept:
+      in the gap case that byte is the tail window's own first byte; in the adjacent
+      case it is the head's last byte (when the head read was full — a short read
+      leaves it unproven, so we fail closed and drop). (#6141 r10)
+    - Split-marker repair exception: when a ``## Response`` or ``# Response`` heading
+      provably straddles the adjacent boundary (head ends with a prefix AND tail starts
+      with the matching remainder, the prefix begins at a line start, AND the head
+      read was full), the prefix is MOVED to the tail — the emitted head gives up
+      exactly the prefix bytes — BEFORE the partial-line drop, repairing the complete
+      heading and skipping the drop for that line. The heading therefore survives
+      exactly once. This reconstruction is only performed when the split is proven;
+      markerless output keeps literal bytes (no heading is ever synthesized).
+      (#6141 r12, R1, R2, R7; r13)
+    - Every read is capped (no unbounded ``fh.read()``).
+    - The returned ``bytes_read`` is the actual byte count consumed from THIS
+      descriptor (the disjoint head + tail windows, derived from the pinned
+      fstat before the descriptor closes). The caller uses it for batch budget
+      accounting so a post-read pathname stat cannot under/overcharge by
+      describing a different file. (#6141 r4)
+    - ``budget`` (optional) caps the total bytes this call may consume; when
+      the disjoint windows would exceed it the call returns ``ok=False`` so the
+      caller continues past it without breaching the batch bound. This enforces
+      the batch allowance INSIDE the read, so an over-budget probe cannot read
+      up to two caps and then be discarded. (#6141 r4)
+
+    Returns ``(text, truncated, ok, bytes_read, declined)``. On open/fstat/read
+    failure returns ``("", False, False, 0, False)``; on budget decline (the
+    file was readable but its bounded windows exceed the remaining allowance)
+    returns ``("", False, False, 0, True)``. The ``declined`` flag lets the
+    cron batch distinguish a budget decline (mark truncated and continue — a
+    later smaller file may still fit the remaining allowance) from a real I/O
+    failure (continue — a later smaller file may still fit). (#6141 r5 #3, r12 #2)
+    """
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return "", False, False, 0, False
+    try:
+        try:
+            st = os.fstat(fh.fileno())
+        except OSError:
+            return "", False, False, 0, False
+        size = st.st_size
+        cap = max_bytes
+        if size <= cap:
+            # Under cap. Admit when the ACTUAL pinned size fits the remaining
+            # budget — not when cap+1 fits (a 10-byte file with 10 bytes of
+            # allowance must be admitted, not declined because cap+1 > 10).
+            # (#6141 r6 #3)
+            if budget is not None and size > budget:
+                return "", False, False, 0, True
+            # Physical read cap: NEVER request more than the remaining allowance.
+            # The growth-detection probe (cap+1) is only used when there is room
+            # for it within the budget; otherwise the read is capped at exactly
+            # the budget so a same-inode growth between fstat and read cannot
+            # return more than the caller's remaining allowance. (#6141 r7)
+            read_amount = cap + 1
+            probed_growth = True  # True when the cap+1 probe is in the read
+            if budget is not None and read_amount > budget:
+                read_amount = budget
+                probed_growth = False
+            try:
+                raw = fh.read(read_amount)
+            except OSError:
+                return "", False, False, 0, False
+            # Charge EVERY byte physically returned by the descriptor, including
+            # the cap+1 growth-probe byte when the file grew under us. The
+            # physical-I/O bound counts what was read, not what's returned.
+            # (#6141 r6 #1)
+            bytes_read = len(raw)
+            if len(raw) > cap:
+                return raw[:cap].decode("utf-8", errors="replace"), True, True, bytes_read, False
+            # If the growth probe was in the read and returned more than the
+            # pinned size, the file grew — truncated.
+            if probed_growth and len(raw) > size:
+                return raw[:cap].decode("utf-8", errors="replace"), True, True, bytes_read, False
+            # If the read was capped at the budget (no room for the growth probe)
+            # and filled the allowance exactly, the file may have grown beyond
+            # what we read — conservatively mark truncated since we can't probe
+            # for more. (#6141 r7)
+            if not probed_growth and len(raw) >= read_amount and read_amount == budget:
+                return raw.decode("utf-8", errors="replace"), True, True, bytes_read, False
+            return raw.decode("utf-8", errors="replace"), False, True, bytes_read, False
+        # Over cap: read DISJOINT head + tail from this one descriptor.
+        if size > 2 * cap:
+            # Gap case (middle omitted): shift both windows one byte — the
+            # head gives up its last byte and the tail starts one byte
+            # earlier, INCLUDING the boundary byte — so first-line
+            # completeness at the tail boundary is provable from bytes
+            # already read. Total planned bytes are unchanged (2*cap).
+            # Clamp head_len to prevent read(-1) at degenerate caps. (#6141 r11)
+            gap_case = True
+            head_len = max(0, cap - 1)
+            tail_start = size - cap - 1
+            tail_len = cap + 1
+        else:
+            # Adjacent case: tail begins exactly where the head ended, so the
+            # byte before the tail IS the head's last byte.
+            gap_case = False
+            head_len = cap
+            tail_start = cap
+            tail_len = min(cap, max(0, size - cap))
+        planned = head_len + tail_len
+        # Budget enforcement INSIDE the descriptor read: if the disjoint windows
+        # would exceed the remaining allowance, decline before reading — do NOT
+        # read up to two caps and then discard. (#6141 r4, r5 #1)
+        if budget is not None and planned > budget:
+            return "", False, False, 0, True
+        head_raw = b""
+        tail_raw = b""
+        consumed = 0  # bytes physically consumed so far (survives partial failure)
+        try:
+            fh.seek(0)
+            head_raw = fh.read(head_len)
+            consumed = len(head_raw)
+            fh.seek(tail_start)
+            tail_raw = fh.read(tail_len)
+            consumed = len(head_raw) + len(tail_raw)
+        except OSError:
+            # Partial failure: if head succeeded but tail's seek/read raised,
+            # the consumed head bytes must still be charged — they were
+            # physically read and cannot disappear from the batch budget.
+            # Return ok=False (the read is incomplete) but report `consumed` so
+            # the handler charges it. (#6141 r6 #2)
+            if consumed > 0:
+                return "", False, False, consumed, False
+            return "", False, False, 0, False
+        # Actual bytes consumed from the descriptor (handles short reads and
+        # shrink-after-fstat, where len(raw) < the planned window). (#6141 r5 #3)
+        bytes_read = consumed
+    finally:
+        fh.close()
+    head_text = head_raw.decode("utf-8", errors="replace")
+    tail_text = tail_raw.decode("utf-8", errors="replace")
+    # Repair a Response heading that provably straddled the boundary BEFORE the
+    # partial-first-line drop: the tail-side heading remainder ("onse...") is
+    # itself a split line the drop would discard. Only adjacent windows can
+    # prove a split — their concatenation is the file's true byte sequence.
+    # A short head read (shrink-during-read) cannot prove adjacency, so the
+    # proof requires BOTH adjacent case AND a full head read equal to head_len.
+    # (#6141 r12 #1, R2)
+    split_marker_prefix = (
+        _split_response_marker_prefix(head_raw, tail_raw)
+        if not gap_case and len(head_raw) == head_len
+        else ""
+    )
+    if split_marker_prefix:
+        # Move the proven prefix, never copy it: the emitted head gives up
+        # exactly the prefix bytes so the heading survives once. The prefix
+        # is pure ASCII and head_raw.endswith() proved it is the head's final
+        # bytes, so trimming exactly its length from head_text is exact even
+        # under errors="replace" decoding. (#6141 r13)
+        head_text = head_text[: -len(split_marker_prefix)]
+        tail_text = split_marker_prefix + tail_text
+    else:
+        # Drop the first tail line only when it is a PROVEN partial. The first
+        # tail line is proven COMPLETE when the byte immediately before it on
+        # this descriptor is a newline (the tail boundary landed exactly on a
+        # line boundary): in the gap case that byte is the tail window's own
+        # first byte; in the adjacent case it is the head's last byte (when the
+        # head read was full — a short read leaves it unproven, so we fail
+        # closed and drop). (#6141 r10)
+        if gap_case:
+            boundary_newline = tail_raw[:1] == b"\n"
+            if boundary_newline and tail_text.startswith("\n"):
+                tail_text = tail_text[1:]  # keep the complete first line
+        else:
+            boundary_newline = len(head_raw) == head_len and head_raw[-1:] == b"\n"
+        if not boundary_newline:
+            tnl = tail_text.find("\n")
+            if tnl >= 0 and tnl + 1 < len(tail_text):
+                tail_text = tail_text[tnl + 1:]
+    marker_in_tail = _cron_response_marker_index(tail_text) >= 0
+    if marker_in_tail:
+        # Tail carries the marker (and therefore the complete body at EOF).
+        tm = _cron_response_marker_index(tail_text)
+        tail_text = tail_text[tm:]  # keep marker + body from the tail
+    # No real marker in either window (markerless script/failed output, or the
+    # marker sits wholly in the omitted gap): keep the bounded bytes literal.
+    # Never synthesize a semantic heading the source never had. (#6141 r12 #1)
+    return (
+        head_text.rstrip()
+        + _CRON_TRUNCATION_DIVIDER
+        + tail_text,
+        True,
+        True,
+        bytes_read,
+        False,
+    )
 
 
 def _cron_job_for_api(job: dict) -> dict:
@@ -14605,9 +14958,16 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Invalid file path", 400)
             if not target.exists() or not target.is_file():
                 return bad(handler, "File not found", 404)
+            # Bound the read so a huge linked file isn't loaded whole / serialized
+            # wholesale into the response. Over-cap files return the head and a
+            # truncated flag. _read_text_bounded returns (text, truncated, ok);
+            # a failed read (ok=False) is treated as a missing file.
+            content, truncated, ok = _read_text_bounded(target)
+            if not ok and not content:
+                return bad(handler, "File not found", 404)
             return j(
                 handler,
-                {"content": target.read_text(encoding="utf-8"), "path": file_path},
+                {"content": content, "path": file_path, "truncated": truncated},
             )
         data = _skill_view_from_active_dir(name)
         if not isinstance(data.get("linked_files"), dict):
@@ -21770,12 +22130,20 @@ def _handle_cron_run_detail(handler, parsed):
     if not fpath.exists():
         return j(handler, {"error": "run not found"}, status=404)
     try:
-        content = fpath.read_text(encoding="utf-8", errors="replace")
+        # Bound the read so a multi-MB cron output isn't loaded whole and
+        # serialized into the response. Cron output puts ## Response at the END,
+        # so _read_cron_output_bounded reads head-first and falls back to a tail
+        # read when the response marker isn't in the head — otherwise a large
+        # prompt section would push the reply past the cap and the snippet would
+        # serve prompt bytes instead of the response.
+        content, truncated, ok, _bytes_read, _declined = _read_cron_output_bounded(fpath)
+        if not ok:
+            return j(handler, {"error": "run output unreadable"}, status=500)
         snippet = _cron_output_snippet(content)
         usage = _cron_output_usage_metadata(content)
         return j(handler, {"job_id": job_id, "filename": filename,
                            "content": content, "snippet": snippet,
-                           "usage": usage})
+                           "usage": usage, "truncated": truncated})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=500)
 
@@ -21853,6 +22221,9 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
         if line.startswith("## Response") or line.startswith("# Response"):
             response_idx = i
             break
+    if response_idx < 0 and _CRON_TRUNCATION_DIVIDER in text:
+        text = text.split(_CRON_TRUNCATION_DIVIDER, 1)[1]
+        lines = text.split("\n")
     body = ("\n".join(lines[response_idx + 1:]) if response_idx >= 0 else "\n".join(lines)).strip()
     return body[:limit] or "(empty)"
 
@@ -21882,15 +22253,77 @@ def _handle_cron_output(handler, parsed):
         limit = 5
     out_dir = CRON_OUT / job_id
     outputs = []
+    truncated_files = False
     if out_dir.exists():
         files = sorted(out_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+        # Cumulative byte budget across the batch so many large files don't each
+        # force a full read (each file is independently bounded by
+        # _read_cron_output_bounded; this caps the whole batch).
+        #
+        # Identity + boundedness contract (#6141 r4):
+        # - The charge for each file comes from the descriptor-derived
+        #   ``bytes_read`` returned by _read_cron_output_bounded (the disjoint
+        #   head+tail windows against the pinned fstat), NOT from a second
+        #   pathname stat. A second stat could describe a different file after
+        #   replace/truncate/unlink and under/overcharge.
+        # - The remaining allowance is passed INTO the reader as ``budget``,
+        #   so an over-budget probe declines before reading rather than reading
+        #   up to two caps and being discarded. This keeps total successful
+        #   batch reads within the four-cap bound.
+        # - Failed reads (ok=False) are skipped: no append, no charge.
+        total_budget = _FILE_READ_MAX_BYTES * 4
+        spent = 0
         for f in files:
+            remaining = total_budget - spent
+            # Stop before another reader call when no allowance remains — do not
+            # keep calling the reader for every older file after exhaustion.
+            # (#6141 r5 #2) The first (newest) file is always attempted even
+            # with zero remaining so the newest run is never blank.
+            if spent > 0 and remaining <= 0:
+                truncated_files = True
+                break
+            # The newest (first) successful file is always admitted even if it
+            # alone exceeds the budget, so the newest run is never blank.
+            budget_for_call = None if spent == 0 else remaining
             try:
-                txt = f.read_text(encoding="utf-8", errors="replace")
-                outputs.append({"filename": f.name, "content": _cron_output_content_window(txt)})
+                txt, file_truncated, read_ok, bytes_read, declined = _read_cron_output_bounded(
+                    f, budget=budget_for_call
+                )
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
-    return j(handler, {"job_id": job_id, "outputs": outputs})
+                continue
+            if not read_ok:
+                # Even on failure, charge any bytes physically consumed from the
+                # descriptor (e.g. head read succeeded but tail seek/read raised).
+                # Those bytes were read and cannot disappear from the batch
+                # budget. (#6141 r6 #2)
+                spent += bytes_read
+                # Distinguish I/O failure from budget decline (#6141 r5 #3):
+                # - declined=True: the file was readable but its bounded windows
+                #   exceeded the remaining allowance. Mark truncated and continue — a
+                #   later smaller file may still fit the remaining allowance.
+                # - declined=False: a real open/fstat/read failure. Continue to
+                #   the next file (a later smaller file may still fit).
+                if declined:
+                    # Files are ordered by mtime, not size — a decline only
+                    # proves THIS file's windows exceed the remaining allowance.
+                    # Keep scanning: a later smaller file may still fit. True
+                    # exhaustion (remaining <= 0) is the top-of-loop stop.
+                    # (#6141 r12 #2)
+                    truncated_files = True
+                    continue
+                logger.debug("Skipped cron output file %s (read failure)", f)
+                continue
+            entry = {"filename": f.name, "content": _cron_output_content_window(txt)}
+            if file_truncated:
+                entry["truncated"] = True
+            outputs.append(entry)
+            # Charge the actual descriptor-derived bytes read (no second stat).
+            spent += bytes_read
+    result = {"job_id": job_id, "outputs": outputs}
+    if truncated_files:
+        result["truncated"] = True
+    return j(handler, result)
 
 
 def _handle_cron_status(handler, parsed):
