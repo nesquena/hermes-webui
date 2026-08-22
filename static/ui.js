@@ -617,7 +617,10 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
+  if(m._source === 'process_wakeup'){
+    if(window._showBackgroundWakeups===false) return false;
+    return !!(msgContent(m)||m.attachments?.length);
+  }
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -626,6 +629,15 @@ function _messageIsRenderable(m){
   const hasReasoningAnchor=hasTc||hasTu||_messageHasReasoningPayload(m);
   const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
+}
+function _hasHiddenProcessWakeupBoundaryBefore(rawIdx){
+  if(window._showBackgroundWakeups!==false) return false;
+  for(let idx=Number(rawIdx)-1;idx>=0;idx--){
+    const previous=(S.messages||[])[idx];
+    if(previous&&previous._source==='process_wakeup') return true;
+    if(_messageIsRenderable(previous)) return false;
+  }
+  return false;
 }
 function _getVisibleMessagesWithIdx(){
   if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
@@ -11368,6 +11380,7 @@ function _assistantTurnFinalVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
+    if(m&&m.role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) flush();
     if(m&&m.role==='assistant'){
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
@@ -11390,6 +11403,7 @@ function _assistantTurnVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
+    if(m&&m.role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) flush();
     if(m&&m.role==='assistant'){
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
@@ -16775,9 +16789,9 @@ function renderMessages(options){
     _wireMessageWindowLoadEarlierButton();
   }
   let lastUserRawIdx=-1;
-  for(let i=visWithIdx.length-1;i>=0;i--){
-    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
-      lastUserRawIdx=visWithIdx[i].rawIdx;
+  for(let rawIdx=S.messages.length-1;rawIdx>=0;rawIdx--){
+    if(S.messages[rawIdx]&&S.messages[rawIdx].role==='user'){
+      lastUserRawIdx=rawIdx;
       break;
     }
   }
@@ -16817,6 +16831,7 @@ function renderMessages(options){
   const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
+    if(role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) lastQuestionRawIdx=-1;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
@@ -16841,6 +16856,7 @@ function renderMessages(options){
     };
     for(const entry of renderVisWithIdx){
       const em=entry&&entry.m; const role=em&&em.role;
+      if(role==='assistant'&&_hasHiddenProcessWakeupBoundaryBefore(entry.rawIdx)) _flush();
       if(role==='assistant'){
         _run.push(entry.rawIdx);
         // Visible prose = content with any leading <think>…</think> /channel-thought
@@ -16984,6 +17000,7 @@ function renderMessages(options){
       }
     }
     const isProcessWakeup=m&&m._source==='process_wakeup';
+    if(_hasHiddenProcessWakeupBoundaryBefore(rawIdx)) currentAssistantTurn=null;
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
@@ -16998,9 +17015,12 @@ function renderMessages(options){
       const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
       thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
     }
-    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
+    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1&&rawIdx>lastUserRawIdx;
     const nextRendered=renderVisWithIdx[vi+1];
-    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
+    const isTurnFinalAssistant=!isUser&&(
+      !nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant'||
+      _hasHiddenProcessWakeupBoundaryBefore(nextRendered.rawIdx)
+    );
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
