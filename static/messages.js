@@ -2477,7 +2477,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return;
     }
     _streamEndRecoveryTimer=null;
-    const status=await _restoreSettledSession(source,{status:true});
+    const status=await _restoreSettledSession(source,{status:true,allowUnmarkedShorterTerminalSnapshot:true});
     if(status==='restored'){
       _clearStreamEndRecovery();
       return;
@@ -6433,7 +6433,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      const status=await _restoreSettledSession(source,{status:true});
+      const status=await _restoreSettledSession(source,{status:true,allowUnmarkedShorterTerminalSnapshot:true});
       if(status==='restored'){
         return;
       }
@@ -6939,6 +6939,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
+  // Full-authoritative identity for the shorter-snapshot prefix decision in
+  // _restoreSettledSession. Unlike _messageIdentityKey (used by the lenient
+  // ephemeral carry-forward, which intentionally truncates content to 160
+  // chars), this key compares the COMPLETE content: two messages sharing
+  // role/timestamp/first-160-chars but differing later must NOT be treated
+  // as a matching prefix — otherwise a divergent authoritative tail would be
+  // masked and a stale visible reply preserved.
+  function _messageAuthoritativeKey(m){
+    if(!m||!m.role) return '';
+    const ts=m._ts||m.timestamp||'';
+    let body='';
+    if(typeof m.content==='string') body=m.content;
+    else if(Array.isArray(m.content)){
+      try{ body=m.content.map(p=>(p&&typeof p==='object')?(p.text||p.input_text||'')||'':String(p||'')).join(''); }catch(_){ body=''; }
+    }
+    return `${m.role}|${ts}|${body}`;
+  }
   const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
@@ -6973,6 +6990,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(source, options=null){
     const returnStatus=!!(options&&options.status);
     const preserveVisibleOnShorterTerminalSnapshot=!!(options&&options.preserveVisibleOnShorterTerminalSnapshot);
+    const allowUnmarkedShorterTerminalSnapshot=!!(options&&options.allowUnmarkedShorterTerminalSnapshot);
     if(_isActiveSession() && S.activeStreamId!==streamId){
       _closeSource(source);
       return returnStatus?'stale':false;
@@ -7020,14 +7038,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _stagedMatchesCurrentPrefix=(
           _stagedMessages.length>0 &&
           _stagedMessages.length<_currentVisibleMessages.length &&
-          _currentVisibleEndsWithTerminalMarker &&
+          (_currentVisibleEndsWithTerminalMarker || allowUnmarkedShorterTerminalSnapshot) &&
           _stagedMessages.every((message, idx)=>{
-            const stagedKey=_messageIdentityKey(message);
-            const currentKey=_messageIdentityKey(_currentVisibleMessages[idx]);
+            const stagedKey=_messageAuthoritativeKey(message);
+            const currentKey=_messageAuthoritativeKey(_currentVisibleMessages[idx]);
             return !!stagedKey && stagedKey===currentKey;
           })
         );
-        const _preserveCurrentTranscript=preserveVisibleOnShorterTerminalSnapshot&&_stagedMatchesCurrentPrefix;
+        const _preserveCurrentTranscript=(preserveVisibleOnShorterTerminalSnapshot||allowUnmarkedShorterTerminalSnapshot)&&_stagedMatchesCurrentPrefix;
         const _resolvedMessages=_preserveCurrentTranscript
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
           : _stagedMessages;

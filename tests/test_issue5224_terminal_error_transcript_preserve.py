@@ -62,6 +62,7 @@ function installRuntimeHelpers() {
     "_replaceMarkerOnlyAssistantWithStreamError",
     "_messageIdentityKey",
     "_isHistoricalAnchorActivityScene",
+    "_messageAuthoritativeKey",
     "_carryForwardEphemeralTurnFields",
     "_isTerminalStreamErrorMarkerMessage",
     "_ensureSingleTerminalStreamErrorMarker",
