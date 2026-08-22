@@ -23,43 +23,15 @@ plans as a covering-index scan, results are unchanged by its presence, and a
 read-only db still degrades gracefully instead of raising.
 """
 
-import contextlib
 import pathlib
 import sqlite3
 
 from api.agent_sessions import read_importable_agent_session_rows
+from tests._sqlite_helpers import writes_blocked
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 COVERING_INDEX = "idx_messages_session_ts_role"
-
-
-@contextlib.contextmanager
-def _writes_blocked():
-    """Force the self-heal's writable connection to fail, deterministically.
-
-    The projection reads through a ``mode=ro`` URI handle and only opens a
-    plain writable connection for the best-effort index prime. Swapping
-    ``sqlite3.connect`` for the duration of the call lets URI opens delegate to
-    the real connector while every plain (writable) open raises, which is what
-    a genuinely read-only or locked db does.
-
-    ``chmod(0o444)`` cannot express this: root ignores the mode bit, so a
-    permission-based test silently exercises the writable path and can never
-    detect a regression in the caught-``sqlite3.Error`` branch.
-    """
-    real_connect = sqlite3.connect
-
-    def guarded(target, *args, **kwargs):
-        if kwargs.get("uri"):
-            return real_connect(target, *args, **kwargs)
-        raise sqlite3.OperationalError("attempt to write a readonly database")
-
-    sqlite3.connect = guarded
-    try:
-        yield
-    finally:
-        sqlite3.connect = real_connect
 
 
 def _make_state_db(path, *, sessions=6, messages_per_session=25):
@@ -179,7 +151,7 @@ def test_index_presence_does_not_change_rows(tmp_path):
     # The baseline must stay genuinely unindexed: without the write block its
     # own projection call primes the covering index first, and the comparison
     # degenerates into indexed-vs-indexed.
-    with _writes_blocked():
+    with writes_blocked():
         baseline = read_importable_agent_session_rows(without)
     assert COVERING_INDEX not in _index_names(without), (
         "baseline fixture must remain unindexed for the comparison to mean "
@@ -209,7 +181,7 @@ def test_read_only_db_degrades_gracefully(tmp_path):
         "writable control must prime the index"
     )
 
-    with _writes_blocked():
+    with writes_blocked():
         rows = read_importable_agent_session_rows(db)
 
     assert rows, "projection must still return rows when the prime fails"

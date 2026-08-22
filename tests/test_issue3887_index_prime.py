@@ -12,15 +12,12 @@ refresh.
 These tests assert the intent (the index is primed when missing so the listing
 self-heals) and the cross-cell isolation (the prime is a no-op when the index
 already exists, is skipped when the schema lacks the columns, and degrades
-silently on a read-only db without ever failing the listing).
+silently when the write fails without ever failing the listing).
 """
-import os
 import sqlite3
-import stat
-
-import pytest
 
 import api.agent_sessions as agent_sessions
+from tests._sqlite_helpers import writes_blocked
 
 
 def _full_schema_db(path):
@@ -166,21 +163,17 @@ def test_prime_skipped_without_timestamp_column(tmp_path):
 def test_prime_degrades_on_readonly_db(tmp_path):
     """A read-only db (can't create the index) must not raise — the listing
     still returns, just without the perf benefit."""
-    # Root bypasses POSIX permission bits, so chmod 0444 doesn't make the file
-    # read-only for root and the prime would succeed — validating the wrong path
-    # and giving false confidence on root-run CI (greptile). Skip under root; the
-    # production handler's `except sqlite3.Error: pass` covers read-only/locked/
-    # corrupted/older-schema regardless, and the other cases pin that contract.
-    if hasattr(os, "getuid") and os.getuid() == 0:
-        pytest.skip("chmod-based read-only test is a no-op under root")
+    # Blocking the writable connect rather than chmod'ing the file: root
+    # ignores POSIX mode bits, so a permission-based test exercises the
+    # writable path while claiming to cover the failure path, and this
+    # previously had to be skipped under root (i.e. no coverage at all).
+    # writes_blocked() makes the prime fail deterministically for every user.
     db = tmp_path / "state.db"
     _full_schema_db(db)
-    os.chmod(db, stat.S_IREAD)
-    try:
+    with writes_blocked():
         rows = agent_sessions.read_importable_agent_session_rows(
             db, limit=20, exclude_sources=None
         )
-        assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
-    finally:
-        # Restore write so tmp_path cleanup can remove it.
-        os.chmod(db, stat.S_IWRITE | stat.S_IREAD)
+    assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
+    # The caught-sqlite3.Error branch really was taken: no index was created.
+    assert "idx_messages_session" not in _messages_indexes(db)
