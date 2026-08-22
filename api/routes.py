@@ -8940,7 +8940,28 @@ def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     )
 
 
-def _display_merge_cached_messages(session, sidecar_messages):
+def _display_merge_session_is_active(session) -> bool:
+    """Return whether any canonical in-memory projection is active/pending."""
+    if getattr(session, "active_stream_id", None) or getattr(
+        session, "pending_user_message", None
+    ):
+        return True
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid:
+        return True
+    with LOCK:
+        live = SESSIONS.get(sid)
+    if live is None or live is session:
+        return False
+    if str(getattr(live, "session_id", "") or "") != sid:
+        return True
+    return bool(
+        getattr(live, "active_stream_id", None)
+        or getattr(live, "pending_user_message", None)
+    )
+
+
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -8953,9 +8974,7 @@ def _display_merge_cached_messages(session, sidecar_messages):
     the key cannot be built, or the cached entry does not match, and the caller
     then performs the normal full load + merge.
     """
-    if getattr(session, "active_stream_id", None) or getattr(
-        session, "pending_user_message", None
-    ):
+    if msg_before is not None or _display_merge_session_is_active(session):
         return None
     sid = str(getattr(session, "session_id", "") or "")
     if not sid:
@@ -9026,7 +9045,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     #   - a content fingerprint of the (bounded) state.db rows.
     # Any uncertainty (missing signature, fingerprint failure) skips caching.
     cache_key = None
-    if not getattr(session, "active_stream_id", None) and not getattr(session, "pending_user_message", None):
+    if not _display_merge_session_is_active(session):
         if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
             _state_key = _state_db_rows_fingerprint(state_db_messages)
         else:
@@ -9095,11 +9114,9 @@ def _limited_webui_messages_for_display_with_sidecar(
 # perf: memoized sidecar↔state.db display merges for GET /api/session.
 # See _limited_webui_messages_for_display_with_sidecar for the validity rules.
 _DISPLAY_MERGE_CACHE_MAX = 16
-# While another turn streams, state.db changes for every delta. The key reuses
-# the project's established streaming freeze marker so unrelated writes do not
-# evict every historical transcript. Bound that deliberate freeze tightly:
-# after five seconds the full state.db load + merge runs again, so an external
-# edit to an inactive target session can never remain stale indefinitely.
+# Legacy streaming-freeze keys are still accepted defensively and remain
+# tightly bounded. Production streaming keys now carry an exact target-session
+# digest, so unrelated deltas stay stable without hiding target mutations.
 _DISPLAY_MERGE_STREAMING_TTL_SECONDS = 5.0
 _display_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
 _display_merge_cache_lock = threading.Lock()
@@ -9163,12 +9180,10 @@ def _display_merge_cache_key(
         last = sidecar_messages[-1]
         if isinstance(last, dict):
             last_ts = last.get("timestamp")
-    # Prefer the existing commit-reliable DB/WAL/SHM signature. Serialising
-    # every state.db display row costs more than the cached response budget, so
-    # the cache could never pay for itself. During a stream the project-standard
-    # freeze marker prevents unrelated per-delta commits from churning this key;
-    # streaming entries have a strict five-second TTL. Fail closed onto the exact
-    # row fingerprint whenever the signature cannot be read.
+    # Prefer the existing commit-reliable DB/WAL/SHM signature outside streams.
+    # While another turn streams, use an exact digest scoped to this target
+    # session so unrelated per-delta commits do not churn the key. Fail closed
+    # onto the exact row fingerprint whenever the signature cannot be read.
     if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
         state_fp = _state_db_session_signature(
             sid, getattr(session, "profile", None) or None
@@ -9195,6 +9210,52 @@ def _display_merge_cache_key(
     )
 
 
+def _state_db_target_session_signature(db_path, session_id):
+    """Hash every target-session row without materialising display dictionaries."""
+    try:
+        uri_path = quote(str(Path(db_path).resolve()), safe="/")
+        with closing(
+            sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, timeout=5.0)
+        ) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")]
+            if "session_id" not in columns or "id" not in columns:
+                return None
+            quoted_columns = ", ".join(
+                '"' + column.replace('"', '""') + '"' for column in columns
+            )
+            conn.text_factory = lambda raw: ("text", raw)
+            rows = conn.execute(
+                f'SELECT {quoted_columns} FROM messages '
+                'WHERE session_id = ? ORDER BY id',
+                (str(session_id),),
+            )
+            digest = hashlib.blake2b(digest_size=32)
+            digest.update("\x1f".join(columns).encode("utf-8"))
+            row_count = 0
+            for row in rows:
+                row_count += 1
+                for value in row:
+                    if value is None:
+                        tag, payload = b"n", b""
+                    elif isinstance(value, tuple) and value[:1] == ("text",):
+                        tag, payload = b"t", value[1]
+                    elif isinstance(value, bytes):
+                        tag, payload = b"b", value
+                    elif isinstance(value, int):
+                        tag, payload = b"i", str(value).encode("ascii")
+                    elif isinstance(value, float):
+                        tag, payload = b"f", value.hex().encode("ascii")
+                    else:
+                        return None
+                    digest.update(tag)
+                    digest.update(len(payload).to_bytes(8, "big"))
+                    digest.update(payload)
+            return ("streaming-target", row_count, digest.hexdigest())
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+
+
 def _state_db_session_signature(session_id, profile=None):
     """Commit-reliable state.db signature for a session cache key.
 
@@ -9207,11 +9268,11 @@ def _state_db_session_signature(session_id, profile=None):
     Outside a stream, this may invalidate a session cache when *another*
     session is written. That is a deliberate safety trade-off: false
     invalidation costs one cold merge, while missed invalidation can serve a
-    stale or shrunk transcript. During an active stream, the project-standard
-    streaming marker freezes those unrelated per-delta commits; the cache layer
-    limits such entries to five seconds before forcing a fresh full merge. The
-    normal DB signature call costs about 1.3 ms on the production state.db
-    versus 1.4 s for serialising all 36k display rows in Python.
+    stale or shrunk transcript. During an active stream, an exhaustive digest
+    of the target session replaces the global freeze marker: unrelated deltas
+    remain stable, while same-length direct edits to the target invalidate
+    immediately. The normal DB signature call costs about 1.3 ms on the
+    production state.db; the exhaustive path is reserved for active streams.
 
     Returns None on any failure so callers fail closed onto the exact row
     fingerprint rather than trusting a partial key.
@@ -9236,7 +9297,7 @@ def _state_db_session_signature(session_id, profile=None):
     except Exception:
         streaming_marker = None
     if streaming_marker is not None:
-        return streaming_marker
+        return _state_db_target_session_signature(db_path, sid)
     try:
         signature = _sqlite_file_stat_cache_key(Path(db_path))
     except Exception:
@@ -9417,8 +9478,13 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
                     break
             if not stale:
                 with _lineage_display_cache_lock:
-                    _lineage_display_cache.move_to_end(sid, last=True)
-                return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+                    current_entry = _lineage_display_cache.get(sid)
+                    if current_entry is entry:
+                        _lineage_display_cache.move_to_end(sid, last=True)
+                        return [
+                            dict(m) if isinstance(m, dict) else m
+                            for m in entry["messages"]
+                        ]
 
     segments = []
     current = session
@@ -9427,6 +9493,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     root_is_fork = source == "fork"
     seen = {str(getattr(session, "session_id", "") or "")}
     parent_sigs: list[tuple[str, tuple]] = []
+    parent_signatures_complete = True
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
@@ -9436,7 +9503,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             break
         parent_path = SESSION_DIR / f"{parent_id}.json"
         parent_sig = _sidecar_stat_signature(parent_path)
-        if parent_sig is not None:
+        if parent_sig is None:
+            parent_signatures_complete = False
+        else:
             parent_sigs.append((str(parent_path), parent_sig))
         parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
         if root_is_fork and parent_source != "fork":
@@ -9466,7 +9535,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         getattr(session, "messages", []) or [],
         truncation_watermark=None,
     )
-    if self_sig is not None and parent_sigs:
+    if self_sig is not None and parent_sigs and parent_signatures_complete:
         with _lineage_display_cache_lock:
             _lineage_display_cache[sid] = {
                 "self_sig": self_sig,
@@ -13323,7 +13392,9 @@ def handle_get(handler, parsed) -> bool:
                     and not getattr(s, "pending_user_message", None)
                 ):
                     _display_cache_hit = _display_merge_cached_messages(
-                        s, limited_sidecar_messages
+                        s,
+                        limited_sidecar_messages,
+                        msg_before=msg_before,
                     )
                 if _display_cache_hit is not None:
                     state_db_messages = []

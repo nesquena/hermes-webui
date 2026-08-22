@@ -5,11 +5,11 @@ serialises every state.db display row with ``json.dumps``. On a 36k-row session
 that cost ~1.4s *per request*, which became the floor cost of even a cache HIT --
 the cache could never pay for itself.
 
-``_state_db_session_signature`` now reuses the project's DB/WAL/SHM commit key,
-and freezes that global component while a turn streams. These tests pin the
-properties that matter: every committed mutation moves the normal signature;
-the streaming marker is stable only for its bounded cache window; and failures
-return None so the caller falls back to the exact row fingerprint.
+``_state_db_session_signature`` now reuses the project's DB/WAL/SHM commit key
+outside streams and switches to an exact target-session digest while another
+turn streams. These tests pin the properties that matter: every committed
+target mutation moves the signature; unrelated stream deltas remain stable;
+and failures return None so the caller falls back to the exact row fingerprint.
 """
 
 import sqlite3
@@ -147,17 +147,31 @@ def test_signature_is_stable_without_mutation(db):
         assert _sig(db) == first
 
 
-def test_signature_freezes_while_streaming(db, monkeypatch):
-    """Per-delta writes elsewhere must not churn a historical transcript key."""
+def test_streaming_signature_is_scoped_to_target_session(db, monkeypatch):
+    """Unrelated stream writes stay stable, but target edits invalidate immediately."""
     marker = ("streaming", ("active-run-1",))
     monkeypatch.setattr(
         "api.models._cli_sessions_streaming_freeze_marker",
         lambda: marker,
         raising=False,
     )
-    assert _sig(db) == marker
-    _mutate(db, "UPDATE messages SET content='changed' WHERE id=20")
-    assert _sig(db) == marker
+    first = _sig(db)
+    assert first is not None
+
+    _mutate(
+        db,
+        "INSERT INTO messages (session_id, role, content, timestamp) "
+        "VALUES ('20260202_000000_other', 'user', 'unrelated delta', 1700001111.0)",
+    )
+    assert _sig(db) == first
+
+    _mutate(
+        db,
+        "UPDATE messages SET content = 'Z' || SUBSTR(content, 2) WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages WHERE session_id = ?)",
+        (SID,),
+    )
+    assert _sig(db) != first, "target session edit was hidden by the global stream marker"
 
 
 def test_signature_invalidates_on_other_session_write(db):

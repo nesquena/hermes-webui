@@ -115,6 +115,74 @@ def test_parent_write_invalidates_cache(lineage, hermes_home):
     )
 
 
+def test_lru_eviction_during_parent_validation_cannot_crash(lineage, monkeypatch):
+    """A cache entry may disappear while its parent signatures are checked."""
+    routes, Session, child = lineage
+    import api.models as models
+
+    expected = routes._webui_sidecar_lineage_messages_for_display(child)
+    real_signature = models._sidecar_stat_signature
+    evicted = False
+
+    def evict_on_parent(path):
+        nonlocal evicted
+        if not evicted and path.stem == "lineage_parent":
+            evicted = True
+            with routes._lineage_display_cache_lock:
+                routes._lineage_display_cache.pop(child.session_id, None)
+        return real_signature(path)
+
+    monkeypatch.setattr(models, "_sidecar_stat_signature", evict_on_parent)
+    got = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert evicted
+    assert [m.get("content") for m in got] == [m.get("content") for m in expected]
+
+
+def test_incomplete_multihop_parent_signatures_disable_cache(hermes_home, monkeypatch):
+    import api.models as models
+    import api.routes as routes
+    from api.models import Session
+
+    monkeypatch.setattr(routes, "SESSION_DIR", hermes_home / "sessions")
+    monkeypatch.setattr(models, "SESSION_DIR", hermes_home / "sessions")
+    routes._lineage_display_cache.clear()
+
+    grandparent = Session(
+        session_id="lineage_grandparent",
+        messages=[{"role": "user", "content": "grand", "timestamp": 1}],
+    )
+    grandparent.pre_compression_snapshot = True
+    grandparent.save()
+    parent = Session(
+        session_id="lineage_parent_two",
+        messages=[{"role": "assistant", "content": "parent", "timestamp": 2}],
+    )
+    parent.pre_compression_snapshot = True
+    parent.parent_session_id = grandparent.session_id
+    parent.save()
+    child = Session(
+        session_id="lineage_child_two",
+        messages=[{"role": "user", "content": "child", "timestamp": 3}],
+    )
+    child.parent_session_id = parent.session_id
+    child.save()
+
+    real_signature = models._sidecar_stat_signature
+
+    def incomplete_signature(path):
+        if path.stem == grandparent.session_id:
+            return None
+        return real_signature(path)
+
+    monkeypatch.setattr(models, "_sidecar_stat_signature", incomplete_signature)
+    got = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert [m.get("content") for m in got] == ["grand", "parent", "child"]
+    with routes._lineage_display_cache_lock:
+        assert child.session_id not in routes._lineage_display_cache
+
+
 def test_sessions_without_lineage_do_not_pollute_cache(lineage):
     routes, Session, child = lineage
     routes._lineage_display_cache.clear()

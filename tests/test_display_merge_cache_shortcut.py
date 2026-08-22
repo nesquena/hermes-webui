@@ -146,6 +146,27 @@ def test_pending_user_message_never_uses_the_cache(stable_key):
     assert routes._display_merge_cached_messages(session, sidecar) is None
 
 
+def test_live_memory_session_blocks_hit_from_stale_idle_object(stable_key):
+    """A stale disk object must not bypass the canonical in-memory active queue."""
+    stale = _Session()
+    sidecar = [{"role": "user", "content": "hi", "timestamp": 10.0}]
+    merged = [{"role": "user", "content": "cached", "timestamp": 10.0}]
+    _seed(stale, sidecar, merged)
+    live = _Session(active="stream-live")
+
+    with routes.LOCK:
+        previous = routes.SESSIONS.get(stale.session_id)
+        routes.SESSIONS[stale.session_id] = live
+    try:
+        assert routes._display_merge_cached_messages(stale, sidecar) is None
+    finally:
+        with routes.LOCK:
+            if previous is None:
+                routes.SESSIONS.pop(stale.session_id, None)
+            else:
+                routes.SESSIONS[stale.session_id] = previous
+
+
 def test_changed_state_db_signature_misses(monkeypatch, stable_key):
     """New state.db rows must invalidate the entry, not be silently skipped."""
     session = _Session()
@@ -194,6 +215,18 @@ def test_changed_sidecar_tail_misses(stable_key):
 
 def test_empty_cache_misses(stable_key):
     assert routes._display_merge_cached_messages(_Session(), []) is None
+
+
+def test_msg_before_pagination_never_uses_tail_cache(stable_key):
+    session = _Session()
+    sidecar = [{"role": "user", "content": "hi", "timestamp": 10.0}]
+    _seed(session, sidecar, [{"role": "user", "content": "cached tail", "timestamp": 10.0}])
+
+    assert routes._display_merge_cached_messages(
+        session,
+        sidecar,
+        msg_before=100,
+    ) is None
 
 
 def test_probe_fails_closed_when_bounded_signature_unavailable(monkeypatch):
