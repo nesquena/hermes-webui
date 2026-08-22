@@ -3440,6 +3440,77 @@ def _reasoning_name_candidates(model_id: str) -> list[str]:
     return candidates
 
 
+# Gemini routes that have no thinking ladder at all, whatever their version.
+# Checked BEFORE the version gate so an image/embedding id cannot ride in on
+# its major number (e.g. `gemini-3-pro-image-preview`).
+_GEMINI_NON_TEXT_RE = re.compile(r"(?:^|[^a-z0-9])(?:image|imagine|embedding)")
+
+# xAI Grok builds that accept `reasoning_effort`, as explicit shapes.
+#
+# Mirrors the Agent core's `_GROK_EFFORT_CAPABLE_PREFIXES`
+# (agent/model_metadata.py), which was verified live against api.x.ai
+# /v1/responses. The lineup is NOT monotonic in the version number, so a
+# ">= 4.5" comparison is wrong in both directions:
+#
+#   accepts effort : grok-3-mini(-fast), grok-4.3, grok-4.5, grok-4.6,
+#                    grok-4.20-multi-agent
+#   rejects effort : grok-3, grok-4, grok-4-0709, grok-4-fast(-reasoning),
+#                    grok-4-1-fast, grok-4.20 / grok-4.20-non-reasoning,
+#                    grok-code-fast-1
+#
+# Ids are normalised to `-` separators before matching, so `grok-4.5` arrives
+# here as `grok-4-5`; both spellings are listed.
+_GROK_EFFORT_CAPABLE_PREFIXES = (
+    "grok-3-mini",
+    "grok-4-20-multi-agent",
+    "grok-4.20-multi-agent",
+    "grok-4-3",
+    "grok-4.3",
+    "grok-4-5",
+    "grok-4.5",
+    "grok-4-6",
+    "grok-4.6",
+)
+
+# Shapes that would otherwise be caught by a prefix above but must NOT be
+# treated as effort-capable. `grok-4.20-non-reasoning` starts with the same
+# `grok-4-20` stem as the multi-agent build in normalised form, so an
+# exclusion pass is required rather than prefix matching alone.
+_GROK_EFFORT_DENY_SUBSTRINGS = (
+    "non-reasoning",
+    "code-fast",
+)
+
+
+def _grok_supports_effort(normalized: str) -> bool:
+    """True when an xAI Grok id accepts a `reasoning_effort` dial.
+
+    A prefix must end on a version boundary, not merely start the string. A
+    bare `startswith` lets a date stamp be absorbed into the version: an
+    aggregator id like `grok-4-520250101` (that is `grok-4` plus the date
+    `20250101`) begins with `grok-4-5` and would read as the effort-capable
+    4.5 build, so the composer would offer levels the model rejects and the
+    request would fail. Requiring the next character to be a non-digit keeps
+    `grok-4.5-20250101` (a genuinely dated 4.5) capable while classifying
+    `grok-4-520250101` as the `grok-4` it actually is.
+
+    This mirrors the `(?!\\d)` date-stamp guard the Claude branch below already
+    uses for the same class of bug.
+    """
+    name = (normalized or "").strip().lower().rsplit("/", 1)[-1]
+    if not name:
+        return False
+    if any(bad in name for bad in _GROK_EFFORT_DENY_SUBSTRINGS):
+        return False
+    for prefix in _GROK_EFFORT_CAPABLE_PREFIXES:
+        if not name.startswith(prefix):
+            continue
+        rest = name[len(prefix):]
+        if not rest or not rest[0].isdigit():
+            return True
+    return False
+
+
 def _candidate_supports_reasoning(candidate: str) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "-", str(candidate or "").strip().lower()).strip("-")
     if not normalized:
@@ -3447,6 +3518,15 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
 
     tokens = [token for token in normalized.split("-") if token]
     token_set = set(tokens)
+
+    # Grok is decided FIRST, by explicit shape, because the generic
+    # "reasoning"/"thinking" keyword shortcut below would otherwise claim
+    # `grok-4-fast-reasoning` and `grok-4.20-non-reasoning` — both of which
+    # reason natively but REJECT a `reasoning_effort` dial. The keyword says
+    # "this model reasons", which is not the same question as "this model
+    # exposes an effort control".
+    if "grok" in token_set or normalized.startswith("grok"):
+        return _grok_supports_effort(normalized)
 
     if "thinking" in token_set or "reasoning" in token_set:
         return True
@@ -3472,7 +3552,28 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
             if major >= 4 or (major == 3 and minor >= 7):
                 return True
         return False
-    # Positive-only prefixed Qwen 3+ detection (e.g. "al-qwen3-8-max-preview"
+    if "gemini" in token_set or normalized.startswith("gemini"):
+        # Hard-deny non-text routes FIRST. An image / imagine / embedding model
+        # has no thinking ladder at all, and a bare version match would happily
+        # let `gemini-3-pro-image-preview` through on its `3`.
+        if _GEMINI_NON_TEXT_RE.search(normalized):
+            return False
+        # Thinking/effort controls are documented for Gemini 2.5+ and 3-era.
+        # 1.5 / 2.0 have no ladder — a selector there would 400.
+        #
+        # The minor group is capped at 1-2 digits with a (?!\d) guard so a
+        # trailing date stamp is NOT read as a minor version — otherwise a
+        # dated id like "gemini-2-20250219" would parse minor=20250219 and
+        # wrongly satisfy the 2.5+ gate. (Same defense the Claude branch
+        # above already uses.)
+        match = re.search(r"gemini.*?(\d+)(?:\D+(\d{1,2})(?!\d))?", normalized)
+        if match:
+            major = int(match.group(1))
+            minor = int(match.group(2)) if match.group(2) else 0
+            if major >= 3 or (major == 2 and minor >= 5):
+                return True
+        return False
+    # Positive-only prefixed Qwen 3+ detection (e.g. "al-qwen3-8-max-preview")
     # → tokens ["al","qwen3","8",...]). Scan for any token starting with
     # "qwen" followed by version >= 3 and immediately allow. Do NOT return
     # False here — Qwen 2.x embedded in hybrid IDs like
@@ -3686,6 +3787,98 @@ def _is_gpt_5_6_reasoning_model(bare_model: str) -> bool:
     return str(bare_model or "").strip().lower() in _GPT_5_6_REASONING_MODELS
 
 
+# Grok models that accept an effort ladder but REJECT turning reasoning off.
+# Explicit per-model, never a blanket `grok` prefix: the lineup is not
+# monotonic in the version number, and a prefix deny silently removes a
+# working control. Verified live against api.x.ai /v1/responses and recorded
+# in the Agent core (`agent/model_metadata.py`): grok-4.5 "REJECTS 'none'
+# (This model does not support `reasoning_effort` value `none`), unlike
+# grok-4.3", and grok-4.6 is its drop-in successor with the same dial.
+#
+# grok-4.3 and grok-3-mini DO accept disabling, so they keep "None". Removing
+# it there is not cosmetic: the installed xAI transport then defaults
+# reasoning back on at medium, so a user who picks "None" silently gets
+# medium reasoning.
+_DISABLE_REASONING_DENY_PREFIXES = (
+    "grok-4.5",
+    "grok-4-5",
+    "grok-4.6",
+    "grok-4-6",
+)
+
+# Per-model `thinking_level` ladders, transcribed from Google's published
+# "Controlling thinking" table (https://ai.google.dev/gemini-api/docs/thinking).
+# The ladder is genuinely model-specific: 3.1 Pro and the whole 2.5 line have
+# no `minimal`, and 3 Pro exposes only the two endpoints. A single universal
+# ladder therefore advertises levels the model will not honor.
+# Longest-prefix wins, so `gemini-3.5-flash-lite` is matched before
+# `gemini-3.5-flash`.
+_GEMINI_THINKING_LEVELS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("gemini-3.7-flash", ("low", "medium", "high")),
+    ("gemini-3.6-flash", ("minimal", "low", "medium", "high")),
+    ("gemini-3.5-flash-lite", ("minimal", "low", "medium", "high")),
+    ("gemini-3.5-flash", ("minimal", "low", "medium", "high")),
+    ("gemini-3.1-pro", ("low", "medium", "high")),
+    ("gemini-3-flash", ("minimal", "low", "medium", "high")),
+    ("gemini-3-pro", ("low", "high")),
+    ("gemini-2.5-pro", ("low", "medium", "high")),
+    ("gemini-2.5-flash-lite", ("low", "medium", "high")),
+    ("gemini-2.5-flash", ("low", "medium", "high")),
+)
+
+# Conservative default for a Gemini id not in the table (new releases). Every
+# published text Gemini ladder contains at least low/medium/high, and no
+# published ladder omits them, so this offers only levels that are universal.
+_GEMINI_DEFAULT_THINKING_LEVELS = ("low", "medium", "high")
+
+
+def _gemini_thinking_levels(model_id: str) -> list[str]:
+    """Return the published `thinking_level` ladder for a Gemini id.
+
+    Falls back to the universally-supported low/medium/high for ids not in the
+    table rather than guessing `minimal`, which several families reject.
+    """
+    name = str(model_id or "").strip().lower().rsplit("/", 1)[-1]
+    if not name:
+        return []
+    best: tuple[str, tuple[str, ...]] | None = None
+    for prefix, levels in _GEMINI_THINKING_LEVELS:
+        if name.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, levels)
+    if best is not None:
+        return list(best[1])
+    return list(_GEMINI_DEFAULT_THINKING_LEVELS)
+
+
+def supports_disable_reasoning(
+    model_id: str | None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> bool:
+    """True when the model accepts turning reasoning OFF entirely.
+
+    Distinct from ``supports_thinking_toggle``, which only asks whether the
+    composer should render a control at all. A model can have a perfectly good
+    effort ladder and still have no "off" position: xAI's Grok reasoning builds
+    accept ``low``/``medium``/``high`` but reject ``reasoning_effort:"none"``
+    outright, and the native xAI endpoint silently ignores it and leaves
+    reasoning on — so offering "None" there is either an error or a lie.
+
+    Z.AI GLM models are the opposite case: they accept the ``thinking`` toggle
+    and their whole control is the on/off pair, so they must keep "None".
+    """
+    zai_thinking = _zai_glm_thinking_toggle_supported(model_id, provider_id)
+    if zai_thinking is not None:
+        return zai_thinking
+
+    name = str(model_id or "").strip().lower().rsplit("/", 1)[-1]
+    if not name:
+        return False
+    if any(name.startswith(prefix) for prefix in _DISABLE_REASONING_DENY_PREFIXES):
+        return False
+    return True
+
+
 def _filter_reasoning_efforts_for_provider(
     efforts: list[str],
     model_id: str,
@@ -3712,6 +3905,26 @@ def _filter_reasoning_efforts_for_provider(
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
     # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
     # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
+    # Gemini has no 'xhigh' and no 'max' — Google documents
+    # minimal/low/medium/high. Advertising a level the API does not have lets a
+    # user pick a depth the model never uses (the adapter treats an unknown
+    # 'max' as medium), so clamp to the real contract.
+    #
+    # Keyed on the MODEL, not just the provider name: Gemini also arrives via
+    # aggregators (`google/gemini-2.5-pro` on openrouter, `vertex/gemini-…` on
+    # a custom gateway), where a provider-name check would miss it entirely.
+    if _is_gemini_id(bare) or _is_gemini_id(_strip_provider_hint_for_reasoning(model_id)):
+        # Share the published per-model table rather than re-encoding a second,
+        # looser ladder here: a universal ceiling would put `minimal` back on
+        # the models that reject it (3.1 Pro, the whole 2.5 line).
+        gemini_id = bare if _is_gemini_id(bare) else _strip_provider_hint_for_reasoning(model_id)
+        if _is_native_gemini_provider(provider):
+            # The native adapter collapses several levels onto one request, so
+            # only offer what it can actually distinguish.
+            gemini_ladder = tuple(_gemini_native_wire_ladder(gemini_id))
+        else:
+            gemini_ladder = tuple(_gemini_thinking_levels(gemini_id))
+        return [eff for eff in normalized if eff in gemini_ladder]
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
         return [eff for eff in normalized if eff != "max"]
     # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
@@ -3793,8 +4006,163 @@ def _is_pre_adaptive_anthropic(bare_model: str) -> bool:
     return (major, minor) < (4, 6)
 
 
+# Levels the NATIVE Gemini path can actually distinguish on the wire.
+#
+# The installed adapter (`agent/transports/chat_completions.py`,
+# `_build_gemini_thinking_config`) collapses Hermes' effort levels when it
+# builds `thinkingConfig`, so several UI choices produce byte-identical
+# requests. Measured against that function:
+#
+#   gemini-2.5-*     every level -> {"includeThoughts": True}   (1 outcome)
+#   gemini-3*-pro    minimal/low/medium -> "low", high+ -> "high"  (2 outcomes)
+#   gemini-3*-flash  minimal/low -> "low", medium -> "medium",
+#                    high/xhigh/max -> "high"                    (3 outcomes)
+#
+# Offering aliased levels lets a user pick a depth that never reaches the
+# model, so the native ladder exposes one representative level per distinct
+# wire outcome. 2.5 has a single outcome and therefore no meaningful
+# intensity control at all until a `thinkingBudget` translation exists;
+# `None`/`Default` still work there because they are handled before this
+# ladder (`enabled: False` / `effort == "none"` -> `includeThoughts: False`).
+#
+# Aggregator routes (openrouter, vertex gateways) do NOT go through this
+# adapter, so they keep the published per-model ladder.
+_GEMINI_NATIVE_WIRE_LADDERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("gemini-2.5", ()),
+    ("gemini-3-pro", ("low", "high")),
+    ("gemini-3.1-pro", ("low", "high")),
+)
+
+_GEMINI_NATIVE_FLASH_LADDER = ("low", "medium", "high")
+
+
+def _gemini_native_wire_ladder(model_id: str) -> list[str]:
+    """Levels the native Gemini adapter turns into DISTINCT requests."""
+    name = str(model_id or "").strip().lower().rsplit("/", 1)[-1]
+    if not name:
+        return []
+
+    best: tuple[str, tuple[str, ...]] | None = None
+    for prefix, levels in _GEMINI_NATIVE_WIRE_LADDERS:
+        if name.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, levels)
+    if best is not None:
+        return list(best[1])
+
+    if name.startswith("gemini-3"):
+        # Flash and every other Gemini 3 shape take the flash branch, which
+        # keeps three distinct thinkingLevel values.
+        return list(_GEMINI_NATIVE_FLASH_LADDER)
+
+    # Unknown Gemini generation: fall back to the published ladder rather than
+    # guessing at a collapse this adapter may not perform.
+    return _gemini_thinking_levels(model_id)
+
+
+def _is_native_gemini_provider(provider_id: str) -> bool:
+    """True for the first-party Gemini endpoints that use the native adapter."""
+    return str(provider_id or "").strip().lower() in {
+        "gemini",
+        "google",
+        "google-gemini",
+        "google-ai-studio",
+    }
+
+
+def _gemini_model_segments(model_id: str) -> list[str]:
+    """Path segments of *model_id* that are themselves Gemini model ids.
+
+    A routed id can nest a model under wrapper namespaces
+    (`image-router/gemini-3.6-flash`). Only the segment that IS the model
+    carries the model's identity; wrapper names are infrastructure. Returning
+    the segments — rather than a bare bool — lets every Gemini-specific
+    predicate ask its question *about the model*, instead of scanning the whole
+    route and mixing a keyword from one segment with the family name from
+    another.
+    """
+    lowered = str(model_id or "").strip().lower()
+    if not lowered:
+        return []
+    found: list[str] = []
+    for segment in lowered.split("/"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        # `gemini`, `gemini-2.5-pro`, `gemini_3_flash` — the family name must
+        # start the segment and be followed by a version separator or nothing,
+        # so `gemini-router` (a gateway name) and `notgemini-…` do not match.
+        if segment == "gemini":
+            found.append(segment)
+            continue
+        if segment.startswith("gemini"):
+            rest = segment[len("gemini"):]
+            if rest[:1] in {"-", "_", "."} and rest[1:2].isdigit():
+                found.append(segment)
+    return found
+
+
+def _is_gemini_id(model_id: str) -> bool:
+    """True when an id belongs to the Gemini family, at any nesting depth.
+
+    Matches Gemini-shaped PATH SEGMENTS rather than searching the whole string
+    for `gemini-`. An unrestricted substring test claims ids that merely
+    mention the word: `notgemini-deepseek-r1` and `acme-gemini-router/deepseek-r1`
+    are DeepSeek models that were being clamped to Gemini's ladder and losing
+    xhigh/max. A segment must BE a Gemini model id, not contain one.
+    """
+    return bool(_gemini_model_segments(model_id))
+
+
+def _gemini_route_is_non_text(model_id: str) -> bool:
+    """True when the Gemini MODEL segment is an image/imagine/embedding route.
+
+    Both halves of this question must be asked of the same path segment. A
+    top-level scan that finds `image` anywhere in the route and `gemini`
+    anywhere else in it denies valid text models: `image-router/gemini-3.6-flash`
+    matched `image` in the wrapper and `gemini` in the model, and lost its
+    ladder even though the model segment is an ordinary text Gemini. Same for
+    `embedding-gateway/gemini-3.1-pro-preview`.
+
+    `vendor/gemini-3-pro-image-preview` and `vendor/gemini-embedding-001` stay
+    denied, because there the keyword is inside the model segment itself.
+    """
+    for segment in _gemini_model_segments(model_id):
+        normalized = re.sub(r"[^a-z0-9]+", "-", segment).strip("-")
+        if _GEMINI_NON_TEXT_RE.search(normalized):
+            return True
+    return False
+
+
+def _gemini_text_ladder(model_id: str = "") -> list[str]:
+    """Gemini's exact thinking ladder for heuristic (non-catalog) fallbacks.
+
+    Model-specific: Google publishes a different `thinking_level` set per
+    model (3.1 Pro and the 2.5 line have no `minimal`; 3 Pro exposes only
+    `low`/`high`), and no Gemini has `xhigh` or `max`. Offering a level the
+    model does not accept lets a user pick a depth the API then rejects or
+    silently clamps, which is worse than not offering it — the UI would be
+    reporting a depth the model never used.
+    """
+    return _gemini_thinking_levels(model_id) if model_id else list(
+        _GEMINI_DEFAULT_THINKING_LEVELS
+    )
+
+
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     """Fallback when hermes_cli is unavailable."""
+    efforts = _heuristic_reasoning_efforts_impl(model_id, provider_id)
+    # Single chokepoint for Gemini's exact ladder. Gemini reaches this function
+    # through several branches (copilot, slash-prefixed vendor routes, nested
+    # gateway routes, the candidate scan), and every one of them used to hand
+    # back the full VALID_REASONING_EFFORTS including xhigh/max — levels Gemini
+    # does not have. Clamping at the exit keeps the contract in one place
+    # rather than repeating it in each branch.
+    if efforts and _is_gemini_id(_strip_provider_hint_for_reasoning(model_id)):
+        return _gemini_text_ladder(_strip_provider_hint_for_reasoning(model_id))
+    return efforts
+
+
+def _heuristic_reasoning_efforts_impl(model_id: str, provider_id: str) -> list[str]:
     model = _strip_provider_hint_for_reasoning(model_id).lower()
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     if not model or provider in {"cursor-acp", "copilot-acp"}:
@@ -3807,10 +4175,33 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
             list(VALID_REASONING_EFFORTS), model, provider
         )
     if provider in {"copilot", "github-copilot"}:
-        if bare.startswith(("gpt-5", "o1", "o3", "o4")):
-            if bare.startswith(("o1", "o3", "o4")):
-                return ["low", "medium", "high"]
+        # Copilot is a CLOSED set: whatever this branch decides is final, so it
+        # must not fall through to the generic prefix table below. Falling
+        # through is how `grok-4.20-non-reasoning` and `grok-3-mini` used to
+        # come back with the full six-level ladder — the first rejects an
+        # effort dial entirely, the second only accepts low/medium/high.
+        if bare.startswith(("o1", "o3", "o4")):
+            return ["low", "medium", "high"]
+        if bare.startswith("gpt-5"):
             return list(VALID_REASONING_EFFORTS)
+        if "claude" in bare:
+            return (
+                ["low", "medium", "high"]
+                if not _is_pre_adaptive_anthropic(bare)
+                else []
+            )
+        if bare.startswith("gemini"):
+            # image / imagine / embedding routes have no ladder at all.
+            if not _candidate_supports_reasoning(bare):
+                return []
+            return _gemini_thinking_levels(bare)
+        if bare.startswith("grok"):
+            # Explicit per-shape table (see _grok_supports_effort). Every
+            # effort-capable Grok build accepts exactly low/medium/high.
+            return ["low", "medium", "high"] if _grok_supports_effort(bare) else []
+        if bare.startswith("mai-code"):
+            return ["low", "medium", "high"]
+        return []
     prefixes = (
         "deepseek/",
         "anthropic/",
@@ -3826,6 +4217,14 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         return list(VALID_REASONING_EFFORTS)
     if _nested_gateway_route_reasoning(model):
         return list(VALID_REASONING_EFFORTS)
+    # Grok is decided by the WHOLE id, before the candidate scan below.
+    # `_reasoning_name_candidates` splits on dots, so `grok-4.20-non-reasoning`
+    # yields the fragment `20-non-reasoning` — which has lost the `grok` prefix
+    # and gets claimed by the generic "reasoning" keyword shortcut. Deciding
+    # here keeps the explicit shape table authoritative for the whole family.
+    if bare.startswith("grok") or "grok" in re.split(r"[^a-z0-9]+", bare):
+        return ["low", "medium", "high"] if _grok_supports_effort(bare) else []
+
     # Named custom providers often rewrite model ids with dots, underscores, or
     # extra vendor namespaces. Normalize those shapes before applying family-level
     # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
@@ -4109,6 +4508,240 @@ def _configured_reasoning_effort_lists(provider_entry, model_id: str) -> list:
     return configured_lists
 
 
+def _copilot_catalog_reasoning_efforts(
+    model_id: str,
+) -> tuple[list[str], bool, list[str], str]:
+    """Ask the core for a Copilot model's ladder.
+
+    Returns ``(efforts, resolved, core_levels, core_verdict)``.
+
+    ``resolved`` reflects the outcome of THIS lookup:
+
+    * ``True``  — a concrete catalog answered. A non-empty list is its ladder;
+      an empty list means the catalog positively says this model has no ladder
+      (``claude-haiku-4.5``), which must be honoured rather than guessed over.
+    * ``False`` — no catalog was consulted this time (core too old, no
+      credential, fetch failed). Fall back to the heuristic.
+
+    ``core_levels`` / ``core_verdict`` describe what the INSTALLED core would
+    send for this model, carried out of the same observation so the caller
+    never has to call the resolver again:
+
+    * ``"absent"`` — no core, or no resolver. Nothing to disagree with.
+    * ``"inert"``  — a core with no catalog path resolved nothing for this
+      model, so a control would be visible but do nothing on the wire.
+    * ``"answer"`` — ``core_levels`` is what it would send; the heuristic must
+      not offer levels beyond it (the published table can be wider than the
+      core's offline table — Copilot lists ``minimal`` for Gemini 3.x Flash
+      while the core's static fallback stops at high).
+    * ``"trust"``  — a catalog-aware core came back empty, i.e. a transient
+      fetch failure that says nothing about this model.
+
+    ONE fetch backs the classification, the resolution AND the core verdict.
+    Deriving them from separate calls is a check/use race: a transient failure
+    on the first call and a success on the second yields "empty" AND
+    "authoritative", which reads as a positive deny and silently drops the
+    ladder for any model the core's offline table does not know
+    (`grok-3-mini`, `grok-4.3`). Passing the fetched catalog straight into the
+    resolver makes them physically unable to disagree.
+    """
+    try:
+        import hermes_cli.models as copilot_models
+    except Exception:
+        return [], False, [], "absent"
+
+    resolver = getattr(copilot_models, "github_model_reasoning_efforts", None)
+    if resolver is None:
+        return [], False, [], "absent"
+
+    if not _copilot_core_reads_catalog_unprompted(copilot_models):
+        # Core never consults a catalog. Whatever it returns comes from its own
+        # static table: a ladder is usable, an empty result is not an answer.
+        try:
+            efforts = list(resolver(model_id) or [])
+        except Exception:
+            return [], False, [], "trust"
+        if efforts:
+            return efforts, True, efforts, "answer"
+        return [], False, [], "inert"
+
+    catalog = _fetch_copilot_catalog_once(copilot_models)
+    if not catalog:
+        # The catalog is unreachable this time. The core will still answer from
+        # its own offline table on the wire, so ask it what that answer is.
+        # An EMPTY catalog is passed explicitly: a bare call would make the
+        # resolver fetch again, and a second fetch is exactly the check/use
+        # gap this function exists to close. The core's table can be NARROWER
+        # than the vendor's published one (Copilot lists `minimal` for Gemini
+        # 3.x Flash; the core's fallback stops at high), and offering the extra
+        # level would render a control the runtime silently drops.
+        try:
+            if _resolver_accepts_catalog_kwarg(resolver):
+                offline = resolver(model_id, catalog=[])
+            else:
+                offline = resolver(model_id)
+            core_levels = [
+                str(x).strip().lower()
+                for x in (offline or [])
+                if str(x).strip()
+            ]
+        except Exception:
+            return [], False, [], "trust"
+        if core_levels:
+            return [], False, core_levels, "answer"
+        return [], False, [], "trust"
+
+    # Ask the signature whether the resolver accepts `catalog`, rather than
+    # calling and catching TypeError. Catching cannot tell a signature
+    # mismatch from a TypeError raised INSIDE a modern resolver — the latter
+    # would be retried without the catalog, quietly reintroducing the
+    # two-observation gap this function exists to close.
+    try:
+        efforts = list(_call_copilot_resolver(resolver, model_id, catalog) or [])
+    except Exception:
+        return [], False, [], "trust"
+
+    if efforts:
+        return efforts, True, efforts, "answer"
+
+    # Empty from a live catalog is authoritative ONLY if the catalog actually
+    # lists this model. When the id is absent the core falls back to its own
+    # static table, and that table returning `[]` means "I don't know this
+    # model", not "this model has no ladder" — the difference between
+    # `claude-haiku-4.5` (listed, genuinely no ladder) and `grok-4.3`
+    # (unlisted on a partial catalog, ladder must come from the heuristic).
+    if _catalog_lists_model(catalog, copilot_models, model_id):
+        return [], True, [], "answer"
+    return [], False, [], "trust"
+
+
+def _resolver_accepts_catalog_kwarg(resolver) -> bool:
+    """True when *resolver* can be called with a ``catalog=`` keyword.
+
+    Determined from the signature rather than by calling and catching
+    ``TypeError``: a modern resolver that raises ``TypeError`` internally is
+    indistinguishable from an old signature at the call site, and retrying it
+    without the catalog would silently reintroduce the two-observation gap.
+    When the signature cannot be read (C builtins, exotic callables), fail
+    closed to the bare call — that is the historical behaviour.
+    """
+    try:
+        import inspect
+
+        params = inspect.signature(resolver).parameters
+    except (TypeError, ValueError):
+        return False
+    if "catalog" in params:
+        return True
+    return any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _call_copilot_resolver(resolver, model_id: str, catalog):
+    """Invoke the core resolver, passing *catalog* only when it is accepted."""
+    if _resolver_accepts_catalog_kwarg(resolver):
+        return resolver(model_id, catalog=catalog)
+    return resolver(model_id)
+
+
+def _catalog_lists_model(catalog, copilot_models, model_id: str) -> bool:
+    """True when *catalog* carries an entry for *model_id*.
+
+    Normalises through the core's own id resolver when available, so an alias
+    or a provider-prefixed id still matches its catalog entry.
+    """
+    wanted = str(model_id or "").strip().lower()
+    if not wanted:
+        return False
+
+    normalize = getattr(copilot_models, "normalize_copilot_model_id", None)
+    if callable(normalize):
+        try:
+            normalized = str(normalize(model_id, catalog=catalog) or "").strip().lower()
+            if normalized:
+                wanted = normalized
+        except Exception:
+            pass
+
+    for entry in catalog or ():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("id") or "").strip().lower() == wanted:
+            return True
+    return False
+
+
+def _fetch_copilot_catalog_once(copilot_models):
+    """Fetch the Copilot catalog once, or return a falsy value."""
+    fetch = getattr(copilot_models, "fetch_github_model_catalog", None)
+    if fetch is None:
+        return None
+
+    resolve_key = getattr(copilot_models, "_resolve_copilot_catalog_api_key", None)
+    api_key = ""
+    if callable(resolve_key):
+        try:
+            api_key = resolve_key() or ""
+        except Exception:
+            api_key = ""
+
+    try:
+        return fetch(api_key=api_key) if api_key else fetch()
+    except Exception:
+        return None
+
+
+_COPILOT_CATALOG_PROBE_ID = "hermes-probe-catalog-capability"
+
+# Witness for the bare-call probe: a Copilot model that no core's OFFLINE
+# table has ever known, so a non-empty bare answer can only have come from a
+# catalog the core fetched by itself. The old static tables covered GPT-5 /
+# o-series only, which is why a Claude id is the right witness — using
+# `gpt-5.5` would answer from the static table and report catalog support that
+# is not there.
+_COPILOT_BARE_CALL_WITNESS_ID = "claude-opus-5"
+
+
+def _copilot_core_reads_catalog_unprompted(copilot_models) -> bool:
+    """True when the core resolves Copilot ladders on a BARE call.
+
+    This is deliberately the bare-call question, not "does the resolver accept
+    a ``catalog=`` keyword". The two came apart in a released core: it accepts
+    the keyword, but a bare call still resolves Claude/Gemini/Grok/MAI from its
+    old static table and returns ``[]``. The agent's wire path calls it bare.
+    So a keyword-shaped check would let the WebUI substitute a heuristic ladder
+    and render a control while the runtime sends no reasoning field at all —
+    visible but inert.
+
+    Answered by asking the installed core about a model it can only know from a
+    live catalog. A core that self-fetches returns a ladder; the older one
+    returns ``[]`` and we must not paper over it.
+
+    Touches no module state. An earlier version installed temporary
+    ``mock.patch.object`` stand-ins for the core's token and fetch helpers.
+    ``patch.object`` restores whatever the attribute held when it was entered,
+    so two concurrent probes could interleave as A-enter, B-enter, A-exit,
+    B-exit — leaving B to write A's probe lambda back as the permanent value.
+    The server is threaded, so concurrent first-time lookups made that
+    reachable, and the damage was unbounded: core catalog discovery would keep
+    returning the synthetic probe model for the life of the process. Never
+    mutate shared module globals to answer a capability question.
+    """
+    resolver = getattr(copilot_models, "github_model_reasoning_efforts", None)
+    if not callable(resolver):
+        return False
+    if not _resolver_accepts_catalog_kwarg(resolver):
+        return False
+
+    # A catalog-only model: absent from every core's static table, so a
+    # non-empty answer can only have come from a catalog the core fetched
+    # itself. Fail closed on any error.
+    try:
+        efforts = resolver(_COPILOT_BARE_CALL_WITNESS_ID)
+    except Exception:
+        return False
+    return bool(efforts)
+
+
 def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -4142,6 +4775,21 @@ def _resolve_model_reasoning_efforts_impl(
     if _nested_route_reasoning_denied(hinted_model):
         return []
 
+    # Same hard deny for FLAT non-text Gemini ids (`gemini-embedding-001`,
+    # `gemini-3-pro-image-preview`). The nested check above only matches
+    # gateway-prefixed routes, and a catalog — including the live Copilot one —
+    # can advertise an effort ladder for an image model that would then 400.
+    # can advertise an effort ladder for an image model that would then 400.
+    # A non-text route has no thinking control on any provider, so this
+    # outranks every source below, catalog included.
+    #
+    # Both halves of the question are asked of the SAME path segment: scanning
+    # the whole route for the keyword while matching the family name elsewhere
+    # denied valid text models routed under a wrapper namespace
+    # (`image-router/gemini-3.6-flash`).
+    if _gemini_route_is_non_text(hinted_model):
+        return []
+
     # 0. Model/provider config: a models.<model>.reasoning_efforts list takes
     # precedence over its provider-level reasoning_efforts list. Explicit valid
     # config is authoritative — no heuristics or models.dev lookup. Invalid or
@@ -4172,12 +4820,58 @@ def _resolve_model_reasoning_efforts_impl(
         pass
 
     if provider in {"copilot", "github-copilot"}:
-        try:
-            from hermes_cli.models import github_model_reasoning_efforts
-        except Exception:
-            return _heuristic_reasoning_efforts(hinted_model, provider)
+        # Tri-state, not a bare passthrough.
+        #
+        #   answer      -> the catalog spoke: honour it verbatim, including an
+        #                  authoritative empty list (haiku-4.5 genuinely has no
+        #                  ladder, and inventing one would 400).
+        #   unavailable -> the catalog could not be consulted at all: fall back
+        #                  to the local heuristic.
+        #   deny        -> a model the core positively rejects: stays empty.
+        #
+        # The distinction matters because a released core returns `[]` for
+        # Claude/Gemini/Grok/MAI *without* having read the catalog — it has no
+        # entry for them in its static table and no way to fetch one. Treating
+        # that `[]` as an answer made this whole feature inert in production:
+        # the resolver returned before the heuristic below could run.
+        efforts, resolved, core_levels, core_verdict = (
+            _copilot_catalog_reasoning_efforts(hinted_model)
+        )
+        if resolved:
+            return _filter_reasoning_efforts_for_provider(
+                efforts, hinted_model, provider
+            )
+        # Not resolved. The heuristic below is only safe to expose when the
+        # installed core would actually SEND what the control offers, so ask
+        # THIS model's question rather than a global one: a core that cannot
+        # resolve Claude/Gemini/Grok still resolves gpt-5 from its static
+        # table, and gating those off too would hide a control that works.
+        #
+        # When no core is importable at all there is no runtime to disagree
+        # with (a standalone WebUI, or CI), so the heuristic stands as the
+        # only available answer.
+        if core_verdict == "inert":
+            # The core is installed, has no catalog path, and resolves nothing
+            # for this model: the control would be visible but inert. Hide it.
+            return []
+        heuristic = _heuristic_reasoning_efforts(hinted_model, provider)
+        # The heuristic comes from the vendor's published table, which can be
+        # wider than the installed core's own offline table (the Copilot
+        # catalog lists `minimal` for Gemini 3.x Flash; the core's static
+        # fallback stops at low/medium/high). Offering the extra level would
+        # put a control on screen that the runtime silently drops, so narrow
+        # to what the core will actually resolve for this model.
+        #
+        # The single call above already consulted the core and
+        # cached its answer for this lookup, so this reuses that observation
+        # rather than calling the resolver a second time — a second call is
+        # exactly the two-observation gap the single-fetch collapse removed.
+        if core_levels:
+            heuristic = [eff for eff in heuristic if eff in core_levels]
         return _filter_reasoning_efforts_for_provider(
-            github_model_reasoning_efforts(hinted_model), hinted_model, provider
+            heuristic,
+            hinted_model,
+            provider,
         )
 
     if provider == "lmstudio":
@@ -4241,6 +4935,13 @@ def coerce_reasoning_effort_for_model(
     if raw == "none" and _zai_glm_classification(model_id, provider_id) == "forced":
         return ""
     if raw == "none":
+        # Models with an effort ladder but no off position (Grok) must not
+        # receive reasoning_effort:"none" — xAI rejects it outright and the
+        # native endpoint silently ignores it, leaving reasoning on while the
+        # UI claims it is off. Degrade to the provider default instead, which
+        # is the honest representation of "this cannot be turned off".
+        if not supports_disable_reasoning(model_id, provider_id, base_url):
+            return ""
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
@@ -4274,6 +4975,15 @@ def coerce_reasoning_effort_for_model(
             raw_idx = None
         if raw_idx is not None:
             for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
+                if level in ceiling:
+                    return level
+            # Nothing lower is supported. This happens when the EXCLUDED level
+            # is at the bottom of the ladder: Gemini 3.1 Pro and the 2.5 line
+            # publish no `minimal`, so a stored `minimal` has nowhere to
+            # degrade. Falling through would return it unchanged and send the
+            # very value the ceiling just rejected. Climb to the nearest
+            # supported level instead — the smallest legal amount of thinking.
+            for level in ladder[raw_idx + 1:]:  # strictly higher, lowest first
                 if level in ceiling:
                     return level
     # An empty list is ambiguous: resolve_model_reasoning_efforts() returns []
@@ -4391,6 +5101,14 @@ def get_reasoning_status(
         # effort-capable model OR a ZAI GLM model that accepts the thinking
         # toggle but not the effort ladder. False hides the chip entirely.
         "supports_thinking_toggle": supports_thinking_toggle,
+        # Whether "None" (reasoning off) is a legal position. Separate from
+        # supports_thinking_toggle: Grok has a full effort ladder but no off
+        # position, so the composer must render the ladder WITHOUT "None".
+        "supports_disable_reasoning": supports_disable_reasoning(
+            resolve_model,
+            provider_id=resolve_provider,
+            base_url=resolve_base_url,
+        ),
     }
 
 

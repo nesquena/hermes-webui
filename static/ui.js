@@ -5133,6 +5133,11 @@ let _currentReasoningEffortsSupported=null;
 // is empty (GLM-4.5–5.1 on native zai). Undefined = unknown, treated as true
 // so the chip stays visible by default (prior behavior).
 let _currentReasoningToggleSupported=undefined;
+// Whether "None" (reasoning off) is a legal position for this model. Separate
+// from the toggle flag: Grok has a full effort ladder but rejects
+// reasoning_effort:"none", so the ladder must render without "None".
+// Undefined = unknown, treated as true (prior behavior).
+let _currentReasoningDisableSupported=undefined;
 let _profileTransitionReasoningContext=null;
 
 function _normalizeReasoningEffort(eff){
@@ -5178,21 +5183,29 @@ function _reasoningEffortQuery(){
   return qs?('?'+qs):'';
 }
 
-function _applyReasoningOptions(supportedEfforts){
+function _applyReasoningOptions(supportedEfforts, canDisable){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  const allowNone=(typeof canDisable==='boolean')?canDisable:true;
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
-    // 'none' (turn thinking off) and '' (Default = clear override, provider
-    // default = thinking on) are meta-options outside the effort ladder. They
-    // are always shown so a thinking-toggle-only model (GLM-4.5–5.1 on native
-    // zai, where the ladder is empty) still has an operable two-state control:
-    // Default (on) + None (off). Without the Default option the toggle is
-    // one-way off-only — the user can disable thinking but cannot re-enable it.
-    // (#6219 round-3)
-    if(effort==='none'||effort===''){
+    // '' (Default = clear override) is always available: it is the only way
+    // back to the provider default once an override is set.
+    if(effort===''){
       opt.style.display='';
+      return;
+    }
+    // 'none' (turn thinking off) is a meta-option outside the effort ladder,
+    // shown so a thinking-toggle-only model (GLM-4.5–5.1 on native zai, where
+    // the ladder is empty) still has an operable two-state control:
+    // Default (on) + None (off). Without the Default option the toggle is
+    // one-way off-only. (#6219 round-3)
+    // But it is NOT universal: models with an effort ladder and no off
+    // position (Grok) reject reasoning_effort:"none", so offering it there
+    // would send a value the runtime cannot honor.
+    if(effort==='none'){
+      opt.style.display=allowNone?'':'none';
       return;
     }
     if(!supported.size){
@@ -5219,6 +5232,10 @@ function _applyReasoningChip(eff){
   if(meta&&typeof meta.supports_thinking_toggle==='boolean'){
     _currentReasoningToggleSupported=meta.supports_thinking_toggle;
   }
+  // supports_disable_reasoning: whether "None" is a legal position at all.
+  if(meta&&typeof meta.supports_disable_reasoning==='boolean'){
+    _currentReasoningDisableSupported=meta.supports_disable_reasoning;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
@@ -5244,7 +5261,12 @@ function _applyReasoningChip(eff){
   }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
-  if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
+  if(typeof _applyReasoningOptions==='function'){
+    const canDisable=(typeof _currentReasoningDisableSupported==='undefined')
+      ?true
+      :_currentReasoningDisableSupported;
+    _applyReasoningOptions(supportedEfforts, canDisable);
+  }
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
