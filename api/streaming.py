@@ -9749,6 +9749,46 @@ def _run_agent_streaming(
                         _emit_metering()
                     return
 
+                # (#6743) MoA reference-model outputs arrive through
+                # tool_progress_callback as display events (moa.reference /
+                # moa.progress / moa.phase / moa.aggregating) relayed by the
+                # MoA facade. The WebUI previously dropped the whole family
+                # (only reasoning.available had dedicated handling), so MoA
+                # turns looked like a silent hang until the aggregator's final
+                # answer. Forward each event verbatim as its own SSE event so
+                # the frontend can render labelled collapsible blocks, matching
+                # the CLI/TUI. Display-only: never touches tool cards, the
+                # reasoning index, or the live prompt estimate.
+                if event_type in ('moa.reference', 'moa.progress', 'moa.phase', 'moa.aggregating'):
+                    if event_type == 'moa.reference':
+                        _moa_payload = {'label': name, 'text': preview}
+                        if cb_kwargs.get('moa_index') is not None:
+                            _moa_payload['index'] = cb_kwargs.get('moa_index')
+                        if cb_kwargs.get('moa_count') is not None:
+                            _moa_payload['count'] = cb_kwargs.get('moa_count')
+                    elif event_type == 'moa.progress':
+                        _moa_payload = {'label': name}
+                        if cb_kwargs.get('moa_refs_done') is not None:
+                            _moa_payload['refs_done'] = cb_kwargs.get('moa_refs_done')
+                        if cb_kwargs.get('moa_refs_total') is not None:
+                            _moa_payload['refs_total'] = cb_kwargs.get('moa_refs_total')
+                    elif event_type == 'moa.phase':
+                        _moa_payload = {'phase': cb_kwargs.get('moa_phase')}
+                        if cb_kwargs.get('moa_refs_done') is not None:
+                            _moa_payload['refs_done'] = cb_kwargs.get('moa_refs_done')
+                        if cb_kwargs.get('moa_refs_total') is not None:
+                            _moa_payload['refs_total'] = cb_kwargs.get('moa_refs_total')
+                        if name:
+                            _moa_payload['aggregator'] = name
+                    else:  # moa.aggregating
+                        _moa_payload = {}
+                        if name:
+                            _moa_payload['aggregator'] = name
+                        if cb_kwargs.get('moa_ref_count') is not None:
+                            _moa_payload['ref_count'] = cb_kwargs.get('moa_ref_count')
+                    put(event_type, _moa_payload)
+                    return
+
                 # (#3587) Advance reasoning index at tool-call boundaries.
                 # on_interim_assistant is suppressed for contentless tool-call
                 # messages (run_agent.py:3834), so the index never advances

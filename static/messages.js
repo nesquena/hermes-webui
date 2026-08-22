@@ -2519,6 +2519,65 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(typeof updateThinking==='function') updateThinking(text, opts);
     else appendThinking(text, opts);
   }
+  // (#6743) MoA reference-model output block. Each reference arrives as a
+  // `moa.reference` SSE event (forwarded from the agent's MoA facade) with
+  // {label, text, index?, count?}. Render it as a labelled, collapsible card
+  // inside the live assistant turn — CLI/TUI parity. Upsert by label so a
+  // re-sent/replayed event for the same reference updates the same block.
+  function _upsertMoaReference(d){
+    if(!d||!d.label) return;
+    if(!S.session||S.session.session_id!==activeSid) return;
+    if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return;
+    let turn=$('liveAssistantTurn');
+    if(!turn){
+      turn=_createAssistantTurn();
+      turn.id='liveAssistantTurn';
+      if(S.session) turn.dataset.sessionId=S.session.session_id;
+      const inner=$('msgInner');
+      if(inner) inner.appendChild(turn);
+    }
+    const blocks=_assistantTurnBlocks(turn);
+    if(!blocks) return;
+    const key=String(d.label||'');
+    let card=blocks.querySelector('.moa-reference[data-moa-ref="'+CSS.escape(key)+'"]');
+    const counter=(d.index!=null&&d.count!=null)?` <span class="moa-ref-counter">${d.index}/${d.count}</span>`:'';
+    if(!card){
+      card=document.createElement('div');
+      card.className='agent-activity-thinking moa-reference';
+      card.setAttribute('data-moa-ref',key);
+      card.innerHTML=`<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('layers',14)}</span><span class="thinking-card-label">${esc(String(d.label||''))}${counter}</span><span class="thinking-card-btn-row"><span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre></pre></div></div>`;
+      const liveFooter=blocks.querySelector('#liveRunStatus');
+      if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(card,liveFooter);
+      else blocks.appendChild(card);
+    }
+    const body=card.querySelector('.thinking-card-body pre');
+    if(body&&d.text!==undefined&&d.text!==null) body.textContent=String(d.text);
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+  }
+  // (#6743) MoA status line: `moa.progress` (N/M refs done) and
+  // `moa.aggregating` / `moa.phase` ("Aggregating…"). One shared status row
+  // per live turn, kept above #liveRunStatus so it does not fight the footer.
+  function _updateMoaStatus(d, aggregating){
+    if(!S.session||S.session.session_id!==activeSid) return;
+    let turn=$('liveAssistantTurn');
+    if(!turn) return;
+    const blocks=_assistantTurnBlocks(turn);
+    if(!blocks) return;
+    let status=blocks.querySelector('.moa-status');
+    if(!status){
+      status=document.createElement('div');
+      status.className='moa-status';
+      const liveFooter=blocks.querySelector('#liveRunStatus');
+      if(liveFooter&&liveFooter.parentElement===blocks) blocks.insertBefore(status,liveFooter);
+      else blocks.appendChild(status);
+    }
+    if(aggregating){
+      status.textContent=d&&d.aggregator?`Aggregating with ${d.aggregator}…`:'Aggregating…';
+    }else if(d&&d.refs_done!=null&&d.refs_total!=null){
+      status.textContent=`MoA: ${d.refs_done}/${d.refs_total} refs done`;
+    }
+    status.style.display='';
+  }
   // Split a content string into {reasoning, content} by extracting any <think>...
   // blocks (or other known reasoning-tag pairs). If reasoning is already
   // populated on the message (e.g. from a separate on_reasoning stream), the
@@ -5844,6 +5903,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           });
         }
       }
+    });
+
+    source.addEventListener('moa.reference',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      const d=JSON.parse(e.data);
+      _completeAutomaticCompressionOnLiveProgress(activeSid);
+      _upsertMoaReference(d);
+      snapshotLiveTurn();
+    });
+
+    source.addEventListener('moa.progress',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      const d=JSON.parse(e.data);
+      _updateMoaStatus(d,false);
+    });
+
+    source.addEventListener('moa.phase',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      const d=JSON.parse(e.data);
+      if(d&&d.phase==='aggregator') _updateMoaStatus(d,true);
+    });
+
+    source.addEventListener('moa.aggregating',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
+      if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
+      const d=JSON.parse(e.data);
+      _updateMoaStatus(d,true);
     });
 
     source.addEventListener('tool',e=>{
