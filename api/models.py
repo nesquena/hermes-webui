@@ -1687,6 +1687,14 @@ class Session:
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
         if not is_safe_session_id(sid):
             return None
+        # Loading may self-heal duplicate partial rows. Keep the sidecar read,
+        # collapse, and write-back in the same per-session save generation so a
+        # stale loader cannot overwrite a newer durable save.
+        with _session_save_authority(sid):
+            return cls._load_under_save_authority(sid)
+
+    @classmethod
+    def _load_under_save_authority(cls, sid):
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
@@ -10643,6 +10651,7 @@ def merge_session_messages_append_only(
     truncation_watermark=None,
     truncation_boundary=None,
     incoming_provenance: Literal["unverified", "state_db"] = "unverified",
+    preserve_state_rows_after_watermark: bool = False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -10677,6 +10686,10 @@ def _merge_session_messages_append_only_impl(
     watermark is later advanced (new turn committed), this boundary is preserved
     so the empty-sidecar recovery can distinguish a legitimate prefix from a
     deleted suffix instead of guessing by dropping one turn pair.
+
+    ``preserve_state_rows_after_watermark`` is reserved for a caller that has
+    proved the sidecar is a squash projection.  Such rows are projected tail,
+    not a deleted edit suffix, and remain ordered even within the sidecar range.
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
@@ -11109,6 +11122,7 @@ def _merge_session_messages_append_only_impl(
             and timestamp is not None
             and timestamp > watermark_timestamp
             and key not in seen_message_keys
+            and not preserve_state_rows_after_watermark
             and (
                 not sidecar_advanced_past_watermark
                 or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
@@ -11188,6 +11202,26 @@ def _merge_session_messages_append_only_impl(
                 skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
                 _merge_session_display_metadata(merged_by_visible_key.get(matched_visible_key), msg)
                 continue
+        # A squash summary is an authoritative replacement for rows at/before
+        # its watermark, but distinct state.db rows after that watermark are
+        # part of the projected tail even when their timestamp falls inside the
+        # sidecar's range. The squash caller opts into this only after proving
+        # the first sidecar row is a squash summary.
+        if (
+            preserve_state_rows_after_watermark
+            and watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp > watermark_timestamp
+            and max_sidecar_timestamp is not None
+            and timestamp <= max_sidecar_timestamp
+        ):
+            if _insert_state_message_chronologically(merged_messages, msg):
+                seen_message_keys.add(key)
+                seen_dedup_keys.add(dedup_key)
+                seen_content_keys.add(content_key)
+                seen_visible_keys.add(visible_key)
+                _remember_merged_message(msg, source="state")
+            continue
         # State rows at or before the newest sidecar timestamp are normally
         # assumed to have already been observed by the sidecar. The <= gate
         # preserves sidecar-only ordering/metadata for equal timestamps and

@@ -10039,6 +10039,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 cli_messages,
                 truncation_watermark=getattr(session, "truncation_watermark", None),
                 truncation_boundary=getattr(session, "truncation_boundary", None),
+                preserve_state_rows_after_watermark=True,
             )
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
