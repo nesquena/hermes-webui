@@ -257,6 +257,30 @@ _MISSING = object()  # sentinel: api.profiles module not loaded pre-test
 
 
 @pytest.fixture(autouse=True)
+def _reset_update_freeze_state():
+    """Reset the #6992 static-serving freeze around every test.
+
+    api.updates' freeze state is process-global. In production a successful
+    in-place update keeps /static/* frozen at 503 until the scheduled
+    os.execv replaces the process — which resets the state by starting a
+    fresh interpreter. Tests that drive the apply path (e.g. test_updates.py)
+    never get that replacement, so without this fixture a successful-update
+    test would leak ``frozen=True`` and 503 every later static-serving test
+    in the shard. Reset before AND after each test, mirroring the production
+    process boundary.
+    """
+    try:
+        from api.updates import reset_update_freeze
+    except Exception:
+        reset_update_freeze = None
+    if reset_update_freeze:
+        reset_update_freeze()
+    yield
+    if reset_update_freeze:
+        reset_update_freeze()
+
+
+@pytest.fixture(autouse=True)
 def _restore_profile_home_globals():
     """Restore HERMES_HOME / HERMES_BASE_HOME after every test.
 

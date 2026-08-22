@@ -118,12 +118,23 @@ def test_gzip_negotiated_when_client_accepts(isolated_static):
     assert int(h.header("Content-Length")) == len(h.body) < len(payload)
 
 
-def test_fingerprinted_url_gets_immutable_cache(isolated_static):
+def test_fingerprinted_url_gets_immutable_cache(isolated_static, monkeypatch):
     from api import routes
+    import api.updates as upd
+
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
 
+    # immutable is only claimed when the token provably matches the revision
+    # this process serves (issue #6992): patch WEBUI_VERSION to the token.
+    monkeypatch.setattr(upd, "WEBUI_VERSION", "abc1234")
     h = _serve(routes, "/static/ui.js", query="v=abc1234")
     assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
+
+    # A mismatched token can never be verified against the served bytes →
+    # short cache, never immutable (mismatch contract retained).
+    h2 = _serve(routes, "/static/ui.js", query="v=other-token")
+    assert h2.header("Cache-Control") == "public, max-age=300"
+    assert "immutable" not in h2.header("Cache-Control")
 
 
 def test_empty_fingerprint_value_gets_short_cache(isolated_static):
@@ -143,10 +154,15 @@ def test_unfingerprinted_url_gets_short_cache(isolated_static):
     assert h.header("Cache-Control") == "public, max-age=300"
 
 
-def test_conditional_get_returns_304(isolated_static):
+def test_conditional_get_returns_304(isolated_static, monkeypatch):
     from api import routes
+    import api.updates as upd
+
     _make_static_file(isolated_static, "ui.js", b"hello world\n" * 100)
 
+    # Supply the matching startup token so the 304 keeps the immutable claim
+    # (issue #6992: a non-matching token would only get max-age=300).
+    monkeypatch.setattr(upd, "WEBUI_VERSION", "abc")
     first = _serve(routes, "/static/ui.js", query="v=abc")
     etag = first.header("ETag")
     assert etag is not None

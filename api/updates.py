@@ -44,6 +44,90 @@ _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
+# Issue #6992: freeze model for in-place WebUI updates.
+#
+# An in-place self-update mutates the working tree this process serves
+# /static/* from (git stash/pull/pop for apply_update, checkout/clean/reset
+# for apply_force_update). During that window a request could receive bytes
+# from two different revisions under one versioned URL and cache them
+# immutable for a year. The freeze state below coordinates the update
+# lifecycle with the static-serving path in api/routes._serve_static():
+#
+#   * frozen flag — while set, _serve_static() refuses to serve any /static/*
+#     bytes (503 + no-store), so a request that arrives after the freeze can
+#     never observe a tree mid-mutation.
+#   * reader count — every _serve_static() call that may touch the tree takes
+#     a read ticket (begin_static_read/end_static_read). freeze_static_serving()
+#     sets the flag and then DRAINS: it waits until every in-flight reader has
+#     released its ticket, so a request admitted just before the freeze always
+#     finishes serving the OLD revision's bytes before the updater's first
+#     mutating git command runs (TOCTOU hole #1).
+#   * generation token — each freeze bumps a generation; the caller receives
+#     the generation as an ownership token and unfreeze_static_serving() only
+#     clears the flag while that token is still current. A stale owner (an
+#     update that finished or failed while a newer one was starting) can never
+#     clear the newer update's freeze (handoff hole #2).
+#   * persist-until-replacement — on a SUCCESSFUL update the freeze is NOT
+#     cleared: static stays 503 through the scheduled-restart delay until the
+#     os.execv replaces the process (the new process starts with a fresh,
+#     unfrozen state). Only failure / no-op (no restart scheduled) clears the
+#     freeze, because only then is the working tree coherent again
+#     (restart-delay hole #3).
+#
+# All freeze state is process-local; the restart (or the OS supervisor after
+# os._exit) clears it by replacing the process image.
+_UPDATE_FREEZE_LOCK = threading.Lock()
+_UPDATE_FREEZE_DRAINED = threading.Condition(_UPDATE_FREEZE_LOCK)
+_frozen = False
+_freeze_generation = 0
+_active_readers = 0
+# Per-attempt mutation lifecycle authority (issue #6992 re-gate).
+#
+# Replaces the earlier global-boolean tracker with a structured per-attempt
+# lifecycle owned by the exact freeze generation token. Both update wrappers
+# (and the WebUI-mutating clear-lock retry) share ONE authority for
+# exceptions and ordinary failure returns: `_settle_update_lifecycle()`.
+#
+# States (transitions all under ``_apply_lock``, reset at each wrapper entry):
+#   IDLE              — no update attempt in flight (or freeze never acquired)
+#   FROZEN            — freeze acquired + drain complete; NO mutating git
+#                       command has run yet (pre-mutation)
+#   MUTATION_STARTED  — at least one tree-mutating git command has run
+#                       (checkout/clean/reset, stash/pull/restore); the served
+#                       tree may be mixed-revision
+#   COHERENT_RECOVERY — mutation started but the tree was VERIFIED coherent
+#                       again (stash restored, or reset --hard completed)
+#   REPLACEMENT_OWNED — a bounded replacement (restart) is scheduled or
+#                       guaranteed; the freeze is owned by the replacement
+#
+# Unfreeze rules (do NOT infer coherence from the absence of restart_scheduled):
+#   pre-mutation (IDLE/FROZEN)  → generation-unfreeze, tree untouched
+#   COHERENT_RECOVERY           → generation-unfreeze, rollback verified
+#   MUTATION_STARTED, no verify → NEVER unfreeze into a possibly-mixed tree:
+#                                 transfer ownership to a bounded replacement
+#                                 (_schedule_restart) or keep the freeze
+#                                 (fail-closed terminal outcome)
+#   REPLACEMENT_OWNED           → freeze persists until the replacement runs
+class _MutationLifecycle:
+    IDLE = 0
+    FROZEN = 1
+    MUTATION_STARTED = 2
+    COHERENT_RECOVERY = 3
+    REPLACEMENT_OWNED = 4
+
+
+_mutation_state = _MutationLifecycle.IDLE
+_mutation_token = 0  # freeze generation that owns the current attempt
+# Bounded drain: a pathological reader (e.g. a client stalling mid-download
+# while we hold a ticket) must not hang the update forever. When the bound is
+# reached the update FAILS CLOSED: freeze_static_serving() raises
+# StaticFreezeDrainTimeoutError instead of returning mutation authority, so
+# no git command ever runs while a reader could still serve the OLD revision's
+# bytes under an immutable version URL (mixed-revision cache poisoning, #6992).
+# The caller releases only its own freeze generation and returns a retryable
+# non-success; the reader finishes serving the old bytes and a later update
+# retries cleanly.
+_FREEZE_DRAIN_MAX_WAIT_S = 30.0
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
@@ -343,7 +427,41 @@ def apply_clear_lock(target: str) -> dict:
             # to stable (Codex gate: _apply_update_inner defaults to stable).
             with _cache_lock:
                 _update_cache['checked_at'] = 0
-            retry_result = _apply_update_inner(target, _read_update_channel())
+            # The retry re-runs the WebUI-mutating apply path, so it gets the
+            # same per-attempt freeze lifecycle authority as apply_update()
+            # (issue #6992 re-gate): freeze before the first mutating git
+            # command, settle on every exception AND ordinary failure return.
+            freeze_token = None
+            if target == 'webui':
+                _reset_mutation_lifecycle()
+                try:
+                    try:
+                        freeze_token = freeze_static_serving()
+                        _mark_freeze_acquired(freeze_token)
+                    except StaticFreezeDrainTimeoutError as exc:
+                        unfreeze_static_serving(exc.token)
+                        _reset_mutation_lifecycle()
+                        retry_result = {
+                            'ok': False,
+                            'message': str(exc),
+                            'target': target,
+                            'drain_timeout': True,
+                            'retryable': True,
+                        }
+                        retry_result = dict(retry_result)
+                        retry_result['lock_recovery'] = {
+                            'action': 'no-lock-found',
+                            'manual_command': manual_command,
+                            'other_locks': inv['other_locks'],
+                        }
+                        return retry_result
+                    retry_result = _apply_update_inner(target, _read_update_channel())
+                    _settle_update_lifecycle(freeze_token, retry_result)
+                except Exception:
+                    _settle_update_lifecycle(freeze_token)
+                    raise
+            else:
+                retry_result = _apply_update_inner(target, _read_update_channel())
             retry_result = dict(retry_result)
             retry_result['lock_recovery'] = {
                 'action': 'no-lock-found',
@@ -1733,6 +1851,109 @@ def _schedule_restart(delay: float = 2.0) -> None:
     import os
     import sys
 
+    def _restart_now() -> None:
+        """Synchronously replace this process image.
+
+        Runs the restart sequence without the delay and without re-acquiring
+        ``_apply_lock`` (the caller already holds it). Never returns:
+        ``os.execv`` replaces the process image, and any exec failure falls
+        back to ``os._exit(0)`` so the process supervisor (start.sh / Docker)
+        restarts us. Used as the synchronous fallback when the delayed
+        restart thread cannot start (issue #6992 — an exception while frozen
+        must never leave static serving permanently 503 with no replacement
+        pending).
+        """
+        _wait_until_restart_safe()
+        # Purge bytecode caches so the new process imports from
+        # current source.  Without this, Python may serve stale .pyc
+        # files whose mtime matches the just-pulled .py files,
+        # causing AttributeError when new methods are missing from
+        # cached class definitions.
+        if _AGENT_DIR is not None:
+            _purge_agent_pycache(Path(_AGENT_DIR))
+        _purge_agent_pycache(REPO_ROOT)
+        try:
+            # Re-exec into the just-pulled image.
+            #
+            # sys.argv[0]'s meaning depends on how the server was launched:
+            #
+            #   * Source checkout (`python server.py` via bootstrap.py /
+            #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
+            #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
+            #     the interpreter. CPython treats argv[1] as the script to
+            #     run, so we must pass [sys.executable] + sys.argv.
+            #
+            #   * Frozen/packaged build (PyInstaller, embedded zipapp,
+            #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
+            #     [sys.executable] + sys.argv would re-insert the binary as
+            #     argv[1] — the kernel launches it, the interpreter treats
+            #     the binary itself as the "script" to run, and execv
+            #     effectively becomes a recursive no-op that never reaches
+            #     bind(), leaving the WebUI stuck "offline" after every
+            #     self-update. Pass argv as-is instead.
+            #
+            # Distinguish the two cases with sys.frozen (set by
+            # PyInstaller / zipapp / similar). For source checkouts the
+            # `[sys.executable] + sys.argv` form is the canonical CPython
+            # re-exec idiom (same shape Flask/Django reloaders use) and
+            # is the correct path.
+            #
+            # IMPORTANT: On Windows, os.execv() does NOT replace the
+            # current process — it spawns a new process while the old
+            # one keeps running.  This causes "address already in use"
+            # because the old process still holds the port.  On Windows
+            # we use subprocess.Popen() + os._exit() instead.
+            if sys.platform == 'win32':
+                import subprocess
+                if getattr(sys, "frozen", False):
+                    args = sys.argv
+                else:
+                    args = [sys.executable] + sys.argv
+                # Prefer pythonw.exe over python.exe so the restarted
+                # server does not create a visible console window.
+                # sys.executable may point at python.exe (console
+                # subsystem); substitute pythonw.exe if it exists
+                # next to python.exe.
+                _exe = sys.executable
+                if _exe.lower().endswith('python.exe'):
+                    _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
+                    if os.path.isfile(_w_exe):
+                        if getattr(sys, "frozen", False):
+                            args = sys.argv
+                        else:
+                            args = [_w_exe] + sys.argv
+                # Start new process fully detached with NO console
+                # window.  DETACHED_PROCESS alone is not sufficient
+                # on modern Windows — without CREATE_NO_WINDOW a
+                # python.exe (console-subsystem) child still flashes
+                # an empty terminal window, which the user then
+                # manually kills (taking the WebUI with it).
+                subprocess.Popen(
+                    args,
+                    cwd=os.getcwd(),
+                    creationflags=(
+                        subprocess.DETACHED_PROCESS
+                        | subprocess.CREATE_NEW_PROCESS_GROUP
+                        | subprocess.CREATE_NO_WINDOW
+                    ),
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                # Exit immediately — the port is released as soon as
+                # this process dies, allowing the new process to bind.
+                os._exit(0)
+            else:
+                if getattr(sys, "frozen", False):
+                    os.execv(sys.executable, sys.argv)
+                else:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            # Last-resort: if execv fails for any reason, just exit so the
+            # process supervisor (start.sh / Docker) restarts us.
+            os._exit(0)
+
     def _do():
         import time
         time.sleep(delay)
@@ -1745,98 +1966,26 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
-            _wait_until_restart_safe()
-            # Purge bytecode caches so the new process imports from
-            # current source.  Without this, Python may serve stale .pyc
-            # files whose mtime matches the just-pulled .py files,
-            # causing AttributeError when new methods are missing from
-            # cached class definitions.
-            if _AGENT_DIR is not None:
-                _purge_agent_pycache(Path(_AGENT_DIR))
-            _purge_agent_pycache(REPO_ROOT)
-            try:
-                # Re-exec into the just-pulled image.
-                #
-                # sys.argv[0]'s meaning depends on how the server was launched:
-                #
-                #   * Source checkout (`python server.py` via bootstrap.py /
-                #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
-                #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
-                #     the interpreter. CPython treats argv[1] as the script to
-                #     run, so we must pass [sys.executable] + sys.argv.
-                #
-                #   * Frozen/packaged build (PyInstaller, embedded zipapp,
-                #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
-                #     [sys.executable] + sys.argv would re-insert the binary as
-                #     argv[1] — the kernel launches it, the interpreter treats
-                #     the binary itself as the "script" to run, and execv
-                #     effectively becomes a recursive no-op that never reaches
-                #     bind(), leaving the WebUI stuck "offline" after every
-                #     self-update. Pass argv as-is instead.
-                #
-                # Distinguish the two cases with sys.frozen (set by
-                # PyInstaller / zipapp / similar). For source checkouts the
-                # `[sys.executable] + sys.argv` form is the canonical CPython
-                # re-exec idiom (same shape Flask/Django reloaders use) and
-                # is the correct path.
-                #
-                # IMPORTANT: On Windows, os.execv() does NOT replace the
-                # current process — it spawns a new process while the old
-                # one keeps running.  This causes "address already in use"
-                # because the old process still holds the port.  On Windows
-                # we use subprocess.Popen() + os._exit() instead.
-                if sys.platform == 'win32':
-                    import subprocess
-                    if getattr(sys, "frozen", False):
-                        args = sys.argv
-                    else:
-                        args = [sys.executable] + sys.argv
-                    # Prefer pythonw.exe over python.exe so the restarted
-                    # server does not create a visible console window.
-                    # sys.executable may point at python.exe (console
-                    # subsystem); substitute pythonw.exe if it exists
-                    # next to python.exe.
-                    _exe = sys.executable
-                    if _exe.lower().endswith('python.exe'):
-                        _w_exe = _exe[:-4] + 'w.exe'  # python.exe -> pythonw.exe
-                        if os.path.isfile(_w_exe):
-                            if getattr(sys, "frozen", False):
-                                args = sys.argv
-                            else:
-                                args = [_w_exe] + sys.argv
-                    # Start new process fully detached with NO console
-                    # window.  DETACHED_PROCESS alone is not sufficient
-                    # on modern Windows — without CREATE_NO_WINDOW a
-                    # python.exe (console-subsystem) child still flashes
-                    # an empty terminal window, which the user then
-                    # manually kills (taking the WebUI with it).
-                    subprocess.Popen(
-                        args,
-                        cwd=os.getcwd(),
-                        creationflags=(
-                            subprocess.DETACHED_PROCESS
-                            | subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW
-                        ),
-                        close_fds=True,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    # Exit immediately — the port is released as soon as
-                    # this process dies, allowing the new process to bind.
-                    os._exit(0)
-                else:
-                    if getattr(sys, "frozen", False):
-                        os.execv(sys.executable, sys.argv)
-                    else:
-                        os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception:
-                # Last-resort: if execv fails for any reason, just exit so the
-                # process supervisor (start.sh / Docker) restarts us.
-                os._exit(0)
+            _restart_now()
 
-    threading.Thread(target=_do, daemon=True).start()
+    try:
+        _start_restart_thread(_do)
+    except Exception as exc:
+        # The restart thread could not start (e.g. resource exhaustion at
+        # Thread.start()). The checkout may already have been mutated in
+        # place, so static serving must NOT be exposed again until this
+        # process is replaced (issue #6992 — mixed-revision immutable cache).
+        # Fall back to a synchronous restart: it replaces the process and
+        # never returns.
+        logger.error(
+            'restart thread failed to start (%s); restarting synchronously', exc
+        )
+        _restart_now()
+
+
+def _start_restart_thread(target) -> None:
+    """Start the delayed-restart thread (split out for test injection)."""
+    threading.Thread(target=target, daemon=True).start()
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
@@ -1942,6 +2091,260 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
+class StaticFreezeDrainTimeoutError(Exception):
+    """The freeze drain reached its bound while static readers were still active.
+
+    Raised by :func:`freeze_static_serving` INSTEAD of returning mutation
+    authority: while any reader can still serve the OLD revision's bytes, the
+    updater must not run a single mutating git command (issue #6992 —
+    mixed-revision immutable cache). The caller — still under the update lock —
+    must release exactly this freeze generation via ``unfreeze_static_serving``
+    (``token``) and return a retryable non-success response.
+    """
+
+    def __init__(self, message: str, token: int):
+        super().__init__(message)
+        self.token = token
+
+
+def freeze_static_serving(max_drain_wait_s: float | None = None) -> int:
+    """Freeze /static/* serving and drain in-flight readers (issue #6992).
+
+    Sets the freeze flag (new requests get 503 from _serve_static), bumps the
+    generation and returns the new generation as an ownership token, then
+    waits — bounded by *max_drain_wait_s* (default
+    ``_FREEZE_DRAIN_MAX_WAIT_S``) — until every reader admitted before
+    the freeze has released its read ticket. Only after the drain returns is
+    it safe for the caller to run the first mutating git command: no request
+    can read bytes written by the updater under the old version token.
+
+    The token must be handed to :func:`unfreeze_static_serving`; the freeze
+    is cleared only while the token is still the current generation, so a
+    stale owner can never clear a newer update's freeze.
+
+    FAIL-CLOSED drain bound: if *max_drain_wait_s* elapses while readers are
+    still active, raises :class:`StaticFreezeDrainTimeoutError` (carrying the
+    generation token) instead of returning — mutation authority is NEVER
+    granted while a reader could still serve the old revision's bytes. The
+    caller must not run any git command; it should release its own freeze
+    generation and return a retryable non-success.
+
+    On a SUCCESSFUL update the caller must NOT unfreeze — the freeze persists
+    until the scheduled ``os.execv`` replaces the process. Callers should
+    unfreeze only when the attempt failed or was a no-op (no restart
+    scheduled), i.e. when the working tree is coherent again.
+    """
+    if max_drain_wait_s is None:
+        max_drain_wait_s = _FREEZE_DRAIN_MAX_WAIT_S
+    global _freeze_generation, _frozen
+    with _UPDATE_FREEZE_LOCK:
+        _freeze_generation += 1
+        token = _freeze_generation
+        _frozen = True
+        deadline = time.monotonic() + max(0.0, max_drain_wait_s)
+        while _active_readers > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Fail-closed: never hand out mutation authority while an
+                # active reader can still read the old revision's bytes. Raise
+                # (with the caller's own token) so no mutating git command
+                # ever runs; the caller unfreezes exactly this generation.
+                raise StaticFreezeDrainTimeoutError(
+                    'update freeze drain timed out after %.1fs with %d active '
+                    'static reader(s); aborting before any mutation — retry '
+                    'once the reader(s) release'
+                    % (max_drain_wait_s, _active_readers),
+                    token,
+                )
+            _UPDATE_FREEZE_DRAINED.wait(remaining)
+    return token
+
+
+def unfreeze_static_serving(token: int) -> bool:
+    """Clear the freeze, but only while *token* still owns it (current generation).
+
+    Returns True if this call cleared the freeze. Returns False — leaving the
+    freeze untouched — when a newer update has taken over ownership (stale
+    handoff) or the freeze was already cleared; in either case the caller must
+    not assume the freeze state changed.
+    """
+    global _frozen
+    with _UPDATE_FREEZE_LOCK:
+        if token != _freeze_generation or not _frozen:
+            return False
+        _frozen = False
+        return True
+
+
+def reset_update_freeze() -> None:
+    """Force-clear the freeze regardless of ownership.
+
+    Test/teardown helper only. Production code uses freeze/unfreeze with
+    generation tokens; a real replacement (os.execv) clears the flag simply
+    by starting a fresh process.
+    """
+    global _frozen
+    with _UPDATE_FREEZE_LOCK:
+        _frozen = False
+
+
+def update_in_progress() -> bool:
+    """True while an in-place WebUI update may be mutating the served checkout."""
+    return _frozen
+
+
+def begin_static_read() -> bool:
+    """Take a read ticket before touching the served tree in _serve_static().
+
+    Returns False when a freeze is active — the caller must refuse to serve
+    (503 + no-store) without touching any file. Returns True with the reader
+    counted; the caller MUST pair it with :func:`end_static_read` (finally),
+    otherwise the update drain can block forever.
+    """
+    with _UPDATE_FREEZE_LOCK:
+        if _frozen:
+            return False
+        global _active_readers
+        _active_readers += 1
+        return True
+
+
+def end_static_read() -> None:
+    """Release a read ticket taken by :func:`begin_static_read`.
+
+    Wakes any freeze drain waiting for readers to finish.
+    """
+    with _UPDATE_FREEZE_LOCK:
+        global _active_readers
+        _active_readers -= 1
+        if _active_readers < 0:
+            _active_readers = 0
+        _UPDATE_FREEZE_DRAINED.notify_all()
+
+
+# ── Per-attempt mutation lifecycle authority (issue #6992 re-gate) ──────────
+#
+# Shared by apply_force_update(), apply_update() and the WebUI-mutating
+# clear-lock retry. All calls below happen under ``_apply_lock`` (updates are
+# serialized), so the module-level state is safe. The lifecycle is reset at
+# each wrapper entry and transitions as the apply internals run mutating git
+# commands or verify a coherent rollback.
+
+
+def _reset_mutation_lifecycle() -> None:
+    """Start a fresh per-attempt lifecycle (call at wrapper entry)."""
+    global _mutation_state, _mutation_token
+    _mutation_state = _MutationLifecycle.IDLE
+    _mutation_token = 0
+
+
+def _mark_freeze_acquired(freeze_token: int) -> None:
+    """Record that the freeze was acquired and the drain completed.
+
+    Pre-mutation: from here until the first mutating git command the served
+    tree is still untouched, so a failure may generation-unfreeze.
+    """
+    global _mutation_state, _mutation_token
+    _mutation_state = _MutationLifecycle.FROZEN
+    _mutation_token = freeze_token
+
+
+def _mark_mutation_started() -> None:
+    """Transition FROZEN → MUTATION_STARTED (first tree-mutating git command).
+
+    Idempotent — only the first transition matters; agent-only attempts
+    (never frozen) stay IDLE and are unaffected.
+    """
+    global _mutation_state
+    if _mutation_state == _MutationLifecycle.FROZEN:
+        _mutation_state = _MutationLifecycle.MUTATION_STARTED
+
+
+def _mark_coherent_recovery() -> None:
+    """Record a VERIFIED clean rollback (tree coherent again).
+
+    Called only when the tree has been verified coherent (e.g. stash
+    restored, or reset --hard completed). After this a failure may
+    generation-unfreeze; without it the freeze must persist or be replaced.
+    """
+    global _mutation_state
+    if _mutation_state == _MutationLifecycle.MUTATION_STARTED:
+        _mutation_state = _MutationLifecycle.COHERENT_RECOVERY
+
+
+def _mark_replacement_owned() -> None:
+    """Record that a bounded replacement (restart) is scheduled/guaranteed.
+
+    The freeze is owned by the replacement process from here on; this attempt
+    must never unfreeze it.
+    """
+    global _mutation_state
+    if _mutation_state in (
+        _MutationLifecycle.FROZEN,
+        _MutationLifecycle.MUTATION_STARTED,
+        _MutationLifecycle.COHERENT_RECOVERY,
+    ):
+        _mutation_state = _MutationLifecycle.REPLACEMENT_OWNED
+
+
+def _settle_update_lifecycle(freeze_token, response=None) -> None:
+    """Shared exception/failure authority for the update wrappers.
+
+    Called under ``_apply_lock`` on BOTH ordinary failure returns (with the
+    response) and exceptions (``response=None``), with this attempt's freeze
+    token. Decides whether the freeze may be released:
+
+    * ``freeze_token is None`` — no freeze was acquired (agent target or
+      no-op before freeze); nothing to do.
+    * Success (``restart_scheduled``) — freeze persists until the scheduled
+      replacement; ownership transfers to it.
+    * Pre-mutation (IDLE/FROZEN) — tree untouched, generation-unfreeze.
+    * COHERENT_RECOVERY — rollback verified, generation-unfreeze.
+    * MUTATION_STARTED without verified recovery — NEVER unfreeze into a
+      possibly-mixed tree: transfer ownership to a bounded replacement
+      (``_schedule_restart``). If even that fails, keep the freeze
+      (fail-closed terminal outcome: 503 until a later update or manual
+      restart).
+    * REPLACEMENT_OWNED — freeze persists; nothing to do.
+
+    Coherence is NEVER inferred from the absence of ``restart_scheduled``:
+    a returned partial-mutation failure keeps the freeze unless a verified
+    rollback was recorded.
+    """
+    if freeze_token is None:
+        return
+    if response is not None and response.get('restart_scheduled'):
+        _mark_replacement_owned()
+        return
+    if _mutation_state in (
+        _MutationLifecycle.IDLE,
+        _MutationLifecycle.FROZEN,
+        _MutationLifecycle.COHERENT_RECOVERY,
+    ):
+        unfreeze_static_serving(freeze_token)
+        _reset_mutation_lifecycle()
+        return
+    if _mutation_state == _MutationLifecycle.MUTATION_STARTED:
+        # Mutation may have started with no verified rollback: the served
+        # tree may be mixed-revision. Never unfreeze into it — guarantee a
+        # process replacement (restart thread, or synchronous fallback that
+        # replaces the process and never returns).
+        try:
+            _schedule_restart()
+            _mark_replacement_owned()
+        except Exception:
+            # Both the thread start and the synchronous fallback failed:
+            # keep the freeze (fail-closed — 503 rather than mixed immutable
+            # bytes). A later update or manual restart clears it.
+            logger.exception(
+                'update: failed to schedule replacement after mutation error; '
+                'freeze persists (fail-closed)'
+            )
+        return
+    # REPLACEMENT_OWNED: freeze persists until the replacement process starts.
+
+
+
 def apply_force_update(target: str, channel=None) -> dict:
     """Discard local changes for the requested update target.
 
@@ -1969,7 +2372,13 @@ def apply_force_update(target: str, channel=None) -> dict:
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
-    try:
+    freeze_token = None
+    # Fresh per-attempt mutation lifecycle (issue #6992 re-gate): reset at
+    # wrapper entry; transitions are made by the apply internals at the exact
+    # points the tree mutates or is verified coherent.
+    _reset_mutation_lifecycle()
+
+    def _locked(channel: str) -> dict:
         if target == 'webui':
             path = REPO_ROOT
         elif target == 'agent':
@@ -2043,6 +2452,11 @@ def apply_force_update(target: str, channel=None) -> dict:
                 'channel': channel,
                 'refused_rewind': True,
             }
+        # From here on the served checkout may be mutated in place
+        # (checkout ./ clean / reset --hard) — mark it so an exception or
+        # returned partial-mutation failure on this path can never unfreeze
+        # into a possibly-mixed tree (issue #6992).
+        _mark_mutation_started()
         if not _discard_local_changes(path, compare_ref):
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
@@ -2060,6 +2474,10 @@ def apply_force_update(target: str, channel=None) -> dict:
                 }
 
         _schedule_restart()
+        # Ownership of the freeze transfers to the scheduled replacement
+        # (issue #6992): a later exception in this attempt must never unfreeze
+        # or re-schedule.
+        _mark_replacement_owned()
 
         response = {
             'ok': True,
@@ -2070,6 +2488,56 @@ def apply_force_update(target: str, channel=None) -> dict:
         if target == 'agent':
             response['gateway_restart'] = gateway_result.get('status')
         return response
+
+    try:
+        # Freeze /static/* serving while this checkout is being mutated in
+        # place (issue #6992): set the flag and DRAIN in-flight readers before
+        # the first mutating git command, so a request admitted just before
+        # the freeze can never read bytes written by the updater.
+        if target == 'webui':
+            try:
+                freeze_token = freeze_static_serving()
+                _mark_freeze_acquired(freeze_token)
+            except StaticFreezeDrainTimeoutError as exc:
+                # Fail-closed (issue #6992): a reader that did not drain within
+                # the bound means we MUST NOT mutate — the old process could
+                # otherwise serve the new bytes under the old immutable version
+                # URL. Still under the update lock: release ONLY this caller's
+                # freeze generation (a newer update's freeze stays intact) and
+                # return a retryable non-success; no git command has run.
+                unfreeze_static_serving(exc.token)
+                _reset_mutation_lifecycle()
+                return {
+                    'ok': False,
+                    'message': str(exc),
+                    'target': target,
+                    'drain_timeout': True,
+                    'retryable': True,
+                }
+        response = _locked(channel)
+        # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
+        # scheduled restart replaces this process (static stays 503 through
+        # the restart-delay window). Failures and no-ops are settled by the
+        # shared authority — it generation-unfreezes pre-mutation/verified-
+        # rollback attempts and keeps the freeze (or transfers ownership to a
+        # bounded replacement) when mutation may have started. Runs BEFORE
+        # releasing _apply_lock, so a waiting handoff update can never observe
+        # our unfreeze racing with its own freeze.
+        _settle_update_lifecycle(freeze_token, response)
+        return response
+    except Exception:
+        # Exception-safety for the freeze lifecycle (issue #6992 re-gate):
+        # without this handler the finally below releases only _apply_lock,
+        # so an exception raised after the freeze was acquired (e.g.
+        # _schedule_restart's restart thread failing to start, after the
+        # checkout was already updated) would leave /static/* frozen at 503
+        # until a restart or another successful update — server.py keeps the
+        # process alive on the 500. The shared authority decides by the
+        # per-attempt lifecycle state (pre-mutation / coherent rollback →
+        # generation-unfreeze; mutation may have started → bounded
+        # replacement or fail-closed freeze).
+        _settle_update_lifecycle(freeze_token)
+        raise
     finally:
         _apply_lock.release()
 
@@ -2085,8 +2553,56 @@ def apply_update(target, channel=None):
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
+    freeze_token = None
+    # Fresh per-attempt mutation lifecycle (issue #6992 re-gate); transitions
+    # are made by _apply_update_inner at the exact points the tree mutates or
+    # is verified coherent.
+    _reset_mutation_lifecycle()
     try:
-        return _apply_update_inner(target, channel)
+        # Freeze /static/* serving while this checkout is being mutated in
+        # place (issue #6992): set the flag and DRAIN in-flight readers before
+        # the first mutating git command, so a request admitted just before
+        # the freeze can never read bytes written by the updater.
+        if target == 'webui':
+            try:
+                freeze_token = freeze_static_serving()
+                _mark_freeze_acquired(freeze_token)
+            except StaticFreezeDrainTimeoutError as exc:
+                # Fail-closed (issue #6992): a reader that did not drain within
+                # the bound means we MUST NOT mutate — the old process could
+                # otherwise serve the new bytes under the old immutable version
+                # URL. Still under the update lock: release ONLY this caller's
+                # freeze generation (a newer update's freeze stays intact) and
+                # return a retryable non-success; no git command has run.
+                unfreeze_static_serving(exc.token)
+                _reset_mutation_lifecycle()
+                return {
+                    'ok': False,
+                    'message': str(exc),
+                    'target': target,
+                    'drain_timeout': True,
+                    'retryable': True,
+                }
+        response = _apply_update_inner(target, channel)
+        # Lifecycle (issue #6992): on SUCCESS the freeze persists until the
+        # scheduled restart replaces this process (static stays 503 through
+        # the restart-delay window). Failures and no-ops are settled by the
+        # shared authority — it generation-unfreezes pre-mutation/verified-
+        # rollback attempts and keeps the freeze (or transfers ownership to a
+        # bounded replacement) when mutation may have started. Runs BEFORE
+        # releasing _apply_lock, so a waiting handoff update can never observe
+        # our unfreeze racing with its own freeze.
+        _settle_update_lifecycle(freeze_token, response)
+        return response
+    except Exception:
+        # Exception-safety for the freeze lifecycle (issue #6992 re-gate): an
+        # unexpected exception after freeze_static_serving() must never leave
+        # static serving permanently 503. The shared authority decides by the
+        # per-attempt lifecycle state (pre-mutation / coherent rollback →
+        # generation-unfreeze; mutation may have started → bounded replacement
+        # or fail-closed freeze).
+        _settle_update_lifecycle(freeze_token)
+        raise
     finally:
         _apply_lock.release()
 
@@ -2108,6 +2624,9 @@ def _restore_stash_after_pull_failure(
     """
     _, pop_ok = _run_git(['stash', 'pop'], path)
     if pop_ok:
+        # Stash restored — the served tree is back to the pre-update state
+        # (verified rollback), so a failure may generation-unfreeze.
+        _mark_coherent_recovery()
         return ('Local modifications were restored from the temporary stash.')
 
     # `git stash pop` failed -- could be that the working tree changed under
@@ -2115,6 +2634,7 @@ def _restore_stash_after_pull_failure(
     _, apply_ok = _run_git(['stash', 'apply'], path)
     if apply_ok:
         _, _ = _run_git(['stash', 'drop'], path)
+        _mark_coherent_recovery()
         return ('Local modifications were restored from the temporary stash.')
 
     detail = (pull_out or '').strip()[:200]
@@ -2204,8 +2724,16 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     if status_out:
         _, ok = _run_git(['stash', 'push', '-m', 'hermes-update-autostash'], path)
         if not ok:
+            # git stash push is atomic: a failure leaves the served tree
+            # untouched, so this stays pre-mutation (FROZEN) and the wrapper
+            # may generation-unfreeze.
             return {'ok': False, 'message': 'Failed to stash local changes'}
         stashed = True
+        # First tree-mutating command confirmed (stash push moved the user's
+        # changes out of the served tree) — from here on a failure must never
+        # unfreeze into a possibly-mixed tree unless a rollback is verified
+        # (issue #6992).
+        _mark_mutation_started()
 
     # Pull with ff-only (no merge commits).
     # Split tracking refs like 'origin/main' into separate remote + branch
@@ -2216,6 +2744,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         pull_args.extend([remote, branch])
     else:
         pull_args.extend(['origin', compare_ref])
+    # Pull mutates the served tree (idempotent — no-op if already marked by
+    # the stash push above; agent-only attempts stay IDLE).
+    _mark_mutation_started()
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
         if _is_git_lock_error(pull_out):
@@ -2252,6 +2783,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                 _, drop_ok = _run_git(['stash', 'drop'], path)
                 restored_stash = True
                 stash_drop_failed = not drop_ok
+                # Stash re-applied — the served tree is back to the pre-update
+                # state (verified rollback), so a failure may unfreeze.
+                _mark_coherent_recovery()
             else:
                 _, reset_ok = _run_git(['reset', '--hard', 'HEAD'], path)
                 if not reset_ok:
@@ -2270,6 +2804,10 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                     if diverged_failure:
                         response['diverged'] = True
                     return response
+                # reset --hard HEAD completed — the served tree is back to the
+                # pre-update HEAD (verified rollback), so a failure may
+                # unfreeze.
+                _mark_coherent_recovery()
                 response = {
                     'ok': False,
                     'message': (
@@ -2373,6 +2911,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
                         'gateway_restart': gateway_result.get('status'),
                     }
             _schedule_restart()
+            # Ownership of the freeze transfers to the scheduled replacement
+            # (issue #6992).
+            _mark_replacement_owned()
             response = {
                 'ok': True,
                 'message': (
@@ -2417,6 +2958,9 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
     # setTimeout(() => location.reload(), 1500) on success, so the page reload
     # and the restart land at roughly the same time.
     _schedule_restart()
+    # Ownership of the freeze transfers to the scheduled replacement
+    # (issue #6992).
+    _mark_replacement_owned()
     message = f'{target} updated successfully'
     if stash_drop_failed:
         message += (
