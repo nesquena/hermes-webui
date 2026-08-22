@@ -2286,6 +2286,28 @@ def _build_session_list_cache_payload(
         # routes.all_sessions with the historical diag-only signature.
         return all_sessions(diag=diag)
 
+    def _get_cli_sessions_for_sidebar(requested_source_filter):
+        if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
+            return get_cli_sessions(
+                source_filter=requested_source_filter,
+                all_profiles=all_profiles,
+                include_claude_code=show_claude_code_sessions,
+            )
+        # Focused tests sometimes monkeypatch routes.get_cli_sessions with
+        # the historical two-keyword signature.
+        return get_cli_sessions(
+            source_filter=requested_source_filter,
+            all_profiles=all_profiles,
+        )
+
+    def _sidebar_row_source(row) -> str:
+        if not isinstance(row, dict):
+            return ""
+        return str(
+            row.get("source_tag") or row.get("raw_source")
+            or row.get("session_source") or row.get("source") or ""
+        ).strip().lower()
+
     diag_stage("all_sessions")
     webui_sessions = _all_sessions_for_sidebar()
     diag_stage("reconcile_stale_stream_state")
@@ -2301,19 +2323,7 @@ def _build_session_list_cache_payload(
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
-        if _callable_accepts_kwarg(get_cli_sessions, "include_claude_code"):
-            cli = get_cli_sessions(
-                source_filter=source_filter,
-                all_profiles=all_profiles,
-                include_claude_code=show_claude_code_sessions,
-            )
-        else:
-            # Focused tests sometimes monkeypatch routes.get_cli_sessions with
-            # the historical two-keyword signature.
-            cli = get_cli_sessions(
-                source_filter=source_filter,
-                all_profiles=all_profiles,
-            )
+        cli = _get_cli_sessions_for_sidebar(source_filter)
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
         # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or
@@ -2463,6 +2473,32 @@ def _build_session_list_cache_payload(
             diag_stage=diag_stage,
         )
         deduped_cli = []
+
+    # Delegated children are non-CLI, read-only rows. Fetch state.db-only
+    # children independently of the user-facing CLI toggle/source filter so
+    # established installs (where show_cli_sessions is grandfathered off) do
+    # not lose children that have no WebUI sidecar.
+    diag_stage("get_state_subagent_sessions")
+    state_subagents = [
+        row for row in _get_cli_sessions_for_sidebar("subagent")
+        if _sidebar_row_source(row) == "subagent"
+    ]
+    represented_ids: set[str] = set()
+    for row in webui_sessions + deduped_cli:
+        represented_ids.update(_session_lineage_ids(row))
+    deduped_subagents = _dedupe_cli_sidebar_sessions_for_api(
+        state_subagents,
+        represented_ids,
+        show_cron_sessions=show_cron_sessions,
+        show_webhook_sessions=show_webhook_sessions,
+    )
+    existing_cli_ids = {
+        str(row.get("session_id") or "") for row in deduped_cli
+    }
+    deduped_cli.extend(
+        row for row in deduped_subagents
+        if str(row.get("session_id") or "") not in existing_cli_ids
+    )
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
     merged.sort(
@@ -2574,10 +2610,7 @@ def _build_session_list_cache_payload(
         for _r in _rows:
             if not isinstance(_r, dict):
                 continue
-            _src = (
-                str(_r.get("source_tag") or _r.get("raw_source")
-                    or _r.get("session_source") or _r.get("source") or "").strip().lower()
-            )
+            _src = _sidebar_row_source(_r)
             _is_sa = _src == "subagent"
             # A stale index row can say webui/fork while state.db records the
             # row as source='subagent' (the child shares the parent's lineage).

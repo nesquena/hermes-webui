@@ -274,7 +274,7 @@ def test_sessions_route_supports_historical_get_cli_sessions_signature(monkeypat
     body = handler.json_body()
 
     assert handler.status == 200
-    assert calls == [(None, False)]
+    assert calls == [(None, False), ("subagent", False)]
     assert {row["session_id"] for row in body["sessions"]} == {"webui-1", "external-cli"}
 
 

@@ -5916,6 +5916,82 @@ def _sidebar_title_is_generic_webui(title: str | None) -> bool:
     return text.startswith(prefix) and text[len(prefix):].isdigit()
 
 
+def _sidebar_title_is_generic_subagent(title: str | None) -> bool:
+    """Treat blank and stock delegated-child labels as non-authoritative."""
+    return ' '.join(str(title or '').split()) in ('', 'Subagent Session')
+
+
+def _read_state_db_subagent_goal_titles(
+    conn,
+    session_ids: set[str],
+) -> dict[str, str]:
+    """Read one deterministic, bounded goal title per delegated child.
+
+    The sidebar is a hot path. Only use an index whose leading column is
+    ``session_id``; otherwise fail closed instead of running one table scan per
+    child. Rows are streamed in canonical ``(timestamp, id/rowid)`` order and
+    only a bounded prefix reaches Python, where ``title_from`` remains the one
+    authority for blank-content and title normalization semantics.
+    """
+    ids = sorted(str(sid) for sid in session_ids if sid)
+    if not ids:
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(messages)")
+        message_cols = {str(row[1]) for row in cur.fetchall()}
+        if not {'session_id', 'role', 'content', 'timestamp'}.issubset(message_cols):
+            return {}
+        order_col = 'id' if 'id' in message_cols else 'rowid'
+
+        cur.execute("PRAGMA index_list(messages)")
+        usable_indexes: list[tuple[int, str]] = []
+        for index_row in cur.fetchall():
+            # Partial indexes may omit delegated user rows, so they cannot be
+            # used as a general fail-closed guarantee here.
+            if len(index_row) > 4 and bool(index_row[4]):
+                continue
+            index_name = str(index_row[1])
+            quoted_name = index_name.replace('"', '""')
+            cur.execute(f'PRAGMA index_info("{quoted_name}")')
+            index_cols = [str(row[2]) for row in cur.fetchall()]
+            if index_cols and index_cols[0] == 'session_id':
+                preferred = int(len(index_cols) > 1 and index_cols[1] == 'timestamp')
+                usable_indexes.append((preferred, index_name))
+        if not usable_indexes:
+            return {}
+        _, index_name = max(usable_indexes)
+        quoted_index = index_name.replace('"', '""')
+
+        titles: dict[str, str] = {}
+        for sid in ids:
+            try:
+                cur.execute(
+                    f"""
+                    SELECT substr(CAST(content AS TEXT), 1, 4096) AS content
+                    FROM messages INDEXED BY "{quoted_index}"
+                    WHERE session_id = ? AND role = 'user' AND content IS NOT NULL
+                    ORDER BY timestamp ASC, {order_col} ASC
+                    """,
+                    (sid,),
+                )
+                for row in cur:
+                    display_title = title_from(
+                        [{'role': 'user', 'content': row[0]}],
+                        fallback='',
+                    )
+                    if display_title:
+                        titles[sid] = display_title
+                        break
+            except Exception:
+                # WITHOUT ROWID legacy tables lacking an explicit message id
+                # cannot provide a deterministic tie-breaker. Keep generic.
+                continue
+        return titles
+    except Exception:
+        return {}
+
+
 def _read_state_db_sidebar_overrides(
     db_path: Path,
     session_ids: set[str],
@@ -5967,13 +6043,11 @@ def _read_state_db_sidebar_overrides(
             has_messages_table = cur.fetchone() is not None
             messages_has_session_id = False
             messages_has_timestamp = False
-            messages_has_title_fields = False
             if has_messages_table:
                 cur.execute("PRAGMA table_info(messages)")
                 message_cols = {str(row[1]) for row in cur.fetchall()}
                 messages_has_session_id = 'session_id' in message_cols
                 messages_has_timestamp = 'timestamp' in message_cols
-                messages_has_title_fields = {'session_id', 'role', 'content', 'timestamp'}.issubset(message_cols)
 
             overrides: dict[str, dict] = {}
             delegated_title_ids: set[str] = set()
@@ -6000,7 +6074,7 @@ def _read_state_db_sidebar_overrides(
                     if (
                         state_source == 'subagent'
                         and sid in count_wanted
-                        and ' '.join(state_title.split()) == 'Subagent Session'
+                        and _sidebar_title_is_generic_subagent(state_title)
                     ):
                         delegated_title_ids.add(sid)
                     if state_source:
@@ -6047,29 +6121,11 @@ def _read_state_db_sidebar_overrides(
                                 entry['_state_db_last_message_at'] = float(row['last_message_at'] or 0)
                             except (TypeError, ValueError):
                                 pass
-            if messages_has_title_fields and delegated_title_ids:
-                seen_user_messages: set[str] = set()
-                delegated_title_ids = list(delegated_title_ids)
-                for i in range(0, len(delegated_title_ids), chunk_size):
-                    chunk = delegated_title_ids[i:i + chunk_size]
-                    placeholders = ','.join('?' * len(chunk))
-                    cur.execute(
-                        f"""
-                        SELECT session_id, role, content, timestamp
-                        FROM messages
-                        WHERE session_id IN ({placeholders}) AND role = 'user'
-                        ORDER BY session_id, timestamp ASC
-                        """,
-                        chunk,
-                    )
-                    for row in cur.fetchall():
-                        sid = str(row['session_id'])
-                        if sid in seen_user_messages:
-                            continue
-                        display_title = title_from([dict(row)], fallback='')
-                        if display_title:
-                            seen_user_messages.add(sid)
-                            overrides.setdefault(sid, {})['_state_db_display_title'] = display_title
+            for sid, display_title in _read_state_db_subagent_goal_titles(
+                conn,
+                delegated_title_ids,
+            ).items():
+                overrides.setdefault(sid, {})['_state_db_display_title'] = display_title
             return overrides
     except Exception:
         return {}
@@ -6187,7 +6243,7 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         if (
             state_db_display_title
             and state_db_source == 'subagent'
-            and ' '.join(str(title or '').split()) == 'Subagent Session'
+            and _sidebar_title_is_generic_subagent(title)
         ):
             session['display_title'] = state_db_display_title
 
@@ -7660,6 +7716,7 @@ def _load_cli_sessions_uncached(
         return None
 
     profile_value = _cli_profile or 'default'
+    state_projection_subagent_ids: set[str] = set()
     # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
     # so recovery/audit/claim treat it as gone. The sidebar's own state.db projection
     # must honor the same tombstone, or a deleted WebUI session reappears here as an
@@ -7692,6 +7749,11 @@ def _load_cli_sessions_uncached(
         profile = profile_value  # CLI DB has no profile column; use active profile
 
         _source = row['source'] or 'cli'
+        if (
+            _source == 'subagent'
+            and _sidebar_title_is_generic_subagent(row['title'])
+        ):
+            state_projection_subagent_ids.add(str(sid))
         # Honor the deleted-WebUI tombstone: a WebUI row the user deleted must
         # not resurface in this projection (the #5498 ghost). Live sidecar wins.
         if (
@@ -7715,7 +7777,10 @@ def _load_cli_sessions_uncached(
         if _sidecar_meta.get('title'):
             _title = _sidecar_meta['title']
         _archived = bool(_sidecar_meta.get('archived'))
-        _display_title = _title or f'{_source.title()} Session'
+        if _source == 'subagent' and _sidebar_title_is_generic_subagent(_title):
+            _display_title = 'Subagent Session'
+        else:
+            _display_title = _title or f'{_source.title()} Session'
         cli_sessions.append({
             'session_id': sid,
             'title': _display_title,
@@ -7751,6 +7816,20 @@ def _load_cli_sessions_uncached(
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
         })
+
+    if state_projection_subagent_ids:
+        try:
+            with open_state_db_readonly(db_path) as state_conn:
+                state_projection_titles = _read_state_db_subagent_goal_titles(
+                    state_conn,
+                    state_projection_subagent_ids,
+                )
+        except Exception:
+            state_projection_titles = {}
+        for session in cli_sessions:
+            display_title = state_projection_titles.get(str(session.get('session_id') or ''))
+            if display_title and _sidebar_title_is_generic_subagent(session.get('title')):
+                session['display_title'] = display_title
 
     if source_filter is not None:
         return cli_sessions

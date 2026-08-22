@@ -325,7 +325,12 @@ def test_api_sessions_passes_source_filter_only_on_sidebar_path(monkeypatch):
 
     assert handler.status == 200
     assert handler.json_body()["sessions"] == []
-    assert captured == [{"source_filter": "  TUI  ", "all_profiles": False}]
+    assert captured == [
+        {"source_filter": "  TUI  ", "all_profiles": False},
+        # Delegated children are non-CLI and use a dedicated state projection,
+        # independent of the user-facing CLI source filter.
+        {"source_filter": "subagent", "all_profiles": False},
+    ]
 
 
 def test_non_sidebar_cli_session_callers_keep_default_get_cli_sessions_signature(monkeypatch):
