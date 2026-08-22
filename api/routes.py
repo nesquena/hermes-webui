@@ -10987,10 +10987,9 @@ button:hover{background:rgba(124,185,255,.25)}
 <div class="card">
   <div class="logo">{{BOT_NAME_INITIAL}}</div>
   <h1>{{BOT_NAME}}</h1>
-  <p class="sub">{{LOGIN_SUBTITLE}}</p>
+  {{LOGIN_SUBTITLE_HTML}}
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
-    <button type="submit">{{LOGIN_BTN}}</button>
+    {{PASSWORD_LOGIN_HTML}}
     <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
     {{OIDC_LOGIN_HTML}}
   </form>
@@ -11069,6 +11068,19 @@ def _oidc_login_html(parsed) -> str:
     return (
         '<a id="oidc-login" class="oidc-login" '
         f'href="{_html.escape(href, quote=True)}">Continue with SSO</a>'
+    )
+
+
+def _password_login_html(login_strings: dict[str, str]) -> str:
+    """Render local-password controls only when password auth is enabled."""
+    from api.auth import get_password_hash
+
+    if get_password_hash() is None:
+        return ""
+    return (
+        '<input type="password" id="pw" '
+        f'placeholder="{_html.escape(login_strings["placeholder"], quote=True)}" autofocus>'
+        f'<button type="submit">{_html.escape(login_strings["btn"])}</button>'
     )
 
 
@@ -12938,6 +12950,24 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/login":
+        # When no authentication mechanism is configured, `/login` is not a
+        # login surface: continuing to the requested local path is the only
+        # useful action.  Keep the target subject to the usual open-redirect
+        # validation.
+        from api.auth import is_auth_enabled
+
+        if not is_auth_enabled():
+            next_path = _safe_login_redirect_path(
+                parse_qs(parsed.query or "").get("next", [""])[0]
+            )
+            handler.send_response(302)
+            handler.send_header("Location", next_path)
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Content-Length", "0")
+            _security_headers(handler)
+            handler.end_headers()
+            return True
+
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         _lang = _settings.get("language", "en")
@@ -12947,17 +12977,23 @@ def handle_get(handler, parsed) -> bool:
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
+        password_login_html = _password_login_html(_login_strings)
+        login_subtitle_html = (
+            f'<p class="sub">{_html.escape(_login_strings["subtitle"])}</p>'
+            if password_login_html
+            else ""
+        )
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
             .replace("{{WEBUI_VERSION}}", version_token)
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
-            .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
             .replace(
-                "{{LOGIN_PLACEHOLDER}}", _html.escape(_login_strings["placeholder"])
+                "{{LOGIN_SUBTITLE_HTML}}",
+                login_subtitle_html,
             )
-            .replace("{{LOGIN_BTN}}", _html.escape(_login_strings["btn"]))
+            .replace("{{PASSWORD_LOGIN_HTML}}", password_login_html)
             .replace("{{LOGIN_INVALID_PW}}", _html.escape(_login_strings["invalid_pw"]))
             .replace(
                 "{{LOGIN_CONN_FAILED}}", _html.escape(_login_strings["conn_failed"])
