@@ -103,6 +103,11 @@ def test_in_place_fallback_preserves_special_mode_bits(tmp_path: Path) -> None:
     path the casualty is a temp file, but the in-place fallback truncates and
     rewrites the *real* config, so an unrestored bit is stripped from the
     administrator's actual file. A second hard link forces that branch.
+
+    ``0o4664`` is the load-bearing case on every platform. ``0o2664`` is
+    load-bearing on macOS only: Linux clears setgid solely when ``S_IXGRP`` is
+    set, so without group-execute that sub-case would pass on Linux even with
+    the restore removed. The setuid row keeps the test honest there.
     """
     target = tmp_path / "config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
@@ -152,24 +157,38 @@ def test_mode_restore_does_not_revert_a_concurrent_permission_change(
     An administrator can chmod the config while a save is in flight. Replaying
     the pre-write mode would silently revert that change, so only the bits the
     kernel actually cleared are OR-ed onto the inode's current mode.
+
+    The concurrent chmod has to land in the window the merge actually guards:
+    after the payload ``write()`` cleared the bits, but before the restore
+    reads the current mode. Injecting it via ``fsync`` instead would land
+    *after* the restore has already run, where a naive wholesale replay is
+    indistinguishable from the real merge.
     """
     target = tmp_path / "config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
     os.link(target, tmp_path / "config.hardlink")
     os.chmod(target, 0o2664)
 
-    real_fsync = os.fsync
+    real_fstat = os.fstat
+    fired: list[bool] = []
 
-    def widen_mid_write(fd: int) -> None:
-        # Simulate `chmod g+w,o+w` landing between our fstat and the restore.
-        os.chmod(target, 0o2666)
-        real_fsync(fd)
+    def widen_before_restore(fd: int) -> os.stat_result:
+        result = real_fstat(fd)
+        # The restore's own fstat is the first one to observe the payload
+        # write's cleared setgid; chmod there and let it read the new mode.
+        if not fired and not result.st_mode & stat.S_ISGID:
+            fired.append(True)
+            os.chmod(target, 0o0666)  # admin: chmod o+w while the save runs
+            result = real_fstat(fd)
+        return result
 
-    monkeypatch.setattr(os, "fsync", widen_mid_write)
+    monkeypatch.setattr(os, "fstat", widen_before_restore)
     _atomic_write_text(target, "model:\n  default: new\n")
 
+    assert fired, "the concurrent chmod never landed in the guarded window"
     assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
-    # The administrator's 0o666 survives, and setgid is still restored.
+    # The administrator's o+w survives, and setgid is still restored on top.
+    # A wholesale replay of the captured 0o2664 would drop the o+w.
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o2666
 
 
@@ -199,6 +218,74 @@ def test_mode_restore_runs_before_fsync_not_after(tmp_path: Path, monkeypatch) -
     assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
     # Restoring before the fsync means the revocation lands after us and stands.
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o0664
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX special files")
+def test_non_regular_target_does_not_persist_special_bits(tmp_path: Path) -> None:
+    """A setuid FIFO must not hand its privilege bits to the regular file.
+
+    A non-regular target never reaches the ``S_ISREG`` normalisation, so its
+    mode reaches the temp descriptor. Before the restoration existed the
+    payload ``write()`` stripped the special bits again and the committed file
+    landed unprivileged; re-applying them afterwards would instead persist
+    setuid/setgid onto a real ``config.yaml``. Ordinary bits still carry over,
+    matching the pre-restoration behaviour exactly.
+    """
+    for hostile in (0o4755, 0o2755, 0o6755):
+        target = tmp_path / f"config_{hostile:o}.yaml"
+        os.mkfifo(target)
+        os.chmod(target, hostile)
+
+        _atomic_write_text(target, "model:\n  default: new\n")
+
+        result = os.stat(target)
+        assert stat.S_ISREG(result.st_mode), "target should now be a regular file"
+        assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
+        assert not stat.S_IMODE(result.st_mode) & (stat.S_ISUID | stat.S_ISGID)
+        # Unchanged from the pre-restoration behaviour: 0o755, bits stripped.
+        assert stat.S_IMODE(result.st_mode) == hostile & ~(stat.S_ISUID | stat.S_ISGID)
+
+
+def test_atomic_path_restore_failure_aborts_and_leaves_no_debris(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The atomic path must fail loudly, unlike the in-place fallback.
+
+    The two call sites are deliberately asymmetric. The in-place path has
+    already committed its content when the restore runs, so a denied chmod is
+    swallowed; the atomic path still owns a private temp file, so it can abort
+    with the original file untouched. Failing there must also not strand a
+    ``.cfg_*`` temp file in the config directory.
+    """
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.chmod(target, 0o2664)
+    assert os.stat(target).st_nlink == 1, "must take the atomic path"
+
+    real_fchmod = os.fchmod
+    calls: list[int] = []
+
+    def deny_only_the_restore(fd: int, mode: int) -> None:
+        # The first fchmod is the pre-write mode transfer onto the temp
+        # descriptor; denying that would abort before the restore is reached
+        # and the test would pass for the wrong reason.
+        calls.append(mode)
+        if len(calls) == 1:
+            real_fchmod(fd, mode)
+            return
+        raise PermissionError(errno.EPERM, "operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", deny_only_the_restore)
+
+    with pytest.raises(PermissionError):
+        _atomic_write_text(target, "model:\n  default: new\n")
+
+    assert len(calls) == 2, f"the restore never ran; fchmod calls: {calls}"
+    # All-or-nothing: the original content and mode both survive intact.
+    assert target.read_text(encoding="utf-8") == "model:\n  default: old\n"
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "config.yaml"]
+    assert leftovers == [], f"temp debris left behind: {leftovers}"
 
 
 @pytest.mark.skipif(

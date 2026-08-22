@@ -101,8 +101,9 @@ def _restore_write_cleared_mode_bits(
     POSIX requires ``write()`` to clear ``S_ISUID``/``S_ISGID`` when the writer
     is not the superuser (``man 2 write``), so a ``chmod`` issued *before* the
     content is written loses exactly the bits it just set. macOS clears setgid
-    unconditionally; Linux keeps setgid only while the writer belongs to the
-    file's group but drops setuid regardless. Re-applying the mode once the
+    unconditionally; Linux clears it only when the group-execute bit is also
+    set — ``S_ISGID`` without ``S_IXGRP`` denotes mandatory locking rather than
+    privilege — but drops setuid regardless. Re-applying the mode once the
     bytes are down is the only ordering that preserves an administrator's
     policy on every platform, and it is skipped entirely for ordinary modes so
     the common ``0644``/``0664`` path issues no extra syscall.
@@ -222,6 +223,13 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     except FileNotFoundError:
         existing_stat = None
     mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    if existing_stat is not None and not stat.S_ISREG(existing_stat.st_mode):
+        # A non-regular target (FIFO, socket, device) never reaches the
+        # S_ISREG normalisation below, so its mode survives to the temp file.
+        # Ordinary bits are harmless there, but restoring setuid/setgid after
+        # the write would persist them onto the regular file that replaces it
+        # — a privilege bit the original write() had always stripped.
+        mode = stat.S_IMODE(existing_stat.st_mode) & ~_WRITE_CLEARED_MODE_BITS
 
     def _verify_symlink_target() -> None:
         if symlink_target is not None and path.resolve(strict=False) != symlink_target:
