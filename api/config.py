@@ -3513,6 +3513,26 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         idx = tokens.index("deepseek")
         if idx + 1 < len(tokens) and tokens[idx + 1].startswith(("v", "r")):
             return True
+    # xAI Grok models that expose a configurable effort dial. Gateways
+    # commonly advertise them as bare ``grok-4.5``, OpenRouter-style
+    # ``x-ai/grok-4.5``, or Vercel/AI-gateway ``xai/grok-4.5``. Align with
+    # Hermes agent allowlist (grok-3-mini / grok-4.3 / grok-4.5 /
+    # multi-agent) rather than every ``grok-*`` id so image / video / TTS /
+    # non-reasoning variants stay chip-hidden.
+    if "grok" in token_set or normalized.startswith("grok"):
+        if any(tok in token_set for tok in ("image", "imagine", "video", "tts", "stt", "voice")):
+            return False
+        if "non" in token_set and "reasoning" in token_set:
+            return False
+        joined = normalized  # already hyphen-normalized
+        if (
+            "multi-agent" in joined
+            or "grok-3-mini" in joined
+            or "grok-4-5" in joined
+            or "grok-4-3" in joined
+        ):
+            return True
+        return False
     return False
 
 
@@ -3731,6 +3751,24 @@ def _filter_reasoning_efforts_for_provider(
         return normalized
     if zai_supports is False:
         return []
+    # xAI Grok effort ladders are model-specific (docs.x.ai + Hermes agent
+    # allowlist). Keep the UI from advertising levels the API rejects, and
+    # hide the chip entirely for media / non-effort Grok variants.
+    if "grok" in bare:
+        if any(tok in bare for tok in ("image", "imagine", "video", "tts", "stt", "voice")):
+            return []
+        if "non-reasoning" in bare or "non_reasoning" in bare:
+            return []
+        # Agent's xAI Responses transport clamps stronger generic values to high,
+        # so advertise only the effective wire ladder.
+        if "multi-agent" in bare:
+            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
+        # Effort-capable chat Grok (4.5 / 4.3 / 3-mini).
+        if bare.startswith(("grok-4.5", "grok-4.3", "grok-3-mini")):
+            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
+        # Unknown grok-* : fail closed (no chip) rather than advertise a ladder
+        # the API may reject with HTTP 400.
+        return []
     return normalized
 
 
@@ -3816,6 +3854,10 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "anthropic/",
         "openai/",
         "x-ai/",
+        # Vercel AI Gateway / some custom proxies use ``xai/`` (no hyphen),
+        # while OpenRouter-style catalogs use ``x-ai/``. Match both so Grok
+        # behind provider=custom keeps the reasoning chip.
+        "xai/",
         "google/gemini-2",
         "google/gemma-4",
         "qwen/qwen3",
