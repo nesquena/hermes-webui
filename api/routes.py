@@ -8986,7 +8986,16 @@ def _display_merge_cached_messages(session, sidecar_messages):
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
 
-def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, state_db_messages) -> list:
+_DISPLAY_STATE_SIGNATURE_UNSET = object()
+
+
+def _limited_webui_messages_for_display_with_sidecar(
+    session,
+    sidecar_messages,
+    state_db_messages,
+    *,
+    state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
+) -> list:
     if sidecar_messages is None:
         sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
     else:
@@ -9018,7 +9027,24 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
     # Any uncertainty (missing signature, fingerprint failure) skips caching.
     cache_key = None
     if not getattr(session, "active_stream_id", None) and not getattr(session, "pending_user_message", None):
-        cache_key = _display_merge_cache_key(session, sidecar_messages, state_db_messages)
+        if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
+            _state_key = _state_db_rows_fingerprint(state_db_messages)
+        else:
+            _state_key = state_db_signature
+            if _state_key is not None:
+                _current_key = _state_db_session_signature(
+                    getattr(session, "session_id", None),
+                    getattr(session, "profile", None) or None,
+                )
+                if _current_key != _state_key:
+                    _state_key = None
+        if _state_key is not None:
+            cache_key = _display_merge_cache_key(
+                session,
+                sidecar_messages,
+                state_db_messages,
+                state_db_signature=_state_key,
+            )
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
@@ -9032,6 +9058,23 @@ def _limited_webui_messages_for_display_with_sidecar(session, sidecar_messages, 
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
     )
+    if cache_key is not None:
+        _state_key = cache_key[4]
+        _streaming_key = (
+            isinstance(_state_key, (list, tuple))
+            and bool(_state_key)
+            and _state_key[0] == "streaming"
+        )
+        if (
+            state_db_signature is not _DISPLAY_STATE_SIGNATURE_UNSET
+            and not _streaming_key
+            and _state_db_session_signature(
+                getattr(session, "session_id", None),
+                getattr(session, "profile", None) or None,
+            )
+            != state_db_signature
+        ):
+            cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
@@ -9083,7 +9126,13 @@ def _display_merge_cache_entry_usable(entry, cache_key) -> bool:
     return 0.0 <= age <= _DISPLAY_MERGE_STREAMING_TTL_SECONDS
 
 
-def _display_merge_cache_key(session, sidecar_messages, state_db_messages):
+def _display_merge_cache_key(
+    session,
+    sidecar_messages,
+    state_db_messages,
+    *,
+    state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
+):
     """Return a fail-closed validity key for the display-merge cache, or None.
 
     None means "do not cache": any component that cannot be resolved exactly
@@ -9120,9 +9169,12 @@ def _display_merge_cache_key(session, sidecar_messages, state_db_messages):
     # freeze marker prevents unrelated per-delta commits from churning this key;
     # streaming entries have a strict five-second TTL. Fail closed onto the exact
     # row fingerprint whenever the signature cannot be read.
-    state_fp = _state_db_session_signature(
-        sid, getattr(session, "profile", None) or None
-    )
+    if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
+        state_fp = _state_db_session_signature(
+            sid, getattr(session, "profile", None) or None
+        )
+    else:
+        state_fp = state_db_signature
     if state_fp is None:
         # state_db_messages is None on the cache-probe path, where the rows were
         # deliberately not loaded. Fingerprinting None would key on the empty
@@ -9199,6 +9251,15 @@ def _state_db_session_signature(session_id, profile=None):
     except TypeError:
         return None
     return signature
+
+
+def _load_state_db_messages_with_stable_signature(session_id, profile, reader_kwargs):
+    """Load rows and return the database signature that brackets that read."""
+    before = _state_db_session_signature(session_id, profile)
+    rows = get_state_db_session_messages(session_id, **dict(reader_kwargs or {}))
+    after = _state_db_session_signature(session_id, profile)
+    stable = before if before is not None and before == after else None
+    return rows, stable
 
 
 def _state_db_rows_fingerprint(rows) -> str | None:
@@ -13218,6 +13279,7 @@ def handle_get(handler, parsed) -> bool:
             # reused without loading the state.db rows; must exist for every
             # branch below, including the ones that never probe the cache.
             _display_cache_hit = None
+            _display_state_db_signature = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -13266,10 +13328,24 @@ def handle_get(handler, parsed) -> bool:
                 if _display_cache_hit is not None:
                     state_db_messages = []
                 else:
-                    state_db_messages = get_state_db_session_messages(
-                        sid,
-                        **_state_db_reader_kwargs,
-                    )
+                    if (
+                        msg_limit is not None
+                        and not getattr(s, "active_stream_id", None)
+                        and not getattr(s, "pending_user_message", None)
+                    ):
+                        (
+                            state_db_messages,
+                            _display_state_db_signature,
+                        ) = _load_state_db_messages_with_stable_signature(
+                            sid,
+                            _session_profile,
+                            _state_db_reader_kwargs,
+                        )
+                    else:
+                        state_db_messages = get_state_db_session_messages(
+                            sid,
+                            **_state_db_reader_kwargs,
+                        )
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
                 # reconciliation contract as full loads so stale/replayed
@@ -13309,6 +13385,7 @@ def handle_get(handler, parsed) -> bool:
                             s,
                             limited_sidecar_messages,
                             state_db_messages,
+                            state_db_signature=_display_state_db_signature,
                         )
                 else:
                     _all_msgs = merge_session_messages_append_only(

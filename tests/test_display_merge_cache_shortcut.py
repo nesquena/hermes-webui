@@ -111,7 +111,12 @@ def test_shortcut_matches_the_full_merge_path(monkeypatch, stable_key):
         {"role": "assistant", "content": "two", "timestamp": 2.0},
     ]
 
-    full = routes._limited_webui_messages_for_display_with_sidecar(session, sidecar, rows)
+    full = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        sidecar,
+        rows,
+        state_db_signature=stable_key,
+    )
     probed = routes._display_merge_cached_messages(session, sidecar)
 
     assert probed is not None, "merge helper did not populate the cache"
@@ -222,3 +227,64 @@ def test_cache_key_refuses_none_rows_without_bounded_signature(monkeypatch):
 def test_unsafe_session_id_is_refused(stable_key):
     bad = _Session(sid="../../etc/passwd")
     assert routes._display_merge_cached_messages(bad, []) is None
+
+
+def test_loader_refuses_signature_when_commit_occurs_during_read(monkeypatch):
+    signatures = iter(("SIG-A", "SIG-B"))
+    monkeypatch.setattr(
+        routes,
+        "_state_db_session_signature",
+        lambda *args, **kwargs: next(signatures),
+    )
+    rows = [{"role": "assistant", "content": "snapshot"}]
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: rows)
+
+    loaded, stable = routes._load_state_db_messages_with_stable_signature(
+        SID,
+        profile=None,
+        reader_kwargs={},
+    )
+
+    assert loaded == rows
+    assert stable is None
+
+
+def test_loader_returns_signature_when_read_window_is_stable(monkeypatch):
+    monkeypatch.setattr(routes, "_state_db_session_signature", lambda *args, **kwargs: "SIG-A")
+    rows = [{"role": "assistant", "content": "snapshot"}]
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *args, **kwargs: rows)
+
+    loaded, stable = routes._load_state_db_messages_with_stable_signature(
+        SID,
+        profile=None,
+        reader_kwargs={},
+    )
+
+    assert loaded == rows
+    assert stable == "SIG-A"
+
+
+def test_merge_does_not_publish_when_signature_changes_before_store(monkeypatch):
+    monkeypatch.setattr(
+        "api.models._sidecar_stat_signature", lambda path: ("sig", 1, 2, 3), raising=False
+    )
+    signatures = iter(("SIG-A", "SIG-B"))
+    monkeypatch.setattr(
+        routes,
+        "_state_db_session_signature",
+        lambda *args, **kwargs: next(signatures),
+    )
+    session = _Session()
+    sidecar = [{"role": "user", "content": "one", "timestamp": 1.0}]
+    rows = [{"role": "assistant", "content": "two", "timestamp": 2.0}]
+
+    merged = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        sidecar,
+        rows,
+        state_db_signature="SIG-A",
+    )
+
+    assert len(merged) == 2
+    with routes._display_merge_cache_lock:
+        assert session.session_id not in routes._display_merge_cache
