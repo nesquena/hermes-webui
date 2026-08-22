@@ -1124,7 +1124,38 @@ def _skill_view_from_active_dir(name: str) -> dict:
 # Trivial; many production SSE deployments run 5-15s heartbeats specifically
 # to handle proxies and mobile NAT.
 _SSE_HEARTBEAT_INTERVAL_SECONDS = 5
+# A proxy can keep ACKing server heartbeats after the downstream browser has
+# disappeared, so socket keepalive and write deadlines alone cannot prove the
+# subscriber is still alive (#7105). Rotate the three indefinite subscription
+# streams after five minutes. A live EventSource renews the lease by reconnecting;
+# a dead browser does not, which bounds the handler thread and subscriber queue.
+# This is an internal correctness bound, not a user-facing tuning surface.
+_SSE_SUBSCRIBER_LEASE_SECONDS = 300.0
 _SESSION_SSE_SENT_EVENT_ID_LIMIT = 4096
+
+
+def _sse_subscriber_lease_deadline() -> float:
+    return time.monotonic() + max(0.0, float(_SSE_SUBSCRIBER_LEASE_SECONDS))
+
+
+def _sse_subscriber_lease_expired(handler, deadline: float) -> bool:
+    if time.monotonic() < deadline:
+        return False
+    # Do not emit `Connection: close` in the response headers: #3103 proved that
+    # header creates reconnect storms. Setting the BaseHTTPRequestHandler flag
+    # only when the bounded response finishes makes this generation reach EOF.
+    handler.close_connection = True
+    return True
+
+
+def _sse_subscriber_wait_seconds(deadline: float) -> float:
+    return max(
+        0.0,
+        min(
+            float(_SSE_HEARTBEAT_INTERVAL_SECONDS),
+            deadline - time.monotonic(),
+        ),
+    )
 
 
 def _normalize_messaging_source(raw_source) -> str:
@@ -19300,6 +19331,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
+    lease_deadline = _sse_subscriber_lease_deadline()
     try:
         # Send initial snapshot immediately
         from api.models import get_cli_sessions
@@ -19307,9 +19339,13 @@ def _handle_gateway_sse_stream(handler, parsed):
         _sse(handler, 'sessions_changed', {'sessions': initial})
 
         while True:
+            if _sse_subscriber_lease_expired(handler, lease_deadline):
+                break
             try:
-                event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event_data = q.get(timeout=_sse_subscriber_wait_seconds(lease_deadline))
             except queue.Empty:
+                if _sse_subscriber_lease_expired(handler, lease_deadline):
+                    break
                 handler.wfile.write(b': keepalive\n\n')
                 handler.wfile.flush()
                 continue
@@ -19335,11 +19371,16 @@ def _handle_session_events_stream(handler):
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = subscribe_session_events()
+    lease_deadline = _sse_subscriber_lease_deadline()
     try:
         while True:
+            if _sse_subscriber_lease_expired(handler, lease_deadline):
+                break
             try:
-                event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event_data = q.get(timeout=_sse_subscriber_wait_seconds(lease_deadline))
             except queue.Empty:
+                if _sse_subscriber_lease_expired(handler, lease_deadline):
+                    break
                 handler.wfile.write(b': keepalive\n\n')
                 handler.wfile.flush()
                 continue
@@ -21178,8 +21219,10 @@ def _handle_session_sse_stream(handler, parsed):
 
     Lifecycle: opened by the frontend at session mount, closed at unmount or
     on tab close. Multiple tabs share one SessionChannel (refcounted via
-    subscribe/unsubscribe). 30s SSE keepalive comments keep the proxy alive.
-    Reaper-driven idle TTL (default 4h) prevents zombie channels.
+    subscribe/unsubscribe). Five-second SSE comments keep proxies alive, and
+    each subscription generation is capped at five minutes so a proxy-ACKed
+    dead browser cannot pin the thread/channel forever. A live EventSource
+    reconnects and gets a fresh generation; the reaper can collect the old one.
     """
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     if not sid:
@@ -21211,7 +21254,13 @@ def _handle_session_sse_stream(handler, parsed):
     # orphaning this subscriber on a channel no longer in SESSION_CHANNELS.
     # bg_task_complete emits would then never reach this queue. See
     # subscribe_to_session_channel for the full rationale (PR #2971 Greptile P1).
-    ch, q = subscribe_to_session_channel(sid, maxsize=64)
+    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "").strip()
+    ch, q = subscribe_to_session_channel(
+        sid,
+        maxsize=64,
+        after_event_id=last_event_id or None,
+    )
+    lease_deadline = _sse_subscriber_lease_deadline()
 
     # NOTE: ``subscribe_to_session_channel`` above acquires a subscriber slot
     # that MUST be released on every exit path. Header setup
@@ -21245,7 +21294,49 @@ def _handle_session_sse_stream(handler, parsed):
         # live (mirrors approval/clarify which send an 'initial' frame). No
         # snapshot data is needed — this channel only carries forward-looking
         # events, not pending state.
-        _sse(handler, 'initial', {"session_id": sid})
+        initial_event_id = str(
+            getattr(q, "_session_channel_initial_event_id", "") or ""
+        ).strip()
+        if initial_event_id:
+            _sse_with_id(
+                handler,
+                'initial',
+                {"session_id": sid},
+                initial_event_id,
+            )
+        else:
+            _sse(handler, 'initial', {"session_id": sid})
+
+        def emit_channel_payload(payload) -> bool:
+            if payload is None:
+                return False
+            event_name, data = payload
+            event_id = (
+                str(data.get("event_id") or "").strip()
+                if isinstance(data, dict)
+                else ""
+            )
+            if event_id:
+                _sse_with_id(handler, event_name, data, event_id)
+            else:
+                _sse(handler, event_name, data)
+            return True
+
+        # Cursor replay was queued atomically before this handler registered as
+        # a live subscriber. Deliver it before `server_turn_started` recovery:
+        # that frontend event hands the pane to /api/chat/stream and suspends
+        # this EventSource, which would otherwise drop the completion toast/ack.
+        replay_count = max(
+            0,
+            int(getattr(q, "_session_channel_replay_count", 0) or 0),
+        )
+        for _ in range(replay_count):
+            try:
+                replay_payload = q.get_nowait()
+            except queue.Empty:
+                break
+            if not emit_channel_payload(replay_payload):
+                return True
 
         # ── Open-tab live-view self-heal (root cause: lost server_turn_started) ──
         # The `server_turn_started` fan-out (routes.start_session_turn) is a
@@ -21325,16 +21416,19 @@ def _handle_session_sse_stream(handler, parsed):
             )
 
         while True:
+            if _sse_subscriber_lease_expired(handler, lease_deadline):
+                break
             try:
-                payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                payload = q.get(timeout=_sse_subscriber_wait_seconds(lease_deadline))
             except queue.Empty:
+                if _sse_subscriber_lease_expired(handler, lease_deadline):
+                    break
                 handler.wfile.write(b': keepalive\n\n')
                 handler.wfile.flush()
                 continue
             if payload is None:
                 break
-            event_name, data = payload
-            _sse(handler, event_name, data)
+            emit_channel_payload(payload)
     except _CLIENT_DISCONNECT_ERRORS:
         pass  # client went away — normal for long-lived connections
     finally:

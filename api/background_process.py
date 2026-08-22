@@ -46,6 +46,7 @@ import queue
 import threading
 import time
 import uuid
+from collections import deque
 from typing import Any, Optional
 
 from api.process_event_utils import (
@@ -105,6 +106,7 @@ _PENDING_EMIT_TIMERS: dict[str, threading.Timer] = {}
 #   stream_end / cancel / reconnect.
 SESSION_CHANNELS: dict[str, "SessionChannel"] = {}
 SESSION_CHANNELS_LOCK = threading.Lock()
+_SESSION_CHANNEL_REPLAY_LIMIT = 32
 
 
 class SessionChannel:
@@ -112,9 +114,9 @@ class SessionChannel:
 
     Subscribers are ``queue.Queue`` instances owned by the SSE route
     handler — one per active EventSource (tab). ``emit`` broadcasts to every
-    live subscriber; subscribers whose buffer is full silently drop the
-    event (the tab will reconnect on disconnect and the SSE-level disconnect
-    detection will tear it down).
+    live subscriber. Events carrying a stable ``event_id`` also enter a small
+    bounded replay history so EventSource reconnect can bridge a connection-
+    generation gap. A fresh tab with no cursor never receives old history.
 
     Lifecycle:
       - Created on demand by ``get_or_create_session_channel`` when the first
@@ -122,25 +124,65 @@ class SessionChannel:
       - ``subscribe`` / ``unsubscribe`` are refcount-style: zero subscribers
         does NOT immediately collect the channel; the reaper waits a 60s
         grace so a quick navigation away/back doesn't churn the registry.
-      - The reaper collects the channel when subscribers stay empty past the
-        grace period, OR when subscribers are empty AND ``created_at`` is
-        older than SESSION_CHANNEL_IDLE_TTL_SECS (zombie cap — applies only
-        when nobody is subscribed; a live subscriber keeps the channel even
-        past the idle TTL).
+      - After a subscriber drops, the reaper always preserves the full grace
+        period for EventSource reconnect and cursor replay. A never-subscribed
+        empty channel is capped by SESSION_CHANNEL_IDLE_TTL_SECS.
     """
 
     def __init__(self, session_id: str):
         self.session_id = session_id
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
+        # Only events with stable event_id values are replayable. This closes the
+        # tiny gap between a bounded SSE generation reaching EOF and EventSource
+        # opening its replacement without replaying old toasts on a fresh tab.
+        self._history: deque[tuple[str, dict, str]] = deque(
+            maxlen=_SESSION_CHANNEL_REPLAY_LIMIT
+        )
         now = time.time()
         self.created_at = now
         self.last_event_at = now
         self.last_subscriber_drop_at: float | None = None
 
-    def subscribe(self, maxsize: int = 16) -> queue.Queue:
+    def subscribe(
+        self,
+        maxsize: int = 16,
+        after_event_id: str | None = None,
+    ) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=maxsize)
         with self._lock:
+            matched_cursor = False
+            replay_count = 0
+            if after_event_id:
+                history = list(self._history)
+                match_index = next(
+                    (
+                        index
+                        for index in range(len(history) - 1, -1, -1)
+                        if history[index][2] == after_event_id
+                    ),
+                    None,
+                )
+                if match_index is not None:
+                    matched_cursor = True
+                    pending = [
+                        item for item in history[match_index + 1:] if item[0]
+                    ]
+                    if len(pending) <= maxsize:
+                        for event, data, _event_id in pending:
+                            q.put_nowait((event, dict(data)))
+                        replay_count = len(pending)
+            if matched_cursor:
+                initial_event_id = str(after_event_id)
+            else:
+                # A first connection has no Last-Event-ID. Give its `initial`
+                # frame a cursor marker so an event emitted during the later
+                # EOF/reconnect gap can still replay. Unknown/evicted cursors
+                # get a new marker after old history and never replay stale data.
+                initial_event_id = f"session-channel:{uuid.uuid4().hex}"
+                self._history.append(("", {}, initial_event_id))
+            q._session_channel_initial_event_id = initial_event_id
+            q._session_channel_replay_count = replay_count
             self._subscribers.append(q)
             # Cancel any pending subscribers-empty grace timer.
             self.last_subscriber_drop_at = None
@@ -163,6 +205,13 @@ class SessionChannel:
         """Broadcast (event, data) to all live subscribers. Returns delivered count."""
         delivered = 0
         with self._lock:
+            event_id = (
+                str(data.get("event_id") or "").strip()
+                if isinstance(data, dict)
+                else ""
+            )
+            if event_id:
+                self._history.append((event, dict(data), event_id))
             subs = list(self._subscribers)
             self.last_event_at = time.time()
         for q in subs:
@@ -170,13 +219,9 @@ class SessionChannel:
                 q.put_nowait((event, data))
                 delivered += 1
             except queue.Full:
-                # Slow tab: drop this event for that tab. SSE-level disconnect
-                # detection will eventually tear the connection down and the
-                # browser will reconnect, replaying the live stream from
-                # whatever fires next. process_complete is intrinsically
-                # idempotent (frontend dedupes by ``(session_id, event_id)``
-                # using a small ring-buffer in static/messages.js — see the
-                # bg_task_complete consumer-side dedupe introduced in PR #2971).
+                # Slow tab: drop from this queue. If the payload carries an
+                # event_id, reconnect can replay it from the bounded history;
+                # the frontend also dedupes by (session_id, event_id).
                 logger.debug("SessionChannel emit: subscriber buffer full, dropping")
             except Exception:
                 logger.debug("SessionChannel emit failed", exc_info=True)
@@ -188,8 +233,8 @@ class SessionChannel:
         Two collection conditions (per Option X spec):
           1. Subscribers empty AND last_subscriber_drop_at is older than
              SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS (normal teardown).
-          2. created_at older than SESSION_CHANNEL_IDLE_TTL_SECS AND
-             subscribers empty (zombie cap — survived too long).
+          2. A never-subscribed empty channel is older than
+             SESSION_CHANNEL_IDLE_TTL_SECS (zombie cap).
         """
         from api import config as _cfg
 
@@ -204,10 +249,13 @@ class SessionChannel:
             return False
         # No subscribers — check grace period.
         grace = float(getattr(_cfg, "SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS", 60))
-        if drop_at is not None and (now - drop_at) >= grace:
-            return True
-        # Hard cap on lifetime (even if subscribers oscillated): if created
-        # long ago AND nobody's subscribed right now, sweep.
+        if drop_at is not None:
+            # A bounded SSE generation may expire after the channel itself is
+            # older than the idle TTL. Preserve the complete reconnect grace;
+            # otherwise the reaper can delete its replay history during the
+            # browser's normal ~3s EventSource gap (#7105).
+            return (now - drop_at) >= grace
+        # Hard cap for a channel that was created but never acquired a viewer.
         ttl = float(getattr(_cfg, "SESSION_CHANNEL_IDLE_TTL_SECS", 14400))
         if (now - created_at) >= ttl:
             return True
@@ -231,7 +279,9 @@ def get_session_channel(session_id: str) -> Optional[SessionChannel]:
 
 
 def subscribe_to_session_channel(
-    session_id: str, maxsize: int = 16
+    session_id: str,
+    maxsize: int = 16,
+    after_event_id: str | None = None,
 ) -> tuple["SessionChannel", "queue.Queue"]:
     """Atomically get-or-create the channel for ``session_id`` AND register a
     subscriber on it, both under ``SESSION_CHANNELS_LOCK``.
@@ -267,8 +317,10 @@ def subscribe_to_session_channel(
         if ch is None:
             ch = SessionChannel(session_id)
             SESSION_CHANNELS[session_id] = ch
-        q = ch.subscribe(maxsize=maxsize)
-        return ch, q
+        return ch, ch.subscribe(
+            maxsize=maxsize,
+            after_event_id=after_event_id,
+        )
 
 
 # Bounded window a cancelling worker may stay lifecycle-busy before an entry
