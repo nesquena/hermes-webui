@@ -157,6 +157,88 @@ def test_session_load_collapses_non_adjacent_duplicate_incomplete_ids(tmp_path, 
     assert (session_dir / f"{sid}.json.bak").exists()
 
 
+def test_load_self_heal_cannot_overwrite_a_newer_save(tmp_path, monkeypatch):
+    """The read, repair, and write-back must share one save generation."""
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "_write_session_index", lambda *_args, **_kwargs: None)
+
+    sid = "load-self-heal-generation"
+    session_path = session_dir / f"{sid}.json"
+    duplicate = _incomplete_reasoning_only(1701)
+    session_path.write_text(
+        json.dumps({"session_id": sid, "messages": [duplicate, dict(duplicate)]}),
+        encoding="utf-8",
+    )
+
+    stale_read = threading.Event()
+    release_stale_reader = threading.Event()
+    writer_started = threading.Event()
+    writer_committed = threading.Event()
+    paused = False
+    real_read_text = Path.read_text
+
+    def _pause_loader_after_sidecar_read(path, *args, **kwargs):
+        nonlocal paused
+        text = real_read_text(path, *args, **kwargs)
+        if (
+            path == session_path
+            and threading.current_thread().name == "stale-loader"
+            and not paused
+        ):
+            paused = True
+            stale_read.set()
+            assert release_stale_reader.wait(timeout=5)
+        return text
+
+    monkeypatch.setattr(Path, "read_text", _pause_loader_after_sidecar_read)
+    errors = []
+
+    def _load_and_repair():
+        try:
+            assert models.Session.load(sid) is not None
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    newer = _incomplete_reasoning_only(1702)
+
+    def _write_newer_generation():
+        try:
+            writer_started.set()
+            models.Session(session_id=sid, messages=[duplicate, newer]).save(skip_index=True)
+            writer_committed.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    loader = threading.Thread(target=_load_and_repair, name="stale-loader")
+    writer = threading.Thread(target=_write_newer_generation, name="newer-writer")
+    loader.start()
+    assert stale_read.wait(timeout=5)
+    writer.start()
+    assert writer_started.wait(timeout=5)
+
+    # On the unfenced implementation the writer commits here and the stale
+    # loader subsequently overwrites it. With generation fencing it waits for
+    # the repair, then publishes the newest durable sidecar.
+    writer_committed.wait(timeout=1)
+    release_stale_reader.set()
+    loader.join(timeout=5)
+    writer.join(timeout=5)
+
+    assert not loader.is_alive()
+    assert not writer.is_alive()
+    assert errors == []
+    assert writer_committed.is_set()
+    assert [
+        message["id"]
+        for message in json.loads(session_path.read_text(encoding="utf-8"))["messages"]
+    ] == [1701, 1702]
+
+
 def test_context_dedupe_is_idempotent_for_alternating_incomplete_ids():
     from api.streaming import _deduplicate_context_messages
 

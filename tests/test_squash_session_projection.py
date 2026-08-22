@@ -166,3 +166,34 @@ def test_branch_keep_count_uses_squash_authoritative_display_coordinates(monkeyp
         "# Session compactée\n\nRésumé opérationnel vérifié.",
         "nouvelle demande",
     ]
+
+
+def test_squash_projection_preserves_distinct_state_only_rows_after_watermark():
+    sidecar_messages, cli_messages = _production_squash_projection()
+    cli_messages.insert(
+        2,
+        _message(
+            "assistant",
+            "réponse disponible uniquement dans state.db",
+            250.0,
+            message_id="state-only-250",
+        ),
+    )
+    session = SimpleNamespace(
+        session_id="production-squash-state-only-tail",
+        messages=sidecar_messages,
+        session_source="webui",
+        parent_session_id=None,
+        truncation_watermark=200.0,
+        truncation_boundary=200.0,
+        compression_anchor_mode="manual",
+    )
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [message["content"] for message in merged] == [
+        "# Session compactée\n\nRésumé opérationnel vérifié.",
+        "réponse disponible uniquement dans state.db",
+        "nouvelle demande",
+        "nouvelle réponse",
+    ]
