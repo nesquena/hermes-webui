@@ -10622,6 +10622,9 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     set_session_yolo_enabled,
     submit_gateway_pending_mirror,
     submit_pending,
+    pending_head_for_session_locked,
+    child_approval_keys_for_session_locked,
+    _queue_entries_locked,
 )
 
 # Clarify prompts (optional -- graceful fallback if agent not available)
@@ -10646,14 +10649,12 @@ except ImportError:
 
 def _session_attention_summary(session_id: str) -> dict | None:
     """Return sidebar attention metadata for pending approval/clarify work."""
-    approval_count = 0
     with _lock:
         reconcile_gateway_pending_mirror_locked(session_id)
-        queue_list = _pending.get(session_id)
-        if isinstance(queue_list, list):
-            approval_count = len(queue_list)
-        elif queue_list:
-            approval_count = 1
+        # One aggregate projection on every path (own queue + delegated-child
+        # queues, deduped by stable approval id) so a parent-with-1 +
+        # child-with-1 lights the dot with count 2, not 1 (#6961 #5).
+        _head, approval_count = pending_head_for_session_locked(session_id)
     if approval_count > 0:
         return {
             "kind": "approval",
@@ -20979,27 +20980,11 @@ def _read_anchored_file_bytes(ws_root: Path, target: Path) -> bytes:
 def _handle_approval_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     with _lock:
-        _head, _total, _changed = reconcile_gateway_pending_mirror_locked(sid)
-        queue = _pending.get(sid)
-        # Support both the new list format and a legacy single-dict value.
-        if isinstance(queue, list):
-            p = queue[0] if queue else None
-            total = len(queue)
-        elif queue:
-            p = queue
-            total = 1
-        else:
-            p = None
-            total = 0
-        if p is None:
-            gw_queue = _gateway_queues.get(sid) or []
-            if gw_queue:
-                raw = getattr(gw_queue[0], "data", None) or {}
-                if raw:
-                    p = raw
-                    total = len(gw_queue)
-                else:
-                    logger.warning("Gateway queue entry for %s has no .data attribute", sid)
+        reconcile_gateway_pending_mirror_locked(sid)
+        # One aggregate projection on every path (own queue + delegated-child
+        # queues, deduped by stable approval id) so a parent-with-1 +
+        # child-with-1 reports count 2, not 1 (#6961 #5).
+        p, total = pending_head_for_session_locked(sid)
     if p:
         return j(handler, {"pending": dict(p), "pending_count": total})
     return j(handler, {"pending": None, "pending_count": 0})
@@ -21028,13 +21013,10 @@ def _handle_approval_sse_stream(handler, parsed):
     with _lock:
         _approval_sse_subscribers.setdefault(sid, []).append(q)
         reconcile_gateway_pending_mirror_locked(sid)
-        q_list = _pending.get(sid)
-        if isinstance(q_list, list):
-            initial_pending = dict(q_list[0]) if q_list else None
-            initial_count = len(q_list)
-        elif q_list:
-            initial_pending = dict(q_list)
-            initial_count = 1
+        # One aggregate projection on every path (own queue + delegated-child
+        # queues, deduped by stable approval id) so a parent-with-1 +
+        # child-with-1 opens the stream with count 2, not 1 (#6961 #5).
+        initial_pending, initial_count = pending_head_for_session_locked(sid)
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -26020,9 +26002,20 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str, run_id: st
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
     elif not approval_id:
         gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    # Delegated-child approvals (#6943): the agent parks a child's approval
+    # under "subagent:<child_session_id>" (agent#82009 contract). The WebUI
+    # surfaces those entries read-only under the parent session key; the
+    # coordinated exact-entry resolve plus agent-side waiter wakeup lands in
+    # the follow-up gated on the agent contract. A parent click therefore
+    # reports the count truthfully without claiming it resolved the child.
     # Keep the historical no-id response path truthy for old clients/tests while
     # making stale explicit ids bounded as not-active for Slice 3b.
-    resolved = bool(pending) or bool(gateway_resolved) or bool(local_gateway_resolved) or not bool(approval_id)
+    resolved = (
+        bool(pending)
+        or bool(gateway_resolved)
+        or bool(local_gateway_resolved)
+        or not bool(approval_id)
+    )
     if resolved:
         publish_session_list_changed("attention_resolved")
     return resolved
@@ -26339,7 +26332,16 @@ def _session_has_pending_approval(sid: str) -> bool:
         elif queue:
             return True
         gw_queue = _gateway_queues.get(sid)
-        return bool(gw_queue)
+        if gw_queue:
+            return True
+        # A delegated-child approval parked under a child key (agent#82009
+        # contract) is still live work for this session (#6943).
+        for child_key in child_approval_keys_for_session_locked(sid):
+            if child_key == sid:
+                continue
+            if _queue_entries_locked(child_key):
+                return True
+        return False
 
 
 def _handle_approval_respond(handler, body):

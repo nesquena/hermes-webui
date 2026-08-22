@@ -66,11 +66,13 @@ def _handler_body() -> str:
 
 
 def test_snapshot_taken_under_lock():
-    """The initial _pending snapshot must be guarded by `with _lock:`."""
+    """The initial snapshot must be guarded by `with _lock:`."""
     lock_body = _extract_lock_block(_handler_body())
     assert lock_body, "_handle_approval_sse_stream must contain a `with _lock:` block"
-    assert "_pending.get(sid)" in lock_body, \
-        "Initial snapshot of _pending must be read inside the `with _lock:` block"
+    assert "pending_head_for_session_locked(sid)" in lock_body, (
+        "Initial aggregate snapshot (own + delegated-child queues) must be "
+        "read inside the `with _lock:` block"
+    )
 
 
 def test_subscriber_registered_inside_lock():
@@ -89,10 +91,10 @@ def test_subscribe_before_snapshot_in_lock():
     assert lock_body, "Handler must contain a `with _lock:` block"
 
     sub_idx = lock_body.find("_approval_sse_subscribers")
-    snap_idx = lock_body.find("_pending.get(sid)")
+    snap_idx = lock_body.find("pending_head_for_session_locked(sid)")
 
     assert sub_idx != -1, "Subscriber registration must be inside the lock"
-    assert snap_idx != -1, "Snapshot read must be inside the lock"
+    assert snap_idx != -1, "Aggregate snapshot read must be inside the lock"
     assert sub_idx < snap_idx, (
         "Subscriber registration must come BEFORE the snapshot read inside the lock. "
         "Otherwise an approval arriving between subscribe and snapshot is silently dropped."
