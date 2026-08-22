@@ -88,7 +88,7 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "frame-ancestors 'none'; "
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
-    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "img-src 'self' data: https: blob:; "
     "font-src 'self' data: https://fonts.gstatic.com; "
     "media-src 'self' data: blob:; "
@@ -154,7 +154,7 @@ def _csp_extra_frame_src() -> str:
 
 
 def _csp_connect_src(extra_connect_src: str = "") -> str:
-    return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
+    return f"{_CSP_CONNECT_BASE}{extra_connect_src}"
 
 
 def _csp_frame_src(extra_frame_src: str = "") -> str:
