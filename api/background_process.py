@@ -43,9 +43,11 @@ from __future__ import annotations
 
 import logging
 import queue
+import sqlite3
 import threading
 import time
 import uuid
+from contextlib import closing
 from typing import Any, Optional
 
 from api.process_event_utils import (
@@ -57,8 +59,96 @@ from api.process_event_utils import (
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
 )
+from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cross-process async delegation admission guard (#7201)
+# Two WebUI backends sharing HERMES_HOME can both restore the same pending
+# async delegation and race to admit a wakeup turn. The durable claim in
+# hermes-agent (tools.async_delegation.claim_completion_delivery) is the
+# primary guard, but as a defense-in-depth measure we also guard the *admission*
+# (turn start) with a unique constraint on delegation_id in a dedicated table.
+# This ensures that even if the claim race is lost, only one process can
+# successfully persist the admission record and proceed to start the turn.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ADMISSION_DB_LOCK = threading.Lock()
+_ADMISSION_TABLE_INITIALIZED = False
+
+
+def _admission_db_path() -> str:
+    return str(get_hermes_home() / "state.db")
+
+
+def _initialize_admission_table() -> None:
+    """Create the webui_delegation_admissions table if it doesn't exist."""
+    global _ADMISSION_TABLE_INITIALIZED
+    with _ADMISSION_DB_LOCK:
+        if _ADMISSION_TABLE_INITIALIZED:
+            return
+        path = _admission_db_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(path, timeout=10)) as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS webui_delegation_admissions (
+                       delegation_id TEXT PRIMARY KEY,
+                       session_id TEXT NOT NULL,
+                       stream_id TEXT,
+                       admitted_at REAL NOT NULL
+                   )"""
+            )
+            conn.commit()
+        _ADMISSION_TABLE_INITIALIZED = True
+
+
+def _try_admit_delegation(delegation_id: str, session_id: str) -> bool:
+    """
+    Atomically claim admission for a delegation.
+
+    Returns True if this process won the admission race, False if another
+    process already admitted this delegation.
+    """
+    _initialize_admission_table()
+    now = time.time()
+    with _ADMISSION_DB_LOCK, closing(sqlite3.connect(_admission_db_path(), timeout=10)) as conn:
+        try:
+            conn.execute(
+                """INSERT INTO webui_delegation_admissions
+                   (delegation_id, session_id, admitted_at)
+                   VALUES (?, ?, ?)""",
+                (delegation_id, session_id, now),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Another process already admitted this delegation
+            return False
+
+
+def _mark_admission_stream_id(delegation_id: str, stream_id: str) -> None:
+    """Record the stream_id for an admitted delegation (best-effort)."""
+    _initialize_admission_table()
+    with _ADMISSION_DB_LOCK, closing(sqlite3.connect(_admission_db_path(), timeout=10)) as conn:
+        conn.execute(
+            """UPDATE webui_delegation_admissions
+               SET stream_id=?
+               WHERE delegation_id=?""",
+            (stream_id, delegation_id),
+        )
+        conn.commit()
+
+
+def _revoke_admission(delegation_id: str) -> None:
+    """Revoke a failed admission so another process can retry."""
+    _initialize_admission_table()
+    with _ADMISSION_DB_LOCK, closing(sqlite3.connect(_admission_db_path(), timeout=10)) as conn:
+        conn.execute(
+            """DELETE FROM webui_delegation_admissions WHERE delegation_id=?""",
+            (delegation_id,),
+        )
+        conn.commit()
 
 _DRAIN_THREAD: Optional[threading.Thread] = None
 _DRAIN_STOP = threading.Event()
@@ -1029,7 +1119,28 @@ def _start_async_delegation_wakeup_turn(
     claim,
     process_registry,
 ) -> None:
-    """Start one autonomous delegation turn and ACK only after acceptance."""
+    """Start one autonomous delegation turn and ACK only after acceptance.
+
+    Cross-process admission guard (#7201): before starting the turn, atomically
+    claim admission in the shared database. If another WebUI backend already
+    admitted this delegation, release the durable claim and schedule a retry
+    instead of starting a duplicate turn.
+    """
+
+    # Fast-path admission guard: try to claim admission before doing any work.
+    # This is the secondary guard (the primary is the durable claim in
+    # hermes-agent). If we lose the admission race, don't start the turn.
+    if not _try_admit_delegation(delegation_id, session_id):
+        logger.info(
+            "async delegation %s already admitted by another WebUI backend; "
+            "releasing claim and scheduling retry",
+            delegation_id,
+        )
+        release_async_delegation_delivery(evt, claim)
+        _retry_unclaimed_async_delegation_event(
+            process_registry, evt, keep_legacy_retrying=True
+        )
+        return
 
     def _runner() -> None:
         try:
@@ -1046,6 +1157,9 @@ def _start_async_delegation_wakeup_turn(
             else:
                 status = int(raw_status)
             if 200 <= status < 300:
+                stream_id = (resp or {}).get("stream_id")
+                if stream_id:
+                    _mark_admission_stream_id(delegation_id, stream_id)
                 _record_async_delegation_accepted(
                     evt,
                     session_id=session_id,
@@ -1055,10 +1169,13 @@ def _start_async_delegation_wakeup_turn(
                     "async delegation wakeup turn accepted for session %s "
                     "(stream_id=%s)",
                     session_id,
-                    (resp or {}).get("stream_id"),
+                    stream_id,
                 )
                 return
 
+            # Turn not accepted: revoke admission so another process can try,
+            # then release the durable claim and schedule a retry.
+            _revoke_admission(delegation_id)
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
                 process_registry, evt, keep_legacy_retrying=True
@@ -1077,6 +1194,7 @@ def _start_async_delegation_wakeup_turn(
                     (resp or {}).get("error"),
                 )
         except Exception:
+            _revoke_admission(delegation_id)
             release_async_delegation_delivery(evt, claim)
             _retry_unclaimed_async_delegation_event(
                 process_registry, evt, keep_legacy_retrying=True
