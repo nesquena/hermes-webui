@@ -47,29 +47,25 @@ def _const_line(src: str, name: str) -> str:
 
 _HELPER_CONSTS = (
     "TAB_ID_KEY",
-    "TAB_ID_CLAIM_KEY",
-    "_TAB_CLAIM_HEARTBEAT_MS",
-    "_TAB_OWNER_REVALIDATE_MS",
-    "_TAB_SEEN_TTL_MS",
-    "TAB_ID_SEEN_KEY",
+    "TAB_ID_RELEASED_BASE",
+    "_TAB_RELEASED_TTL_MS",
     "INFLIGHT_KEY_BASE",
     "INFLIGHT_STATE_KEY_BASE",
     "ACTIVE_SESSION_KEY_LEGACY",
     "ACTIVE_SESSION_TOMBSTONE_BASE",
+    "TAB_ACTIVE_SESSION_MIRROR_KEY",
+    "TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY",
+    "TAB_INFLIGHT_MIRROR_KEY",
+    "TAB_INFLIGHT_STATE_MIRROR_KEY",
 )
 
 _HELPER_FUNCS = (
     "function _newTabId",
-    "function _hermesTabNonce",
-    "function _readTabClaims",
-    "function _writeTabClaims",
-    "function _updateTabRegistry",
-    "function _touchTabSeen",
+    "function _scopedTabKey",
+    "function _mirrorTabValue",
+    "function _restoreDocumentScopedState",
     "function _gcOrphanTabKeys",
-    "function _claimTabOwnership",
-    "function _claimTabId",
     "function _releaseTabId",
-    "function _revalidateTabOwnership",
     "function _hermesTabId",
     "function _inflightKey",
     "function _inflightStateKey",
@@ -96,6 +92,7 @@ _HARNESS = """
 // sessionStorage AND its own window object — this is exactly how browsers
 // behave. The helpers close over `sessionStorage` / `window`, so useTab()
 // rebinds what those names resolve to instead of shadowing them.
+let __uuid = 0;
 function makeStorage(){
   const map = new Map();
   return {
@@ -109,7 +106,16 @@ function makeStorage(){
   };
 }
 // A browser tab = its own sessionStorage + its own window (module scope).
-function makeTab(){ return { store: makeStorage(), win: { addEventListener(){}, crypto: undefined } }; }
+// crypto.randomUUID() is document-local and never copied with sessionStorage.
+function makeTab(){
+  return {
+    store: makeStorage(),
+    win: {
+      addEventListener(){},
+      crypto: { randomUUID(){ return 'uuid-' + (++__uuid); } },
+    },
+  };
+}
 
 const localStorage = makeStorage();
 let __tab = makeTab();
@@ -216,22 +222,42 @@ console.log(JSON.stringify({{idOriginal, idClone}}));
     assert out["idOriginal"] != out["idClone"], "a duplicated tab must re-mint its id"
 
 
-def test_plain_reload_keeps_the_same_tab_id():
-    """A reload must NOT re-mint, otherwise the tab loses its own in-flight
-    stream recovery — the release-on-pagehide path exists for this."""
+def test_plain_reload_remints_and_restores_recovery_under_the_new_id():
+    """A reload receives a fresh document id, but its sessionStorage recovery
+    mirror must be restored and re-stamped before scoped state is read."""
     script = f"""
 {_HARNESS}
 {_helpers()}
 const tab = makeTab();
 useTab(tab); const before = _hermesTabId();
+_rememberActiveSession('session-reload');
+const snapshot = {{'session-reload':{{streamId:'stream-reload', updated_at:__now, tabId:before}}}};
+localStorage.setItem(_inflightStateKey(), JSON.stringify(snapshot));
+_mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY, JSON.stringify(snapshot));
+const marker = JSON.stringify({{sid:'session-reload', streamId:'stream-reload', ts:__now}});
+localStorage.setItem(_inflightKey(), marker);
+_mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY, marker);
 _releaseTabId();                     // pagehide fires before unload
 // Reload: sessionStorage survives, the window (and its cached id) does not.
-const reloaded = {{ store: tab.store, win: {{ addEventListener(){{}}, crypto: undefined }} }};
+const freshDocument = makeTab();
+const reloaded = {{ store: tab.store, win: freshDocument.win }};
 useTab(reloaded); const after = _hermesTabId();
-console.log(JSON.stringify({{before, after}}));
+const restoredSession = _rememberedActiveSession();
+const restoredState = loadInflightState('session-reload', 'stream-reload');
+const restoredMarker = JSON.parse(localStorage.getItem(_inflightKey()));
+console.log(JSON.stringify({{
+  before,
+  after,
+  restoredSession,
+  restoredOwner:restoredState&&restoredState.tabId,
+  restoredMarkerSid:restoredMarker&&restoredMarker.sid,
+}}));
 """
     out = _run(script)
-    assert out["before"] == out["after"], "a reload must keep the tab's identity"
+    assert out["before"] != out["after"], "every new document must receive a fresh id"
+    assert out["restoredSession"] == "session-reload"
+    assert out["restoredOwner"] == out["after"], "recovery must be re-stamped"
+    assert out["restoredMarkerSid"] == "session-reload"
 
 
 def test_orphan_tab_keys_are_reclaimed():
@@ -245,9 +271,7 @@ const live = _hermesTabId();
 // Leftovers from a tab closed long ago.
 localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY + '::ghost', 'old-session');
 localStorage.setItem(INFLIGHT_KEY_BASE + '::ghost', 'old-stream');
-const seen = JSON.parse(localStorage.getItem(TAB_ID_SEEN_KEY) || '{{}}');
-seen['ghost'] = __now - (_TAB_SEEN_TTL_MS * 2);
-localStorage.setItem(TAB_ID_SEEN_KEY, JSON.stringify(seen));
+localStorage.setItem(TAB_ID_RELEASED_BASE + '::ghost', String(__now - (_TAB_RELEASED_TTL_MS * 2)));
 _gcOrphanTabKeys();
 const remaining = localStorage._keys().filter(k => k.indexOf('::ghost') !== -1);
 const liveKept = localStorage._keys().filter(k => k.indexOf('::' + live) !== -1);
@@ -263,12 +287,10 @@ def test_recent_tab_keys_are_not_reclaimed():
 {_HARNESS}
 {_helpers()}
 const tab = makeTab();
-useTab(tab); _hermesTabId();   // this tab is live and stamps itself as seen
-// Another tab, last seen a second ago (e.g. a background window).
+useTab(tab); _hermesTabId();
+// Another document was only just released; retain its recovery grace period.
 localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY + '::recent', 'still-used');
-const seen = JSON.parse(localStorage.getItem(TAB_ID_SEEN_KEY) || '{{}}');
-seen['recent'] = __now - 1000;
-localStorage.setItem(TAB_ID_SEEN_KEY, JSON.stringify(seen));
+localStorage.setItem(TAB_ID_RELEASED_BASE + '::recent', String(__now - 1000));
 _gcOrphanTabKeys();
 const kept = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY + '::recent');
 console.log(JSON.stringify({{kept}}));
@@ -335,40 +357,27 @@ console.log(JSON.stringify({{legacyAfter, fresh, legacyFinal}}));
     assert out["legacyFinal"] is None, "the owning tab must still be able to clear it"
 
 
-def test_registry_writes_do_not_clobber_a_concurrent_tab():
-    """Claim/seen updates are read-modify-write on one shared key. A tab that
-    read the registry before a second tab registered must not erase it."""
+def test_release_markers_are_independent_per_document():
+    """Teardown uses one scalar key per document, never a shared RMW registry."""
     script = f"""
 {_HARNESS}
 {_helpers()}
 const tabA = makeTab();
 const tabB = makeTab();
-// Tab A boots and registers.
 useTab(tabA); const idA = _hermesTabId();
-// Tab B boots and registers (interleaved with A's next heartbeat below).
 useTab(tabB); const idB = _hermesTabId();
-// A heartbeats using a STALE view of the registry (it re-reads internally).
-useTab(tabA); _touchTabSeen(idA);
-const claims = JSON.parse(localStorage.getItem(TAB_ID_CLAIM_KEY) || '{{}}');
-const seen = JSON.parse(localStorage.getItem(TAB_ID_SEEN_KEY) || '{{}}');
-// Releasing A must not take B's claim with it.
 useTab(tabA); _releaseTabId();
-const afterRelease = JSON.parse(localStorage.getItem(TAB_ID_CLAIM_KEY) || '{{}}');
+useTab(tabB); _releaseTabId();
 console.log(JSON.stringify({{
-  bothClaimed: !!claims[idA] && !!claims[idB],
-  bothSeen: !!seen[idA] && !!seen[idB],
-  bSurvivedRelease: !!(afterRelease[idB] && !afterRelease[idB].released),
-  aReleased: !!(afterRelease[idA] && afterRelease[idA].released),
+  idA, idB,
+  releasedA: localStorage.getItem(TAB_ID_RELEASED_BASE + '::' + idA),
+  releasedB: localStorage.getItem(TAB_ID_RELEASED_BASE + '::' + idB),
 }}));
 """
     out = _run(script)
-    assert out["bothClaimed"], "a concurrent tab's claim must not be clobbered"
-    assert out["bothSeen"], "a concurrent tab's seen entry must not be clobbered"
-    assert out["bSurvivedRelease"], "releasing one tab must not drop another's claim"
-    assert out["aReleased"], (
-        "the releasing tab's record must be marked released (kept for reload "
-        "re-claim, never silently dropped)"
-    )
+    assert out["idA"] != out["idB"]
+    assert out["releasedA"] == "1000000"
+    assert out["releasedB"] == "1000000"
 
 
 def test_remembered_session_returns_null_when_empty():
@@ -381,6 +390,66 @@ useTab(makeTab());
 console.log(JSON.stringify({{value: _rememberedActiveSession()}}));
 """
     assert _run(script)["value"] is None
+
+
+def test_empty_legacy_fallback_is_read_only_once_per_document():
+    """A later write by another tab must not bleed into a document that already
+    established that it had no active session."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const tabA = makeTab();
+const tabB = makeTab();
+useTab(tabA); const before = _rememberedActiveSession();
+useTab(tabB); _rememberActiveSession('session-B');
+useTab(tabA); const after = _rememberedActiveSession();
+console.log(JSON.stringify({{before, after}}));
+"""
+    out = _run(script)
+    assert out["before"] is None
+    assert out["after"] is None
+
+
+def test_missing_crypto_fails_closed_without_scoped_access():
+    """An inherited id is never authority; without a cryptographic fresh id the
+    document must neither read nor write scoped recovery state."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const unsafe = makeTab();
+unsafe.win.crypto = undefined;
+unsafe.store.setItem(TAB_ID_KEY, 'copied-id');
+const foreignKey = ACTIVE_SESSION_KEY_LEGACY + '::copied-id';
+localStorage.setItem(foreignKey, 'foreign-session');
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'legacy-session');
+const rawGetItem = localStorage.getItem;
+let foreignReads = 0;
+localStorage.getItem = (key) => {{
+  if(key === foreignKey) foreignReads++;
+  return rawGetItem(key);
+}};
+useTab(unsafe);
+const id = _hermesTabId();
+const restored = _rememberedActiveSession();
+_rememberActiveSession('attempted-write');
+let scopedKeyRejected = false;
+try{{ _activeSessionKey(); }}catch(_){{ scopedKeyRejected = true; }}
+console.log(JSON.stringify({{
+  id,
+  restored,
+  foreignReads,
+  scopedKeyRejected,
+  foreignValue: rawGetItem(foreignKey),
+  legacyValue: rawGetItem(ACTIVE_SESSION_KEY_LEGACY),
+}}));
+"""
+    out = _run(script)
+    assert out["id"] is None
+    assert out["restored"] is None
+    assert out["foreignReads"] == 0
+    assert out["scopedKeyRejected"]
+    assert out["foreignValue"] == "foreign-session"
+    assert out["legacyValue"] == "legacy-session"
 
 
 # ── Adversarial re-gate regressions (maintainer CHANGES_REQUESTED 2026-08-17) ──
@@ -467,10 +536,8 @@ console.log(JSON.stringify({{scopedSession, scopedInflightKept: scopedInflight!=
     assert out["scopedInflightKept"], "the live tab's inflight snapshot must survive GC"
 
 
-def test_gc_is_disabled_fail_safe_on_malformed_registry_json():
-    """Must-fix 2b (ui.js:9330): malformed registry JSON used to parse to {} and
-    be read as 'no tab was ever seen', so the very next GC pass deleted every
-    live tab's keys. Parse failure must DISABLE GC entirely (fail safe)."""
+def test_gc_fails_safe_on_missing_or_malformed_release_evidence():
+    """GC may collect only after a valid, old, per-document release marker."""
     script = f"""
 {_HARNESS}
 {_helpers()}
@@ -478,30 +545,25 @@ const tab = makeTab();
 useTab(tab);
 const id = _hermesTabId();
 _rememberActiveSession('session-live');
-// Corrupt BOTH registries (extension writers, quota-truncated writes...).
-localStorage.setItem(TAB_ID_CLAIM_KEY, '{{not json');
-localStorage.setItem(TAB_ID_SEEN_KEY, '{{not json');
+localStorage.setItem(TAB_ID_RELEASED_BASE + '::' + id, 'not-a-number');
 _gcOrphanTabKeys();
-const keptAfterClaimsCorruption = localStorage.getItem(_activeSessionKey());
-// Repair claims but leave 'seen' corrupt: still fail safe (legacy keys with
-// no ownership record would otherwise be judged by garbage data).
-localStorage.removeItem(TAB_ID_CLAIM_KEY);
-_claimTabId(id);
+const keptAfterMalformedRelease = localStorage.getItem(_activeSessionKey());
+// A scoped key with no release evidence must also survive indefinitely.
 localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY + '::unrecorded', 'legacy-key');
 _gcOrphanTabKeys();
 const keptLegacy = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY + '::unrecorded');
 console.log(JSON.stringify({{
-  keptAfterClaimsCorruption,
+  keptAfterMalformedRelease,
   keptLegacy,
   scopedStillThere: localStorage.getItem(_activeSessionKey()),
 }}));
 """
     out = _run(script)
-    assert out["keptAfterClaimsCorruption"] == "session-live", (
-        "malformed claim-registry JSON must disable GC, not unleash it"
+    assert out["keptAfterMalformedRelease"] == "session-live", (
+        "malformed release evidence must disable collection for that document"
     )
     assert out["keptLegacy"] == "legacy-key", (
-        "malformed seen-registry JSON must also disable GC for unrecorded keys"
+        "missing release evidence must retain unrecorded scoped keys"
     )
     assert out["scopedStillThere"] == "session-live"
 
@@ -699,3 +761,64 @@ def test_inflight_readers_run_the_migration_before_scoped_reads():
     assert read_body.index("_migrateLegacyInflight()") < read_body.index(
         "localStorage.getItem(_inflightStateKey())"
     ), "migration must precede the scoped state read"
+
+
+def test_simultaneous_same_id_documents_remint_before_scoped_access():
+    """Two documents inherit one copied id and boot concurrently. The registry
+    hook reproduces the stale-read schedule in the rejected CAS implementation;
+    the sessionStorage hook applies the equivalent pause to the fresh-id design.
+    Both documents must establish distinct authority before scoped access."""
+    script = f"""
+{_HARNESS}
+{_helpers()}
+const inherited = 'copied-tab-id';
+const tabA = makeTab();
+const tabB = makeTab();
+tabA.store.setItem(TAB_ID_KEY, inherited);
+tabB.store.setItem(TAB_ID_KEY, inherited);
+
+// Deterministic collision schedule: A has already received the registry value
+// when this hook runs. B initializes completely before that value is returned
+// to A, so A resumes with a stale "free" view.
+const rawGetItem = localStorage.getItem;
+const rawSessionSetItem = sessionStorage.setItem;
+let interleaved = false;
+let idB = null;
+localStorage.getItem = (key) => {{
+  const value = rawGetItem(key);
+  // This raw legacy key intentionally keeps the test discriminating against the
+  // rejected read/write/verify localStorage arbitration implementation.
+  if(!interleaved && key === 'hermes-webui-tab-claims' && __tab === tabA){{
+    interleaved = true;
+    useTab(tabB);
+    idB = _hermesTabId();
+    useTab(tabA);
+  }}
+  return value;
+}};
+sessionStorage.setItem = (key, value) => {{
+  rawSessionSetItem(key, value);
+  if(!interleaved && key === TAB_ID_KEY && __tab === tabA){{
+    interleaved = true;
+    useTab(tabB);
+    idB = _hermesTabId();
+    useTab(tabA);
+  }}
+}};
+
+useTab(tabA);
+const idA = _hermesTabId();
+if(!idB){{ useTab(tabB); idB = _hermesTabId(); }}
+useTab(tabA); _rememberActiveSession('session-A');
+useTab(tabB); _rememberActiveSession('session-B');
+useTab(tabA); const restoredA = _rememberedActiveSession();
+console.log(JSON.stringify({{idA, idB, inherited, interleaved, restoredA}}));
+"""
+    out = _run(script)
+    assert out["interleaved"], "the probe must exercise a concurrent boot schedule"
+    assert out["idA"] != out["idB"], (
+        "simultaneous documents must not both accept one inherited identity"
+    )
+    assert out["restoredA"] == "session-A", (
+        "the losing document must remint before any scoped session access"
+    )
