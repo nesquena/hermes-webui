@@ -9589,6 +9589,184 @@ function _todosPanelIsActive(){
   return !!(panel&&panel.classList&&panel.classList.contains('active'));
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Chat todos: embedded collapsible task list at the top of the chat area.
+// Opt-in via the "Show task list in chat" checkbox (localStorage-backed,
+// frontend-only preference — no server settings round-trip needed).
+// When enabled, the sidebar Todos panel is hidden to avoid duplication.
+// ────────────────────────────────────────────────────────────────────────
+const CHAT_TODOS_LS_KEY='hermes-webui-chat-todos';
+let _chatTodosEnabled=null;             // null = uninitialised; true/false once known
+let _chatTodosInitialised=false;
+let _chatTodosForceHidden=false;        // set when user collapses the tray manually
+
+function _chatTodosReadPref(){
+  try{
+    const v=localStorage.getItem(CHAT_TODOS_LS_KEY);
+    if(v===null) return true;  // default: enabled
+    return v==='1';
+  }catch(_){return true;}
+}
+function _chatTodosWritePref(v){
+  try{
+    // Persist both states explicitly ('1' enabled / '0' disabled). Removing the
+    // key on false would collide with first-use default (null => enabled) and
+    // make a user's choice to disable the tray vanish on reload.
+    localStorage.setItem(CHAT_TODOS_LS_KEY,v?'1':'0');
+  }catch(_){}
+}
+function chatTodosEnabled(){
+  if(_chatTodosEnabled===null) _chatTodosEnabled=_chatTodosReadPref();
+  return _chatTodosEnabled;
+}
+function _setChatTodosEnabled(v){
+  _chatTodosEnabled=!!v;
+  _chatTodosWritePref(_chatTodosEnabled);
+  if(typeof _syncChatTodosRailVisibility==='function') _syncChatTodosRailVisibility();
+}
+function _syncChatTodosRailVisibility(){
+  // When the in-chat tray is active, hide the sidebar Todos panel so the
+  // user never has two competing todo surfaces.
+  const enabled=chatTodosEnabled();
+    document.querySelectorAll('[data-panel="todos"]').forEach(function(el){
+      el.classList.toggle('nav-tab-hidden',!!enabled);
+    });
+  // If the sidebar Todos panel is currently open, bounce back to chat.
+  if(enabled){
+    const panel=document.getElementById('panelTodos');
+    if(panel&&panel.classList&&panel.classList.contains('active')&&typeof switchPanel==='function'){
+      switchPanel('chat',{fromRailClick:false});
+    }
+  }
+}
+function _chatTodosToggleEnabled(checked){
+  _setChatTodosEnabled(checked);
+  const tray=$('chatTodosPanel');
+  if(tray){
+    if(checked){
+      tray.hidden=false;
+      tray.classList.remove('open');       // default collapsed in-chat
+      _chatTodosForceHidden=false;
+    }else{
+      tray.hidden=true;
+    }
+  }
+  renderChatTodos();
+  if(checked&&typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+}
+
+// ── Chat todos alignment (left / center / right), localStorage-backed ──
+const CHAT_TODOS_ALIGN_LS_KEY='hermes-webui-chat-todos-align';
+function _chatTodosReadAlign(){
+  try{
+    const v=localStorage.getItem(CHAT_TODOS_ALIGN_LS_KEY);
+    return (v==='center'||v==='right')?v:'left';  // default: left (avoids the right-side outline/jump buttons)
+  }catch(_){return 'left';}
+}
+function _applyChatTodosAlign(align){
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  tray.dataset.align=(align==='center'||align==='right')?align:'left';
+}
+function _pickChatTodosAlign(align){
+  const a=(align==='center'||align==='right')?align:'left';
+  try{localStorage.setItem(CHAT_TODOS_ALIGN_LS_KEY,a);}catch(_){}
+  _applyChatTodosAlign(a);
+  _syncChatTodosAlignRadios(a);
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+}
+function _syncChatTodosAlignRadios(value){
+  if(typeof document==='undefined') return;
+  document.querySelectorAll('input[name="chatTodosAlign"]').forEach(function(el){
+    el.checked=(el.value===value);
+  });
+}
+function _currentTodos(){
+  if(Array.isArray(S.todos)) return S.todos;
+  if(typeof _legacyTodosFromMessages==='function'){
+    const legacy=_legacyTodosFromMessages();
+    if(Array.isArray(legacy)) return legacy;
+  }
+  return [];
+}
+function _chatTodosSummary(todos){
+  const active=todos.filter(t=>t&&t.status!=='completed'&&t.status!=='cancelled').length;
+  const total=todos.length;
+  if(!total) return {text:t('todos_no_active')||'No active tasks',active:0,total:0};
+  return {text:`${active===0?'All done':active+' active'} · ${total} total`,active,total};
+}
+function renderChatTodos(){
+  if(typeof $!=='function'||typeof document==='undefined') return;
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  if(!chatTodosEnabled()||_chatTodosForceHidden){
+    tray.hidden=true;
+    return;
+  }
+  const todos=_currentTodos();
+  if(!todos.length){
+    tray.hidden=true;
+    return;
+  }
+  tray.hidden=false;
+  const summary=_chatTodosSummary(todos);
+  const summaryEl=$('chatTodosSummary');
+  if(summaryEl) summaryEl.textContent=summary.text;
+  const counterEl=$('chatTodosCounter');
+  if(counterEl){
+    const active=summary.active;
+    counterEl.textContent=active>0?`${active} running`:'';
+    counterEl.style.display=active>0?'':'none';
+  }
+  if(!tray.classList.contains('open')){
+    // Collapsed: header only. Render body lazily when expanded.
+    return;
+  }
+  const body=$('chatTodosBody');
+  if(!body) return;
+  const rows=todos.map(function(td){
+    const status=todoStatusKey(td&&td.status);
+    const visual=todoStatusVisual(status);
+    const content=todoContent(td);
+    const isEnd=status==='completed'||status==='cancelled';
+    const contentStyle=isEnd?'text-decoration:line-through;opacity:.5;color:var(--muted)':'';
+    return `<div class="chat-todos-row">
+      <span class="todos-status" style="color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
+      <div class="todos-content" style="${contentStyle}">${esc(content)}</div>
+    </div>`;
+  }).join('');
+  body.innerHTML=rows||`<div class="chat-todos-empty">${esc(t('todos_no_active'))}</div>`;
+}
+function toggleChatTodos(){
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  const isOpen=tray.classList.toggle('open');
+  const head=$('chatTodosHead');
+  if(head) head.setAttribute('aria-expanded',isOpen?'true':'false');
+  if(isOpen) renderChatTodos();
+}
+function _initChatTodos(){
+  if(_chatTodosInitialised) return;
+  _chatTodosInitialised=true;
+  if(typeof document==='undefined') return;
+  _chatTodosEnabled=chatTodosEnabled();
+  _syncChatTodosRailVisibility();
+  _applyChatTodosAlign(_chatTodosReadAlign());
+  _syncChatTodosAlignRadios(_chatTodosReadAlign());
+  const tray=$('chatTodosPanel');
+  if(tray){
+    if(!chatTodosEnabled()){
+      tray.hidden=true;
+      return;
+    }
+    tray.hidden=false;
+        // Desktop: tray floats; start collapsed so it never blocks the message
+        // stream. Users expand on demand (mobile keeps the same collapsed start).
+        renderChatTodos();
+  }
+}
+
 function scheduleTodosRefresh(){
   // Idempotent: many `todo_state` events fire on each tool result, but
   // only the latest snapshot needs to paint.  RAF lets us coalesce
@@ -9597,6 +9775,7 @@ function scheduleTodosRefresh(){
   if(typeof requestAnimationFrame!=='function'){
     if(typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
+    if(typeof renderChatTodos==='function') renderChatTodos();
     return;
   }
   _todosRenderRafId=requestAnimationFrame(()=>{
@@ -9604,6 +9783,7 @@ function scheduleTodosRefresh(){
     const sidebarActive=_todosPanelIsActive();
     if(sidebarActive&&typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
+    if(typeof renderChatTodos==='function') renderChatTodos();
   });
 }
 
@@ -9909,6 +10089,8 @@ function _syncSystemHealthMonitorVisibility(){
 document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initChatTodos);
+  else _initChatTodos();
 
 // ── Hermes agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;
