@@ -2700,6 +2700,12 @@
   .composer-mobile-context-copy{flex:1 1 auto;gap:2px;}
   .composer-mobile-context-detail{font-size:11px;color:var(--muted);white-space:normal;line-height:1.25;}
   .composer-mobile-context-compress{flex:0 0 auto;width:auto;max-width:128px;align-self:center;text-align:center;white-space:normal;}
+  .composer-mobile-config-panel .composer-mobile-squash-action{flex:1 0 100%;width:100%;align-items:center;overflow:visible;}
+  .composer-mobile-squash-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;border-radius:8px;background:var(--accent-bg);color:var(--accent);}
+  .composer-mobile-squash-copy{flex:1 1 auto;gap:3px;}
+  .composer-mobile-squash-action .composer-mobile-config-value{font-weight:650;color:var(--text);}
+  .composer-mobile-squash-action:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  .composer-mobile-squash-action.squash-running{pointer-events:none;animation:squashPulse 1.2s ease-in-out infinite;}
   .composer-mobile-context-action.ctx-mid .composer-mobile-config-value{color:var(--warning);}
   .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
@@ -2732,6 +2738,8 @@
   .cancel-btn:active{transform:scale(.96);}
   .icon-btn{width:34px;height:34px;border-radius:8px;background:none;border:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;transition:all .15s;}
   .icon-btn{opacity:.75;}
+  #btnSquash.squash-running{pointer-events:none;animation:squashPulse 1.2s ease-in-out infinite;}
+  @keyframes squashPulse{0%,100%{opacity:.35;}50%{opacity:.9;}}
   .icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text);opacity:1;}
   .mic-btn{transition:color .15s,background .15s;}
   .mic-btn.recording{color:var(--error);background:rgba(239,83,80,.12);animation:mic-pulse 1.2s ease-in-out infinite;}
@@ -3036,6 +3044,7 @@
   .composer-footer.cf-burger .composer-mobile-config-panel.open{display:flex;}
   .composer-footer.cf-burger .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
   .composer-footer.cf-burger .composer-mobile-context-action{flex:1 0 100%;}
+  .composer-footer.cf-burger .composer-mobile-squash-action{flex:1 0 100%;width:100%;}
   .composer-footer.cf-burger .ctx-indicator-wrap{display:none!important;}
 
   /* Show session-toolsets chip ONLY when the composer-footer container is wide

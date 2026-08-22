@@ -11,6 +11,7 @@ plus pure-function tests for the SessionChannel class and reaper logic.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -935,11 +936,32 @@ def test_load_session_rearms_stream_on_every_early_return():
         "helper must (re)arm startSessionStream for the currently-shown S.session"
     )
 
-    # Isolate the loadSession body. Widened window: the #4946 visit-ack helpers
-    # added inside loadSession pushed the fetch-error catch's stream restart past
-    # the old 14000-char cutoff.
+    # Isolate the loadSession body semantically (function start to its own
+    # closing brace) rather than by a fixed character window. Fixed windows
+    # have now twice silently truncated the tail of the function as unrelated
+    # hunks landed inside loadSession (#4946 visit-ack helpers past the old
+    # 14000 cutoff; the #6704 squash-indicator re-sync past 16000 on the CI
+    # merge ref), cutting off the fetch-error catch this test pins down.
     fn_ix = js.index("async function loadSession(")
-    body = js[fn_ix:fn_ix + 16000]
+    depth = 0
+    end_ix = None
+    for k in range(js.index("{", fn_ix), len(js)):
+        ch = js[k]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end_ix = k + 1
+                break
+    assert end_ix is not None, "unbalanced braces scanning loadSession body"
+    body = js[fn_ix:end_ix]
+    # Sanity: the extracted body must end before the next top-level function —
+    # guards the brace scan against string/template-literal brace imbalance.
+    next_fn = re.search(r"\n(?:async )?function \w+\(", js[fn_ix + 1:])
+    assert next_fn is None or end_ix <= fn_ix + 1 + next_fn.start() + 1, (
+        "loadSession body extraction overran into the next top-level function"
+    )
 
     # The unconditional teardown must still be there (this is what creates the
     # dead-stream window the re-arm closes).
@@ -971,9 +993,12 @@ def test_load_session_rearms_stream_on_every_early_return():
 
     # The fetch-error catch must restart the stream for the on-screen session,
     # but guarded against the self-healed-current (404'd) case so it never
-    # spins the reconnect loop against a dead session_id.
+    # spins the reconnect loop against a dead session_id. Bound the slice
+    # semantically: from the guard flag's computation to the next early-return
+    # section (the undefined-data 401 guard) — not a fixed char window.
     catch_ix = body.index("const _selfHealedCurrent")
-    catch_src = body[catch_ix:catch_ix + 2200]
+    catch_end = body.index("if (!data)", catch_ix)
+    catch_src = body[catch_ix:catch_end]
     assert "!_selfHealedCurrent" in catch_src and "startSessionStream(currentSid)" in catch_src, (
         "fetch-error path must restart the on-screen stream, guarded against "
         "the self-healed-current (deleted/404) session"

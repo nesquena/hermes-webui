@@ -4856,6 +4856,105 @@ async function clearConversation() {
   } catch(e) { setStatus(t('clear_failed') + e.message); }
 }
 
+// ── Squash (compact conversation to one verified summary) ──
+// Server-side counterpart of the squash-chat skill: archives the full
+// transcript, collapses the session to a single summary message and reloads
+// the view. Runs as a background job (aux-LLM summary can take minutes).
+
+// P1 (#6704): the 'squash-running' pulse renders on the SHARED desktop and
+// mobile controls, so it must be scoped to the session that owns the running
+// job — otherwise switching conversations mid-job leaves the newly selected
+// conversation with a pulsing, pointer-disabled squash action. Same
+// owner-scoping pattern as the upload progress bar in ui.js: state is keyed
+// by owner sid and loadSession() re-syncs the shared controls on switch.
+const _squashRunningSessions = new Set();
+function _squashRunningButtons() {
+  return [$('btnSquash'), $('composerMobileSquashBtn')].filter(Boolean);
+}
+function _squashSyncRunningIndicatorForSession(sessionId) {
+  const owner = String(sessionId || '');
+  const running = !!(owner && _squashRunningSessions.has(owner));
+  _squashRunningButtons().forEach(btn => btn.classList.toggle('squash-running', running));
+}
+function _squashSetRunning(sessionId, running) {
+  const owner = String(sessionId || '');
+  if(!owner) return;
+  if(running) _squashRunningSessions.add(owner);
+  else _squashRunningSessions.delete(owner);
+  // Re-sync the shared controls against the CURRENTLY displayed session:
+  // if it owns a running job the indicator (re)asserts, otherwise it clears —
+  // a job settling in the background never touches another conversation's UI.
+  _squashSyncRunningIndicatorForSession(S.session ? S.session.session_id : '');
+}
+
+async function squashConversation() {
+  if(!S.session) return;
+  const sid = S.session.session_id;
+  // Capture requested-navigation authority before the first await. S.session
+  // remains on A while a newer B metadata request is pending, so visible state
+  // alone cannot authorize the eventual completion refresh.
+  const navigationAuthority = _captureSessionNavigationAuthority(sid);
+  const _sqConfirmed = await showConfirmDialog({
+    title: t('squash_title'),
+    message: t('squash_message'),
+    confirmLabel: t('squash_confirm'),
+    danger: false,
+    focusCancel: true,
+  });
+  if(!_sqConfirmed) return;
+  _squashSetRunning(sid, true);
+  showToast(t('squash_started'), 4000);
+  try {
+    const start = await api('/api/session/squash', {method:'POST', timeoutMs: 30000,
+      body: JSON.stringify({session_id: sid, confirm_session_id: sid})});
+    const jobId = start && start.job && start.job.job_id;
+    if(!jobId) throw new Error('no job id returned');
+    const job = await _pollSquashJob(jobId, sid);
+    if(job.status === 'error') throw new Error(job.error || 'unknown error');
+    const r = job.result || {};
+    if(r.already_squashed) {
+      showToast(t('squash_already'));
+    } else {
+      let note = '';
+      if(r.summary_source === 'fallback-template') note = ' — ' + t('squash_fallback_note');
+      showToast(t('squash_done', (r.before && r.before.message_count) || 0, (r.after && r.after.message_count) || 1) + note, 7000);
+    }
+    // P1 (#6704): a newer destination keeps navigation authority. If the newer
+    // request is a load of this same visible sid, let that request settle first
+    // and consume one owner-scoped post-squash refresh marker rather than
+    // superseding it here. A load that already observed the squash satisfies the
+    // marker without another request.
+    if(!_squashTranscriptMatchesResult(sid, r)){
+      await _refreshSessionAfterConcurrentSameSessionNavigation(
+        sid, navigationAuthority, r
+      );
+    }
+  } catch(e) {
+    showToast(t('squash_failed') + e.message, 7000, 'error');
+  } finally {
+    _squashSetRunning(sid, false);
+  }
+}
+
+function _pollSquashJob(jobId, sessionId) {
+  return new Promise((resolve, reject) => {
+    const owner = String(sessionId || '');
+    const deadline = Date.now() + 6 * 60 * 1000;
+    const tick = async () => {
+      try {
+        const data = await api('/api/session/squash/status?job_id=' + encodeURIComponent(jobId), {timeoutMs: 15000});
+        const job = data && data.job;
+        if(!job) { reject(new Error('job not found')); return; }
+        if(!owner || String(job.session_id || '') !== owner) { reject(new Error('squash job owner mismatch')); return; }
+        if(job.status === 'done' || job.status === 'error') { resolve(job); return; }
+        if(Date.now() > deadline) { reject(new Error('squash job timeout')); return; }
+        setTimeout(tick, 2000);
+      } catch(e) { reject(e); }
+    };
+    tick();
+  });
+}
+
 // ── Skills panel ──
 async function loadSkills() {
   if (_skillsData) { renderSkills(_skillsData); return; }
