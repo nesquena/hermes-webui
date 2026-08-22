@@ -1379,6 +1379,26 @@ def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
 
 def _configured_model_ids(raw_models: object) -> list[str]:
     """Return ordered model IDs from supported config allowlist shapes."""
+    if isinstance(raw_models, str):
+        # ``models`` is occasionally persisted as a JSON-encoded string
+        # (e.g. round-tripped through a form field / API layer that
+        # serializes dict/list values) rather than a native dict/list. A
+        # bare string was previously always treated as "no allowlist" and
+        # silently dropped, which defeats model-ownership matching for any
+        # entry stored in that shape (same class of bug as #7134/#7165). Only
+        # accept a decoded list or dict — anything else (an invalid string,
+        # or a decoded scalar) is not a supported allowlist shape.
+        text = raw_models.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        if isinstance(decoded, (list, dict)):
+            raw_models = decoded
+        else:
+            return []
     if isinstance(raw_models, dict):
         candidates = (key for key in raw_models if isinstance(key, str))
     elif isinstance(raw_models, list):
@@ -1452,6 +1472,7 @@ def _resolve_configured_provider_id(
     *,
     base_url: object = None,
     resolve_alias: bool = True,
+    model_id: object = None,
 ) -> str:
     """Normalize a configured provider id.
 
@@ -1464,6 +1485,11 @@ def _resolve_configured_provider_id(
     ``lmstudio``. The base-url-to-named-slug fallback still runs in both
     modes when applicable.
 
+    ``model_id``, when supplied, is forwarded to
+    ``_named_custom_provider_slug_for_base_url`` so a ``base_url`` shared by
+    several named custom providers resolves to the entry that actually owns
+    the requested model, instead of always the first one declared (#7176).
+
     See in-stage absorption note on stage-313 for the #1625 regression that
     motivated the ``resolve_alias`` flag.
     """
@@ -1474,7 +1500,9 @@ def _resolve_configured_provider_id(
     if not resolve_alias:
         raw = str(provider or "").strip().lower()
         if base_url and raw == "custom":
-            by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+            by_base_url = _named_custom_provider_slug_for_base_url(
+                base_url, config_obj, model_id=model_id
+            )
             if by_base_url:
                 return by_base_url
         return str(provider or "")
@@ -1484,7 +1512,9 @@ def _resolve_configured_provider_id(
         base_url
         and str(resolved or "").strip().lower() == "custom"
     ):
-        by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+        by_base_url = _named_custom_provider_slug_for_base_url(
+            base_url, config_obj, model_id=model_id
+        )
         if by_base_url:
             return by_base_url
 
@@ -1540,7 +1570,16 @@ def _normalize_base_url_for_match(value: object) -> str:
     url = str(value or "").strip().rstrip("/")
     if not url:
         return ""
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    except ValueError:
+        # Malformed URLs (e.g. an unbalanced "[" that urlparse treats as a
+        # bad IPv6 literal) must not abort resolution for every OTHER entry
+        # sharing the base_url being matched against — treat the entry as
+        # simply not matching rather than raising. See #7176 review: a valid
+        # first match followed by a malformed later config.yaml entry used to
+        # crash the whole scan and break provider resolution entirely.
+        return ""
     scheme = (parsed_url.scheme or "http").lower()
     netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
     path = parsed_url.path.rstrip("/")
@@ -1619,16 +1658,51 @@ def _lookup_custom_api_key_env(provider_id: object) -> str | None:
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
+    *,
+    model_id: object = None,
 ) -> str:
+    """Resolve a ``custom_providers[]`` slug by matching ``base_url``.
+
+    Multiple named custom providers commonly share one physical endpoint
+    (e.g. an internal gateway fronting several APIs: an OpenAI-chat route, an
+    Anthropic-messages route, a Responses/codex route, all on the same
+    ``base_url`` with different ``api_mode``/``model``). A plain first-match
+    scan always resolves to whichever entry appears first in ``config.yaml``,
+    independent of which model was actually requested — so a
+    ``model.default: claude-...`` configured under an *Anthropic* provider
+    entry silently gets routed through an unrelated *OpenAI-chat* entry that
+    happens to share the same ``base_url`` and sit earlier in the list. The
+    wrong entry's ``api_mode``/headers are then used for every request,
+    surfacing as an opaque upstream 401/400 with no obvious cause (#7176).
+
+    When ``model_id`` is given, prefer an entry that actually owns that model
+    (via its ``model`` field or ``models`` allowlist) over plain base_url
+    order — mirroring the disambiguation ``resolve_model_provider`` already
+    does for models selected from the dropdown. Falls back to the first
+    base_url match when no entry claims the model, or when ``model_id`` is
+    not supplied, preserving prior behavior for existing callers.
+    """
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
+    matches: list[dict] = []
     for entry in _custom_provider_entries(config_obj):
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
-    return ""
+        matches.append(entry)
+    if not matches:
+        return ""
+    wanted_model = str(model_id or "").strip()
+    if wanted_model:
+        for entry in matches:
+            entry_model = str(entry.get("model") or "").strip()
+            owned_ids = set(_configured_model_ids(entry.get("models")))
+            if entry_model:
+                owned_ids.add(entry_model)
+            if wanted_model in owned_ids:
+                return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+    return _custom_provider_slug_from_name(matches[0].get("name")) or "custom"
 
 
 def _provider_is_known_or_configured(
@@ -2736,6 +2810,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             cfg,
             base_url=config_base_url,
             resolve_alias=False,
+            model_id=model_id,
         )
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
@@ -5387,10 +5462,11 @@ def _minimal_static_models_catalog() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
-                    active_provider, cfg, base_url=cfg_base_url
+                    active_provider, cfg, base_url=cfg_base_url, model_id=default_model
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -5401,13 +5477,13 @@ def _minimal_static_models_catalog() -> dict:
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
                         _resolve_configured_provider_id(
-                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                            _store.get("active_provider"), cfg, base_url=cfg_base_url,
+                            model_id=default_model,
                         )
                         or None
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
         groups: list[dict] = []
         if default_model:
             try:
@@ -5450,12 +5526,14 @@ def _static_models_catalog_without_live_probes() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
                     active_provider,
                     cfg,
                     base_url=cfg_base_url,
+                    model_id=default_model,
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -5471,13 +5549,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                             auth_store.get("active_provider"),
                             cfg,
                             base_url=cfg_base_url,
+                            model_id=default_model,
                         )
                         or None
                     )
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
-        default_model = get_effective_default_model(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -5605,7 +5683,9 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if cfg_base_url:
             detected_providers.add(
-                _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                _named_custom_provider_slug_for_base_url(
+                    cfg_base_url, cfg, model_id=default_model
+                )
                 or active_provider
                 or "custom"
             )
@@ -6944,11 +7024,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # providers are first-class provider ids in WebUI routing; accept the
         # user-facing name from config.yaml (``provider: ollama-local``) and
         # route it through the same ``custom:<name>`` slug the picker emits.
+        # Pass default_model so a base_url shared by several named custom
+        # providers resolves to the entry that actually owns the configured
+        # default model, instead of always the first declared entry (#7176).
         if active_provider:
             active_provider = _resolve_configured_provider_id(
                 active_provider,
                 cfg,
                 base_url=cfg_base_url,
+                model_id=default_model,
             )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
@@ -6964,6 +7048,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         auth_store.get("active_provider"),
                         cfg,
                         base_url=cfg_base_url,
+                        model_id=default_model,
                     )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -7255,10 +7340,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(model_cfg, dict):
                 model_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
                 if model_base_url == target:
+                    # Pass default_model so a base_url shared by several named
+                    # custom providers resolves to the entry that actually
+                    # owns the configured default model, instead of always
+                    # the first declared entry (#7176). Without this, the
+                    # cold/uncached get_available_models() build path keeps
+                    # attributing the initial endpoint probe to the wrong
+                    # sibling provider even though active_provider elsewhere
+                    # in this function is resolved model-aware.
                     provider_hint = _resolve_configured_provider_id(
                         model_cfg.get("provider"),
                         cfg,
                         base_url=base_url,
+                        model_id=default_model,
                     )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
@@ -7626,7 +7720,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
-        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(
+            cfg_base_url, cfg, model_id=default_model
+        )
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
