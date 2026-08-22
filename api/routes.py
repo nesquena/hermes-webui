@@ -28036,6 +28036,33 @@ def _handle_skill_toggle(handler, body):
     if not skill_md:
         return bad(handler, f"Skill '{name}' not found", 404)
 
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        home = get_active_hermes_home()
+        # Full read → masked merge/mutation → persistence under the lock
+        # keyed to this config authority/home, so a concurrent skills or MCP
+        # mutation targeting the same authority cannot be lost.
+        with _bridge.config_transaction(home):
+            cfg = _bridge.load_agent_config(home)
+            skills_cfg = cfg.get("skills") if isinstance(cfg.get("skills"), dict) else {}
+            skills_cfg["disabled"] = _toggle_name_in_list(
+                skills_cfg.get("disabled"), name, enabled
+            )
+            platform_disabled = skills_cfg.get("platform_disabled")
+            if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+                platform_disabled["webui"] = _toggle_name_in_list(
+                    platform_disabled["webui"], name, enabled
+                )
+            _bridge.save_skills_config(skills_cfg, home)
+        reload_config()
+        _SKILLS_STATS_CACHE.clear()
+        return j(handler, {"ok": True, "name": name, "enabled": enabled})
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return j(handler, {"error": f"Agent config layer unavailable: {exc}"}, status=503)
+
     config_path = _active_profile_config_path()
     with _cfg_lock:
         cfg = _load_yaml_config_file(config_path)
@@ -29282,6 +29309,25 @@ def _handle_notes_item(handler, parsed):
         return j(handler, {"source": "joplin", "error": str(exc)}, status=502)
 
 
+def _mcp_write_capability() -> dict:
+    """Report whether MCP config writes (add/edit/delete/toggle) can succeed
+    right now, for the frontend to disable write controls instead of letting
+    them fail. Mirrors the same fail-closed check ``_mcp_bridge_or_legacy``
+    performs before a write: an agent checkout that IS configured but whose
+    config layer failed to import must not offer write buttons that would
+    just 503 (a half-wired deployment problem, distinct from "no checkout at
+    all", which writes fine through the legacy YAML path)."""
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        return {"writable": True}
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        return {"writable": False, "unavailable_reason": str(exc)}
+    return {"writable": True}
+
+
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
     cfg = get_config_for_profile_home(get_active_hermes_home())
@@ -29293,11 +29339,47 @@ def _handle_mcp_servers_list(handler):
         _server_summary(name, scfg, runtime.get(str(name)))
         for name, scfg in servers.items()
     ]
+    caps = _mcp_write_capability()
     return j(handler, {
         "servers": result,
-        "toggle_supported": True,
+        "toggle_supported": caps.get("writable", True),
         "reload_required": True,
+        **caps,
     })
+
+
+def _mcp_bridge_or_legacy(handler):
+    """Resolve the MCP write path for this request.
+
+    Returns ``(use_bridge, home)`` or ``None`` after answering the request
+    when the agent checkout is configured but not importable (fail closed —
+    a half-wired deployment must not silently fall back to the legacy
+    comment-destroying writer).
+    """
+    from api import agent_config_bridge as _bridge
+
+    if _bridge.bridge_available():
+        home = get_active_hermes_home()
+        # The WebUI's _get_config_path() honors HERMES_CONFIG_PATH — an env-var
+        # override that can point to a config file *outside* the active profile
+        # home.  The Agent's save_config() always writes to
+        # <override-home>/config.yaml and does NOT check HERMES_CONFIG_PATH.
+        # When the env override is set and diverges, fall back to legacy mode so
+        # GET and mutation stay in sync on the same file.  Otherwise a bridge
+        # write would silently mutate <home>/config.yaml while GET returns the
+        # external override file — a data-integrity split.
+        cfg_path_override = os.getenv("HERMES_CONFIG_PATH", "").strip()
+        if cfg_path_override:
+            agent_default_path = Path(home) / "config.yaml"
+            if os.path.expanduser(cfg_path_override) != str(agent_default_path):
+                return False, None
+        return True, home
+    try:
+        _bridge.require_bridge()
+    except _bridge.AgentBridgeUnavailable as exc:
+        j(handler, {"error": f"Agent config layer unavailable: {exc}"}, status=503)
+        return None
+    return False, None
 
 
 def _handle_mcp_server_delete(handler, name):
@@ -29306,15 +29388,29 @@ def _handle_mcp_server_delete(handler, name):
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    del servers[name]
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        if not _bridge.remove_mcp_server(name, home):
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        reload_config()
+        return j(handler, {"ok": True, "deleted": name})
+    # Legacy fallback — serialize the read-modify-write under the WebUI's
+    # global config lock (the same lock the bridge path keys per home).
+    with _cfg_lock:
+        cfg = get_config()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        del servers[name]
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
 
@@ -29328,17 +29424,31 @@ def _handle_mcp_server_toggle(handler, name, body):
     if "enabled" not in body:
         return bad(handler, "enabled field is required")
     enabled = bool(body["enabled"])
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    if name not in servers:
-        return bad(handler, f"MCP server '{name}' not found", 404)
-    if not isinstance(servers[name], dict):
-        return bad(handler, f"MCP server '{name}' has invalid config", 400)
-    servers[name]["enabled"] = enabled
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        if not _bridge.set_mcp_server_enabled(name, enabled, home):
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        reload_config()
+        return j(handler, {"ok": True, "name": name, "enabled": enabled})
+    # Legacy fallback — serialize the read-modify-write under the WebUI's
+    # global config lock (the same lock the bridge path keys per home).
+    with _cfg_lock:
+        cfg = get_config()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        if name not in servers:
+            return bad(handler, f"MCP server '{name}' not found", 404)
+        if not isinstance(servers[name], dict):
+            return bad(handler, f"MCP server '{name}' has invalid config", 400)
+        servers[name]["enabled"] = enabled
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
@@ -29369,13 +29479,97 @@ def _handle_mcp_server_update(handler, name, body):
     name = unquote(name)
     if not name:
         return bad(handler, "name is required")
-    # Validate: must have url (http) or command (stdio)
+    route = _mcp_bridge_or_legacy(handler)
+    if route is None:
+        return True
+    use_bridge, home = route
+    if use_bridge:
+        from api import agent_config_bridge as _bridge
+
+        # The FULL read → masked-value merge → validation → secret/config
+        # persistence transaction runs under one lock keyed to the active
+        # config authority/home, so two concurrent writers cannot read the
+        # same snapshot and silently drop one independent mutation.
+        with _bridge.config_transaction(home):
+            # Read the existing server through the SAME home-scoped bridge
+            # reader the write path below uses — not the WebUI's own get_config()
+            # cache. The two can diverge (different profile resolution, stale
+            # in-memory cache), which would make _strip_masked_values() below
+            # miss the real header/env value and silently persist the literal
+            # •••••• placeholder as the "secret" instead of preserving the
+            # original (a quiet secret loss, not a leak).
+            try:
+                agent_cfg = _bridge.load_agent_config(home)
+            except Exception as exc:
+                return bad(handler, f"Failed to read existing server config: {exc}", 502)
+            agent_servers = agent_cfg.get("mcp_servers", {})
+            if not isinstance(agent_servers, dict):
+                agent_servers = {}
+            existing_cfg = agent_servers.get(name, {})
+
+            server_cfg = _build_mcp_server_cfg(body, existing_cfg)
+            if server_cfg is None:
+                return bad(handler, "url or command is required")
+
+            bearer_token = str(body.get("bearer_token") or "").strip()
+            has_new_token = bool(bearer_token) and bearer_token != _MASKED_PLACEHOLDER
+            if has_new_token:
+                # Build the candidate header template WITHOUT writing the
+                # token: the secret must not touch the profile .env until the
+                # complete candidate entry has passed MCP security validation.
+                token_headers = _bridge.build_mcp_bearer_header(name)
+                merged_headers = dict(server_cfg.get("headers") or {})
+                merged_headers.update(token_headers)
+                server_cfg["headers"] = merged_headers
+
+            # Validate the COMPLETE candidate entry before any persistence —
+            # a rejected entry leaves both .env and config.yaml byte-identical.
+            issues = _bridge.validate_mcp_entry(name, server_cfg)
+            if issues:
+                return j(handler, {"error": "Server configuration rejected", "issues": issues}, status=400)
+
+            # Validation passed — now persist the secret (if any) and the
+            # config. save_mcp_server() keeps its own validation at the
+            # persistence boundary as a final fail-closed gate.
+            if has_new_token:
+                try:
+                    token_headers = _bridge.save_mcp_bearer_token(name, bearer_token, home)
+                except ValueError as exc:
+                    return bad(handler, str(exc))
+                merged_headers = dict(server_cfg.get("headers") or {})
+                merged_headers.update(token_headers)
+                server_cfg["headers"] = merged_headers
+            issues = _bridge.save_mcp_server(name, server_cfg, home)
+            if issues:
+                return j(handler, {"error": "Server configuration rejected", "issues": issues}, status=400)
+        reload_config()
+        return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+    # Legacy fallback — serialize under the WebUI's global config lock so the
+    # read-modify-write cannot interleave with another legacy writer.
+    with _cfg_lock:
+        cfg = get_config()
+        servers = cfg.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            servers = {}
+        existing_cfg = servers.get(name, {})
+        server_cfg = _build_mcp_server_cfg(body, existing_cfg)
+        if server_cfg is None:
+            return bad(handler, "url or command is required")
+        if body.get("bearer_token"):
+            return bad(handler, "bearer_token requires a Hermes agent checkout (set HERMES_WEBUI_AGENT_DIR); use headers instead")
+        servers[name] = server_cfg
+        cfg["mcp_servers"] = servers
+        _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+
+def _build_mcp_server_cfg(body, existing_cfg):
+    """Build the candidate MCP server entry from a PUT body, resolving masked
+    placeholder values against *existing_cfg*. Returns None when neither
+    ``url`` nor ``command`` was supplied."""
     server_cfg = {}
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    existing_cfg = servers.get(name, {})
     if body.get("url"):
         server_cfg["url"] = body["url"].strip()
         if body.get("headers"):
@@ -29387,14 +29581,10 @@ def _handle_mcp_server_update(handler, name, body):
         if body.get("env"):
             server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
     else:
-        return bad(handler, "url or command is required")
+        return None
     if body.get("timeout") is not None:
         try:
             server_cfg["timeout"] = int(body["timeout"])
         except (ValueError, TypeError):
             pass
-    servers[name] = server_cfg
-    cfg["mcp_servers"] = servers
-    _save_yaml_config_file(_get_config_path(), cfg)
-    reload_config()
-    return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+    return server_cfg
