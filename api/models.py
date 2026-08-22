@@ -34,7 +34,7 @@ from api.config import (
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
     get_effective_default_model, _get_session_agent_lock,
 )
-from api.workspace import get_last_workspace
+from api.workspace import get_last_workspace, _resolve_path
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
@@ -1245,7 +1245,8 @@ class Session:
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
-        self.workspace = str(Path(workspace).expanduser().resolve())
+        self.profile = profile
+        self.workspace = str(_resolve_path(workspace, profile=profile))
         # #6672: immutable snapshot of the workspace at session creation time.
         # s.workspace is updated on every turn when the user switches workspaces
         # mid-session via the WebUI header dropdown; interpolating the live
@@ -1257,7 +1258,7 @@ class Session:
         # without a persisted created_workspace fall back to the workspace
         # recorded on disk, which is the best available approximation.
         self.created_workspace = (
-            str(Path(created_workspace).expanduser().resolve())
+            str(_resolve_path(created_workspace, profile=profile))
             if created_workspace
             else self.workspace
         )

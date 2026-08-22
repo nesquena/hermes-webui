@@ -155,7 +155,7 @@ def test_remote_terminal_linux_home_preserves_path_without_macos_synthetic_resol
         lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/home/developer"}),
     )
 
-    real_resolve = workspace._resolve_path
+    real_resolve = workspace._safe_resolve
 
     def fake_resolve(p):
         p_str = str(p)
@@ -163,12 +163,374 @@ def test_remote_terminal_linux_home_preserves_path_without_macos_synthetic_resol
             return Path(f"/System/Volumes/Data{p_str}")
         return real_resolve(p)
 
-    monkeypatch.setattr(workspace, "_resolve_path", fake_resolve)
+    monkeypatch.setattr(workspace, "_safe_resolve", fake_resolve)
 
     assert workspace.validate_workspace_to_add("/home/developer") == Path("/home/developer")
     assert workspace.resolve_trusted_workspace("/home/developer") == Path("/home/developer")
     assert workspace.get_profile_default_workspace() == "/home/developer"
+    assert workspace._resolve_path("/home/developer") == Path("/home/developer")
     assert workspace._clean_workspace_list([{"path": "/home/developer", "name": "Dev"}]) == [
         {"path": "/home/developer", "name": "Dev"}
     ]
+
+
+def test_session_init_and_created_workspace_preserve_remote_posix_path(monkeypatch):
+    """Session initialization must not corrupt remote POSIX paths to macOS synthetic firmlinks."""
+    monkeypatch.setattr(
+        api_config,
+        "get_config",
+        lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/home/rootson"}),
+    )
+
+    from api.models import Session
+
+    s = Session(workspace="/home/rootson", created_workspace="/home/rootson")
+    assert s.workspace == "/home/rootson"
+    assert s.created_workspace == "/home/rootson"
+
+
+def test_named_profile_remote_terminal_workspace_candidate_isolated(monkeypatch, tmp_path):
+    """Remote paths must resolve per profile: remote for named remote profile, not for active local profile."""
+    # Active profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
+
+    # Named profile 'optiplex' under base home
+    profiles_dir = tmp_path / "profiles" / "optiplex"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text(
+        "terminal:\n  backend: ssh\n  cwd: /home/rootson\n", encoding="utf-8"
+    )
+
+    from api import profiles
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # Scoped to named remote profile: candidate is recognized as remote
+    cand_optiplex = workspace._remote_terminal_workspace_candidate(
+        "/home/rootson/projects/app", profile="optiplex"
+    )
+    assert cand_optiplex == Path("/home/rootson/projects/app")
+
+    # Scoped to active local profile: candidate is NOT recognized as remote (prevents cross-profile bypass)
+    cand_local = workspace._remote_terminal_workspace_candidate(
+        "/home/rootson/projects/app", profile=None
+    )
+    assert cand_local is None
+
+    # Local validation fails on nonexistent path when active profile is local
+    with pytest.raises(ValueError, match="Path does not exist"):
+        workspace.validate_workspace_to_add("/home/rootson/projects/app", profile=None)
+
+    # Remote validation succeeds when profile is optiplex
+    assert workspace.validate_workspace_to_add(
+        "/home/rootson/projects/app", profile="optiplex"
+    ) == Path("/home/rootson/projects/app")
+
+
+def test_build_native_multimodal_message_preserves_remote_workspace(monkeypatch, tmp_path):
+    """Multimodal message builder must scope workspace resolution to the session profile."""
+    # Active ambient profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
+
+    profiles_dir = tmp_path / "profiles" / "optiplex"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text(
+        "terminal:\n  backend: ssh\n  cwd: /home/rootson\n", encoding="utf-8"
+    )
+
+    from api import profiles, streaming
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # 1. Profile as logical name string
+    msg1 = streaming._build_native_multimodal_message(
+        "[Workspace::v1: /home/rootson]\n",
+        "hello",
+        attachments=[],
+        workspace="/home/rootson",
+        profile="optiplex",
+    )
+    assert "[Workspace::v1: /home/rootson]" in msg1
+
+    # 2. Profile as filesystem path string (_profile_home)
+    msg2 = streaming._build_native_multimodal_message(
+        "[Workspace::v1: /home/rootson]\n",
+        "hello",
+        attachments=[],
+        workspace="/home/rootson",
+        profile=str(profiles_dir),
+    )
+    assert "[Workspace::v1: /home/rootson]" in msg2
+
+    # 3. Profile as Path object
+    msg3 = streaming._build_native_multimodal_message(
+        "[Workspace::v1: /home/rootson]\n",
+        "hello",
+        attachments=[],
+        workspace="/home/rootson",
+        profile=profiles_dir,
+    )
+    assert "[Workspace::v1: /home/rootson]" in msg3
+
+
+def test_resolve_profile_home_param_formats(tmp_path):
+    """_resolve_profile_home_param handles None, default, profile name, Path, and path string."""
+    from api.profiles import _DEFAULT_HERMES_HOME
+
+    assert workspace._resolve_profile_home_param(None) == _DEFAULT_HERMES_HOME
+    assert workspace._resolve_profile_home_param("default") == _DEFAULT_HERMES_HOME
+    assert workspace._resolve_profile_home_param(str(tmp_path / "profiles/custom")) == (tmp_path / "profiles/custom")
+    assert workspace._resolve_profile_home_param(tmp_path / "profiles/custom") == (tmp_path / "profiles/custom")
+
+
+def test_remote_profile_a_cannot_use_remote_profile_b_cwd(monkeypatch, tmp_path):
+    """Active remote profile Alice (/srv/remote-alice) cannot validate paths under remote profile Bob (/srv/remote-bob)."""
+    profiles_alice = tmp_path / "profiles" / "alice"
+    profiles_alice.mkdir(parents=True)
+    (profiles_alice / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-alice\n", encoding="utf-8")
+
+    profiles_bob = tmp_path / "profiles" / "bob"
+    profiles_bob.mkdir(parents=True)
+    (profiles_bob / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-bob\n", encoding="utf-8")
+
+    from api import profiles
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # Scoped to Alice: Bob's path must be rejected
+    with pytest.raises(ValueError, match="Path does not exist"):
+        workspace.validate_workspace_to_add("/srv/remote-bob/project", profile="alice")
+
+    with pytest.raises(ValueError, match="Path does not exist"):
+        workspace.resolve_trusted_workspace("/srv/remote-bob/project", profile="alice")
+
+    # Scoped to Alice: Alice's own path succeeds
+    assert workspace.validate_workspace_to_add("/srv/remote-alice/project", profile="alice") == Path("/srv/remote-alice/project")
+    assert workspace.resolve_trusted_workspace("/srv/remote-alice/project", profile="alice") == Path("/srv/remote-alice/project")
+
+
+def test_local_symlink_resolving_to_system_path_is_rejected(monkeypatch, tmp_path):
+    """Local symlink pointing to a system directory (/etc) is strictly rejected."""
+    # Active profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": str(tmp_path)}})
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path / "home")
+
+    symlink_to_etc = tmp_path / "symlink_etc"
+    try:
+        symlink_to_etc.symlink_to("/etc")
+    except OSError:
+        pytest.skip("Symlink creation requires permissions")
+
+    with pytest.raises(ValueError, match="Path points to a system directory"):
+        workspace.validate_workspace_to_add(str(symlink_to_etc), profile=None)
+
+    with pytest.raises(ValueError, match="Path points to a system directory"):
+        workspace.resolve_trusted_workspace(str(symlink_to_etc), profile=None)
+
+
+def test_local_profile_add_workspace_auto_create_on_remote_path_collision(monkeypatch, tmp_path):
+    """Active local profile adding a path beneath an inactive remote profile's cwd still creates local directory."""
+    # Active profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": str(tmp_path)}})
+
+    # Inactive remote profile 'optiplex' has cwd /tmp/remote-test
+    profiles_dir = tmp_path / "profiles" / "optiplex"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /tmp/remote-test\n", encoding="utf-8")
+
+    from api import profiles
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    local_target = tmp_path / "remote-test" / "subproject"
+    assert not local_target.exists()
+
+    from api.routes import _handle_workspace_add
+
+    class MockHandler:
+        def __init__(self):
+            self.response = None
+        def send_response(self, *args): pass
+        def send_header(self, *args): pass
+        def end_headers(self): pass
+        @property
+        def wfile(self):
+            class W:
+                def write(self, b): pass
+            return W()
+
+    handler = MockHandler()
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(workspace, "_workspaces_file", lambda: tmp_path / "workspaces.json")
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+
+    _handle_workspace_add(handler, {"path": str(local_target), "create": True})
+    assert local_target.is_dir()
+
+
+def test_detached_streaming_worker_preserves_session_profile_workspace(monkeypatch, tmp_path):
+    """Detached streaming worker preserves session profile Alice (/srv/remote-alice) even with ambient local profile."""
+    # Ambient process profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
+
+    profiles_dir = tmp_path / "profiles" / "alice"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-alice\n", encoding="utf-8")
+
+    from api import profiles, models
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # Simulate macOS firmlink expansion on host resolve
+    real_resolve = workspace._safe_resolve
+    def fake_resolve(p):
+        p_str = str(p)
+        if p_str == "/srv/remote-alice" or p_str.startswith("/srv/remote-alice/"):
+            return Path(f"/System/Volumes/Data{p_str}")
+        return real_resolve(p)
+
+    monkeypatch.setattr(workspace, "_safe_resolve", fake_resolve)
+
+    s = models.Session(session_id="test1234", workspace="/srv/remote-alice", profile="alice")
+    assert s.workspace == "/srv/remote-alice"
+    assert s.created_workspace == "/srv/remote-alice"
+
+    # Streaming workspace update
+    resolved_ws = workspace._resolve_path("/srv/remote-alice", profile=s.profile)
+    assert str(resolved_ws) == "/srv/remote-alice"
+
+
+def test_gateway_multimodal_message_preserves_remote_profile_workspace(monkeypatch, tmp_path):
+    """Gateway chat multimodal payload builder preserves remote profile workspace containment."""
+    # Ambient process profile is local
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
+
+    profiles_dir = tmp_path / "profiles" / "optiplex"
+    profiles_dir.mkdir(parents=True)
+    (profiles_dir / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /home/rootson\n", encoding="utf-8")
+
+    from api import profiles, streaming, models
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    s = models.Session(session_id="gw_test", workspace="/home/rootson", profile="optiplex")
+
+    msg = streaming._build_native_multimodal_message(
+        "",
+        "hello",
+        attachments=[],
+        workspace=str(s.workspace),
+        profile=getattr(s, "profile", None),
+    )
+    assert msg == "hello"
+
+
+def test_isolated_profile_config_read_does_not_mutate_or_read_shared_cache(monkeypatch, tmp_path):
+    """Explicit profile config lookup must not leak into or read from mutable global config cache."""
+    alice_home = tmp_path / "profiles" / "alice"
+    alice_home.mkdir(parents=True)
+    (alice_home / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-alice\n", encoding="utf-8")
+
+    bob_home = tmp_path / "profiles" / "bob"
+    bob_home.mkdir(parents=True)
+    (bob_home / "config.yaml").write_text("terminal:\n  backend: local\n  cwd: /Users/bob\n", encoding="utf-8")
+
+    from api import profiles
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+
+    # Active TLS profile is alice
+    profiles.set_request_profile("alice")
+    try:
+        # 1. alice resolves to remote cwd
+        assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
+        assert workspace._remote_terminal_cwd() == "/srv/remote-alice"
+
+        # 2. bob resolves to None (local backend)
+        assert workspace._remote_terminal_cwd("bob") is None
+
+        # 3. Simulate concurrent reload on global _cfg_cache pointing to bob or dirty state
+        monkeypatch.setattr(api_config, "_cfg_cache", {"terminal": {"backend": "local", "cwd": "/Users/polluted"}})
+
+        # Explicit lookup of alice still resolves to alice's on-disk terminal cwd, not polluted global cache
+        assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
+        assert workspace.validate_workspace_to_add("/srv/remote-alice/sub", profile="alice") == Path("/srv/remote-alice/sub")
+    finally:
+        profiles.clear_request_profile()
+
+
+def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
+    """Workspace route actions (add, remove, rename, reorder) must be fully isolated per profile."""
+    from api import profiles
+    from api.routes import (
+        _handle_workspace_add,
+        _handle_workspace_remove,
+        _handle_workspace_rename,
+        _handle_workspace_reorder,
+    )
+
+    alice_home = tmp_path / "profiles" / "alice"
+    alice_home.mkdir(parents=True)
+    (alice_home / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-alice\n", encoding="utf-8")
+
+    bob_home = tmp_path / "profiles" / "bob"
+    bob_home.mkdir(parents=True)
+    (bob_home / "config.yaml").write_text("terminal:\n  backend: ssh\n  cwd: /srv/remote-bob\n", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+
+    class MockHandler:
+        def __init__(self):
+            self.status = 200
+            self.data = None
+        def send_response(self, code): self.status = code
+        def send_header(self, *args): pass
+        def end_headers(self): pass
+        @property
+        def wfile(self):
+            class W:
+                def write(inner_self, b): pass
+            return W()
+
+    # Add workspace under Alice
+    profiles.set_request_profile("alice")
+    try:
+        h1 = MockHandler()
+        _handle_workspace_add(h1, {"path": "/srv/remote-alice/project1", "name": "Project 1"})
+        assert len(workspace.load_workspaces(profile="alice")) == 2
+        assert any(w["path"] == "/srv/remote-alice/project1" for w in workspace.load_workspaces(profile="alice"))
+    finally:
+        profiles.clear_request_profile()
+
+    # Bob's workspaces must be clean and not contain Alice's workspace
+    profiles.set_request_profile("bob")
+    try:
+        h2 = MockHandler()
+        assert len(workspace.load_workspaces(profile="bob")) == 1
+        assert workspace.load_workspaces(profile="bob")[0]["path"] == "/srv/remote-bob"  # Default workspace for bob
+
+        _handle_workspace_add(h2, {"path": "/srv/remote-bob/app", "name": "Bob App"})
+        bob_ws = workspace.load_workspaces(profile="bob")
+        assert any(w["path"] == "/srv/remote-bob/app" for w in bob_ws)
+        assert not any("remote-alice" in w["path"] for w in bob_ws)
+    finally:
+        profiles.clear_request_profile()
+
+    # Re-verify Alice's workspaces did not get Bob's workspace
+    profiles.set_request_profile("alice")
+    try:
+        alice_ws = workspace.load_workspaces(profile="alice")
+        assert len(alice_ws) == 2
+        assert any(w["path"] == "/srv/remote-alice/project1" for w in alice_ws)
+        assert not any("remote-bob" in w["path"] for w in alice_ws)
+    finally:
+        profiles.clear_request_profile()
+
+
+
+
+
+
 
