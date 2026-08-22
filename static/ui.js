@@ -20708,7 +20708,13 @@ function _workspaceContextMenuItem(label, onClick, opts={}){
 
 function _copyTextWithFallback(text, successMsg, failurePrefix){
   const done=()=>showToast(successMsg);
-  const fail=(err)=>showToast(failurePrefix+(err&&err.message?err.message:String(err||'')));
+  // A failed copy is an error, not a notice. showToast() infers the level from
+  // the message TEXT with an English-only regex, so a localized failure prefix
+  // plus a browser reason that carries no English keyword (Firefox: "blocked
+  // due to lack of user activation") fell through to a 2.8s info toast with no
+  // Copy/Dismiss affordance. Type it explicitly so every locale gets the
+  // long-lived error toast (maintainer review PR #6957).
+  const fail=(err)=>showToast(failurePrefix+(err&&err.message?err.message:String(err||'')),null,'error');
   if(navigator.clipboard&&navigator.clipboard.writeText){
     return navigator.clipboard.writeText(text).then(done).catch(err=>{
       const ta=document.createElement('textarea');
@@ -20730,7 +20736,7 @@ function _copyTextWithFallback(text, successMsg, failurePrefix){
   let copied=false;
   try{copied=document.execCommand('copy');}catch(err){ta.remove();fail(err);return Promise.resolve();}
   ta.remove();
-  if(copied) done(); else fail('clipboard unavailable');
+  if(copied) done(); else fail(t('clipboard_unavailable'));
   return Promise.resolve();
 }
 
