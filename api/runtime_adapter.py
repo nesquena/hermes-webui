@@ -166,7 +166,7 @@ def _active_control_result(value: Any) -> ControlResult:
     if isinstance(value, ControlResult):
         return value
     if isinstance(value, dict):
-        accepted = bool(value.get("ok", True))
+        accepted = bool(value.get("cancelled", value.get("ok", True)))
         return ControlResult(
             accepted=accepted,
             status=str(value.get("status") or value.get("action") or ("accepted" if accepted else "not-active")),

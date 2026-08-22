@@ -137,7 +137,7 @@ def test_cancel_stream_recovery_stamps_wakeup_meta():
     models.SESSIONS[s.session_id] = s
     _wire_cancel_state(s.session_id, stream_id)
 
-    assert cancel_stream(stream_id) is True
+    assert cancel_stream(stream_id)["cancelled"] is True
 
     recovered = next(
         m for m in reversed(models.SESSIONS[s.session_id].messages)
@@ -164,7 +164,7 @@ def test_cancel_stream_recovery_webui_turn_unmarked():
     models.SESSIONS[s.session_id] = s
     _wire_cancel_state(s.session_id, stream_id)
 
-    assert cancel_stream(stream_id) is True
+    assert cancel_stream(stream_id)["cancelled"] is True
 
     recovered = next(
         m for m in reversed(models.SESSIONS[s.session_id].messages)

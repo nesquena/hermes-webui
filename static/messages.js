@@ -1446,7 +1446,10 @@ async function send(){
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
-          if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
+          const _r = await cancelStream('busy-interrupt');
+          // Preserve persistence-failure warning (gate-certifier blocker #4).
+          if(_r && _r.cancelled && !_r.persistence_failed) showToast(t('busy_interrupt_confirm'),2000);
+          else if(_r && _r.persistence_failed) { /* warning already shown by cancelStream */ }
           else showToast(t('cancel_failed'),null,'error');
         } else {
           showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);

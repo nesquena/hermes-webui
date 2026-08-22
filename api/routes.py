@@ -1536,7 +1536,7 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
     from api.profiles import (
         cron_profile_context_for_home,
         get_hermes_home_for_profile,
-        list_profiles_api,
+        list_profiles_api,  # noqa: F811  - pre-existing redefinition
     )
 
     def _home_key(path: Path) -> str:
@@ -14387,10 +14387,19 @@ def handle_get(handler, parsed) -> bool:
 
         if runtime_adapter_enabled():
             adapter = LegacyJournalRuntimeAdapter(cancel_delegate=cancel_stream)
-            cancelled = adapter.cancel_run(stream_id).accepted
+            cancel_result = adapter.cancel_run(stream_id).payload or {}
         else:
-            cancelled = cancel_stream(stream_id)
-        return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
+            cancel_result = cancel_stream(stream_id)
+        if not isinstance(cancel_result, dict):
+            cancel_result = {
+                "cancelled": bool(cancel_result),
+                "persistence_failed": False,
+                "stream_id": stream_id,
+            }
+        return j(handler, {"ok": True,
+                           "cancelled": bool(cancel_result.get("cancelled")),
+                           "stream_id": cancel_result.get("stream_id") or stream_id,
+                           "persistence_failed": bool(cancel_result.get("persistence_failed"))})
 
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)

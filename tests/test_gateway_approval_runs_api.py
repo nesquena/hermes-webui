@@ -1833,7 +1833,7 @@ def test_start_chat_stream_clears_gateway_run_state_when_thread_start_fails(monk
         (
             True,
             200,
-            {"ok": True, "cancelled": True, "stream_id": "stream-cancel-worker-pending"},
+            {"ok": True, "cancelled": True, "stream_id": "stream-cancel-worker-pending", "persistence_failed": False},
             True,
         ),
     ],
@@ -2228,7 +2228,7 @@ def test_chat_cancel_retires_same_run_gateway_mirrors_after_stop(monkeypatch):
     try:
         routes.handle_get(object(), parsed)
         assert captured["status"] == 200
-        assert captured["payload"] == {"ok": True, "cancelled": True, "stream_id": stream_id}
+        assert captured["payload"] == {"ok": True, "cancelled": True, "stream_id": stream_id, "persistence_failed": False}
         assert sid not in approvals._pending
     finally:
         _STREAM_RUN_IDS.pop(stream_id, None)
@@ -2307,6 +2307,7 @@ def test_chat_cancel_without_gateway_readiness_uses_local_cancel(monkeypatch):
         "ok": True,
         "cancelled": True,
         "stream_id": stream_id,
+        "persistence_failed": False,
     }
     assert called["cancel"] is True
     assert called["stop"] is False
@@ -2389,6 +2390,7 @@ def test_chat_cancel_uses_local_cancel_after_gateway_runs_api_falls_back(monkeyp
             "ok": True,
             "cancelled": True,
             "stream_id": stream_id,
+        "persistence_failed": False,
         }
         assert called["cancel"] is True
         assert called["stop"] is False
@@ -2439,6 +2441,7 @@ def test_chat_cancel_ignores_legacy_run_id_after_gateway_runs_api_falls_back(mon
             "ok": True,
             "cancelled": True,
             "stream_id": stream_id,
+        "persistence_failed": False,
         }
         assert called["cancel"] is True
         assert called["stop"] is False

@@ -930,6 +930,17 @@ def _run_gateway_chat_streaming(
         # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # Retire the worker settlement participant that cancel_stream() may have
+        # registered (gate-certifier blocker #1: SILENT lifecycle leak — Gateway
+        # pre-start exits never retire the registered worker participant).
+        try:
+            from api.streaming import _retire_worker_cancelled_state
+            _retire_worker_cancelled_state(stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to retire worker settlement participant for pre-start "
+                "gateway stream %s", stream_id, exc_info=True,
+            )
         return
     register_active_run(
         stream_id,
@@ -1493,3 +1504,15 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # Retire the worker settlement participant on every Gateway producer
+        # exit (gate-certifier blocker #1: SILENT lifecycle leak — Gateway
+        # teardown omitted worker retirement, leaking
+        # _STREAM_SETTLEMENT_PARTICIPANTS and the terminal fence).
+        try:
+            from api.streaming import _retire_worker_cancelled_state
+            _retire_worker_cancelled_state(stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to retire worker settlement participant for gateway "
+                "teardown stream %s", stream_id, exc_info=True,
+            )

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -87,7 +88,24 @@ def test_stream_writeback_diagnostics_cover_final_writeback_stages():
     assert (
         'with _stream_writeback_stage(_writeback_timings, "session_save"):\n'
         '                    s.save()'
-    ) in src
+    ) in src or (
+        # The production settlement-leak fix wraps the save in a generation-
+        # owned committer that tracks the fallback-notice generation; accept
+        # the wrapped form too as long as s.save() still lands inside the
+        # session_save stage.  The committer now receives the stamp-point
+        # (generation, notice) snapshot as keyword args, so the call spans
+        # multiple lines — match a regex instead of an exact string.
+        re.search(
+            r'with _stream_writeback_stage\(_writeback_timings, "session_save"\):\n'
+            r'                    with _turn_final_save_commit\(\n'
+            r'                        stream_id, s,\n'
+            r'                        committed_generation=_commit_gen,\n'
+            r'                        committed_notice=_commit_notice,\n'
+            r'                    \):\n'
+            r'                        s\.save\(\)',
+            src,
+        )
+    )
     assert src.index('with _stream_writeback_stage(_writeback_timings, "session_save")') < src.index(
         'with _stream_writeback_stage(_writeback_timings, "state_sync")'
     )
