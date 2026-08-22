@@ -2761,8 +2761,7 @@ function _mediaTokenParts(source, matchOffset, rawRef){
       break;
     }
   }
-  const remoteValue=/^https?:\/\//i.test(ref)
-    && /[?#]/.test(ref.slice(ref.indexOf('://')+3));
+  const remoteValue=/^https?:\/\//i.test(ref);
   const punctuation=remoteValue?null:ref.match(/[.,;:!?]+$/);
   if(punctuation&&ref.length>punctuation[0].length){
     ref=ref.slice(0,-punctuation[0].length);

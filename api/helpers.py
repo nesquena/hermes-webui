@@ -92,6 +92,10 @@ def split_media_token_ref(text: str, match) -> tuple[str, str] | None:
             ref = ref[: -len(delimiter)]
             suffix = delimiter + suffix
             break
+    punctuation = _re.search(r"[.,;:!?]+$", ref)
+    if punctuation and len(ref) > len(punctuation.group(0)):
+        ref = ref[: punctuation.start()]
+        suffix = punctuation.group(0) + suffix
     if not ref or _re.fullmatch(r"[*_`]+", ref):
         return None
     return ref, suffix
