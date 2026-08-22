@@ -5408,33 +5408,43 @@ def _sanitize_messages_for_api(
         if sanitized.get('role'):
             clean.append(sanitized)
 
-    # Third pass: strip orphaned tool_calls from assistant messages — calls whose id
-    # has no matching tool-role response in the clean list.  Strict providers (DeepSeek,
-    # newer OpenAI) reject with 400 when an assistant message references a tool call that
-    # was never answered (e.g. session aborted before results flushed).
-    answered_ids: set = set()
-    for msg in clean:
-        if msg.get('role') == 'tool':
-            tid = msg.get('tool_call_id') or ''
-            if tid:
-                answered_ids.add(tid)
-
+    # Third pass: strip orphaned tool_calls from assistant messages.  A call is kept
+    # only when its tool-role response IMMEDIATELY follows the assistant message
+    # (before any non-tool message).  A response that merely exists somewhere else in
+    # the list — e.g. replayed/out-of-order insert after an interrupted MCP round —
+    # does NOT satisfy the adjacency rule strict providers enforce: the downstream
+    # repair/transport phase re-derives tool_calls from the trailing sequence, and a
+    # non-adjacent call becomes `tool_calls: []`, which DeepSeek-style providers
+    # reject with HTTP 400 (#6545).
     filtered_clean = []
-    for msg in clean:
+    i = 0
+    n = len(clean)
+    while i < n:
+        msg = clean[i]
         if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+            adjacent_answered: set = set()
+            j = i + 1
+            while j < n and clean[j].get('role') == 'tool':
+                tid = clean[j].get('tool_call_id') or ''
+                if tid:
+                    adjacent_answered.add(tid)
+                j += 1
             kept = [
                 tc for tc in msg['tool_calls']
                 if isinstance(tc, dict) and
-                (tc.get('id') or tc.get('call_id') or '') in answered_ids
+                (tc.get('id') or tc.get('call_id') or '') in adjacent_answered
             ]
             if not kept:
-                # All calls orphaned: drop tool_calls key; if no content, drop message.
+                # All calls non-adjacent/orphaned: drop tool_calls key; if no
+                # content, drop message.
                 msg = {k: v for k, v in msg.items() if k != 'tool_calls'}
                 if not str(msg.get('content') or '').strip():
+                    i += 1
                     continue
             else:
                 msg = dict(msg, tool_calls=kept)
         filtered_clean.append(msg)
+        i += 1
 
     # Fourth pass: drop _recovered user messages unless removing one would fuse
     # two same-role neighbours.  Operating on filtered_clean (post orphaned-tool/
@@ -5538,30 +5548,36 @@ def _api_safe_message_positions(messages):
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
-    # Third pass: strip orphaned tool_calls from assistant messages (mirrors
-    # _sanitize_messages_for_api pass 3).
-    answered_ids: set = set()
-    for _idx, msg in out:
-        if msg.get('role') == 'tool':
-            tid = msg.get('tool_call_id') or ''
-            if tid:
-                answered_ids.add(tid)
-
+    # Third pass: strip orphaned tool_calls from assistant messages — adjacency-based
+    # (mirrors _sanitize_messages_for_api pass 3, #6545).  A call is kept only when its
+    # tool-role response immediately follows the assistant message.
     filtered_out = []
-    for idx, msg in out:
+    i = 0
+    n = len(out)
+    while i < n:
+        idx, msg = out[i]
         if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+            adjacent_answered: set = set()
+            j = i + 1
+            while j < n and out[j][1].get('role') == 'tool':
+                tid = out[j][1].get('tool_call_id') or ''
+                if tid:
+                    adjacent_answered.add(tid)
+                j += 1
             kept = [
                 tc for tc in msg['tool_calls']
                 if isinstance(tc, dict) and
-                (tc.get('id') or tc.get('call_id') or '') in answered_ids
+                (tc.get('id') or tc.get('call_id') or '') in adjacent_answered
             ]
             if not kept:
                 msg = {k: v for k, v in msg.items() if k != 'tool_calls'}
                 if not str(msg.get('content') or '').strip():
+                    i += 1
                     continue
             else:
                 msg = dict(msg, tool_calls=kept)
         filtered_out.append((idx, msg))
+        i += 1
 
     # Fourth pass: drop _recovered user messages unless removing one would fuse
     # two same-role neighbours — mirrors _sanitize_messages_for_api pass 4 (#4283).
