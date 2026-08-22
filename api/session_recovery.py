@@ -969,25 +969,42 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         states, _ = derive_turn_journal_states(journal.get('events') or [])
         live_path = session_dir / f"{session_id}.json"
         live_messages = _msg_count(live_path)
-        existing_user_messages: set[str] = set()
+        existing_user_messages: set[tuple[str, float]] = set()
         try:
-            from api.models import _decode_state_db_content, _message_content_text
+            from api.models import (
+                _decode_state_db_content,
+                _message_content_text,
+                _message_exact_timestamp_details,
+            )
 
             payload = json.loads(live_path.read_text(encoding='utf-8'))
             if isinstance(payload, dict):
                 for message in payload.get('messages') or []:
                     if isinstance(message, dict) and message.get('role') == 'user':
                         content = _decode_state_db_content(message.get('content'))
-                        existing_user_messages.add(
-                            _message_content_text({'content': content}).strip()
-                        )
+                        timestamp, timestamp_valid = _message_exact_timestamp_details(message)
+                        if timestamp_valid and timestamp is not None:
+                            existing_user_messages.add((
+                                _message_content_text({'content': content}).strip(),
+                                timestamp,
+                            ))
         except (OSError, json.JSONDecodeError, ValueError):
             pass
         for turn_id, event in sorted(states.items()):
             if is_terminal_turn_event(event):
                 continue
-            content = str(event.get('content') or '').strip()
-            if not content or content in existing_user_messages:
+            content = _message_content_text({'content': event.get('content')}).strip()
+            if not content:
+                continue
+            event_timestamp, event_timestamp_valid = _message_exact_timestamp_details({
+                'timestamp': event.get('created_at'),
+            })
+            if (
+                content
+                and event_timestamp_valid
+                and event_timestamp is not None
+                and (content, event_timestamp) in existing_user_messages
+            ):
                 continue
             items.append(_new_audit_item(
                 session_id,

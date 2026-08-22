@@ -8750,7 +8750,12 @@ def _agent_durable_multimodal_content(msg: dict) -> str | None:
     image_parts = 0
     for part in content:
         if isinstance(part, str):
-            normalized_parts.append(part)
+            normalized_parts.append(
+                _normalized_message_content_value(
+                    part,
+                    strip_workspace_prefix=True,
+                )
+            )
             continue
         if not isinstance(part, dict):
             return None
@@ -8762,7 +8767,12 @@ def _agent_durable_multimodal_content(msg: dict) -> str | None:
             for key in _SESSION_MESSAGE_TEXT_PART_KEYS:
                 text = part.get(key)
                 if isinstance(text, str):
-                    normalized_parts.append(text)
+                    normalized_parts.append(
+                        _normalized_message_content_value(
+                            text,
+                            strip_workspace_prefix=True,
+                        )
+                    )
                     break
             else:
                 return None
@@ -8792,7 +8802,10 @@ def _session_message_multimodal_mirror_key(
     else:
         if not isinstance(raw_content, str):
             return None
-        content = _normalized_session_message_content(msg)
+        content = _normalized_session_message_content(
+            msg,
+            normalize_workspace_prefix=True,
+        )
     timestamp, timestamp_valid = _message_exact_timestamp_details(msg)
     if not timestamp_valid or timestamp is None:
         return None

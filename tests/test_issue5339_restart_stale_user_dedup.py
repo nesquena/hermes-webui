@@ -252,6 +252,50 @@ def test_input_text_multimodal_sidecar_reconciles_with_scalar_mirror():
     assert sidecar["api_content"] == "input-text provider wire content"
 
 
+@pytest.mark.parametrize(
+    ("part_type", "text_key"),
+    (
+        ("text", "text"),
+        ("", "content"),
+        ("input_text", "input_text"),
+        ("output_text", "output_text"),
+        (None, None),
+    ),
+)
+def test_multimodal_mirror_normalizes_escaped_workspace_prefix_for_text_shapes(
+    part_type,
+    text_key,
+):
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    workspace_prompt = "[Workspace::v1: /tmp/a\\]b]\nhello"
+    text_part = (
+        workspace_prompt
+        if text_key is None
+        else {"type": part_type, text_key: workspace_prompt}
+    )
+    sidecar = {
+        "role": "user",
+        "content": [
+            text_part,
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    state = {
+        "role": "user",
+        "content": "hello\n[screenshot]",
+        "timestamp": timestamp,
+        "api_content": "escaped-workspace provider wire content",
+    }
+
+    merged = merge_session_messages_append_only([sidecar], [state])
+
+    assert merged == [sidecar]
+    assert sidecar["api_content"] == "escaped-workspace provider wire content"
+
+
 def test_multimodal_mirror_does_not_match_rich_rows_or_copy_rich_sidecars():
     from api.models import (
         _copy_api_content_sidecar,
