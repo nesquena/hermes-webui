@@ -10462,28 +10462,21 @@ def _pre_compression_continuation_session_id(session) -> str | None:
                 seen.add(child_sid)
                 if _row_value(child, "pre_compression_snapshot", False):
                     frontier.append(child_sid)
-                else:
-                    candidates.append(child)
+                    continue
+                # User forks (session_source="fork") are not compression
+                # continuations: starting a turn on one would fork the archived
+                # conversation instead of continuing it (#6745 review).
+                if str(_row_value(child, "session_source") or "").strip().lower() == "fork":
+                    continue
+                candidates.append(child)
 
-        if not candidates:
+        # Fail closed on ambiguity: only a uniquely resolvable continuation is
+        # safe to hand to the client or to start a turn on. With several
+        # candidates (or none) the lineage is stale or racy — don't guess
+        # (#6745 review).
+        if len(candidates) != 1:
             return None
-        latest = max(
-            candidates,
-            key=lambda child: (
-                float(
-                    _safe_first(
-                        _row_value(child, "updated_at"),
-                        _row_value(child, "created_at"),
-                        0,
-                    ) or 0
-                ),
-                # Secondary tiebreaker so the index-fast-path and the sidecar-scan
-                # path resolve byte-identically on an updated_at/created_at tie
-                # (otherwise the chosen sid could differ by iteration order).
-                str(_safe_first(_row_value(child, "session_id"), "") or ""),
-            ),
-        )
-        latest_sid = _safe_first(_row_value(latest, "session_id", None)) or None
+        latest_sid = _safe_first(_row_value(candidates[0], "session_id", None)) or None
         # Only hand the client a well-formed session id (it gets written to URL/localStorage).
         if latest_sid and not is_safe_session_id(latest_sid):
             return None
@@ -24121,6 +24114,51 @@ def _handle_chat_start(handler, body, diag=None):
                 pass
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        # A mobile client can still hold a pre-compression snapshot id after
+        # context compression. The gateway refuses appends to a closed
+        # snapshot ("closed by compression; adopt its live continuation"), so a
+        # full agent turn would run and then fail to persist (response_len=0).
+        # Resolve to the live continuation here, mirroring the GET /api/session
+        # continuation hint, so the typed message lands in the active session.
+        if getattr(s, "pre_compression_snapshot", False):
+            continuation_sid = _pre_compression_continuation_session_id(s)
+            if not continuation_sid:
+                # Sealed snapshot without a uniquely resolvable live
+                # continuation: the gateway rejects appends to snapshots, so a
+                # turn started here would run and then fail to persist. Fail
+                # closed with a retryable 409 instead (#6745 review).
+                logger.warning(
+                    "refusing chat/start on archived snapshot %s: no unique loadable continuation",
+                    body["session_id"],
+                )
+                return bad(
+                    handler,
+                    f"session {body['session_id']} was archived by compression; reload its continuation session",
+                    409,
+                )
+            try:
+                s = _get_or_materialize_session(
+                    continuation_sid, refresh_cli_messages=True
+                )
+            except PermissionError:
+                # Read-only continuation (imported/subagent): preserve the 403
+                # contract of the direct-id load above (#6745 review).
+                return bad(
+                    handler,
+                    "Read-only imported sessions cannot be continued from WebUI",
+                    403,
+                )
+            except KeyError:
+                logger.warning(
+                    "resolved continuation %s for snapshot %s but it is not loadable; refusing to append to the sealed snapshot",
+                    continuation_sid,
+                    body["session_id"],
+                )
+                return bad(
+                    handler,
+                    f"session {body['session_id']} was archived by compression; its continuation {continuation_sid} is not loadable, reload and retry",
+                    409,
+                )
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         active_profile = _get_active_profile_name()
