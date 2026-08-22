@@ -13272,6 +13272,21 @@ def handle_get(handler, parsed) -> bool:
         from api.config import get_auxiliary_models
         return j(handler, get_auxiliary_models())
 
+    # ── Model scheduler (model-router) ──
+    # Optional model recommendation: difficulty + urgency -> best model,
+    # driven by the user-editable model-policy.json. Off by default.
+    if parsed.path == "/api/model-router/status":
+        from api import model_router
+        return j(handler, model_router.get_status())
+
+    if parsed.path == "/api/model-router/policy":
+        from api import model_router
+        try:
+            return j(handler, model_router.get_policy())
+        except Exception:
+            logger.exception("model-router get_policy failed")
+            return bad(handler, "policy load failed", status=500)
+
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -16691,6 +16706,46 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(e), 403)
         except (ValueError, FileExistsError, RuntimeError) as e:
             return bad(handler, str(e))
+
+    # ── Model scheduler (model-router): recommend + policy update + failure cooldown ──
+    if parsed.path == "/api/model-router/recommend":
+        from api import model_router
+        payload = body if isinstance(body, dict) else {}
+        text = str(payload.get("text") or "")
+        try:
+            messages = max(0, int(payload.get("message_count", 0)))
+        except (TypeError, ValueError):
+            messages = 0
+        session_id = str(payload.get("session_id") or "") or None
+        return j(handler, model_router.recommend(text, message_count=messages, session_id=session_id))
+
+    if parsed.path == "/api/model-router/policy":
+        from api import model_router
+        try:
+            updates = body if isinstance(body, dict) else {}
+            policy = model_router.update_policy(updates)
+            return j(handler, policy)
+        except RuntimeError as exc:
+            # model-scheduler library not installed -> clear 503, not a 500.
+            return bad(handler, str(exc), status=503)
+        except (TypeError, ValueError) as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception:
+            logger.exception("model-router update_policy failed")
+            return bad(handler, "policy update failed", status=500)
+
+    if parsed.path == "/api/model-router/failure":
+        from api import model_router
+        try:
+            payload = body if isinstance(body, dict) else {}
+            model_router.record_failure(
+                payload.get("model") or "",
+                payload.get("model_provider") or None,
+            )
+            return j(handler, {"ok": True})
+        except Exception:
+            logger.exception("model-router record_failure failed")
+            return j(handler, {"ok": False}, status=500)
 
     if parsed.path == "/api/profile/delete":
         name = body.get("name", "").strip()

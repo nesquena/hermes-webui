@@ -114,6 +114,17 @@ function _chatPayloadModelState(){
   return {model,model_provider:_chatPayloadModelProvider(model)};
 }
 
+function _recordModelRouterFailure(modelState) {
+  if (typeof window.ModelRouter === 'undefined' || !window.ModelRouter || typeof window.ModelRouter.recordFailure !== 'function') return;
+  try {
+    // Greptile P1: 优先用发起请求时捕获的模型状态（会话 A），
+    // 避免失败处理时用户已切到会话 B 而冷却错误模型；
+    // 无参调用（流式 apperror）兜底重读当前会话模型，保持原行为。
+    const _ms = modelState || _chatPayloadModelState();
+    window.ModelRouter.recordFailure(_ms.model, _ms.model_provider);
+  } catch (_e) { /* cooldown delivery must never break error UI */ }
+}
+
 function _deferStreamErrorIfOffline(){
   if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
     setComposerStatus(t('offline_stream_waiting'));
@@ -1611,8 +1622,32 @@ async function send(){
   }
   if(!S.session){await newSession();await renderSessionList();}
 
+  // Greptile P1: 在 model-router await 之前锁定本次 send 的所属会话。
+  // 若 /recommend 请求期间用户切换会话，后续草稿清理、上传与
+  // /api/chat/start 仍必须发往发起会话，而不是新切换的会话。
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+  const sessionAtSend=S.session; // 引用捕获（不是复制），用于 await 后 fail-closed 守卫
+
+  // Model scheduler: 若开关启用（设置总开关 + composer Auto），发送前获取
+  // 推荐并应用到模型下拉。该调用不阻塞发送，失败保持当前模型。
+  // 此 await 已从 send() 开头移到会话锁定之后（Greptile P1）。
+  if(typeof window.ModelRouter!=='undefined'&&window.ModelRouter&&typeof window.ModelRouter.beforeSend==='function'){
+    try{await window.ModelRouter.beforeSend(text);}catch(_e){}
+  }
+
+  // Greptile: await 期间用户切换会话 → 中止本次发送（fail closed），
+  // 避免后续代码用新会话的全局 S 状态发送旧会话的消息。
+  if(S.session!==sessionAtSend||S.session.session_id!==activeSid){
+    _sendInProgress=false;_sendInProgressSid=null;
+    if(typeof showToast==='function') showToast('Conversation switched while sending; message not sent.',2500);
+    return;
+  }
+
+  // Greptile P1: beforeSend 之后（推荐模型已应用、会话未变）捕获实际发送
+  // 的模型状态。不能更早——beforeSend 可能把模型从 A 切到 B，早捕获会
+  // 冷却旧模型；也不能等失败时重读全局 S（用户可能已切会话）。
+  const failedModelState = _chatPayloadModelState();
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -1862,6 +1897,11 @@ async function send(){
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
     stopClarifyPolling();
+    // 非流式 /api/chat/start 失败：通知 model scheduler 记录 failure cooldown。
+    // 404 会话失效已在前方 return；active-stream 冲突由 conflictActiveStream 排除。
+    // Greptile P1: 传入 send() 捕获的 failedModelState（会话 A 的模型），
+    // 避免失败处理时重读全局 S 而冷却用户刚切换到的会话 B 的模型。
+    if (!conflictActiveStream && typeof _recordModelRouterFailure === 'function') _recordModelRouterFailure(failedModelState);
     // Only hide approval card if it belongs to the session that just finished
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
@@ -2012,6 +2052,12 @@ const _STREAM_NOTIFICATION_BACKGROUND={};
 // keeps the prior state when the streamId matches. One idempotent
 // visibilitychange listener (never leaks) flips wasHidden on all active entries.
 const _STREAM_WAS_HIDDEN={};
+// Greptile P1: per-stream 捕获的流式请求模型状态。key 为 session id，
+// entry {streamId, modelState}；streamId 是服务端流式请求的唯一标识，
+// 同一条流重连必须复用原始捕获值，不能重读 composer。生命周期与
+// _STREAM_WAS_HIDDEN 一致：terminal/done 路径随 _clearStreamHidden 清理，
+// 新 streamId attach 时覆盖旧值。
+const _STREAM_MODEL_STATE={};
 let _streamHiddenTrackerBound=false;
 function _bindStreamHiddenTracker(){
   if(_streamHiddenTrackerBound||typeof document==='undefined'||typeof document.addEventListener!=='function') return;
@@ -2029,6 +2075,10 @@ function _clearStreamHidden(sid, streamId){
   if(!e) return;
   if(streamId&&e.streamId&&e.streamId!==streamId) return;
   delete _STREAM_WAS_HIDDEN[sid];
+  // Greptile P1: per-stream 模型状态与 hidden tracker 同生命周期，一并清理，
+  // 避免流结束后残留旧 stream 的捕获值。
+  const _m=_STREAM_MODEL_STATE[sid];
+  if(_m && (!streamId || !_m.streamId || _m.streamId===streamId)) delete _STREAM_MODEL_STATE[sid];
 }
 function _clearStreamNotificationBackground(sid, streamId){
   if(!sid) return;
@@ -2129,6 +2179,18 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  // Greptile P1: 流式请求发起时捕获模型，避免用户切换下拉框后冷却错模型。
+  // 同一 streamId 的重连必须复用原始捕获值：服务端实际流式请求仍用发起时的
+  // 模型 A，而 composer 此时可能已切到 B；重新捕获会把失败冷却到健康的 B。
+  const _existingStreamModelEntry = _STREAM_MODEL_STATE[activeSid];
+  const _storedStreamModel = _existingStreamModelEntry && _existingStreamModelEntry.streamId===streamId
+    ? _existingStreamModelEntry.modelState
+    : null;
+  const _streamModelState = _storedStreamModel || _chatPayloadModelState();
+  // 只有新 streamId（或首次 attach）才捕获并存根；同一条流保持原始捕获值。
+  if(!_storedStreamModel){
+    _STREAM_MODEL_STATE[activeSid]={streamId, modelState:_streamModelState};
+  }
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
     :Date.now()/1000;
@@ -6613,6 +6675,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isToolLimitReached=d.type==='tool_limit_reached';
           isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
+          if (typeof _recordModelRouterFailure === 'function' &&
+              (isRateLimit || isQuotaExhausted || isAuthMismatch || isGatewayAuthError || isModelNotFound || isNoResponse)) {
+            // Greptile P1: 冷却实际流式请求使用的模型，避免用户切换下拉框后冷却错模型。
+            _recordModelRouterFailure(_streamModelState);
+          }
           const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isCompressionExhausted?'Context compression exhausted':isToolLimitReached?'Tool iteration limit reached':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';

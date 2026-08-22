@@ -12,6 +12,14 @@
 # CPU/RAM metrics on platforms without /proc:  pip install psutil>=5.9
 pyyaml>=6.0
 cryptography>=42.0
+# OPTIONAL: Model scheduler (Settings -> Model scheduler) needs `model-scheduler`.
+# It is intentionally NOT a hard dependency — when it is absent the scheduler
+# stays disabled and endpoints degrade gracefully (status/recommend return a
+# clear "model-scheduler not installed" payload; policy updates return 503).
+# The feature is off by default. Install it only if you want per-message model
+# recommendation based on task difficulty, free-quota and peak hours.
+# v0.2.1 adds session_id passthrough and format/parse selector key helpers:
+#   pip install model-scheduler>=0.2.1
 # OPTIONAL: Office workspace preview/edit support needs these parsers.
 # The workspace file routes return 503 with an install hint when they are absent.
 # Install them only if you want .docx/.xlsx/.pptx preview support:

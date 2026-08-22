@@ -9665,6 +9665,7 @@ _SETTINGS_DEFAULTS = {
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
+    "model_scheduler_enabled": False,  # opt-in: model scheduler (Settings -> Model scheduler); off by default
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
     "large_text_paste_as_attachment": True,  # convert very large composer text pastes into .md attachments by default
     "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
@@ -10008,6 +10009,7 @@ _SETTINGS_BOOL_KEYS = {
     "workspace_todos_tab",
     "api_redact_enabled",
     "session_jump_buttons",
+    "model_scheduler_enabled",
     "render_user_markdown",
     "large_text_paste_as_attachment",
     "project_quick_create_buttons",
