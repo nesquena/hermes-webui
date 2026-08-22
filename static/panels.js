@@ -11699,6 +11699,14 @@ function _buildProviderCard(p){
   return card;
 }
 
+function _invalidateLiveModelCacheForProvider(providerId, canonicalProvider, profileOverride=null){
+  if(typeof window._invalidateLiveModelCache!=='function') return;
+  const requested=String(providerId||'').trim().toLowerCase();
+  const canonical=String(canonicalProvider||'').trim().toLowerCase();
+  if(requested) window._invalidateLiveModelCache(requested, profileOverride);
+  if(canonical&&canonical!==requested) window._invalidateLiveModelCache(canonical, profileOverride);
+}
+
 async function _saveProviderKey(providerId){
   const els=_providerCardEls.get(providerId);
   if(!els) return;
@@ -11707,6 +11715,7 @@ async function _saveProviderKey(providerId){
     showToast(t('providers_enter_key'));
     return;
   }
+  const initiatingProfile=(typeof S!=='undefined'&&S)?S.activeProfile:null;
   els.saveBtn.disabled=true;
   els.saveBtn.textContent=t('providers_saving');
   try{
@@ -11714,6 +11723,9 @@ async function _saveProviderKey(providerId){
     if(res.ok){
       showToast(res.provider+' key '+res.action);
       els.input.value='';
+      if(typeof _invalidateLiveModelCacheForProvider==='function'){
+        _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
+      }
       // Invalidate every dropdown surface that caches /api/models so the
       // newly-configured provider's models show up without a server restart
       // or page reload (#1539). Server-side invalidate_models_cache() is
@@ -11735,11 +11747,13 @@ async function _saveProviderKey(providerId){
 async function _removeProviderKey(providerId){
   const els=_providerCardEls.get(providerId);
   if(!els) return;
+  const initiatingProfile=(typeof S!=='undefined'&&S)?S.activeProfile:null;
   if(els.saveBtn){els.saveBtn.disabled=true;els.saveBtn.textContent=t('providers_removing');}
   try{
     const res=await api('/api/providers/delete',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(res.provider+' key '+t('providers_key_removed').toLowerCase());
+      _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
       // Drop the removed provider from every cached dropdown surface so it
       // disappears immediately — composer picker, /model slash command,
       // Settings → Default Model, configured-model badges (#1539).
@@ -11846,6 +11860,7 @@ async function _saveSelfHostedProvider(providerId){
     return;
   }
   if(!els.saveBtn) return;
+  const initiatingProfile=(typeof S!=='undefined'&&S)?S.activeProfile:null;
   const saveBtn=els.saveBtn;
   const prevLabel=saveBtn.textContent;
   saveBtn.disabled=true;
@@ -11857,6 +11872,9 @@ async function _saveSelfHostedProvider(providerId){
     if(res&&res.ok){
       showToast(`${res.provider} configured`);
       if(els.apiKeyInput) els.apiKeyInput.value='';
+      if(typeof _invalidateLiveModelCacheForProvider==='function'){
+        _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
+      }
       _refreshModelDropdownsAfterProviderChange();
       await loadProvidersPanel();
     }else{
@@ -11877,7 +11895,9 @@ async function _saveSelfHostedProvider(providerId){
 // flushes the JS-side caches so the next render rebuilds from a fresh
 // /api/models response. Wrapped in a try/catch so a UI module that hasn't
 // loaded yet (e.g. during early Settings open) cannot break the save flow.
-function _refreshModelDropdownsAfterProviderChange(){
+function _refreshModelDropdownsAfterProviderChange(opts){
+  opts=opts||{};
+  let rebuild=Promise.resolve();
   try{
     if(typeof window._invalidateSlashModelCache==='function'){
       window._invalidateSlashModelCache();
@@ -11887,24 +11907,38 @@ function _refreshModelDropdownsAfterProviderChange(){
     // on the very next paint frame.
     if(typeof window._ensureModelDropdownReady==='function'){
       window._modelDropdownReady=null;
-      Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+      rebuild=Promise.resolve(window._ensureModelDropdownReady());
     }else if(typeof populateModelDropdown==='function'){
-      Promise.resolve(populateModelDropdown()).catch(()=>{});
+      rebuild=Promise.resolve(populateModelDropdown());
     }
   }catch(_e){
     // Swallow — dropdown refresh is best-effort, providers panel must still update.
   }
+  if(opts&&opts.awaitRebuild) return rebuild;
+  rebuild.catch(()=>{});
+  return rebuild;
 }
 
 async function _refreshProviderModels(providerId, btn){
+  const initiatingProfile=(typeof S!=='undefined'&&S)?S.activeProfile:null;
   btn.disabled=true;
   const orig=btn.innerHTML;
   btn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> ${t('providers_refreshing')||'Refreshing...'}`;
   try{
-    const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
-    if(res.ok){
-      showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
-      _refreshModelDropdownsAfterProviderChange();
+     const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
+     if(res.ok){
+       _invalidateLiveModelCacheForProvider(providerId,res.provider,initiatingProfile);
+       const currentProfile=(typeof S!=='undefined'&&S)?S.activeProfile:null;
+       if(currentProfile!==initiatingProfile) return;
+       if(typeof _fetchLiveModels==='function'){
+         const fresh=await _fetchLiveModels(res.provider||providerId,null,null,{required:true});
+         const profileAfterFetch=(typeof S!=='undefined'&&S)?S.activeProfile:null;
+         if(profileAfterFetch!==initiatingProfile||!fresh) return;
+       }
+       await _refreshModelDropdownsAfterProviderChange();
+       const profileAfterRebuild=(typeof S!=='undefined'&&S)?S.activeProfile:null;
+       if(profileAfterRebuild!==initiatingProfile) return;
+       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
     }else{
       showToast(res.error||'Failed to refresh models');
     }

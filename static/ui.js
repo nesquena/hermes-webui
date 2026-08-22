@@ -3700,6 +3700,24 @@ async function populateModelDropdown(opts={}){
 
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
+const _liveModelCacheGen={};
+function _liveModelCacheKey(provider, profileOverride=null){
+  const p=String(provider||'').trim().toLowerCase();
+  const profile=(profileOverride!==null&&profileOverride!==undefined)
+    ? String(profileOverride).trim().toLowerCase()
+    : (typeof S!=='undefined'&&S&&S.activeProfile)
+    ? String(S.activeProfile).trim().toLowerCase()
+    : 'default';
+  return `${profile||'default'}::${p}`;
+}
+function _invalidateLiveModelCache(provider, profileOverride=null){
+  const p=String(provider||'').trim().toLowerCase();
+  if(!p) return;
+  const cacheKey=_liveModelCacheKey(p, profileOverride);
+  delete _liveModelCache[cacheKey];
+  _liveModelCacheGen[cacheKey]=(_liveModelCacheGen[cacheKey]||0)+1;
+}
+window._invalidateLiveModelCache=_invalidateLiveModelCache;
 // Tracks providers for which a live-model fetch is in flight.
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
@@ -3804,37 +3822,51 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
-  if(!provider||!sel) return;
+async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
+  const required=!!(opts&&opts.required);
+  provider=String(provider||'').trim().toLowerCase();
+  if(!provider||(!sel&&!required)) return required?Promise.reject(new Error('provider is required')):undefined;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  const cacheKey=_liveModelCacheKey(provider);
+  const generation=_liveModelCacheGen[cacheKey]||0;
+  const pendingKey=`${cacheKey}:${generation}`;
   // Already fetched — apply cached models to this select element (#872)
-  if(_liveModelCache[provider]){
+  if(!required&&_liveModelCache[cacheKey]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[cacheKey],sel);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
-    return;
+    return _liveModelCache[cacheKey];
   }
-  _liveModelFetchPending.add(provider);
+  const pendingToken=`${pendingKey}:${Math.random()}`;
+  _liveModelFetchPending.add(pendingToken);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(_redirectIfUnauth(_liveRes)) return;
+    if(!_liveRes.ok) throw new Error(t('providers_live_models_request_failed'));
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    if(!data.models||!data.models.length) return;
-    _liveModelCache[provider]=data.models;
+    if(!data.models||!data.models.length){
+      if(required) throw new Error(t('providers_live_models_empty'));
+      return;
+    }
+    if(generation!==(_liveModelCacheGen[cacheKey]||0)) return;
+    _liveModelCache[cacheKey]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(!sel) return data.models;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
+    return data.models;
   }catch(e){
+    if(required) throw e;
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    _liveModelFetchPending.delete(pendingToken);
   }
 }
 
@@ -11080,7 +11112,13 @@ function syncTopbar(){
         // Also defer if a live model fetch is still in flight — the model may be
         // in the list once the fetch completes. Persisting now would corrupt the
         // session with the wrong model before live models arrive (#1169).
-        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        const activeProvider=window._activeProvider&&String(window._activeProvider).trim().toLowerCase();
+        const activeCacheKey=activeProvider?_liveModelCacheKey(activeProvider):'';
+        const activePendingPrefix=activeCacheKey
+          ? `${activeCacheKey}:${_liveModelCacheGen[activeCacheKey]||0}:`
+          : '';
+        const liveStillPending=!!activePendingPrefix&&Array.from(_liveModelFetchPending)
+          .some(token=>String(token).startsWith(activePendingPrefix));
         if(liveStillPending||missingModelIsRoutable){
           // Live fetch in flight — don't touch sel.value or S.session.model yet.
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
