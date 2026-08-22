@@ -625,6 +625,48 @@ def read_importable_agent_session_rows(
                 except sqlite3.Error:
                     pass  # read-only db / locked / older schema — degrade gracefully
 
+        # Covering index for the projection's aggregate columns.
+        #
+        # ``idx_messages_session`` above only covers the *candidate ordering*
+        # subquery (``MAX(mx.timestamp)``). The main projection additionally
+        # aggregates ``m.role`` via ``user_message_count_expr``
+        # (``COUNT(CASE WHEN LOWER(m.role) = 'user' ...)``), and no agent index
+        # contains ``role``. SQLite therefore drives the LEFT JOIN through
+        # ``idx_messages_session_id (session_id, id)`` and fetches every matching
+        # ``messages`` row from the table to read ``role``/``timestamp`` — the
+        # join degrades linearly with total message volume rather than with the
+        # bounded candidate window.
+        #
+        # Measured on a 1.4 GB state.db (1327 sessions / 175789 messages): the
+        # projection took 6.0-8.7s, of which the role aggregate was ~95% —
+        # dropping only that expression took the same query to 0.49s. Adding
+        # ``(session_id, timestamp, role)`` lets the join run as a COVERING
+        # INDEX scan: 6.0s -> 0.35s, with byte-identical results (an index
+        # changes the query plan, never the rows). On a 970 MB state.db the same
+        # projection went 443ms -> 23ms. Index cost is ~8 MB on the larger db.
+        #
+        # Same self-heal contract as #3887: best-effort on a separate writable
+        # connection, and a read-only/locked db simply keeps the old plan.
+        if messages_index_present and 'role' in message_cols:
+            try:
+                cur.execute("PRAGMA index_list(messages)")
+                has_covering = any(
+                    str(row[1]) == "idx_messages_session_ts_role"
+                    for row in cur.fetchall()
+                )
+            except sqlite3.Error:
+                has_covering = True  # cannot introspect — leave the db alone
+            if not has_covering:
+                try:
+                    with closing(sqlite3.connect(str(db_path))) as _heal:
+                        _heal.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_messages_session_ts_role "
+                            "ON messages(session_id, timestamp, role)"
+                        )
+                        _heal.commit()
+                except sqlite3.Error:
+                    pass  # read-only db / locked / older schema — degrade gracefully
+
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
             if 'role' in message_cols:
