@@ -2986,6 +2986,7 @@ function _getOptionProviderId(opt){
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.toLowerCase().startsWith('openrouter/')) return 'openrouter';
   return '';
 }
 function _modelPickerOptionIdentity(modelId, providerId){
@@ -3002,6 +3003,8 @@ function _modelPickerOptionIdentity(modelId, providerId){
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
+  }else if(provider.toLowerCase()==='openrouter'&&value.toLowerCase().startsWith('openrouter/')){
+    value=value.substring('openrouter/'.length);
   }
   return value.replace(/-/g,'.').toLowerCase();
 }
@@ -3052,12 +3055,23 @@ function _modelStateForSelect(sel, modelId){
       ?Array.from(sel.options).find(o=>String(o.value||'')===value)
       :null;
     const routedModel=selected&&selected.dataset&&selected.dataset.model;
-    // Read the provider from the matched option's authoritative data-provider
-    // rather than re-parsing the value at its LAST colon: a colon-bearing model
-    // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
-    // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
-    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+    let strippedModel=routedModel;
+    if(!strippedModel){
+      if(explicitProvider.startsWith('custom:')){
+        const prefix=`@${explicitProvider}:`;
+        if(value.toLowerCase().startsWith(prefix.toLowerCase())){
+          strippedModel=value.slice(prefix.length);
+        }
+      }else if(explicitProvider==='openrouter'){
+        if(value.toLowerCase().startsWith('@openrouter:')){
+          strippedModel=value.slice('@openrouter:'.length);
+        }else if(value.toLowerCase().startsWith('openrouter/')){
+          strippedModel=value.slice('openrouter/'.length);
+        }
+      }
+    }
+    return {model:strippedModel||value,model_provider:routedProvider||explicitProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
@@ -3078,7 +3092,13 @@ function _modelStateForSelect(sel, modelId){
     opt=Array.from(sel.options).find(o=>String(o.value||'')===value)||null;
   }
   const provider=String(_getOptionProviderId(opt)||'').trim();
-  return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
+  let model=value;
+  if(opt&&opt.dataset&&opt.dataset.model){
+    model=opt.dataset.model;
+  }else if(provider.toLowerCase()==='openrouter'&&model.toLowerCase().startsWith('openrouter/')){
+    model=model.slice('openrouter/'.length);
+  }
+  return {model:model,model_provider:(provider&&provider!=='default')?provider:null};
 }
 function _captureModelDropdownSelection(sel){
   if(!sel||!sel.value) return null;
@@ -3495,9 +3515,12 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   }
   const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
   const rawModel=String(modelId||'');
-  const bareModel=explicitPrefix&&rawModel.toLowerCase().startsWith(explicitPrefix.toLowerCase())
-    ?rawModel.slice(explicitPrefix.length)
-    :rawModel;
+  let bareModel=rawModel;
+  if(explicitPrefix&&rawModel.toLowerCase().startsWith(explicitPrefix.toLowerCase())){
+    bareModel=rawModel.slice(explicitPrefix.length);
+  }else if(requestedProvider.toLowerCase()==='openrouter'&&rawModel.toLowerCase().startsWith('openrouter/')){
+    bareModel=rawModel.slice('openrouter/'.length);
+  }
   const value=requestedProvider?`${explicitPrefix}${bareModel}`:rawModel;
   const opt=document.createElement('option');
   opt.value=value;
