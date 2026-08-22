@@ -712,7 +712,8 @@ def test_branchable_read_only_helper_accepts_cron_sources():
     assert "function _isBranchableReadOnlySession(session)" in src
     assert "session && session.source_tag" in src
     assert "session && session.raw_source" in src
-    assert "sources.includes('cron')" in src
+    assert ".find(Boolean)" in src
+    assert "return source === 'cron'" in src
     assert "sid.startsWith('cron_')" not in src
     assert "sid.startsWith('cron-')" not in src
 
