@@ -526,6 +526,28 @@ def _resolve_profile_home_for_name(name: str) -> Path:
     return _resolve_named_profile_home(name)
 
 
+def is_valid_profile_identity(name: str) -> bool:
+    """Return True when *name* is a resolvable profile identity.
+
+    ``_resolve_profile_home_for_name`` deliberately maps invalid names (path
+    traversal, anything not matching the profile-id shape) to the ROOT home —
+    a safe default for path resolution, but a cross-profile leak for callers
+    that must load a *session's* config: an invalid stored ``session.profile``
+    would load the ROOT config. Fail-closed callers (e.g. the #6648 custom
+    provider slug normalizer config load) validate with this helper BEFORE
+    resolving and treat ``False`` as "no identity" (return None).
+
+    ``None``/empty (root convention), root aliases ('default', a renamed root
+    display name), and syntactically valid named profiles return True;
+    everything else False.
+    """
+    if not name:
+        return True
+    if _is_root_profile(name):
+        return True
+    return bool(_PROFILE_ID_RE.fullmatch(str(name)))
+
+
 def get_active_hermes_home() -> Path:
     """Return the HERMES_HOME path for the currently active profile.
 

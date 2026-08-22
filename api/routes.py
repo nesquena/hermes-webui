@@ -6616,6 +6616,114 @@ def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
     return model, None
 
 
+def _normalize_custom_qualified_session_model(
+    model: str,
+    provider: str | None,
+    *,
+    profile_config: dict | None = None,
+) -> tuple[str, str] | None:
+    """#6648: map session-persisted custom-provider formats to canonical slugs.
+
+    Sessions created with a named custom OpenAI-compatible provider persist the
+    model in forms the Hermes runtime cannot resolve:
+
+      - ``@custom:<slug>:<model>`` (qualifier ``custom:<slug>``)
+      - ``custom/<model>``        (slash form persisted under a ``custom:<slug>`` provider)
+
+    The runtime only knows the canonical provider slug (e.g. ``sensenova-primary``),
+    so the ``custom:`` prefix must be stripped. Returns ``(model, provider)``
+    normalized to ``<slug>/<bare>`` / ``<slug>`` when the qualifier matches a
+    NAMED ``custom_providers`` entry, else ``None`` (caller keeps current
+    behavior — e.g. endpoint-derived ``custom:<host>:<port>`` slugs stay as-is).
+
+    Only qualifiers that THEMSELVES start with ``custom:`` are eligible — never a
+    bare ``custom/`` model-prefix match or an arbitrary provider name (``moa``,
+    ``openai``, ...), which would hijack unrelated routes (#6718 re-gate). The
+    canonical slug always comes from the CONFIGURED entry (the profile's
+    ``custom_providers`` qualified value), not from the raw stored string.
+
+    The lookup runs against ``profile_config`` when supplied (the session's own
+    profile config.yaml), with NO fallback to the module-global config — a slug
+    removed from the session's own profile must not be remapped from another
+    profile's ``custom_providers``.
+    """
+    # #6718 re-gate (CORE 2 follow-up): fail closed. A ``None`` profile config
+    # must NEVER fall through to the module-global ``api.config.cfg``
+    # (``_custom_provider_entries`` defaults to it when handed a non-dict) —
+    # otherwise a slug removed from the session's own profile gets remapped
+    # from another profile's (or the process-global) ``custom_providers``.
+    # Callers that need normalization (chat/start, /api/session/new,
+    # /api/session/update) thread the session's own profile config here.
+    if not isinstance(profile_config, dict):
+        return None
+    bare: str | None = None
+    qualifier: str | None = None
+    if model.startswith("@"):
+        bare, qualifier = _split_provider_qualified_model(model)
+    elif model.lower().startswith("custom/") and provider:
+        bare = model.split("/", 1)[1].strip()
+        qualifier = provider
+    else:
+        return None
+    qualifier = _clean_session_model_provider(qualifier)
+    if not bare or not qualifier or not qualifier.startswith("custom:"):
+        return None
+
+    try:
+        from api.config import _named_custom_provider_slug_for_provider
+        from api.config import _custom_slug_rest_looks_like_host_port
+    except Exception:
+        return None
+    slug = _named_custom_provider_slug_for_provider(
+        qualifier,
+        config_obj=profile_config,
+    )
+    if not slug and model.startswith("@") and ":" in qualifier:
+        # #6718 (greptile-apps[bot]): a model id that itself contains ':' (e.g.
+        # "@custom:sensenova-primary:model:free" where the model is
+        # "model:free") makes _split_provider_qualified_model's rsplit fold the
+        # model's tail into the qualifier ("custom:sensenova-primary:model"),
+        # which matches no configured slug, so normalization is skipped and the
+        # session stays broken. Walk back colon-by-colon, re-attaching the
+        # eaten segments to the model, until the qualifier resolves to a
+        # configured named slug. Fail closed: only a REAL configured match
+        # triggers.
+        #
+        # The CONFIGURED shorter prefix is authoritative and is checked BEFORE
+        # the endpoint classification (greptile P1 re-gate): a named provider
+        # 'custom:localhost' receiving a colon-bearing model like '8080:Qwen3'
+        # produces qualifier 'custom:localhost:8080', which the host:port
+        # heuristic would otherwise classify as an endpoint before the
+        # configured prefix is ever consulted. Genuine endpoint-derived slugs
+        # (custom:<host>:<port>, #1776 form) stay unchanged because the
+        # walk-back only fires on a REAL configured match, and an
+        # endpoint-shaped qualifier with no configured prefix falls through to
+        # the host:port check below and returns None.
+        parts = qualifier.split(":")
+        for i in range(len(parts) - 1, 1, -1):
+            candidate = ":".join(parts[:i])
+            candidate_slug = _named_custom_provider_slug_for_provider(
+                candidate,
+                config_obj=profile_config,
+            )
+            if candidate_slug:
+                slug = candidate_slug
+                bare = ":".join(parts[i:] + [bare])
+                break
+        if not slug and _custom_slug_rest_looks_like_host_port(
+            qualifier.removeprefix("custom:")
+        ):
+            # Endpoint-derived custom:<host>:<port> slug with no configured
+            # prefix to walk back to: keep the #1776 form untouched.
+            return None
+    if not slug:
+        return None
+    canonical = slug.removeprefix("custom:")
+    if not canonical:
+        return None
+    return f"{canonical}/{bare}", canonical
+
+
 def _model_matches_configured_default(
     session_model: str | None,
     cfg_default: str | None,
@@ -7047,8 +7155,20 @@ def _read_profile_model_config(
 
     try:
         from api.profiles import get_hermes_home_for_profile
+        from api.profiles import is_valid_profile_identity
 
         _profile_name = str(session.profile or "")
+        # #6718 review 3 (SILENT): fail closed on an INVALID persisted
+        # session.profile. ``get_hermes_home_for_profile`` maps names that do
+        # not match the profile-id shape to the ROOT home, so an invalid
+        # stored name would load the ROOT config here — and this function's
+        # ``profile_config`` result feeds the custom-provider slug normalizer
+        # (GET /api/session display, chat/start wakeup, goal paths), letting a
+        # root-only provider slug remap inside that session. Validate BEFORE
+        # resolution; anything that is neither a root alias nor a valid named
+        # profile yields None (no config), never the root fallback.
+        if not is_valid_profile_identity(_profile_name):
+            return None, None, None
         _profile_home = get_hermes_home_for_profile(_profile_name)
         _profile_cfg_path = os.path.join(str(_profile_home), "config.yaml")
         if not os.path.isfile(_profile_cfg_path):
@@ -7162,14 +7282,27 @@ def _read_profile_config_cached(profile_name: str, cfg_path: str) -> dict | None
 
 
 def _load_profile_config_dict(session) -> dict | None:
-    """Load the session profile's config.yaml as a dict, or None."""
-    if not getattr(session, "profile", None):
+    """Load the session profile's config.yaml as a dict, or None.
+
+    #6718 review 3 (SILENT): fail closed on an INVALID persisted profile name.
+    ``get_hermes_home_for_profile`` resolves names that do not match the
+    profile-id shape to the ROOT home, so an invalid stored ``session.profile``
+    used to load the root config — letting a root-only custom-provider slug
+    remap inside that session. The identity is validated BEFORE resolution;
+    anything that is neither a root alias nor a syntactically valid named
+    profile yields None (no config), never the root fallback.
+    """
+    _profile = getattr(session, "profile", None)
+    if not _profile:
         return None
     try:
         from api.profiles import get_hermes_home_for_profile
+        from api.profiles import is_valid_profile_identity
 
+        if not is_valid_profile_identity(str(_profile)):
+            return None
         _profile_cfg_path = os.path.join(
-            str(get_hermes_home_for_profile(session.profile)),
+            str(get_hermes_home_for_profile(_profile)),
             "config.yaml",
         )
         if not os.path.isfile(_profile_cfg_path):
@@ -7338,6 +7471,22 @@ def _resolve_compatible_session_model_state(
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    # #6648: session-persisted custom-provider qualifiers ("@custom:<slug>:<model>"
+    # or "custom/<model>") carry the "custom:" prefix the Hermes runtime does not
+    # recognize — it only knows the canonical provider slug. Normalize to
+    # "<slug>/<bare_model>" when the qualifier matches a named custom_providers
+    # entry in the SESSION's own profile config (profile_config) so chat/start
+    # routes in a single API call instead of exhausting the full fallback chain
+    # (10-30x slower). Runs before every fast path below so no branch can return
+    # the broken "@custom:..." form verbatim; non-custom qualifiers (moa, openai,
+    # ...) and unknown custom slugs fall through unchanged (#6718 re-gate).
+    _custom_norm = _normalize_custom_qualified_session_model(
+        model,
+        requested_provider,
+        profile_config=profile_config,
+    )
+    if _custom_norm is not None:
+        return _custom_norm[0], _custom_norm[1], True
     if model and requested_provider == "moa":
         return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
@@ -7983,6 +8132,8 @@ def _session_model_state_from_request(
     model: str | None,
     requested_provider: str | None,
     current_provider: str | None = None,
+    *,
+    profile_config: dict | None = None,
 ) -> tuple[str | None, str | None]:
     model_value = str(model).strip() if model is not None else None
     provider = (
@@ -7999,6 +8150,7 @@ def _session_model_state_from_request(
         model_value, provider, _changed = _resolve_compatible_session_model_state(
             model_value,
             provider,
+            profile_config=profile_config,
         )
     return model_value, provider
 
@@ -15282,9 +15434,49 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
+        # #6718 re-gate: the custom-provider slug normalizer must resolve under
+        # the session's OWN profile config (fail-closed when unreadable) —
+        # never the process-global config, which may belong to another profile.
+        # #6718 review 3 (CORE): resolve ONE authoritative session profile
+        # identity — the explicit body.profile, else the active profile that
+        # new_session() would otherwise stamp the session with — and use that
+        # SAME identity for both the profile-config load below and
+        # new_session(profile=...) below. Previously an omitted body.profile
+        # loaded the DEFAULT (root) config while the session was stamped with
+        # the active NAMED profile: two different identities in one request,
+        # letting a root-only custom-provider slug remap inside another
+        # profile's session. An explicit body.profile that is not a valid
+        # profile identity also fails closed (no config) instead of resolving
+        # to the root home.
+        _profile_name = str(body.get("profile") or "").strip() or None
+        if _profile_name is None:
+            try:
+                _profile_name = str(_get_active_profile_name() or "").strip() or None
+            except Exception:
+                _profile_name = None
+        _session_profile_config = None
+        try:
+            from api.profiles import get_hermes_home_for_profile
+            from api.profiles import is_valid_profile_identity
+
+            if _profile_name is not None and not is_valid_profile_identity(_profile_name):
+                _session_profile_config = None
+            else:
+                _p_cfg_path = os.path.join(
+                    str(get_hermes_home_for_profile(_profile_name)),
+                    "config.yaml",
+                )
+                if os.path.isfile(_p_cfg_path):
+                    _session_profile_config = _read_profile_config_cached(
+                        str(_profile_name or ""),
+                        _p_cfg_path,
+                    )
+        except Exception:
+            _session_profile_config = None
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
+            profile_config=_session_profile_config,
         )
         try:
             enabled_toolsets = _validate_session_toolsets_shape(body.get("enabled_toolsets"))
@@ -15350,7 +15542,9 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
+            # Same authoritative identity resolved above (body.profile, else the
+            # active profile): the config load and the session stamp must agree.
+            profile=_profile_name,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
@@ -15837,10 +16031,13 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
+                # #6718 re-gate: normalize under the session's OWN profile
+                # config (fail-closed when unreadable), never process-global.
                 model, provider = _session_model_state_from_request(
                     body.get("model", s.model),
                     body.get("model_provider") if "model_provider" in body else None,
                     getattr(s, "model_provider", None),
+                    profile_config=_load_profile_config_dict(s),
                 )
                 if model is not None:
                     s.model = model
