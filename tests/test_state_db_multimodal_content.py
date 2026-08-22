@@ -268,7 +268,7 @@ def test_state_db_rich_sidecar_row_deduplicates_without_flattening(
     assert merged == sidecar
 
 
-def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
+def test_session_load_projects_encoded_rich_sidecar_before_reconciliation(
     tmp_path,
     monkeypatch,
 ):
@@ -307,6 +307,7 @@ def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
         ),
         encoding="utf-8",
     )
+    before = sidecar_path.read_bytes()
 
     loaded = models.Session.load(SESSION_ID)
     merged = models.reconciled_state_db_messages_for_session(
@@ -316,6 +317,7 @@ def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
     )
     user_messages = [message for message in merged if message.get("role") == "user"]
 
+    assert loaded.messages[0]["content"] == content
     assert isinstance(loaded.context_messages, list)
     assert loaded.context_messages[0]["content"] == content
     assert len(user_messages) == 1
@@ -328,12 +330,13 @@ def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
     sanitized = _sanitize_messages_for_agent(merged)
     assert "\x00json:" not in json.dumps(sanitized)
 
+    assert sidecar_path.read_bytes() == before
     persisted = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    assert persisted["messages"][0]["content"] == content
-    assert persisted["context_messages"][0]["content"] == content
+    assert persisted["messages"][0]["content"] == encoded
+    assert persisted["context_messages"][0]["content"] == encoded
 
 
-def test_session_load_only_self_heals_when_decoder_replaces_content_object(
+def test_session_load_only_projects_when_decoder_replaces_content_object(
     tmp_path,
     monkeypatch,
 ):
@@ -383,7 +386,7 @@ def test_session_load_only_self_heals_when_decoder_replaces_content_object(
     repaired = models.Session.load(SESSION_ID)
 
     assert repaired.messages[0]["content"] == _rich_content()
-    assert save_calls == [SESSION_ID]
+    assert save_calls == []
 
 
 def test_missing_sidecar_recovery_decodes_rich_state_db_content(

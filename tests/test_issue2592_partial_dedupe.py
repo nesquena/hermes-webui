@@ -1,5 +1,4 @@
 import json
-import os
 
 
 def _tool_partial(reasoning="same reasoning", args=None, *, timestamp=123):
@@ -88,84 +87,69 @@ def test_session_load_collapses_adjacent_duplicate_partials(tmp_path, monkeypatc
     assert (session_dir / f"{sid}.json.bak").exists()
 
 
-def test_session_load_skips_content_self_heal_after_save_time_atomic_replacement(tmp_path, monkeypatch):
+def test_session_load_decodes_encoded_content_without_rewriting_sidecar(tmp_path, monkeypatch):
     import api.models as models
 
-    sid = "content_race"
+    sid = "content_projection"
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
 
-    old_parts = [
-        {"type": "text", "text": "old"},
+    content = [
+        {"type": "text", "text": "describe this image"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
     ]
-    new_parts = [
-        {"type": "text", "text": "new"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
-    ]
-    old_content = '\x00json:' + json.dumps(old_parts, separators=(",", ":"))
-    new_content = '\x00json:' + json.dumps(new_parts, separators=(",", ":"))
+    encoded = '\x00json:' + json.dumps(content, separators=(",", ":"))
     payload = {
         "session_id": sid,
-        "title": "content race",
+        "title": "content projection",
         "workspace": str(tmp_path),
-        "messages": [{"role": "user", "content": old_content}],
+        "messages": [{"role": "user", "content": encoded}],
     }
     path = session_dir / f"{sid}.json"
-    replacement = {**payload, "messages": [{"role": "user", "content": new_content}]}
-    encoded_payload = json.dumps(payload)
-    encoded_replacement = json.dumps(replacement)
-    assert len(encoded_payload) == len(encoded_replacement)
-    path.write_text(encoded_payload, encoding="utf-8")
-    real_signature = models._sidecar_stat_signature
-    signature_calls = 0
-    replaced = False
-
-    def replace_during_save(path_arg):
-        nonlocal replaced, signature_calls
-        signature_calls += 1
-        if path_arg == path and signature_calls == 3:
-            replacement_path = path.with_suffix(".replacement")
-            replacement_path.write_text(encoded_replacement, encoding="utf-8")
-            os.replace(replacement_path, path)
-            replaced = True
-        return real_signature(path_arg)
-
-    monkeypatch.setattr(models, "_sidecar_stat_signature", replace_during_save)
-
-    assert models.Session.load(sid) is not None
-    assert replaced
-    assert json.loads(path.read_text(encoding="utf-8"))["messages"] == replacement["messages"]
-    assert not list(session_dir.glob(f"{sid}.tmp.*"))
-
-
-def test_session_load_self_heals_unchanged_encoded_content(tmp_path, monkeypatch):
-    import api.models as models
-
-    sid = "content_self_heal"
-    session_dir = tmp_path / "sessions"
-    session_dir.mkdir()
-    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
-    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
-
-    parts = [
-        {"type": "text", "text": "hello"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-    ]
-    path = session_dir / f"{sid}.json"
-    path.write_text(
-        json.dumps({
-            "session_id": sid,
-            "title": "content self heal",
-            "workspace": str(tmp_path),
-            "messages": [{"role": "user", "content": "\x00json:" + json.dumps(parts)}],
-        }),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
 
     loaded = models.Session.load(sid)
 
-    assert loaded.messages[0]["content"] == parts
-    assert json.loads(path.read_text(encoding="utf-8"))["messages"][0]["content"] == parts
+    assert loaded.messages[0]["content"] == content
+    assert path.read_bytes() == before
+
+
+def test_session_load_collapses_raw_partials_before_content_projection(tmp_path, monkeypatch):
+    import api.models as models
+
+    sid = "content_projection_partial"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    content = [
+        {"type": "text", "text": "describe this image"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    encoded = '\x00json:' + json.dumps(content, separators=(",", ":"))
+    payload = {
+        "session_id": sid,
+        "title": "content projection partial",
+        "workspace": str(tmp_path),
+        "updated_at": 200.0,
+        "messages": [
+            {"role": "user", "content": encoded},
+            _tool_partial(timestamp=123),
+            _tool_partial(timestamp=123),
+        ],
+        "tool_calls": [],
+    }
+    path = session_dir / f"{sid}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = models.Session.load(sid)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.messages[0]["content"] == content
+    assert sum(1 for message in loaded.messages if message.get("_partial")) == 1
+    assert persisted["messages"][0]["content"] == encoded
+    assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1
