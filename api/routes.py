@@ -8178,23 +8178,39 @@ def _stamp_explicit_foreign_readonly(session, cli_meta=None) -> bool:
     A stale WebUI sidecar can keep ``read_only=False`` after the
     authoritative foreign record is later locked. Decision, advertise,
     and action must all use that live value — not the sidecar snapshot.
+
+    Lookup errors and missing records fail closed for sessions that
+    still require foreign metadata. The GET projection also sets
+    ``read_only=True`` so the composer closes instead of waiting for POST.
     """
     if session is None:
         return False
-    if bool(getattr(session, "explicit_foreign_readonly", False)):
+
+    def _lock() -> bool:
+        session.explicit_foreign_readonly = True
+        session.read_only = True
         return True
-    if cli_meta is not None:
-        locked = bool(cli_meta.get("read_only"))
-    else:
+
+    if bool(getattr(session, "explicit_foreign_readonly", False)):
+        session.read_only = True
+        return True
+
+    record = cli_meta
+    record_unverified = False
+    if record is None:
         try:
             sid = str(getattr(session, "session_id", "") or "")
-            live = _lookup_cli_session_metadata(sid) if sid else {}
-            locked = bool((live or {}).get("read_only"))
+            record = _lookup_cli_session_metadata(sid) if sid else {}
         except Exception:
-            locked = False
-    if locked:
-        session.explicit_foreign_readonly = True
-        return True
+            record = None
+            record_unverified = True
+
+    if bool((record or {}).get("read_only")):
+        return _lock()
+
+    unavailable = record_unverified or record is None or record == {}
+    if unavailable and _session_requires_cli_metadata_lookup(session):
+        return _lock()
     return False
 
 

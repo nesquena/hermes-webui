@@ -687,3 +687,85 @@ def test_import_cli_does_not_advertise_locked_stale_sidecar(
     assert payload["session"]["canonical_continuation"] is False
     assert payload["session"]["read_only"] is True
 
+
+def test_chat_start_403s_when_foreign_lookup_raises(
+    routes_module, monkeypatch, isolated_state_db
+):
+    sid = "20260822_telegram_lookup_raises"
+    _make_state_db(
+        isolated_state_db["db"], sid, message_count=2,
+        title="Lookup boom", source="telegram", cwd="/tmp",
+    )
+    _persist_stale_writable_sidecar(isolated_state_db, sid)
+
+    def _boom(_sid):
+        raise RuntimeError("foreign store unavailable")
+
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", _boom)
+    captured = {}
+    _stub_chat_start(routes_module, monkeypatch, captured)
+    handler = _FakePostHandler(
+        {"session_id": sid, "message": "should fail closed"},
+        path="/api/chat/start",
+    )
+    routes_module._handle_chat_start(
+        handler,
+        {"session_id": sid, "message": "should fail closed"},
+    )
+    assert handler.status == 403
+    assert "read-only" in _response_json(handler)["error"].lower()
+    assert "session" not in captured
+
+
+def test_chat_start_403s_when_foreign_record_unavailable(
+    routes_module, monkeypatch, isolated_state_db
+):
+    sid = "20260822_telegram_lookup_empty"
+    _make_state_db(
+        isolated_state_db["db"], sid, message_count=2,
+        title="Lookup empty", source="telegram", cwd="/tmp",
+    )
+    _persist_stale_writable_sidecar(isolated_state_db, sid)
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    captured = {}
+    _stub_chat_start(routes_module, monkeypatch, captured)
+    handler = _FakePostHandler(
+        {"session_id": sid, "message": "should fail closed"},
+        path="/api/chat/start",
+    )
+    routes_module._handle_chat_start(
+        handler,
+        {"session_id": sid, "message": "should fail closed"},
+    )
+    assert handler.status == 403
+    assert "read-only" in _response_json(handler)["error"].lower()
+    assert "session" not in captured
+
+
+def test_get_session_projects_read_only_when_foreign_locks_stale_sidecar(
+    routes_module, monkeypatch, isolated_state_db
+):
+    from api.models import Session, session_uses_canonical_continuation
+
+    sid = "20260822_telegram_get_projects_lock"
+    _make_state_db(
+        isolated_state_db["db"], sid, message_count=2,
+        title="GET lock", source="telegram", cwd="/tmp",
+    )
+    sess, _sidecar = _persist_stale_writable_sidecar(isolated_state_db, sid)
+    assert sess.read_only is False
+    locked = routes_module._stamp_explicit_foreign_readonly(
+        sess, {"read_only": True, "source_tag": "telegram", "session_source": "messaging"}
+    )
+    assert locked is True
+    assert sess.read_only is True
+    assert session_uses_canonical_continuation(sess) is False
+    compact = sess.compact()
+    assert compact["read_only"] is True
+    assert compact["canonical_continuation"] is False
+
+    sessions = SESSIONS_JS.read_text(encoding="utf-8")
+    blocks = _function_body(sessions, "_sessionBlocksComposer")
+    assert "_isReadOnlySession(session)" in blocks
+    assert "_sessionAllowsCanonicalContinuation(session)" in blocks
+
