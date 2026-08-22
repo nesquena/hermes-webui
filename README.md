@@ -530,7 +530,7 @@ If you want the agent and WebUI in separate containers (for isolation, or becaus
 docker compose -f docker-compose.two-container.yml up -d
 
 # Agent + Dashboard + WebUI
-docker compose -f docker-compose.three-container.yml up -d
+docker compose -f docker-compose.three-service.yml up -d
 ```
 
 Both compose files use **named Docker volumes** by default, which solves the UID/GID problem by construction. If you need bind mounts to share an existing host directory, see [`docs/docker.md`](docs/docker.md) for the full migration recipe.
