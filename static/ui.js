@@ -20864,6 +20864,7 @@ if(typeof window!=='undefined'&&!window._wsDragCleanupBound){
   window.addEventListener('blur',_clearWsDragData);
 }
 function _isWorkspaceTreeMoveDrag(e){
+  if(e&&e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/x-hermes-webui-session-id')) return false;
   if(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('Files')) return false;
   if(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/ws-path')) return true;
   // Stripped-MIME (macOS WebKit) fallback: accept text/plain ONLY while a

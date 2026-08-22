@@ -1828,6 +1828,17 @@
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
   .session-date-header:hover{opacity:1;}
   .session-date-header.pinned{color:var(--accent);}
+  .project-session-header{color:var(--text);background:var(--surface-subtle);border-radius:6px;margin:2px 4px 0;padding:7px 8px 5px;}
+  .project-session-header.drag-over{background:var(--accent-bg);outline:1px dashed var(--accent);opacity:1;}
+  .session-title-row-draggable{cursor:grab;}
+  .session-title-row-draggable:active{cursor:grabbing;}
+  .session-project-drag-handle{display:inline-block;flex:0 0 auto;color:var(--muted);font-size:12px;line-height:1;letter-spacing:-3px;cursor:grab;user-select:none;visibility:hidden;opacity:0;pointer-events:none;transition:opacity .15s;}
+  .session-project-drag-handle:active{cursor:grabbing;}
+  @media (hover:hover) and (pointer:fine){
+    .session-item:hover .session-project-drag-handle,
+    .session-item:focus-within .session-project-drag-handle{visibility:visible;opacity:1;pointer-events:auto;}
+    .session-item.dragging{opacity:.55;}
+  }
 
   /* ── Batch select mode ── */
   .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.6;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}
@@ -5741,6 +5752,7 @@ main.main > #mainPlugin{display:none;}
 .project-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:pointer;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation;}
 .project-chip:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .project-chip.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
+.project-chip.drag-over{background:var(--accent-bg-strong);outline:1px solid var(--accent);}
 .project-chip.long-pressing{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);transform:scale(1.05);}
 .project-chip-quick-create{
   border:1px solid transparent;
@@ -7322,3 +7334,12 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+.session-project-group-header{box-sizing:border-box;height:28px;min-height:28px;line-height:18px;margin:2px 4px 0;padding:5px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.session-project-group-header .session-project-group-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.session-project-group-header.drag-over{background:var(--accent-bg-strong);outline:1px solid var(--accent);}
+.session-drag-grip{display:inline-block;visibility:hidden;opacity:0;flex:0 0 auto;margin-left:4px;cursor:grab;}
+.session-item:hover .session-drag-grip,.session-item:focus-within .session-drag-grip{visibility:visible;opacity:1;pointer-events:auto;}
+@media (pointer:coarse){.session-drag-grip{display:none;}}
+.session-title-row-draggable{cursor:grab;}
+.session-project-drag-handle{display:inline-block;visibility:hidden;opacity:0;pointer-events:none;}
+.session-item:hover .session-project-drag-handle,.session-item:focus-within .session-project-drag-handle{visibility:visible;opacity:1;pointer-events:auto;}

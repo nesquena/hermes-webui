@@ -146,10 +146,34 @@ function _isComposerDraftRestoreSuppressed(sid, text, files) {
   return false;
 }
 
+function _normalizedProfileEquivalent(first,second){
+  const firstName=(typeof first==='string'&&first.trim())?first.trim():'default';
+  const secondName=(typeof second==='string'&&second.trim())?second.trim():'default';
+  if(firstName===secondName) return true;
+  const roster=typeof _profilesCache!=='undefined'&&_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles:null;
+  const fresh=typeof window!=='undefined'&&Number.isFinite(window._profilesCacheFreshAt)&&Date.now()-window._profilesCacheFreshAt<=300000;
+  if(!fresh||!roster) return false;
+  const firstEntry=roster.find(p=>p&&p.name===firstName);
+  const secondEntry=roster.find(p=>p&&p.name===secondName);
+  const firstRoot=firstName==='default'||!!(firstEntry&&firstEntry.is_default);
+  const secondRoot=secondName==='default'||!!(secondEntry&&secondEntry.is_default);
+  return firstRoot&&secondRoot;
+}
+
+function _profileNameIsRoot(name){
+  const normalized=(typeof name==='string'&&name.trim())?name.trim():'default';
+  if(normalized==='default') return true;
+  const roster=typeof _profilesCache!=='undefined'&&_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles:null;
+  const fresh=typeof window!=='undefined'&&Number.isFinite(window._profilesCacheFreshAt)&&Date.now()-window._profilesCacheFreshAt<=300000;
+  return !!(fresh&&roster&&roster.some(p=>p&&p.name===normalized&&p.is_default));
+}
+
+function _profileNamesEquivalent(first,second){ return _normalizedProfileEquivalent(first,second); }
+
 function _profileMatchesActiveProfile(profile, activeProfile){
-  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
-  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
-  if(eventName === activeName) return true;
+  const eventName=(typeof profile==='string'&&profile.trim())?profile.trim():'default';
+  const activeName=(typeof activeProfile==='string'&&activeProfile.trim())?activeProfile.trim():'default';
+  if(eventName===activeName) return true;
   return eventName === 'default' && !!S.activeProfileIsDefault;
 }
 
@@ -622,14 +646,19 @@ function _resolveCronCompletionMarkerOrigin(sid, marker) {
 // A profile name provably resolving to the root profile: the literal
 // 'default' alias, or a roster entry flagged is_default (renamed root).
 // Unknown names fail closed — exact-name matching still applies to them.
+function _profileNameIsRootAlias(name) {
+  return _profileNameIsRoot(name);
+}
+
+// Compatibility helper retained for extracted legacy cron-profile tests and
+// persisted marker readers; project drag eligibility uses the fresh-roster
+// resolver above instead.
 function _cronProfileNameIsRootAlias(name) {
-  if (name === 'default') return true;
-  if (typeof _profilesCache !== 'undefined' && _profilesCache
-    && Array.isArray(_profilesCache.profiles)) {
-    const entry = _profilesCache.profiles.find((p) => p && p.name === name);
-    if (entry && entry.is_default) return true;
-  }
-  return false;
+  if(name==='default') return true;
+  if(typeof _profilesCache!=='undefined'&&_profilesCache&&Array.isArray(_profilesCache.profiles)
+    &&_profilesCache.profiles.some(p=>p&&p.name===name&&p.is_default)) return true;
+  return !!(typeof S!=='undefined'&&S&&S.activeProfileIsDefault
+    &&typeof S.activeProfile==='string'&&S.activeProfile.trim()===name);
 }
 
 // default/renamed-root equivalence for cron-marker ownership (mirrors server
@@ -650,8 +679,13 @@ function _cronMarkerProfileMatchesActive(origin, activeProfile) {
   // ITSELF provably resolves to the root — never "active is default → match
   // all", which under-cleared other profiles' markers on switch to 'default'.
   if (typeof S !== 'undefined' && S && S.activeProfileIsDefault
-    && typeof _cronProfileNameIsRootAlias === 'function'
-    && _cronProfileNameIsRootAlias(originName)) {
+    && ((typeof _profileNameIsRootAlias === 'function'
+      && _profileNameIsRootAlias(originName))
+      || (typeof _cronProfileNameIsRootAlias === 'function'
+        && _cronProfileNameIsRootAlias(originName))
+      || originName==='default'
+      || (typeof S.activeProfile === 'string'
+        && S.activeProfile.trim() === originName))) {
     return true;
   }
   return false;
@@ -4080,6 +4114,8 @@ function _makeSessionSwipeAffordance(side, icon, label){
   return affordance;
 }
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
+const SESSION_GROUP_HEADER_HEIGHT = 30; // 28px header box + 2px top margin
+const SESSION_PINNED_GROUP_HEADER_HEIGHT = 28;
 const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
 let _sessionVirtualScrollList = null;
@@ -7381,6 +7417,26 @@ function _sessionVirtualWindow(opts){
   const buffer=Math.max(0, Number(opts&&opts.buffer)||SESSION_VIRTUAL_BUFFER_ROWS);
   const viewportHeight=Math.max(itemHeight, Number(opts&&opts.viewportHeight)||itemHeight*10);
   const visibleRows=Math.max(1, Math.ceil(viewportHeight/itemHeight));
+  const offsets=Array.isArray(opts&&opts.offsets)?opts.offsets:null;
+  if(offsets){
+    const offsetTotal=Math.max(0,offsets.length-1);
+    if(offsetTotal<=threshold) return {virtualized:false,start:0,end:offsetTotal,topPad:0,bottomPad:0,itemHeight,total:offsetTotal};
+    const scrollTop=Math.max(0,Number(opts&&opts.scrollTop)||0);
+    const endY=scrollTop+viewportHeight;
+    const bisect=(value)=>{
+      let low=0,high=offsetTotal;
+      while(low<high){const mid=(low+high)>>1;if(offsets[mid+1]<=value)low=mid+1;else high=mid;}
+      return low;
+    };
+    let start=Math.max(0,bisect(scrollTop)-buffer);
+    let end=Math.min(offsetTotal,bisect(endY)+1+buffer);
+    const activeIndex=Number.isFinite(Number(opts&&opts.activeIndex))?Number(opts.activeIndex):-1;
+    if(activeIndex>=0&&activeIndex<offsetTotal&&(activeIndex<start||activeIndex>=end)){
+      start=Math.max(0,activeIndex-buffer);end=Math.min(offsetTotal,activeIndex+1+buffer+visibleRows);
+    }
+    const mean=(offsets[offsetTotal]-offsets[0])/Math.max(1,offsetTotal);
+    return {virtualized:true,start,end,topPad:offsets[start],bottomPad:Math.max(0,offsets[offsetTotal]-offsets[end]),itemHeight:mean,total:offsetTotal};
+  }
   if(total<=threshold){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,itemHeight,total};
   }
@@ -7442,6 +7498,7 @@ function _scheduleSessionVirtualizedRender(){
         buffer:SESSION_VIRTUAL_BUFFER_ROWS,
         threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
         activeIndex:-1,
+        offsets:window._sidebarGroupByProject&&liveList._sessionVirtualOffsets||undefined,
       });
       const currentStart=Number(liveList.dataset.sessionVirtualStart||0);
       const currentEnd=Number(liveList.dataset.sessionVirtualEnd||0);
@@ -7671,7 +7728,189 @@ function _attachProjectQuickCreateButton(chip, project){
 }
 
 
+function _buildSessionSidebarGroups(orderedSessions,groupByProject,projects,now){
+  const pinned=orderedSessions.filter(s=>s.pinned);
+  const unpinned=orderedSessions.filter(s=>!s.pinned);
+  const groups=[];
+  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
+  if(groupByProject){
+    const unassignedKey='sidebar_project_group_unassigned';
+    const translatedUnassigned=typeof t==='function'?t(unassignedKey):'';
+    const legacyUnassigned=typeof t==='function'?t('sidebar_group_unassigned'):'';
+    const unassignedLabel=(translatedUnassigned&&translatedUnassigned!==unassignedKey&&translatedUnassigned!=='sidebar_group_unassigned')?translatedUnassigned:(legacyUnassigned&&legacyUnassigned!=='sidebar_group_unassigned'?legacyUnassigned:'Unassigned');
+    const byProject=new Map();
+    for(const s of unpinned){
+      const key=s.project_id||null;
+      if(!byProject.has(key)) byProject.set(key,[]);
+      byProject.get(key).push(s);
+    }
+    const emitted=new Set();
+    const activeProjectFilter=typeof _activeProject==='undefined'?null:_activeProject;
+    for(const project of (projects||[])){
+      const items=byProject.get(project.project_id);
+      if(activeProjectFilter&&activeProjectFilter!==project.project_id) continue;
+      groups.push({label:project.name||project.project_id,items:items||[],projectId:project.project_id,dropProjectId:project.project_id,project,collapseKey:'project:'+project.project_id});
+      emitted.add(project.project_id);
+    }
+    for(const [projectId,items] of byProject){
+      if(projectId&&emitted.has(projectId)) continue;
+      if(projectId&&(!activeProjectFilter||activeProjectFilter===projectId)) groups.push({label:projectId,items,projectId,dropProjectId:projectId,project:{project_id:projectId},collapseKey:'project:'+projectId});
+    }
+    const unassigned=byProject.get(null)||[];
+    const noProjectFilter=typeof NO_PROJECT_FILTER==='undefined'?'__none__':NO_PROJECT_FILTER;
+    if(!activeProjectFilter||activeProjectFilter===noProjectFilter) groups.push({label:unassignedLabel,items:unassigned,dropProjectId:null,collapseKey:'unassigned'});
+    return groups;
+  }
+  let curLabel=null,curItems=[];
+  for(const s of unpinned){
+    const ts=_sessionSortTimestampMs(s);
+    const label=_sessionTimeBucketLabel(ts, now);
+    if(label!==curLabel){
+      if(curItems.length) groups.push({label:curLabel,items:curItems});
+      curLabel=label;curItems=[s];
+    }else curItems.push(s);
+  }
+  if(curItems.length) groups.push({label:curLabel,items:curItems});
+  return groups;
+}
+
+function _buildSidebarRenderEntries(rows,grouped,projects,collapsedMap){
+  if(!grouped) return (Array.isArray(rows)?rows:[]).map(session=>({kind:'row',key:'row:'+(session.session_id||''),session,height:SESSION_VIRTUAL_ROW_HEIGHT}));
+  const groups=_buildSessionSidebarGroups(Array.isArray(rows)?rows:[],true,projects||[],typeof _serverNowMs==='function'?_serverNowMs():0);
+  const collapsed=collapsedMap||{};const entries=[];
+  for(const group of groups){
+    const groupKey=group.collapseKey||group.label;
+    entries.push({kind:'header',key:'header:'+groupKey,groupKey,group,height:group.isPinned?SESSION_PINNED_GROUP_HEADER_HEIGHT:SESSION_GROUP_HEADER_HEIGHT,collapsed:!!collapsed[groupKey]});
+    if(!collapsed[groupKey]) for(const session of group.items||[]) entries.push({kind:'row',key:'row:'+(session.session_id||''),groupKey,group,session,height:SESSION_VIRTUAL_ROW_HEIGHT});
+  }
+  return entries;
+}
+if(typeof window!=='undefined') window._buildSidebarRenderEntries=_buildSidebarRenderEntries;
+
+function _projectMoveEligibility(session,target){
+  if(!session) return {eligible:false,reason:'no-session'};
+  if(typeof _isReadOnlySession==='function'&&_isReadOnlySession(session)) return {eligible:false,reason:'not-writable'};
+  if(session.pinned) return {eligible:false,reason:'pinned-source'};
+  if(target&&target.sourceOnly) return {eligible:true,reason:'eligible'};
+  if(!target) return {eligible:false,reason:'missing-target'};
+  if(!Object.prototype.hasOwnProperty.call(target,'project_id')) return {eligible:false,reason:'missing-target'};
+  const targetId=Object.prototype.hasOwnProperty.call(target,'project_id')?(target.project_id||null):null;
+  if((session.project_id||null)===targetId) return {eligible:false,reason:'same-target'};
+  if(targetId===null) return {eligible:true,reason:'eligible'};
+  if(!_normalizedProfileEquivalent(session.profile,target.profile)){
+    const fresh=typeof window!=='undefined'&&Number.isFinite(window._profilesCacheFreshAt)&&Date.now()-window._profilesCacheFreshAt<=300000;
+    const roster=typeof _profilesCache!=='undefined'&&_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles:null;
+    const known=fresh&&roster&&roster.some(p=>p&&p.name===session.profile)&&roster.some(p=>p&&p.name===target.profile);
+    return {eligible:false,reason:known?'profile-mismatch':'profile-unproven'};
+  }
+  return {eligible:true,reason:'eligible'};
+}
+if(typeof window!=='undefined') window._projectMoveEligibility=_projectMoveEligibility;
+
+const SESSION_PROJECT_DRAG_MIME='application/x-hermes-webui-session-id';
+const SESSION_PROJECT_DRAG_TEXT_PREFIX='hermes-webui-session:';
+let _activeSidebarProjectDragSessionId=null;
+
+function _setSessionProjectDragData(dt,sessionId){
+  if(!dt||!sessionId) return;
+  _activeSidebarProjectDragSessionId=sessionId;
+  try{dt.setData(SESSION_PROJECT_DRAG_MIME,sessionId);}catch(_){}
+  try{dt.setData('text/plain',SESSION_PROJECT_DRAG_TEXT_PREFIX+sessionId);}catch(_){}
+}
+
+function _clearSessionProjectDragData(){
+  _activeSidebarProjectDragSessionId=null;
+  if(typeof _clearGroupedProjectHighlights==='function') _clearGroupedProjectHighlights();
+}
+function _clearGroupedProjectHighlights(){
+  if(typeof document==='undefined'||!document.querySelectorAll) return;
+  document.querySelectorAll('.session-project-group-header.drag-over,.project-chip.drag-over').forEach(el=>{
+    if(typeof el._sessionProjectDragReset==='function') el._sessionProjectDragReset();
+    else el.classList.remove('drag-over');
+  });
+}
+function _bindSessionProjectDragCleanup(){
+  if(typeof window==='undefined'||window._sessionProjectDragCleanupBound) return;
+  window._sessionProjectDragCleanupBound=true;
+  window.addEventListener('dragend',_clearSessionProjectDragData,true);
+  window.addEventListener('drop',()=>setTimeout(_clearSessionProjectDragData,0),true);
+  window.addEventListener('pagehide',_clearSessionProjectDragData);
+  window.addEventListener('blur',_clearSessionProjectDragData);
+}
+_bindSessionProjectDragCleanup();
+
+function _sessionProjectDragSid(dt){
+  if(!dt) return '';
+  const custom=dt.getData&&dt.getData(SESSION_PROJECT_DRAG_MIME)||'';
+  return custom&&custom===_activeSidebarProjectDragSessionId?custom:'';
+}
+
+function _isSessionProjectMoveDrag(dt){
+  if(!dt) return false;
+  const types=Array.isArray(dt.types)?dt.types:Array.from(dt.types||[]);
+  if(!(_activeSidebarProjectDragSessionId&&types.includes(SESSION_PROJECT_DRAG_MIME))) return false;
+  return true;
+}
+
+async function _handleGroupedProjectDrop(e,targetProject,targetLabel){
+  const sid=_sessionProjectDragSid(e.dataTransfer);
+  const session=(_allSessions||[]).find(item=>item&&item.session_id===sid);
+  const targetProjectId=targetProject&&targetProject.project_id||null;
+  const eligibility=_projectMoveEligibility(session,targetProject||{project_id:null});
+  if(!eligibility.eligible) return false;
+  e.preventDefault();
+  return _moveSessionToProject(session,targetProjectId,targetLabel);
+}
+
+function _bindGroupedProjectDropTarget(hdr,targetProject,targetLabel){
+  let enterDepth=0;
+  const protectedEligibilityFor=(e)=>{
+    if(!_isSessionProjectMoveDrag(e.dataTransfer)) return {session:null,eligibility:{eligible:false}};
+    const session=(_allSessions||[]).find(item=>item&&item.session_id===_activeSidebarProjectDragSessionId);
+    return {session,eligibility:_projectMoveEligibility(session,targetProject||{project_id:null})};
+  };
+  const clear=()=>{enterDepth=0;hdr.classList.remove('drag-over');};
+  hdr._sessionProjectDragReset=clear;
+  hdr.addEventListener('dragenter',(e)=>{
+    const {eligibility}=protectedEligibilityFor(e);
+    if(!eligibility.eligible){clear();if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}
+    enterDepth++;hdr.classList.add('drag-over');
+  });
+  hdr.addEventListener('dragover',(e)=>{
+    const {eligibility}=protectedEligibilityFor(e);
+    if(eligibility.eligible){
+      e.preventDefault();
+      e.dataTransfer.dropEffect='move';
+      hdr.classList.add('drag-over');
+    }else{if(e.dataTransfer)e.dataTransfer.dropEffect='none';clear();}
+  });
+  hdr.addEventListener('dragleave',(e)=>{
+    if(!e.relatedTarget||!hdr.contains(e.relatedTarget)){clear();return;}
+    enterDepth=Math.max(0,enterDepth-1);
+    if(enterDepth===0) hdr.classList.remove('drag-over');
+  });
+  hdr.addEventListener('drop',async(e)=>{
+    clear();if(typeof _clearGroupedProjectHighlights==='function') _clearGroupedProjectHighlights();
+    await _handleGroupedProjectDrop(e,targetProject,targetLabel);
+  });
+  hdr.addEventListener('dragend',clear);
+}
+
+function _findGroupedActiveRow(list, activeSidForSidebar, renderedSidebarRows){
+  if(!list||!activeSidForSidebar||typeof list.querySelectorAll!=='function') return null;
+  const rows=[...list.querySelectorAll('.session-item[data-sid]')];
+  const exact=rows.find(row=>row.dataset.sid===activeSidForSidebar);
+  if(exact) return exact;
+  const sourceRows=Array.isArray(renderedSidebarRows)?renderedSidebarRows:(Array.isArray(_allSessions)?_allSessions:[]);
+  return rows.find(row=>{
+    const rowSid=row.dataset.sid;
+    const rowSession=sourceRows.find(item=>item&&item.session_id===rowSid);
+    return !!(rowSession&&_sessionLineageContainsSession(rowSession,activeSidForSidebar));
+  })||null;
+}
+
 function renderSessionListFromCache(){
+  const GROUP_HEADER_HEIGHT=typeof SESSION_GROUP_HEADER_HEIGHT==='number'?SESSION_GROUP_HEADER_HEIGHT:28;
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
   // PREVIOUS profile's rows until /api/sessions resolves, so any unrelated caller
   // (sidebar SSE syncs, stream/unread updates, gateway-poll timers, panel-resync
@@ -7736,6 +7975,16 @@ function renderSessionListFromCache(){
   const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
+  const groupedMode=!!window._sidebarGroupByProject;
+  let groupedActiveWasVisibleBeforeRender=false;
+  if(groupedMode&&activeSidForSidebar&&typeof list.getBoundingClientRect==='function'){
+    const activeRow=_findGroupedActiveRow(list,activeSidForSidebar,sessions);
+    if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
+      const listRect=list.getBoundingClientRect();
+      const rowRect=activeRow.getBoundingClientRect();
+      groupedActiveWasVisibleBeforeRender=rowRect.bottom>listRect.top&&rowRect.top<listRect.bottom;
+    }
+  }
   list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
@@ -7803,6 +8052,7 @@ function renderSessionListFromCache(){
       noneChip.textContent='Unassigned';
       noneChip.title='Show conversations not yet assigned to a project';
       noneChip.onclick=()=>{_setActiveProjectFilter(NO_PROJECT_FILTER);};
+      _bindGroupedProjectDropTarget(noneChip,null,'Unassigned');
       bar.appendChild(noneChip);
     }
     // Project chips
@@ -7825,6 +8075,7 @@ function renderSessionListFromCache(){
       };
       chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
       chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
+      _bindGroupedProjectDropTarget(chip,p,p.name);
       // Touch long-press → context menu (mobile UX: project chips can only be
       // deleted via the right-click menu, which has no touch equivalent).
       let _lpTimer=null;
@@ -7926,34 +8177,35 @@ function renderSessionListFromCache(){
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
-  // Separate pinned from unpinned
-  const pinned=orderedSessions.filter(s=>s.pinned);
-  const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
   const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
-  // Group sessions by date
-  const groups=[];
-  let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
-  for(const s of unpinned){
-    const ts=_sessionSortTimestampMs(s);
-    const label=_sessionTimeBucketLabel(ts, now);
-    if(label!==curLabel){
-      if(curItems.length) groups.push({label:curLabel,items:curItems});
-      curLabel=label;curItems=[s];
-    } else { curItems.push(s); }
-  }
-  if(curItems.length) groups.push({label:curLabel,items:curItems});
+  const groups=groupedMode?[]:_buildSessionSidebarGroups(orderedSessions,false,_allProjects,now);
   const flatSessionRows=[];
   for(const g of groups){
-    if(_groupCollapsed[g.label]) continue;
+    const groupKey=g.collapseKey||g.label;
+    if(_groupCollapsed[groupKey]) continue;
     for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
   }
-  _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
+  const groupedEntries=groupedMode?_buildSidebarRenderEntries(orderedSessions,true,_allProjects,_groupCollapsed):[];
+  const groupedRenderGroups=[];
+  if(groupedMode){
+    const byGroup=new Map();
+    groupedEntries.forEach((entry,index)=>{
+      let group=byGroup.get(entry.groupKey);
+      if(!group){group={group:entry.group,entries:[]};byGroup.set(entry.groupKey,group);groupedRenderGroups.push(group);}
+      group.entries.push({entry,index});
+    });
+  }
+  const groupedOffsets=groupedMode?[0]:null;
+  if(groupedMode) for(const entry of groupedEntries) groupedOffsets.push(groupedOffsets[groupedOffsets.length-1]+entry.height);
+  if(groupedMode) list._sessionVirtualOffsets=groupedOffsets;
+  _sessionVisibleSidebarIds=(groupedMode?groupedEntries:flatSessionRows)
+    .filter((entry,index)=>!groupedMode||index>=0)
+    .map(row=>row.session&&row.session.session_id).filter(Boolean);
   for(const row of flatSessionRows){
     const s=row.session;
     if(!s||!Array.isArray(s._child_sessions)) continue;
@@ -7966,53 +8218,77 @@ function renderSessionListFromCache(){
     }
   }
   _ensureSessionVirtualScrollHandler(list);
-  const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
+  const activeIndex=groupedMode
+    ? groupedEntries.findIndex(entry=>entry.kind==='row'&&_sessionLineageContainsSession(entry.session,activeSidForSidebar))
+    : flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
     list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
     list.dataset.sessionVirtualFilter!==q
   );
   const virtualWindowBeforeActiveAnchor=_sessionVirtualWindow({
-    total:flatSessionRows.length,
+    total:groupedMode?groupedEntries.length:flatSessionRows.length,
     scrollTop:listScrollTopBeforeRender,
     viewportHeight:list.clientHeight||520,
     itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
     buffer:SESSION_VIRTUAL_BUFFER_ROWS,
     threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
     activeIndex:-1,
+    offsets:groupedMode?groupedOffsets:undefined,
   });
   const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end;
-  const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible;
-  let virtualWindow=_sessionVirtualWindow({
-    total:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
-    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-    activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
-  });
+  const activeWasAlreadyVisibleForMode=groupedMode?groupedActiveWasVisibleBeforeRender:activeWasAlreadyVisible;
+  const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisibleForMode;
+  const shouldMoveSidebarToActiveForMode=shouldMoveSidebarToActive;
+  let virtualWindow=groupedMode
+    ? _sessionVirtualWindow({
+      total:groupedEntries.length,
+      offsets:groupedOffsets,
+      scrollTop:listScrollTopBeforeRender,
+      viewportHeight:list.clientHeight||520,
+      itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+      buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+      threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+      activeIndex:shouldMoveSidebarToActiveForMode?activeIndex:-1,
+    })
+    : _sessionVirtualWindow({
+      total:flatSessionRows.length,
+      scrollTop:listScrollTopBeforeRender,
+      viewportHeight:list.clientHeight||520,
+      itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+      buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+      threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+      activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
+    });
   let virtualAnchorScrollTop=null;
   if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
-    virtualAnchorScrollTop=virtualWindow.topPad;
+    if(!groupedMode) virtualAnchorScrollTop=virtualWindow.topPad;
   }else if(activeSidForSidebar){
     list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
   }else{
     delete list.dataset.sessionVirtualActiveAnchor;
   }
-  list.dataset.sessionVirtualTotal=String(flatSessionRows.length);
+  list.dataset.sessionVirtualTotal=String(groupedMode?groupedEntries.length:flatSessionRows.length);
   list.dataset.sessionVirtualFilter=q;
   list.dataset.sessionVirtualStart=String(virtualWindow.start);
   list.dataset.sessionVirtualEnd=String(virtualWindow.end);
-  // Render groups with collapsible headers. Large sidebars render only the
-  // current session-row window plus top/bottom spacers inside each group body;
-  // headers remain real DOM so pin/archive/date grouping and clicks survive.
+  if(groupedMode){
+    _sessionVisibleSidebarIds=groupedEntries.slice(virtualWindow.start,virtualWindow.end)
+      .filter(entry=>entry.kind==='row'&&entry.session&&entry.session.session_id)
+      .map(entry=>entry.session.session_id);
+  }
+  // Flat mode keeps its existing date-group rendering and row-only virtualizer.
   let globalSessionRowIndex=0;
-  for(const g of groups){
+  if(!groupedMode) for(const g of groups){
     const wrapper=document.createElement('div');
-    wrapper.className='session-date-group';
+    wrapper.className='session-date-group'+(g.projectId?' project-session-group':'');
     const hdr=document.createElement('div');
-    hdr.className='session-date-header'+(g.isPinned?' pinned':'');
+    hdr.className='session-date-header'+(g.isPinned?' pinned':'')+(Object.prototype.hasOwnProperty.call(g,'dropProjectId')?' project-session-header':'');
+    if(Object.prototype.hasOwnProperty.call(g,'dropProjectId')) hdr.classList.add('session-project-group-header');
+    if(window._sidebarGroupByProject&&Object.prototype.hasOwnProperty.call(g,'dropProjectId')){
+      hdr.dataset.projectId=g.dropProjectId||'';
+      _bindGroupedProjectDropTarget(hdr,g.project||null,g.label);
+    }
     const caret=document.createElement('span');
     caret.className='session-date-caret';
     caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
@@ -8021,13 +8297,14 @@ function renderSessionListFromCache(){
     hdr.appendChild(caret);hdr.appendChild(label);
     const body=document.createElement('div');
     body.className='session-date-body';
-    const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
+    const groupKey=g.collapseKey||g.label;
+    const isGroupCollapsed=Boolean(_groupCollapsed[groupKey]);
     if(isGroupCollapsed){body.style.display='none';caret.classList.add('collapsed');}
     hdr.onclick=()=>{
       const isCollapsed=body.style.display==='none';
       body.style.display=isCollapsed?'':'none';
       caret.classList.toggle('collapsed',!isCollapsed);
-      _groupCollapsed[g.label]=!isCollapsed;
+      _groupCollapsed[groupKey]=!isCollapsed;
       _saveCollapsed();
       renderSessionListFromCache();
     };
@@ -8047,7 +8324,63 @@ function renderSessionListFromCache(){
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }
-  if(virtualAnchorScrollTop!==null){
+  if(groupedMode){
+    if(virtualWindow.start>0) list.appendChild(_sessionVirtualSpacer(groupedOffsets[virtualWindow.start],'before'));
+    for(const groupedGroup of groupedRenderGroups){
+      const g=groupedGroup.group;
+      const groupEntries=groupedGroup.entries;
+      const groupKey=groupEntries[0].entry.groupKey;const collapsed=!!_groupCollapsed[groupKey];
+      const groupStart=groupEntries[0].index;const groupEnd=groupEntries[groupEntries.length-1].index+1;
+      if(groupEnd<=virtualWindow.start||groupStart>=virtualWindow.end) continue;
+      const wrapper=document.createElement('div');
+      wrapper.className='session-date-group'+(g.projectId?' project-session-group':'');
+      const hdr=document.createElement('div');
+      hdr.className='session-date-header'+(g.isPinned?' pinned':'')+(Object.prototype.hasOwnProperty.call(g,'dropProjectId')?' project-session-header':'');
+      if(Object.prototype.hasOwnProperty.call(g,'dropProjectId')) hdr.classList.add('session-project-group-header');
+      if(Object.prototype.hasOwnProperty.call(g,'dropProjectId')){hdr.dataset.projectId=g.dropProjectId||'';_bindGroupedProjectDropTarget(hdr,g.project||null,g.label);}
+      const caret=document.createElement('span');caret.className='session-date-caret';caret.textContent='\u25BE';
+      const label=document.createElement('span');label.className='session-project-group-label';label.textContent=g.label;
+      if(g.project&&g.project.color){
+        const dot=document.createElement('span');
+        dot.className='session-project-dot';
+        dot.style.background=g.project.color;
+        dot.setAttribute('aria-hidden','true');
+        hdr.append(caret,dot,label);
+      }else hdr.append(caret,label);
+      const body=document.createElement('div');body.className='session-date-body';
+      if(collapsed){body.style.display='none';caret.classList.add('collapsed');}
+      hdr.onclick=()=>{_groupCollapsed[groupKey]=!_groupCollapsed[groupKey];_saveCollapsed();renderSessionListFromCache();};
+      const renderStart=Math.max(virtualWindow.start,groupStart);const renderEnd=Math.min(virtualWindow.end,groupEnd);
+      if(groupStart>=renderStart&&groupStart<renderEnd) wrapper.appendChild(hdr);
+      if(!collapsed){
+        for(const groupedEntry of groupEntries){
+          const entry=groupedEntry.entry;
+          if(entry.kind==='row'&&groupedEntry.index>=renderStart&&groupedEntry.index<renderEnd){
+            body.appendChild(_renderOneSession(entry.session,Boolean(g.isPinned)));
+          }
+        }
+      }
+      wrapper.appendChild(body);list.appendChild(wrapper);
+    }
+    if(virtualWindow.end<groupedEntries.length) list.appendChild(_sessionVirtualSpacer(groupedOffsets[groupedEntries.length]-groupedOffsets[virtualWindow.end],'after'));
+  }
+  if(groupedMode){
+    list.scrollTop=listScrollTopBeforeRender;
+    if(shouldMoveSidebarToActiveForMode){
+      const activeRow=_findGroupedActiveRow(list,activeSidForSidebar,sessions);
+      if(activeRow&&typeof activeRow.getBoundingClientRect==='function'){
+        const listRect=list.getBoundingClientRect();
+        const rowRect=activeRow.getBoundingClientRect();
+        if(rowRect.top<listRect.top){
+          list.scrollTop=Math.max(0,list.scrollTop+rowRect.top-listRect.top);
+        }else if(rowRect.bottom>listRect.bottom){
+          list.scrollTop=Math.max(0,list.scrollTop+rowRect.bottom-listRect.bottom);
+        }
+      }
+    }else{
+      _resyncSessionVirtualWindowAfterRender(list,listScrollTopBeforeRender,virtualWindow);
+    }
+  }else if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
   }else if(listScrollTopBeforeRender>0){
     // Always restore the user's scroll position after re-render, regardless
@@ -8149,8 +8482,47 @@ function renderSessionListFromCache(){
     }
     const sessionText=document.createElement('div');
     sessionText.className='session-text';
+    const _groupedFinePointer=window._sidebarGroupByProject&&window.matchMedia&&window.matchMedia('(pointer: fine)').matches;
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
+    const canProjectDrag=_projectMoveEligibility(s,{sourceOnly:true}).eligible;
+    if(_groupedFinePointer&&!readOnly&&canProjectDrag){
+      titleRow.classList.add('session-title-row-draggable');
+      titleRow.draggable=true;
+      const isGroupedDragControl=(target)=>{
+        const dragTarget=target&&target.nodeType===1?target:target&&target.parentElement;
+        return !!(dragTarget&&dragTarget.closest('button,input,label,[contenteditable],.session-tag,.session-lineage-count,.session-lineage-segments,.session-lineage-segment,.session-child-count,.session-child-sessions,.session-child-session'));
+      };
+      let groupedDragPointerOrigin=null;
+      titleRow.addEventListener('pointerdown',(e)=>{
+        groupedDragPointerOrigin=e.target;
+      },true);
+      titleRow.addEventListener('pointerup',()=>{groupedDragPointerOrigin=null;},true);
+      titleRow.addEventListener('pointercancel',()=>{groupedDragPointerOrigin=null;},true);
+      titleRow.addEventListener('dragstart',(e)=>{
+        if(isGroupedDragControl(groupedDragPointerOrigin)){
+          e.preventDefault();
+          groupedDragPointerOrigin=null;
+          return;
+        }
+        groupedDragPointerOrigin=null;
+        e.stopPropagation();
+        if(!e.dataTransfer) return;
+        e.dataTransfer.effectAllowed='move';
+        _setSessionProjectDragData(e.dataTransfer,s.session_id);
+        el.classList.add('dragging');
+      });
+      titleRow.addEventListener('dragend',()=>{
+        _clearSessionProjectDragData();
+        el.classList.remove('dragging');
+      });
+      const dragHandle=document.createElement('span');
+      dragHandle.className='session-drag-grip session-project-drag-handle';
+      dragHandle.setAttribute('aria-hidden','true');
+      dragHandle.textContent='⋮⋮';
+      dragHandle.title=typeof t==='function'?t('sidebar_group_drag_to_project'):'Drag to move to a project';
+      titleRow.appendChild(dragHandle);
+    }
     if(s.pinned&&!isPinnedGroup){
       const pinInd=document.createElement('span');
       pinInd.className='session-pin-indicator';
@@ -8707,7 +9079,8 @@ function renderSessionListFromCache(){
       _openSessionActionMenu(s, actions||el);
     };
 
-    if(!readOnly){
+    const _hasCoarsePointer=window.matchMedia&&window.matchMedia('(any-pointer: coarse)').matches;
+    if(!readOnly&&(!_groupedFinePointer||_hasCoarsePointer)){
       el.append(
         _makeSessionSwipeAffordance('right',s.archived?'undo':'archive',s.archived?'Restore':t('session_batch_archive')),
         _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
@@ -9198,6 +9571,20 @@ async function deleteSession(sid, beforeDelete=null){
 
 const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c','#67e8f9','#f472b6'];
 
+async function _moveSessionToProject(session,projectId,projectLabel){
+  try{
+    await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:projectId||null})});
+    const idx=_allSessions.findIndex(item=>item&&item.session_id===session.session_id);
+    if(idx>=0) _allSessions[idx].project_id=projectId||null;
+    renderSessionListFromCache();
+    showToast(projectId?'Moved to '+(projectLabel||'project'):'Removed from project');
+    return true;
+  }catch(e){
+    showToast((projectId?'Move failed: ':'Unassign failed: ')+(e.message||e));
+    return false;
+  }
+}
+
 function _showProjectPicker(session, anchorEl){
   // Close any existing picker
   document.querySelectorAll('.project-picker').forEach(p=>p.remove());
@@ -9210,38 +9597,17 @@ function _showProjectPicker(session, anchorEl){
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
-    try {
+    try{
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
-      // Sidebar rows are shallow copies of _allSessions entries (see
-      // _attachChildSessionsToSidebarRows), so mutating `session` only updates
-      // the discarded copy. Write into the authoritative cache so the next
-      // renderSessionListFromCache() reflects the move. (#2551)
-      const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
+      const idx=_allSessions.findIndex(item=>item&&item.session_id===session.session_id);
       if(idx>=0) _allSessions[idx].project_id=null;
       renderSessionListFromCache();
       showToast('Removed from project');
-    } catch(e) {
-      showToast('Unassign failed: '+(e.message||e));
-    }
+    }catch(e){showToast('Unassign failed: '+(e.message||e));}
   };
   picker.appendChild(none);
-  // Project options — only show projects matching the session's profile.
-  // #3331 follow-up (Codex gate): mirror the server's root-alias tolerance —
-  // `_profiles_match` treats the literal 'default' and a renamed-root display
-  // name as equivalent, so a server-approved `profile:'default'` project must
-  // not be hidden for a session stamped with the renamed-root profile (and
-  // vice versa). Only hide when BOTH sides are explicit, distinct, AND neither
-  // is the 'default' alias; let the server's allowlist be authoritative for the
-  // default/renamed-root case.
-  const sessionProfile = session ? (session.profile || undefined) : undefined;
-  const _profileHidesProject = (projProfile) => {
-    if(!sessionProfile || !projProfile) return false;
-    if(projProfile === sessionProfile) return false;
-    if(projProfile === 'default' || sessionProfile === 'default') return false;
-    return true;
-  };
   for(const p of _allProjects){
-    if (_profileHidesProject(p.profile)) continue;
+    if (_projectMoveEligibility(session,p).reason==='profile-mismatch') continue;
     const item=document.createElement('div');
     item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
     if(p.color){
@@ -9258,8 +9624,7 @@ function _showProjectPicker(session, anchorEl){
       document.removeEventListener('click',close);
       try{
         await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
-        // See #2551 — write to _allSessions, not the shallow sidebar copy.
-        const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
+        const idx=_allSessions.findIndex(item=>item&&item.session_id===session.session_id);
         if(idx>=0) _allSessions[idx].project_id=p.project_id;
         renderSessionListFromCache();
         showToast('Moved to '+p.name);

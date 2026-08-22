@@ -9714,6 +9714,7 @@ _SETTINGS_DEFAULTS = {
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
+    "sidebar_group_by_project": False,  # opt-in: group sidebar sessions by project (#6356)
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "default_message_mode": "steer",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
@@ -10006,6 +10007,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_thinking",
     "terminal_auto_expand_on_output",
     "workspace_todos_tab",
+    "sidebar_group_by_project",
     "api_redact_enabled",
     "session_jump_buttons",
     "render_user_markdown",
