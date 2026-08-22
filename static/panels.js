@@ -6640,6 +6640,18 @@ function _refreshProfileSwitchBackground(gen){
   }).catch(function(){});
 }
 
+function _profileDisplayLabel(p){
+  // Mirror upstream hermes_cli.profiles.format_profile_label: render the
+  // presentation-only display_name (e.g. a renamed default profile) as
+  // "display_name (canonical_id)", falling back to the bare canonical id
+  // when no display_name is set (or it equals the id) — byte-for-byte the
+  // pre-feature rendering. The canonical name always stays the programmatic
+  // identity (switching, data-name, matching).
+  const dn = p && typeof p.display_name === 'string' ? p.display_name.trim() : '';
+  const name = p && typeof p.name === 'string' ? p.name : '';
+  return dn && dn !== name ? `${dn} (${name})` : name;
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
@@ -6699,7 +6711,7 @@ async function loadProfilesPanel() {
       card.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}${hiddenBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(_profileDisplayLabel(p))}${defaultBadge}${activeBadge}${hiddenBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;
@@ -6747,7 +6759,7 @@ function _renderProfileDetail(p, activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = p.name;
+  title.textContent = _profileDisplayLabel(p);
   const isActive = p.name === activeName;
   const isDefault = !!p.is_default;
   const statusBadge = isActive
@@ -6871,7 +6883,7 @@ function renderProfileDropdown(data) {
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
-    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
+    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(_profileDisplayLabel(p))}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
     opt.onclick = async () => {
       closeProfileDropdown();
