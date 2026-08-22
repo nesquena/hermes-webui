@@ -21,15 +21,31 @@ def test_full_message_load_updates_viewed_count_after_metadata_fast_path():
     src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     compact = re.sub(r"\s+", "", src)
 
-    # The metadata-arrival viewed-count update now flows through
-    # _acknowledgeSessionVisit(), which calls _setSessionViewedCount() internally
-    # (and additionally syncs the polling snapshot + repaints so visiting a
-    # session reliably clears a stale sidebar unread dot) (#4946).
+    # Metadata is only the fast first phase; unread is acknowledged by the final
+    # selected-session block after the transcript has loaded successfully.
     assert (
-        "_acknowledgeSessionVisit(S.session.session_id,Number(data.session.message_count||0),"
+        "if(S.session&&S.session.session_id===sid){_acknowledgeSessionVisit("
+        "sid,Number(S.session.message_count||0),"
         in compact
     )
+    assert (
+        "_acknowledgeSessionVisit(S.session.session_id,Number(data.session.message_count||0),"
+        not in compact
+    ), "metadata arrival alone must not clear unread for failed or superseded loads"
     assert "_setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));" in src
+
+
+def test_message_loader_rejects_non_session_response():
+    src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("async function _ensureMessagesLoaded")
+    end = src.index("function _messageComparableText", start)
+    block = src[start:end]
+
+    assert "if (!data || !data.session) throw" in block, (
+        "undefined or malformed message responses are failed loads, not successful "
+        "transcripts that may be acknowledged as read"
+    )
+    assert "if (!data || !data.session) return;" not in block
 
 
 def test_lazy_message_load_skips_model_resolution():
