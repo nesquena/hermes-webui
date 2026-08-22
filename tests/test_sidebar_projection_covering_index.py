@@ -23,6 +23,7 @@ plans as a covering-index scan, results are unchanged by its presence, and a
 read-only db still degrades gracefully instead of raising.
 """
 
+import contextlib
 import pathlib
 import sqlite3
 
@@ -31,6 +32,34 @@ from api.agent_sessions import read_importable_agent_session_rows
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 COVERING_INDEX = "idx_messages_session_ts_role"
+
+
+@contextlib.contextmanager
+def _writes_blocked():
+    """Force the self-heal's writable connection to fail, deterministically.
+
+    The projection reads through a ``mode=ro`` URI handle and only opens a
+    plain writable connection for the best-effort index prime. Swapping
+    ``sqlite3.connect`` for the duration of the call lets URI opens delegate to
+    the real connector while every plain (writable) open raises, which is what
+    a genuinely read-only or locked db does.
+
+    ``chmod(0o444)`` cannot express this: root ignores the mode bit, so a
+    permission-based test silently exercises the writable path and can never
+    detect a regression in the caught-``sqlite3.Error`` branch.
+    """
+    real_connect = sqlite3.connect
+
+    def guarded(target, *args, **kwargs):
+        if kwargs.get("uri"):
+            return real_connect(target, *args, **kwargs)
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    sqlite3.connect = guarded
+    try:
+        yield
+    finally:
+        sqlite3.connect = real_connect
 
 
 def _make_state_db(path, *, sessions=6, messages_per_session=25):
@@ -140,15 +169,25 @@ def test_index_presence_does_not_change_rows(tmp_path):
     _make_state_db(without)
     _make_state_db(with_idx)
 
-    baseline = read_importable_agent_session_rows(without)
-
     conn = sqlite3.connect(str(with_idx))
     conn.execute(
         f"CREATE INDEX {COVERING_INDEX} ON messages(session_id, timestamp, role)"
     )
     conn.commit()
     conn.close()
+
+    # The baseline must stay genuinely unindexed: without the write block its
+    # own projection call primes the covering index first, and the comparison
+    # degenerates into indexed-vs-indexed.
+    with _writes_blocked():
+        baseline = read_importable_agent_session_rows(without)
+    assert COVERING_INDEX not in _index_names(without), (
+        "baseline fixture must remain unindexed for the comparison to mean "
+        "anything"
+    )
+
     primed = read_importable_agent_session_rows(with_idx)
+    assert COVERING_INDEX in _index_names(with_idx)
 
     assert baseline == primed, "covering index must not alter projected rows"
     assert baseline, "fixture should project at least one row"
@@ -159,17 +198,27 @@ def test_index_presence_does_not_change_rows(tmp_path):
 
 
 def test_read_only_db_degrades_gracefully(tmp_path):
-    """A read-only/locked db keeps the old plan instead of raising."""
+    """A failed prime keeps the old plan instead of raising, on every CI user."""
     db = tmp_path / "state.db"
+    reference = tmp_path / "reference.db"
     _make_state_db(db)
-    db.chmod(0o444)
-    try:
-        rows = read_importable_agent_session_rows(db)
-    finally:
-        db.chmod(0o644)
+    _make_state_db(reference)
 
-    assert rows, "projection must still return rows on a read-only db"
-    # The prime is best-effort: it may or may not have landed, but the call
-    # must not raise and must not lose data.
+    expected = read_importable_agent_session_rows(reference)
+    assert COVERING_INDEX in _index_names(reference), (
+        "writable control must prime the index"
+    )
+
+    with _writes_blocked():
+        rows = read_importable_agent_session_rows(db)
+
+    assert rows, "projection must still return rows when the prime fails"
+    assert COVERING_INDEX not in _index_names(db), (
+        "the prime must not have landed — otherwise the caught sqlite3.Error "
+        "branch was never exercised"
+    )
+    assert rows == expected, (
+        "the unindexed plan must project the same rows as the indexed one"
+    )
     for row in rows:
         assert row["actual_user_message_count"] > 0

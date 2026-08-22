@@ -116,9 +116,15 @@ def test_prime_is_noop_when_index_exists(tmp_path):
     )
 
     assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
-    # Index set is unchanged — no duplicate, no error.
-    assert _messages_indexes(db) == before
-    assert "idx_messages_session" in _messages_indexes(db)
+    # This prime is unchanged — no duplicate, no error. The projection also
+    # primes its own covering index (a separate self-heal with the same
+    # contract), so pin the delta exactly rather than asserting no change.
+    after = _messages_indexes(db)
+    assert before <= after
+    assert after - before <= {"idx_messages_session_ts_role"}, (
+        f"unexpected index created by the listing: {after - before}"
+    )
+    assert "idx_messages_session" in after
 
 
 def test_prime_skipped_without_timestamp_column(tmp_path):
