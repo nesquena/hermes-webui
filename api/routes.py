@@ -5983,6 +5983,51 @@ def _ip_is_loopback_or_private(raw: str):
     return (True, bool(addr.is_loopback or addr.is_private))
 
 
+def _inject_test_env_enabled() -> bool:
+    """Return True when HERMES_WEBUI_ALLOW_INJECT_TEST explicitly enables inject routes."""
+    return _env_flag_enabled("HERMES_WEBUI_ALLOW_INJECT_TEST")
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """Return True when an env var is an explicit truthy opt-in."""
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _loopback_dev_feature_allowed(handler, env_var: str) -> bool:
+    """Fail-closed gate for localhost-only debug/test features.
+
+    Requires both an explicit env opt-in and a true loopback peer. Peer IP
+    alone is insufficient behind a same-host reverse proxy (Svelte Node proxy
+    / Tailscale Funnel), which always presents as 127.0.0.1.
+    """
+    if not _env_flag_enabled(env_var):
+        return False
+    try:
+        from api.auth import _is_loopback
+
+        peer = ""
+        address = getattr(handler, "client_address", None)
+        if address:
+            peer = str(address[0] or "")
+        return _is_loopback(peer)
+    except Exception:
+        return False
+
+
+def _inject_test_allowed(handler) -> bool:
+    """Fail-closed gate for /api/*/inject_test.
+
+    Inject endpoints are off by default. They require both:
+    1. ``HERMES_WEBUI_ALLOW_INJECT_TEST=1`` (test/CI only), and
+    2. a true loopback peer (``_is_loopback``, includes ::1).
+
+    Peer-IP alone is insufficient behind a same-host reverse proxy (e.g. the
+    Svelte Node proxy or Tailscale Funnel), which always presents as 127.0.0.1.
+    """
+    return _loopback_dev_feature_allowed(handler, "HERMES_WEBUI_ALLOW_INJECT_TEST")
+
+
 def _trusted_proxy_networks():
     """Networks whose socket peer is allowed to assert a forwarded client IP.
 
@@ -14295,11 +14340,14 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"disabled": True})
         include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         qs = parse_qs(parsed.query)
-        # ?simulate=1 returns fake behind counts for UI testing (localhost only)
-        if (
-            qs.get("simulate", ["0"])[0] == "1"
-            and handler.client_address[0] == "127.0.0.1"
-        ):
+        # ?simulate=1 returns fake behind counts for UI testing.
+        # Off by default; requires HERMES_WEBUI_ALLOW_UPDATE_SIMULATE + loopback peer
+        # (peer IP alone is insufficient behind a same-host reverse proxy).
+        if qs.get("simulate", ["0"])[0] == "1":
+            if not _loopback_dev_feature_allowed(
+                handler, "HERMES_WEBUI_ALLOW_UPDATE_SIMULATE"
+            ):
+                return j(handler, {"error": "not found"}, status=404)
             return j(
                 handler,
                 {
@@ -14433,8 +14481,9 @@ def handle_get(handler, parsed) -> bool:
         return _handle_approval_sse_stream(handler, parsed)
 
     if parsed.path == "/api/approval/inject_test":
-        # Loopback-only: used by automated tests; blocked from any remote client
-        if handler.client_address[0] != "127.0.0.1":
+        # Off by default; requires HERMES_WEBUI_ALLOW_INJECT_TEST + loopback peer.
+        # Peer-IP alone is insufficient behind a same-host reverse proxy.
+        if not _inject_test_allowed(handler):
             return j(handler, {"error": "not found"}, status=404)
         return _handle_approval_inject(handler, parsed)
 
@@ -14448,8 +14497,7 @@ def handle_get(handler, parsed) -> bool:
         return _handle_session_sse_stream(handler, parsed)
 
     if parsed.path == "/api/clarify/inject_test":
-        # Loopback-only: used by automated tests; blocked from any remote client
-        if handler.client_address[0] != "127.0.0.1":
+        if not _inject_test_allowed(handler):
             return j(handler, {"error": "not found"}, status=404)
         return _handle_clarify_inject(handler, parsed)
 

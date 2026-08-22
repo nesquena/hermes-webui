@@ -1041,6 +1041,9 @@ def test_server():
         # ~/.hermes/profiles/webui/ and overwrite real API keys.
         "HERMES_BASE_HOME":               str(TEST_STATE_DIR),
         "HERMES_WEBUI_PASSWORD":          "",
+        # Opt-in for loopback inject_test routes used by approval/clarify tests.
+        # Off by default in production so reverse proxies cannot expose them.
+        "HERMES_WEBUI_ALLOW_INJECT_TEST": "1",
     })
 
     # Pass agent dir if discovered so server.py doesn't have to re-discover
