@@ -6164,6 +6164,8 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-foot-with-usage {
   justify-content: flex-start;
   gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .msg-usage-inline,
 .msg-duration-inline,
@@ -6185,6 +6187,17 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   color: var(--error);
   opacity: .95;
   font-weight: 600;
+  flex: 1 1 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.msg-used-model-inline {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .msg-foot-with-usage .msg-time,
 .msg-foot-with-usage .msg-actions {

@@ -5151,6 +5151,70 @@ function _formatReasoningEffortLabel(effort){
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
+function _bareModelId(modelId, providerId){
+  // Mirror of api/streaming.py::_bare_model_id — remove only the routing prefix,
+  // then keep the complete bare model (including slash namespaces and tags).
+  // Older messages can lack provider provenance, so recognize both the ordinary
+  // @provider:model grammar and custom @custom:<slug>:<model> route hints.
+  let m=String(modelId||'').trim();
+  if(!m)return'';
+  const provider=String(providerId||'').trim();
+  const prefix=provider?`@${provider}:`:'';
+  if(prefix&&m.toLowerCase().startsWith(prefix.toLowerCase())){
+    m=m.slice(prefix.length);
+  }else if(!provider&&m.toLowerCase().startsWith('@custom:')){
+    let splitAt=m.indexOf(':','@custom:'.length);
+    const portSplit=m.indexOf(':',splitAt+1);
+    if(splitAt>=0&&portSplit>=0){
+      const host=m.slice('@custom:'.length,splitAt);
+      const port=m.slice(splitAt+1,portSplit);
+      const portNumber=Number(port);
+      const endpointHost=host.toLowerCase()==='localhost'||host.includes('.');
+      if(endpointHost&&/^\d+$/.test(port)&&portNumber>=1&&portNumber<=65535){
+        // Match the shared Python grammar's custom host:port provider shape.
+        splitAt=portSplit;
+      }
+    }
+    if(splitAt>=0)m=m.slice(splitAt+1);
+  }else if(!provider&&m.charAt(0)==='@'&&m.indexOf(':')>=0){
+    // A non-custom provider is one grammar segment. These compatibility paths
+    // are for messages that predate the persisted provider provenance fields.
+    m=m.slice(m.indexOf(':')+1);
+  }
+  return m.trim();
+}
+function _localModelSwitchText(msg, requestedModel){
+  // Notice for a LOCAL fallback switch: the configured provider failed and
+  // fallback_providers served the turn with another model. Gateway turns own
+  // their own warning via _gatewayModelWarningText, so stay silent there to
+  // keep one notice per turn. Fails closed: renders nothing unless both model
+  // identities are known, and keeps the warning on conflicting provenance.
+  if(!msg)return'';
+  if(msg._gatewayRouting)return'';
+  const used=String(msg._usedModel||'').trim();
+  const requested=String(requestedModel||msg._requestedModel||'').trim();
+  if(!used||!requested)return'';
+  const usedId=_bareModelId(used,msg._usedProvider).toLowerCase();
+  const requestedId=_bareModelId(requested,msg._requestedProvider).toLowerCase();
+  if(!usedId||!requestedId)return'';
+  const routeProvider=modelId=>{
+    const match=String(modelId||'').trim().match(/^@(custom:[^:]+|[^:]+):/i);
+    return match?match[1].toLowerCase():'';
+  };
+  const requestedRouteProvider=routeProvider(requested);
+  const usedRouteProvider=routeProvider(used);
+  const requestedProvider=String(msg._requestedProvider||'').trim().toLowerCase();
+  const usedProvider=String(msg._usedProvider||'').trim().toLowerCase();
+  const mismatch=(a,b)=>!!a&&!!b&&a!==b;
+  const provenanceContradicts=
+    mismatch(requestedRouteProvider,requestedProvider)
+    ||mismatch(usedRouteProvider,usedProvider)
+    ||mismatch(requestedProvider||requestedRouteProvider,usedProvider||usedRouteProvider);
+  if(usedId===requestedId&&!provenanceContradicts)return'';
+  // _bareModelId removes only the @provider: routing notation. A remaining slash
+  // namespace is identity-bearing, even when the other id has the same basename.
+  return`${t('model_switched')||'Model switched'}: ${getModelLabel(requested)} → ${getModelLabel(used)}`;
+}
 function _reasoningEffortContext(){
   const transition=_profileTransitionReasoningContext;
   const session=S&&S.session;
@@ -7471,7 +7535,7 @@ function _gatewayModelWarningText(routing){
   if(!routing||!routing.model_changed)return'';
   const requested=getModelLabel(routing.requested_model||'requested model');
   const used=getModelLabel(routing.used_model||'served model');
-  return`Model switched: ${requested} → ${used}`;
+  return`${t('model_switched')||'Model switched'}: ${requested} → ${used}`;
 }
 function _latestGatewayRoutingForSession(session){
   if(!session)return null;
@@ -17854,7 +17918,7 @@ function renderMessages(options){
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const modelWarningText=_gatewayModelWarningText(routing)||_localModelSwitchText(msg);
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
