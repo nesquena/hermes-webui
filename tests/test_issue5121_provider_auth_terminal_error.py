@@ -654,6 +654,254 @@ def test_completed_assistant_answer_with_stale_partial_flag_settles_done(tmp_pat
     assert not any(msg.get("_error") for msg in saved.messages)
 
 
+def test_recovered_final_answer_retires_matching_generic_no_response_sidecar(tmp_path, monkeypatch):
+    """A recovered final answer must win over its own stale generic sidecar.
+
+    This reproduces the durable production shape: the agent DB already has the
+    completed answer, while the WebUI sidecar still ends with the same text
+    marked partial followed by the generated no-response card.
+    """
+    session = _prepare_session(
+        "recovered_final_stale_sidecar",
+        "stream_recovered_final_stale_sidecar",
+        pending_user_message="Please finish cleanly",
+    )
+    session.messages = [
+        {
+            "role": "assistant",
+            "content": "Recovered completed answer",
+            "timestamp": 2,
+            "finish_reason": "stop",
+            "_db_persisted": True,
+        },
+        {"role": "user", "content": "Please finish cleanly", "timestamp": 1},
+        {
+            "role": "assistant",
+            "content": "Recovered completed answer",
+            "timestamp": 2,
+            "_partial": True,
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "**No response from provider:** No response from provider.\n\n"
+                "*The provider returned no content and no error. This often means a "
+                "usage/rate limit was hit silently. Check provider status, switch "
+                "providers via `hermes model`, or try again in a moment.*"
+            ),
+            "timestamp": 2,
+            "_error": True,
+            "provider_details": "No response from provider.",
+        },
+    ]
+    # Reproduce recovery when the durable model-facing context is unavailable
+    # and the agent returns only the recovered current-turn answer.
+    session.context_messages = []
+    session.save()
+
+    class RecoveredFinalAnswerAgent(MockAgent):
+        def run_conversation(self, **kwargs):
+            return {
+                "status": "partial",
+                "partial": True,
+                "messages": [
+                    {"role": "assistant", "content": "Recovered completed answer"},
+                ],
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_recovered_final_stale_sidecar",
+        RecoveredFinalAnswerAgent,
+        workspace=str(tmp_path),
+    )
+    saved = Session.load("recovered_final_stale_sidecar")
+    assert saved is not None
+
+    events = _queue_events(fake_queue)
+    assert any(event == "done" for event, _ in events)
+    assert not any(event == "apperror" for event, _ in events)
+    assert [msg.get("role") for msg in saved.messages] == ["user", "assistant"]
+    assert saved.messages[-1]["content"] == "Recovered completed answer"
+    assert not saved.messages[-1].get("_partial")
+    assert not any(msg.get("_error") for msg in saved.messages)
+    assert not session.path.with_suffix(".json.bak").exists()
+
+
+def _recovered_result(text: str = "Recovered completed answer") -> dict:
+    return {
+        "status": "partial",
+        "partial": True,
+        "messages": [{"role": "assistant", "content": text}],
+        "error": "",
+    }
+
+
+def _generic_no_response_message() -> dict:
+    return {
+        "role": "assistant",
+        "content": streaming._GENERATED_NO_RESPONSE_ERROR_CONTENT,
+        "_error": True,
+        "provider_details": "No response from provider.",
+    }
+
+
+def test_recovered_user_final_partial_error_order_is_repaired():
+    display = [
+        {"role": "user", "content": "Please finish cleanly"},
+        {
+            "role": "assistant",
+            "content": "Recovered completed answer",
+            "finish_reason": "stop",
+            "_db_persisted": True,
+        },
+        {"role": "assistant", "content": "Recovered completed answer", "_partial": True},
+        _generic_no_response_message(),
+    ]
+    result = _recovered_result()
+
+    repaired_display, repaired_context, repaired = streaming._retire_recovered_final_answer_sidecar(
+        display,
+        list(display),
+        result,
+        result["messages"],
+        "Please finish cleanly",
+        last_error="",
+        tool_limit_reached=False,
+    )
+
+    assert repaired is True
+    assert [msg.get("role") for msg in repaired_display] == ["user"]
+    assert repaired_context == []
+
+
+def test_recovered_answer_guard_preserves_real_provider_error_sidecar():
+    display = [
+        {"role": "user", "content": "Please finish cleanly"},
+        {"role": "assistant", "content": "Recovered completed answer", "_partial": True},
+        {
+            "role": "assistant",
+            "content": "**Authentication failed:** invalid token",
+            "_error": True,
+            "provider_details": "HTTP 401 invalid token",
+        },
+    ]
+    result = {
+        "status": "partial",
+        "partial": True,
+        "messages": [{"role": "assistant", "content": "Recovered completed answer"}],
+        "error": "",
+    }
+
+    repaired_display, repaired_context, repaired = streaming._retire_recovered_final_answer_sidecar(
+        display,
+        [],
+        result,
+        result["messages"],
+        "Please finish cleanly",
+        last_error="",
+        tool_limit_reached=False,
+    )
+
+    assert repaired is False
+    assert repaired_display == display
+    assert repaired_context == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"provider_details": "HTTP 429 captured details"},
+        {"provider_details_label": "Provider details"},
+        {"_compressionRecovery": {"recommended_action": "continue"}},
+    ],
+)
+def test_recovered_answer_guard_requires_exact_generic_fingerprint(mutation):
+    error_message = _generic_no_response_message()
+    error_message.update(mutation)
+    display = [
+        {"role": "user", "content": "Please finish cleanly"},
+        {"role": "assistant", "content": "Recovered completed answer", "_partial": True},
+        error_message,
+    ]
+    result = _recovered_result()
+
+    repaired_display, _, repaired = streaming._retire_recovered_final_answer_sidecar(
+        display,
+        [],
+        result,
+        result["messages"],
+        "Please finish cleanly",
+        last_error="",
+        tool_limit_reached=False,
+    )
+
+    assert repaired is False
+    assert repaired_display == display
+
+
+@pytest.mark.parametrize(
+    ("result_update", "last_error"),
+    [
+        ({"status": "failed", "failed": True}, ""),
+        ({"error": "explicit provider failure"}, "explicit provider failure"),
+        ({"compression_exhausted": True}, ""),
+    ],
+)
+def test_recovered_answer_guard_preserves_hard_or_explicit_failures(result_update, last_error):
+    display = [
+        {"role": "user", "content": "Please finish cleanly"},
+        {"role": "assistant", "content": "Recovered completed answer", "_partial": True},
+        _generic_no_response_message(),
+    ]
+    result = _recovered_result()
+    result.update(result_update)
+
+    repaired_display, _, repaired = streaming._retire_recovered_final_answer_sidecar(
+        display,
+        [],
+        result,
+        result["messages"],
+        "Please finish cleanly",
+        last_error=last_error,
+        tool_limit_reached=False,
+    )
+
+    assert repaired is False
+    assert repaired_display == display
+
+
+@pytest.mark.parametrize("partial_field", ["tool_calls", "_partial_tool_calls"])
+def test_recovered_answer_guard_preserves_partial_with_tool_calls(partial_field):
+    partial = {
+        "role": "assistant",
+        "content": "Recovered completed answer",
+        "_partial": True,
+    }
+    partial[partial_field] = [{"id": "call_pending", "type": "function"}]
+    display = [
+        {"role": "user", "content": "Please finish cleanly"},
+        partial,
+        _generic_no_response_message(),
+    ]
+    result = _recovered_result()
+
+    repaired_display, _, repaired = streaming._retire_recovered_final_answer_sidecar(
+        display,
+        [],
+        result,
+        result["messages"],
+        "Please finish cleanly",
+        last_error="",
+        tool_limit_reached=False,
+    )
+
+    assert repaired is False
+    assert repaired_display == display
+
+
 def test_stale_partial_with_unfinished_tool_call_still_reports_no_response(tmp_path, monkeypatch):
     session = _prepare_session(
         "unfinished_tool_call_stale_partial",
