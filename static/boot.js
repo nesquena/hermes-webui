@@ -2242,6 +2242,11 @@ function _applySessionContextMetadataUpdate(data){
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
   S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
+  if(S.lastUsage&&typeof S.lastUsage==='object'){
+    if(Number(S.session.context_length)>0) S.lastUsage.context_length=S.session.context_length;
+    S.lastUsage.threshold_tokens=S.session.threshold_tokens||0;
+    if(S.session.last_prompt_tokens!=null) S.lastUsage.last_prompt_tokens=S.session.last_prompt_tokens;
+  }
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);

@@ -15355,6 +15355,12 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
             enabled_toolsets=enabled_toolsets,
         )
+        _new_cl = _resolve_context_length_for_session_model(
+            getattr(s, "model", None),
+            getattr(s, "model_provider", None),
+        )
+        if _new_cl:
+            s.context_length = _new_cl
         if worktree_info:
             publish_session_list_changed(
                 "session_new",
