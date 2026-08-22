@@ -9,6 +9,7 @@ Proof matrix:
   6. Return signature is unchanged: tuple[int, int].
   7. Nested skill deletions change the stat probe even when file mtimes do not.
 """
+import os
 import shutil
 import sys
 import time
@@ -351,6 +352,39 @@ class TestSymlinkedSkillProbeFollowsLinks:
     # the SAME EXCLUDED_SKILL_DIRS + SKILL_SUPPORT_DIRS sets as the compute path
     # agent.skill_utils.iter_skill_index_files, so the two traversals visit an
     # identical set of directories by construction.
+
+
+class TestSameTimestampPathSetChanges:
+    """A new skill must invalidate the cache even when mtimes do not advance."""
+
+    def test_new_skill_path_with_same_mtime_recomputes_inside_ttl(self, profiles_mod):
+        mod, profile_dir = profiles_mod
+        skills_dir = profile_dir / "skills"
+        first_skill = skills_dir / "first"
+        first_skill.mkdir(parents=True)
+        first_skill_md = first_skill / "SKILL.md"
+        first_skill_md.write_text("# first\n", encoding="utf-8")
+
+        # Simulate a filesystem whose rapid creates share one nanosecond mtime.
+        fixed_ns = 1_700_000_000_000_000_000
+        for path in (skills_dir, first_skill, first_skill_md):
+            os.utime(path, ns=(fixed_ns, fixed_ns))
+
+        with patch.object(
+            mod, "_compute_profile_skills_stats", side_effect=[(1, 1), (2, 2)]
+        ) as mock_compute:
+            assert mod._get_profile_skills_stats(profile_dir) == (1, 1)
+
+            second_skill = skills_dir / "second"
+            second_skill.mkdir()
+            second_skill_md = second_skill / "SKILL.md"
+            second_skill_md.write_text("# second\n", encoding="utf-8")
+            for path in (skills_dir, first_skill, first_skill_md, second_skill, second_skill_md):
+                os.utime(path, ns=(fixed_ns, fixed_ns))
+
+            assert mod._get_profile_skills_stats(profile_dir) == (2, 2)
+
+        assert mock_compute.call_count == 2
 
 
 class TestReturnSignature:
