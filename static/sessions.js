@@ -7670,6 +7670,55 @@ function _attachProjectQuickCreateButton(chip, project){
   chip.appendChild(btn);
 }
 
+function _installSessionOpenControl(control, session){
+  if(!control||!session||!session.session_id) return;
+  control.onclick=async(e)=>{
+    if(e&&typeof e.stopPropagation==='function') e.stopPropagation();
+    // Pointer and touch activation stay owned by the row gesture state machine.
+    // Native keyboard activation and assistive-technology synthesized clicks use
+    // detail=0, so handling only that path avoids opening a conversation twice.
+    if(!e||e.detail!==0||_sessionSelectMode||_renamingSid) return;
+    const search=$('sessionSearch');
+    if(search&&(search.value||'').trim()) _hideSearchPreviewsAfterSelect=true;
+    await _openSidebarSession(session);
+  };
+}
+
+function _isSessionSidebarVisible(list){
+  if(!list) return false;
+  const panel=list.closest&&list.closest('#panelChat');
+  if(panel&&!panel.classList.contains('active')) return false;
+  const sidebar=list.closest&&list.closest('.sidebar');
+  if(typeof _isDesktopWidth==='function'){
+    if(_isDesktopWidth()){
+      if(typeof _isSidebarCollapsed==='function'&&_isSidebarCollapsed()) return false;
+    }else if(sidebar&&!sidebar.classList.contains('mobile-open')){
+      return false;
+    }
+  }
+  return true;
+}
+
+function _captureSessionOpenControlFocus(list){
+  if(!list||typeof document==='undefined') return null;
+  if(!_isSessionSidebarVisible(list)) return null;
+  const active=document.activeElement;
+  if(!active||!list.contains(active)||!active.closest) return null;
+  const control=active.closest('.session-open-control');
+  if(!control||!list.contains(control)) return null;
+  return control.dataset&&control.dataset.sid?control.dataset.sid:null;
+}
+
+function _restoreSessionOpenControlFocus(list, sid){
+  if(!list||!sid||typeof document==='undefined') return false;
+  if(!_isSessionSidebarVisible(list)) return false;
+  const controls=list.querySelectorAll('.session-open-control[data-sid]');
+  const control=Array.from(controls).find(candidate=>candidate.dataset.sid===sid);
+  if(!control||control.disabled||control.getAttribute('aria-hidden')==='true') return false;
+  try{control.focus({preventScroll:true});}catch(_){control.focus();}
+  return document.activeElement===control;
+}
+
 
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
@@ -7736,6 +7785,7 @@ function renderSessionListFromCache(){
   const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
+  const focusedSessionOpenControlId=_captureSessionOpenControlFocus(list);
   list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
@@ -8087,6 +8137,7 @@ function renderSessionListFromCache(){
     toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
     list.appendChild(toggleBtn);
   }
+  _restoreSessionOpenControlFocus(list,focusedSessionOpenControlId);
   // Refresh FLIP and queued archive/delete reflow both drive
   // --session-reflow-offset. Refresh wins so one render has one transform writer.
   const reflowBefore=animateRefresh?flipBefore:_pendingSessionReflowPositions;
@@ -8174,8 +8225,14 @@ function renderSessionListFromCache(){
       branchInd.title=_sessionForkTooltip(parentLabel);
       titleRow.appendChild(branchInd);
     }
-    const title=document.createElement('span');
-    title.className='session-title';
+    const title=document.createElement(_sessionSelectMode?'span':'button');
+    title.className=_sessionSelectMode?'session-title':'session-title session-open-control';
+    if(!_sessionSelectMode){
+      title.type='button';
+      title.dataset.sid=s.session_id;
+      if(isActive) title.setAttribute('aria-current','page');
+      _installSessionOpenControl(title,s);
+    }
     const displayTitle=cleanTitle||'Untitled';
     const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
     if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
@@ -8186,7 +8243,25 @@ function renderSessionListFromCache(){
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
-    titleRow.appendChild(title);
+    const titleGroup=document.createElement('div');
+    titleGroup.className='session-title-group';
+    titleGroup.appendChild(title);
+    // Keep tag/filter controls outside the conversation-open button while one
+    // constrained flex group preserves a visible title on narrow sidebars.
+    for(const tag of tags){
+      const chip=document.createElement('span');
+      chip.className='session-tag';
+      chip.textContent=tag;
+      chip.title='Click to filter by '+tag;
+      ['pointerdown','pointerup','touchstart','touchend'].forEach(ev=>chip.addEventListener(ev,e=>e.stopPropagation()));
+      chip.onclick=(e)=>{
+        e.stopPropagation();
+        const searchBox=$('sessionSearch');
+        if(searchBox){searchBox.value=tag;filterSessions();}
+      };
+      titleGroup.appendChild(chip);
+    }
+    titleRow.appendChild(titleGroup);
     // Project color dot: placed BETWEEN title and timestamp, not inside the
     // title span. Inside the title span it would be clipped by the ellipsis
     // truncation, becoming invisible exactly when the title is long enough
@@ -8624,20 +8699,6 @@ function renderSessionListFromCache(){
       }
       sessionText.appendChild(childList);
     }
-    // Append tag chips after the title text
-    for(const tag of tags){
-      const chip=document.createElement('span');
-      chip.className='session-tag';
-      chip.textContent=tag;
-      chip.title='Click to filter by '+tag;
-      chip.onclick=(e)=>{
-        e.stopPropagation();
-        const searchBox=$('sessionSearch');
-        if(searchBox){searchBox.value=tag;filterSessions();}
-      };
-      title.appendChild(chip);
-    }
-
     // Rename: called directly when we confirm it's a double-click
     const startRename=_buildSessionRenameStarter(
       s,
