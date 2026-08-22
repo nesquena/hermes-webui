@@ -1,5 +1,6 @@
 from api.streaming import (
     _fallback_title_from_exchange,
+    _first_exchange_snippets,
     _strip_workspace_prefix,
     _workspace_context_prefix,
 )
@@ -22,6 +23,18 @@ def test_legacy_workspace_prefix_only_strips_for_compatibility_callers():
 
     assert _strip_workspace_prefix(legacy) == legacy
     assert _strip_workspace_prefix(legacy, include_legacy=True) == "Continue"
+
+
+def test_historical_exchange_strips_legacy_workspace_prefix():
+    user_text, assistant_text = _first_exchange_snippets(
+        [
+            {"role": "user", "content": "[Workspace: /tmp/project]\nContinue"},
+            {"role": "assistant", "content": "Done"},
+        ]
+    )
+
+    assert user_text == "Continue"
+    assert assistant_text == "Done"
 
 
 def test_user_typed_legacy_workspace_prefix_survives_fallback_title():
