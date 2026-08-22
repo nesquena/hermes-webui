@@ -7220,6 +7220,12 @@ function autoResize(){
   }
   const el=$('msg');
   const _nextValue=String(el.value||'');
+  if(typeof CSS!=='undefined'&&typeof CSS.supports==='function'&&CSS.supports('field-sizing','content')){
+    if(el.style.height) el.style.height='';
+    _composerLastResizeValue=_nextValue;
+    updateSendBtn();
+    return;
+  }
   const _isAppendOnly=_nextValue.length>_composerLastResizeValue.length&&_nextValue.startsWith(_composerLastResizeValue);
   const _fitsCurrentHeight=el.scrollHeight<=el.offsetHeight;
   // Only a direct append at the natural one-row height can skip the height
