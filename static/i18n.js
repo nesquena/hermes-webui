@@ -26334,6 +26334,8 @@ function setLocale(lang) {
   _locale = LOCALES[resolved];
   try { localStorage.setItem('hermes-lang', resolved); } catch (_) {}
   document.documentElement.lang = _locale._speech || resolved;
+  document.documentElement.dir = _locale._dir || 'ltr';
+  document.documentElement.dataset.locale = resolved;
 }
 
 /**
