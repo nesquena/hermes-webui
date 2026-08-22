@@ -5967,6 +5967,15 @@ def _message_identity(msg):
         return None
     role = str(msg.get('role') or '')
     content = msg.get('content', '')
+    if not isinstance(content, (str, list, dict)):
+        return (
+            role,
+            '',
+            str(msg.get('tool_call_id') or ''),
+            json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
+            type(content).__name__,
+            repr(content),
+        )
     text = _message_text(content)
     if role == 'user':
         # WebUI sends the model a workspace-prefixed user_message while the

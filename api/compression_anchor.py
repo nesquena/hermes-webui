@@ -36,11 +36,13 @@ compression contexts.
 
 def _content_text(content, *, part_types):
     if isinstance(content, list):
-        return "\n".join(
-            str(part.get("text") or part.get("content") or "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") in part_types
-        ).strip()
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("type") in part_types:
+                parts.append(str(part.get("text") or part.get("content") or ""))
+        return "\n".join(parts).strip()
     return str(content or "").strip()
 
 

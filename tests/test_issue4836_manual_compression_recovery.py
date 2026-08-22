@@ -368,3 +368,40 @@ def test_recovery_recognizes_sentinel_encoded_structured_compression_marker(tmp_
     bak_path.write_text(json.dumps(bak), encoding="utf-8")
 
     assert inspect_session_recovery_status(live_path)["recommend"] == "restore"
+
+
+def test_recovery_recognizes_sentinel_encoded_string_compression_marker(tmp_path):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    sid = "issue4836_sentinel_string_marker"
+    live_path = session_dir / f"{sid}.json"
+    bak_path = session_dir / f"{sid}.json.bak"
+    encoded_marker = "\x00json:" + json.dumps(
+        ["[context compaction] summary"],
+        separators=(",", ":"),
+    )
+
+    live = {
+        "session_id": sid,
+        "title": "Untitled",
+        "workspace": str(tmp_path),
+        "model": "openai/gpt-5.4-mini",
+        "messages": [_msg("user", "one", 1.0), _msg("assistant", "two", 2.0)],
+        "context_messages": [_msg("user", "compressed context", 1.0)],
+        "compression_anchor_summary": "Compressed earlier",
+        "compression_anchor_message_key": {"role": "assistant", "ts": 2.0, "text": "two", "attachments": 0},
+        "compression_anchor_mode": "manual",
+        "truncation_watermark": 1.0,
+        "truncation_boundary": 1.0,
+        "message_count": 2,
+    }
+    bak = dict(live)
+    bak["messages"] = [_msg("user", f"m{i}", float(i)) for i in range(130)]
+    bak["context_messages"] = [
+        _msg("user", encoded_marker, 1.0),
+        _msg("assistant", "compressed follow-up", 2.0),
+    ]
+    live_path.write_text(json.dumps(live), encoding="utf-8")
+    bak_path.write_text(json.dumps(bak), encoding="utf-8")
+
+    assert inspect_session_recovery_status(live_path)["recommend"] == "restore"

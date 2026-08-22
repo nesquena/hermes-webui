@@ -227,6 +227,66 @@ def test_native_multimodal_sidecar_reconciles_with_agent_text_projection():
     assert merged[0]["api_content"] == "trusted provider wire content"
 
 
+def test_input_text_multimodal_sidecar_reconciles_with_scalar_mirror():
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    sidecar = {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "input_text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    state = {
+        "role": "user",
+        "content": "describe this image\n[screenshot]",
+        "timestamp": timestamp,
+        "api_content": "input-text provider wire content",
+    }
+
+    merged = merge_session_messages_append_only([sidecar], [state])
+
+    assert merged == [sidecar]
+    assert sidecar["api_content"] == "input-text provider wire content"
+
+
+def test_multimodal_mirror_does_not_match_rich_rows_or_copy_rich_sidecars():
+    from api.models import (
+        _copy_api_content_sidecar,
+        _session_message_multimodal_mirror_key,
+        merge_session_messages_append_only,
+    )
+
+    timestamp = 1766352000.123456
+    rich_a = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    rich_b = {
+        **rich_a,
+        "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AQ=="}},
+        ],
+    }
+
+    assert _session_message_multimodal_mirror_key(rich_a) is None
+    assert _session_message_multimodal_mirror_key(rich_b) is None
+    rich_b["api_content"] = "rich provider wire content"
+    assert merge_session_messages_append_only([rich_a], [rich_b]) == [rich_a, rich_b]
+    assert "api_content" not in rich_a
+
+    target = dict(rich_a)
+    assert _copy_api_content_sidecar(target, rich_b) is False
+    assert "api_content" not in target
+
+
 def test_ordinary_reconciliation_preserves_conflicting_provider_sidecars():
     """Conflicting provider payloads remain separate ordinary rows."""
     from api.models import merge_session_messages_append_only

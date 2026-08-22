@@ -8716,7 +8716,11 @@ def _session_message_api_content_key(msg: dict | None):
 
 
 def _session_message_content_shape(content) -> str:
-    return "structured" if isinstance(content, (list, dict)) else "scalar"
+    if isinstance(content, (list, dict)):
+        return "structured"
+    if isinstance(content, str):
+        return "scalar"
+    return f"scalar:{type(content).__name__}"
 
 
 def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
@@ -8731,6 +8735,8 @@ def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
 
 
 _SESSION_MESSAGE_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+_SESSION_MESSAGE_TEXT_PART_TYPES = {"", "text", "input_text", "output_text"}
+_SESSION_MESSAGE_TEXT_PART_KEYS = ("text", "content", "input_text", "output_text")
 
 
 def _agent_durable_multimodal_content(msg: dict) -> str | None:
@@ -8743,17 +8749,23 @@ def _agent_durable_multimodal_content(msg: dict) -> str | None:
     normalized_parts = []
     image_parts = 0
     for part in content:
+        if isinstance(part, str):
+            normalized_parts.append(part)
+            continue
         if not isinstance(part, dict):
             return None
-        part_type = part.get("type")
-        if isinstance(part_type, str) and part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+        part_type = str(part.get("type") or "").lower()
+        if part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
             normalized_parts.append("[screenshot]")
             image_parts += 1
-        elif part_type == "text":
-            text = part.get("text")
-            if not isinstance(text, str):
+        elif part_type in _SESSION_MESSAGE_TEXT_PART_TYPES:
+            for key in _SESSION_MESSAGE_TEXT_PART_KEYS:
+                text = part.get(key)
+                if isinstance(text, str):
+                    normalized_parts.append(text)
+                    break
+            else:
                 return None
-            normalized_parts.append(text)
         else:
             return None
     if not image_parts:
@@ -8773,10 +8785,11 @@ def _session_message_multimodal_mirror_key(
     if role != "user":
         return None
     raw_content = msg.get("content")
-    content = _agent_durable_multimodal_content(msg)
-    if require_image_parts and content is None:
-        return None
-    if content is None:
+    if require_image_parts:
+        content = _agent_durable_multimodal_content(msg)
+        if content is None:
+            return None
+    else:
         if not isinstance(raw_content, str):
             return None
         content = _normalized_session_message_content(msg)
@@ -9539,8 +9552,9 @@ def _normalized_session_message_content(
 ) -> str:
     if not isinstance(msg, dict):
         return repr(msg)
+    raw_content = msg.get("content", "")
     normalized = _normalized_message_content_value(
-        msg.get("content") or "",
+        raw_content,
         strip_workspace_prefix=(
             normalize_workspace_prefix and str(msg.get("role") or "") == "user"
         ),
@@ -10129,6 +10143,13 @@ def merge_session_messages_append_only(
         helper = _message_key_helpers[kind]
         msg_cache_key = id(msg)
         prepared_msg = _cached_msg_prepared.get(msg_cache_key)
+
+        # Keep non-string scalar type in the key itself. Stringifying it into
+        # the prepared-message cache would collapse 0/False into empty text.
+        if not isinstance(msg.get("content", ""), (str, list, dict)):
+            value = helper(msg)
+            _cached_msg_keys[cache_key] = value
+            return value
 
         if kind in {"merge", "dedup"}:
             if prepared_msg is None:

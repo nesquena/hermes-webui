@@ -211,6 +211,20 @@ class TestVisibleKeyToolCalls:
 
 
 class TestMergeToolCallsEndToEnd:
+    def test_falsy_scalar_content_keeps_merge_and_replay_identity(self):
+        from api.streaming import _message_replay_key
+
+        empty = {"role": "user", "content": "", "timestamp": 1000}
+        zero = {"role": "user", "content": 0, "timestamp": 1000}
+        false = {"role": "user", "content": False, "timestamp": 1000}
+
+        merged = merge_session_messages_append_only([empty], [zero, false])
+
+        assert [message["content"] for message in merged] == ["", 0, False]
+        assert _message_replay_key(empty) != _message_replay_key(zero)
+        assert _message_replay_key(empty) != _message_replay_key(false)
+        assert _message_replay_key(zero) != _message_replay_key(false)
+
     def test_same_tool_calls_sidecar_and_state_merge_to_one(self):
         """Sidecar and state.db have the same assistant message with identical
         tool_calls → merge must produce exactly one message (deduplicated)."""
