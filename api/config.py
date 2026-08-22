@@ -7787,10 +7787,32 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             fetch_openrouter_models as _fetch_or_models,
                         )
                         live_curated = _fetch_or_models() or []
+                        # Display-name hydration (#7228): fetch_openrouter_models()
+                        # returns (id, badge) pairs — the second element is a picker
+                        # badge ("default"/"free"/"recommended"), NOT a name, so it
+                        # must not become a label. The human-readable names live in
+                        # the shared OpenRouter metadata cache (the same source
+                        # Desktop hydrates overflow labels from). One cached call
+                        # covers the whole loop; on any failure fall back to raw ids
+                        # so the picker group itself can never break.
+                        try:
+                            from agent.model_metadata import (
+                                fetch_model_metadata as _fetch_or_meta,
+                            )
+                            _or_meta = _fetch_or_meta() or {}
+                        except Exception:
+                            logger.debug(
+                                "OpenRouter model metadata unavailable; "
+                                "curated picker labels fall back to raw ids",
+                                exc_info=True,
+                            )
+                            _or_meta = {}
                         for mid, _desc in live_curated:
                             if mid and mid not in seen_ids:
                                 seen_ids.add(mid)
-                                raw_models.append({"id": mid, "label": mid})
+                                _meta_entry = _or_meta.get(mid) or {}
+                                _display_name = str(_meta_entry.get("name") or "").strip()
+                                raw_models.append({"id": mid, "label": _display_name or mid})
                     except Exception:
                         logger.warning("Failed to load OpenRouter curated catalog from hermes_cli")
 
