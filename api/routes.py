@@ -22630,6 +22630,30 @@ def _prepare_chat_start_session_for_stream(
         s.save()
 
 
+def _cleanup_chat_start_launch_failure(session, stream_id: str) -> None:
+    """Release state registered before a worker thread successfully starts."""
+    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+    unregister_stream_owner(stream_id)
+    with STREAMS_LOCK:
+        STREAMS.pop(stream_id, None)
+    STREAM_GOAL_RELATED.pop(stream_id, None)
+    if getattr(session, "active_stream_id", None) != stream_id:
+        return
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    session.pending_user_source = None
+    try:
+        session.save()
+    except Exception:
+        logger.debug(
+            "Failed to persist chat-start cleanup after worker launch failure for %s",
+            stream_id,
+            exc_info=True,
+        )
+
+
 def _is_hidden_empty_session(s) -> bool:
     return (
         getattr(s, "title", "Untitled") == "Untitled"
@@ -23217,6 +23241,7 @@ def _start_chat_stream_for_session(
                 _clear_gateway_run_starting(stream_id)
             except Exception:
                 logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
+        _cleanup_chat_start_launch_failure(s, stream_id)
         raise
     response = {
         "stream_id": stream_id,
