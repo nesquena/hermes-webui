@@ -16478,69 +16478,126 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   return true;
 }
 
-// #6345: parse the synthetic wakeup body back into display fields. Mirrors the
-// two structured api/background_process.format_wakeup_prompt shapes (pinned by
-// tests/test_background_process_wakeup_format.py); other event kinds return
-// null and keep the raw-notice fallback.
-function _parseProcessWakeupBody(text){
-  const s=String(text||'');
-  // Header groups are single-line by grammar; the output group captures the
-  // rest verbatim (leading indentation / trailing blank lines preserved). The
-  // watch suppression note is intentionally NOT split out of the output — real
-  // process output can contain the identical text, so stripping it would drop
-  // legitimate content (#6350 review finding 2). It rides along in `output`.
-  let m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) completed \(exit_code=([^)\n]*)\)\.\nCommand: ([^\n]*)\nOutput:\n([\s\S]*)\]$/);
-  if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
-  m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
-  if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
-  return null;
-}
-// Server-stamped _wakeup_meta (authoritative when present) merged over the
-// client parse; the output section only ever comes from the parse because the
-// meta deliberately carries header fields only.
-function _processWakeupInfo(m, text){
-  const parsed=_parseProcessWakeupBody(text);
-  const meta=(m&&m._wakeup_meta&&typeof m._wakeup_meta==='object')?m._wakeup_meta:null;
-  if(!parsed&&!meta) return null;
-  const pick=(metaKey,parsedKey)=>{
-    if(meta&&meta[metaKey]!=null) return meta[metaKey];
-    return parsed?parsed[parsedKey]:null;
-  };
-  return {
-    type:String(pick('type','type')||''),
-    taskId:String(pick('task_id','taskId')||''),
-    command:String(pick('command','command')||''),
-    exitCode:pick('exit_code','exitCode'),
-    pattern:pick('pattern','pattern'),
-    output:parsed?parsed.output:null,
-  };
-}
-function _processWakeupCardHtml(info, rawText, extras){
-  const isWatch=info.type==='watch_match';
-  const exitStr=info.exitCode==null?'':String(info.exitCode);
-  // Signal-killed processes report negative exit codes (subprocess returncode).
-  const exitKnown=/^-?\d+$/.test(exitStr);
-  const exitOk=exitStr==='0';
-  let chip;
-  if(isWatch){
-    chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
-  }else{
-    const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
-    const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
-    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
+function _hydrateHistoricalToolTranscriptAnchorScenes(){
+  // #6220: hydrate ID-linked historical tool transcripts into Anchors.
+  // Scan S.messages for eligible assistant turns where every tool_calls[]
+  // entry carries an explicit id linked to a matching role:tool result
+  // message within the same turn boundary, then build one deterministic
+  // activity_scene_v1 and attach it as _anchor_activity_scene. The
+  // existing _renderSettledAnchorSceneForMessage path renders the scene;
+  // the legacy fallback in renderMessages skips anchor-owned turns.
+  const messages=S.messages;
+  if(!Array.isArray(messages)||!messages.length) return;
+
+  // Index role:tool results by tool_call_id.
+  const resultsByTid={};
+  const resultMsgIdxByTid={};
+  for(let i=0;i<messages.length;i++){
+    const m=messages[i];
+    if(!m||m.role!=='tool') continue;
+    const tid=m.tool_call_id||m.tool_use_id||'';
+    if(!tid) continue;
+    // Only record the FIRST result per tid to guard against duplicates.
+    if(!Object.prototype.hasOwnProperty.call(resultMsgIdxByTid,tid)){
+      resultMsgIdxByTid[tid]=i;
+      resultsByTid[tid]=typeof _cliToolResultSnippet==='function'?_cliToolResultSnippet(m.content):String(m.content||'').slice(0,4000);
+    }
   }
-  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
-  // Preserve output byte-for-byte for the <pre>; trim ONLY for the
-  // empty/non-empty decision so leading indentation and trailing blank lines
-  // survive (#6350 review finding 1).
-  const outRaw=info.output!=null?String(info.output):String(rawText||'');
-  const outHtml=outRaw.trim()?`<pre class="process-wakeup-text">${esc(outRaw)}</pre>`:'';
-  const cmdRow=info.command?`<div class="process-wakeup-cmd-row"><code>${esc(info.command)}</code></div>`:'';
-  // The collapsed watch chip truncates the pattern; surface the full,
-  // wrapping value in the expanded detail so touch/keyboard users can read it
-  // without relying on a hover tooltip (#6350 review finding 4).
-  const patternRow=(isWatch&&info.pattern)?`<div class="process-wakeup-pattern-row"><span class="process-wakeup-detail-key">${esc(t('process_wakeup_matched'))}</span><code>${esc(String(info.pattern))}</code></div>`:'';
-  return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
+
+  for(let i=0;i<messages.length;i++){
+    const m=messages[i];
+    if(!m||m.role!=='assistant'||m._anchor_activity_scene) continue;
+    const toolCalls=Array.isArray(m.tool_calls)?m.tool_calls:[];
+    if(!toolCalls.length) continue;
+
+    // Find the turn boundary: the position of the NEXT user message after i.
+    let turnEnd=messages.length;
+    for(let j=i+1;j<messages.length;j++){
+      if(messages[j]&&messages[j].role==='user'){turnEnd=j;break;}
+    }
+
+    // Validate every tool_call has an id and matching result within the turn.
+    let allLinked=true;
+    const seenIds=new Set();
+    for(const tc of toolCalls){
+      if(!tc||typeof tc!=='object'){allLinked=false;break;}
+      const tid=tc.id||tc.call_id||'';
+      if(!tid){allLinked=false;break;}
+      // Detect duplicate ids within the same message.
+      if(seenIds.has(tid)){allLinked=false;break;}
+      seenIds.add(tid);
+      // Must have a result message with matching id.
+      if(!Object.prototype.hasOwnProperty.call(resultMsgIdxByTid,tid)){allLinked=false;break;}
+      // Result must not cross a user-message turn boundary.
+      const resultIdx=resultMsgIdxByTid[tid];
+      if(resultIdx<=i||resultIdx>=turnEnd){allLinked=false;break;}
+    }
+    if(!allLinked) continue;
+
+    // Find the turn-final (last) assistant message with visible content
+    // to use as scene owner — the Anchor pattern attaches to the answer.
+    let ownerIdx=i;
+    let finalAnswer='';
+    for(let j=i;j<turnEnd;j++){
+      const am=messages[j];
+      if(!am||am.role!=='assistant') continue;
+      ownerIdx=j;
+      const visContent=typeof msgContent==='function'?msgContent(am):String(am.content||'');
+      if(visContent&&visContent.trim()) finalAnswer=visContent;
+    }
+
+    // Build activity rows.
+    const activityRows=[];
+    toolCalls.forEach((tc,idx)=>{
+      const fn=tc.function||{};
+      const name=fn.name||tc.name||'tool';
+      let args={};
+      try{args=JSON.parse(fn.arguments||'{}');}catch(e){}
+      const tid=tc.id||tc.call_id||'';
+      const resultSnippet=resultsByTid[tid]||'';
+      const patchSnippet=typeof _cliPatchSnippetFromArgs==='function'?_cliPatchSnippetFromArgs(name,args):'';
+      const toolSnippet=typeof _cliToolCardSnippet==='function'
+        ?_cliToolCardSnippet(resultSnippet,patchSnippet)
+        :(resultSnippet||patchSnippet||'');
+      const argsSnap=typeof _toolArgsSnapshot==='function'?_toolArgsSnapshot(args):{};
+      activityRows.push({
+        row_id:'tool:'+tid+':'+idx,
+        order_index:idx,
+        kind:'tool_started',
+        role:'tool',
+        display_hint:'tool_row',
+        display_hints:{compact_worklog:'tool_row',transparent_stream:'chronological_activity'},
+        source_event_type:'tool',
+        status:'completed',
+        tool_call_id:tid,
+        tool:{
+          id:tid,
+          name:name,
+          args:argsSnap,
+          done:true,
+          is_error:false,
+          snippet:toolSnippet,
+        },
+        payload:{
+          name:name,
+          args:args,
+          snippet:resultSnippet||patchSnippet,
+        },
+      });
+    });
+
+    if(!activityRows.length||ownerIdx<0||!messages[ownerIdx]) continue;
+    messages[ownerIdx]._anchor_activity_scene=Object.freeze({
+      version:'activity_scene_v1',
+      mode:'compact_worklog',
+      identity:Object.freeze({source_message_refs:Object.freeze([])}),
+      lifecycle:Object.freeze({}),
+      final_answer:finalAnswer,
+      final_message_ref:null,
+      terminal_state:null,
+      activity_rows:Object.freeze(activityRows),
+    });
+  }
 }
 
 function renderMessages(options){
@@ -16563,6 +16620,9 @@ function renderMessages(options){
   // renderMessages() in this window. Keep the existing loading placeholder.
   if(_loadingSessionId===sid&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
+  // #6220: hydrate ID-linked historical tool transcripts into Anchors before
+  // the anchorOwnedAssistantRawIdxs gate and the legacy fallback run.
+  if(typeof _hydrateHistoricalToolTranscriptAnchorScenes==='function') _hydrateHistoricalToolTranscriptAnchorScenes();
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
