@@ -16774,6 +16774,19 @@ function renderMessages(options){
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
   }
+  // Capped CLI-source transcripts (Codex keeps only the newest N turns from a
+  // rollout). Unlike hasServerOlder there is no back-fill path — the older
+  // turns genuinely aren't in the WebUI sidecar — so show a read-only notice
+  // rather than a load-more button. Only render at the top of the window so it
+  // does not repeat per virtual page.
+  const _cliTruncated=!!(S.session&&S.session.cli_transcript_truncated&&S.messages.length>0);
+  if(_cliTruncated&&!hasServerOlder){
+    const notice=document.createElement('div');
+    notice.className='cli-transcript-truncated-notice';
+    notice.textContent=(typeof t==='function'&&t('earlier_turns_omitted'))
+      || 'Earlier turns from this session were omitted (only the recent part of a long CLI transcript is kept).';
+    inner.appendChild(notice);
+  }
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
     if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){

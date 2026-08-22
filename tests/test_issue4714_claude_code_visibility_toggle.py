@@ -467,6 +467,7 @@ def test_save_settings_preserves_claude_code_opt_out_default():
 const block = {json.dumps(save_block)};
 const showCliSessions = false;
 const showClaudeCodeSessions = true;
+const showCodexSessions = true;
 const showCronSessions = true;
 const showPreviousMessagingSessions = false;
 const body = {{}};
@@ -478,6 +479,9 @@ console.log(JSON.stringify(body));
 
     assert body["show_cli_sessions"] is False
     assert body["show_claude_code_sessions"] is True
+    # The Codex bridge is a sibling opt-out child of the same parent gate and
+    # must persist independently for the same reason (#4714 semantics).
+    assert body["show_codex_sessions"] is True
 
 
 def test_locale_keys_exist_in_every_locale_block():

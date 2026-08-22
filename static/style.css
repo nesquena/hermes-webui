@@ -5876,6 +5876,8 @@ main.main > #mainPlugin{display:none;}
 .session-source-chip[data-source-key="slack"] { color: #4A154B; background: rgba(74, 21, 75, 0.12); }
 .session-item.cli-session[data-source-key="claude_code"] { border-left-color: rgba(217, 119, 6, 0.65); }
 .session-source-chip[data-source-key="claude_code"] { color: rgba(217, 119, 6, 0.85); background: rgba(217, 119, 6, 0.12); }
+.session-item.cli-session[data-source-key="codex"] { border-left-color: rgba(16, 163, 127, 0.65); }
+.session-source-chip[data-source-key="codex"] { color: rgba(16, 163, 127, 0.9); background: rgba(16, 163, 127, 0.12); }
 
 /* ═══════════════════════════════════════════════════════════════════
    Messages redesign — additive overrides for the transcript area.
@@ -6346,6 +6348,11 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .load-older-indicator:hover{opacity:.75;}
 .message-window-load-earlier{align-self:center;margin:4px auto 14px;padding:7px 14px;border:1px solid var(--border);border-radius:999px;background:var(--surface);box-shadow:var(--shadow-sm);}
 .message-window-load-earlier:hover{background:var(--hover-bg);border-color:var(--accent);}
+/* Read-only notice for capped CLI-source transcripts (e.g. Codex keeps only the
+   newest turns). No back-fill path exists, so this is informational only — a
+   quiet pill in the app's own visual language, centered like the load-earlier
+   affordance above. */
+.cli-transcript-truncated-notice{align-self:center;margin:4px auto 14px;padding:7px 14px;border:1px solid var(--border);border-radius:999px;background:var(--surface);box-shadow:var(--shadow-sm);color:var(--muted-text,var(--text-muted));font-size:12.5px;text-align:center;max-width:92%;}
 /* #5966: "Show earlier steps" affordance for a capped Transparent Stream turn.
    Sits inline at the top of the turn's activity run, styled as a quiet pill in
    the app's own visual language (matches .message-window-load-earlier) but

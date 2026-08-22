@@ -36,6 +36,14 @@ from api.config import (
 )
 from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
+from api.codex_sessions import (
+    CODEX_SOURCE,
+    codex_state_db_stat_key,
+    get_codex_session_messages,
+    get_codex_session_messages_and_truncated,
+    get_codex_sessions,
+    is_codex_session_id,
+)
 from api.agent_sessions import (
     _is_continuation_session,
     is_cli_session_row,
@@ -1242,6 +1250,7 @@ class Session:
                  process_wakeup_pause=None,
                  share_token=None,
                  share_created_at=None,
+                 cli_transcript_truncated=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1346,6 +1355,10 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        # Codex (and other capped-source) rollouts keep only the newest N turns,
+        # dropping the oldest. Surfaced on the real viewer path so a reader can
+        # be told older turns were omitted. Defaults falsy; set at import time.
+        self.cli_transcript_truncated = bool(cli_transcript_truncated)
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1417,7 +1430,7 @@ class Session:
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
-            'share_token', 'share_created_at',
+            'share_token', 'share_created_at', 'cli_transcript_truncated',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
@@ -1805,6 +1818,7 @@ class Session:
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
+            'cli_transcript_truncated': self.cli_transcript_truncated,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
@@ -6762,6 +6776,8 @@ def _normalize_cli_session_source_filter(source_filter) -> str | None:
         return None
     if normalized == 'claude-code':
         return CLAUDE_CODE_SOURCE
+    if normalized in {'codex-cli', 'codex_cli'}:
+        return CODEX_SOURCE
     return normalized
 
 
@@ -7265,17 +7281,32 @@ def _path_stat_cache_key(path):
         return None
 
 
-def _callable_accepts_include_claude_code(callable_obj) -> bool:
+def _callable_accepts_named_kwarg(callable_obj, name: str) -> bool:
+    """True when ``callable_obj`` takes ``name`` (or absorbs it via ``**kwargs``).
+
+    Focused tests monkeypatch the CLI-session helpers with historical
+    signatures, so every optional keyword this module threads through them has
+    to be probed before it is passed. Unintrospectable callables are assumed to
+    accept it (the pre-existing, permissive behavior).
+    """
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
         return True
-    if 'include_claude_code' in signature.parameters:
+    if name in signature.parameters:
         return True
     return any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
+
+
+def _callable_accepts_include_claude_code(callable_obj) -> bool:
+    return _callable_accepts_named_kwarg(callable_obj, 'include_claude_code')
+
+
+def _callable_accepts_include_codex(callable_obj) -> bool:
+    return _callable_accepts_named_kwarg(callable_obj, 'include_codex')
 
 
 def _sqlite_content_fingerprint(db_path: Path):
@@ -7404,7 +7435,11 @@ def _cli_sessions_streaming_freeze_marker():
         return ("streaming",)
 
 
-def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool = True):
+def _resolve_cli_sessions_context(
+    source_filter=None,
+    include_claude_code: bool = True,
+    include_codex: bool = True,
+):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -7445,6 +7480,11 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
+        bool(include_codex),
+        # Codex's own SQLite store lives outside HERMES_HOME, so its stat stamp
+        # has to be part of the key or a newly-finished Codex thread would be
+        # invisible until an unrelated invalidation happened to fire.
+        codex_state_db_stat_key() if include_codex else None,
     )
     return hermes_home, db_path, cli_profile, cache_key
 
@@ -7574,6 +7614,7 @@ def _load_cli_sessions_uncached(
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    include_codex: bool = True,
 ) -> list:
     cli_sessions = []
     if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
@@ -7585,6 +7626,26 @@ def _load_cli_sessions_uncached(
     if source_filter == CLAUDE_CODE_SOURCE:
         return cli_sessions
 
+    # get_last_workspace() reads files + probes and returns the same workspace
+    # for the whole sidebar build; resolve it ONCE, lazily, shared by the Codex
+    # path and the cron/webhook projection below (#4842 keeps this cold-path
+    # call single — two separate caches here would re-pay it and regress the
+    # <=1 assertion in test_issue4842). Defined before the Codex early-return
+    # because _cli_workspace() must be callable from that branch.
+    _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
+    def _cli_workspace() -> str:
+        if _cli_workspace_cache[0] is None:
+            _cli_workspace_cache[0] = str(get_last_workspace())
+        return _cli_workspace_cache[0]
+
+    if source_filter in (None, CODEX_SOURCE) and include_codex:
+        try:
+            cli_sessions.extend(get_codex_sessions(default_workspace=_cli_workspace()))
+        except Exception:
+            logger.debug("Codex session scan failed", exc_info=True)
+
+    if source_filter == CODEX_SOURCE:
+        return cli_sessions
 
     if not db_path.exists():
         return cli_sessions
@@ -7636,15 +7697,9 @@ def _load_cli_sessions_uncached(
             return None
         return _cron_job_names().get(parts[1])
 
-    # get_last_workspace() reads up to two files + an is_dir()/remote probe and
-    # returns the SAME active workspace for every projected row, so calling it
-    # per row was redundant I/O on the cold sidebar build (#4842; mirrors the
-    # #4718 hoist on the Claude Code path). Resolve it once for this scan.
-    _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
-    def _cli_workspace():
-        if _cli_workspace_cache[0] is None:
-            _cli_workspace_cache[0] = str(get_last_workspace())
-        return _cli_workspace_cache[0]
+    # _cli_workspace() (lazy get_last_workspace memo) is defined earlier in
+    # this function, before the Codex branch, so the Codex path and this
+    # projection share ONE resolve for the whole build (#4842).
 
     _webhook_pid_cache: list[str | None] = [None]
     def _webhook_pid():
@@ -7965,6 +8020,7 @@ def get_cli_sessions(
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
+    include_codex: bool = True,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
@@ -7990,6 +8046,8 @@ def get_cli_sessions(
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
+            bool(include_codex),
+            codex_state_db_stat_key() if include_codex else None,
         )
     else:
         resolve_kwargs = {}
@@ -7998,17 +8056,30 @@ def get_cli_sessions(
         )
         if resolve_supports_include_claude_code:
             resolve_kwargs['include_claude_code'] = include_claude_code
+        resolve_supports_include_codex = _callable_accepts_include_codex(
+            _resolve_cli_sessions_context
+        )
+        if resolve_supports_include_codex:
+            resolve_kwargs['include_codex'] = include_codex
         hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(
             source_filter,
             **resolve_kwargs,
         )
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
+        if not resolve_supports_include_codex:
+            cache_key = cache_key + (
+                bool(include_codex),
+                codex_state_db_stat_key() if include_codex else None,
+            )
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
     def _load_sessions():
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
+            _load_cli_sessions_uncached
+        )
+        loader_supports_include_codex = _callable_accepts_include_codex(
             _load_cli_sessions_uncached
         )
         if all_profiles:
@@ -8023,6 +8094,11 @@ def get_cli_sessions(
                 }
                 if loader_supports_include_claude_code:
                     load_kwargs['include_claude_code'] = include_claude_code and idx == 0
+                # Codex's store is global (one ~/.codex, not per-Hermes-profile),
+                # so scan it on the first context only or every profile would
+                # contribute a duplicate copy of the same rows.
+                if loader_supports_include_codex:
+                    load_kwargs['include_codex'] = include_codex and idx == 0
                 merged.extend(
                     _load_cli_sessions_uncached(
                         ctx_home,
@@ -8035,6 +8111,8 @@ def get_cli_sessions(
         load_kwargs = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
+        if loader_supports_include_codex:
+            load_kwargs['include_codex'] = include_codex
         return _load_cli_sessions_uncached(
             hermes_home,
             db_path,
@@ -10447,7 +10525,44 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     """
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
+    if is_codex_session_id(sid):
+        return get_codex_session_messages(sid)
     return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
+
+
+def get_cli_session_messages_and_truncated(sid, *, profile=None):
+    """Read ``(messages, truncated)`` for a CLI/external-agent session.
+
+    ``truncated`` is True only for sources that can drop older turns at read
+    time (currently Codex, whose rollout is capped to the newest 1000 turns and
+    tail-read when very large). Other CLI sources return ``(messages, False)``.
+    Used by the import path so the real WebUI viewer can surface an
+    "earlier turns omitted" notice without going through the Codex detail API.
+    """
+    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
+        return get_claude_code_session_messages(sid), False
+    if is_codex_session_id(sid):
+        return get_codex_session_messages_and_truncated(sid)
+    return (
+        get_state_db_session_messages(sid, stitch_continuations=True, profile=profile),
+        False,
+    )
+
+
+def get_cli_session_truncation(sid, *, profile=None) -> bool:
+    """Return whether a CLI/external-agent session dropped its oldest turns.
+
+    True only for capped sources (currently Codex, whose rollout is read as the
+    newest ``CODEX_MAX_MESSAGES_PER_FILE`` turns and tail-read when very large).
+    For Codex this is a cache-hit on the shared rollout parse cache; for every
+    other CLI source it is a constant ``False``. Lets the import path stamp the
+    truncation flag WITHOUT changing the existing ``get_cli_session_messages``
+    call sites, so non-Codex imports are untouched.
+    """
+    if is_codex_session_id(sid):
+        _messages, truncated = get_codex_session_messages_and_truncated(sid)
+        return bool(truncated)
+    return False
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:
