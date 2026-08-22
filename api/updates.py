@@ -1710,7 +1710,7 @@ def _purge_agent_pycache(repo_dir: Path) -> None:
         pass
 
 
-def _schedule_restart(delay: float = 2.0) -> None:
+def _schedule_restart(delay: float = 2.0, revalidate=None) -> None:
     """Re-exec this process after *delay* seconds.
 
     Called after a successful update so that the freshly-pulled code is
@@ -1729,6 +1729,12 @@ def _schedule_restart(delay: float = 2.0) -> None:
     stream and leaving the second repo in an unknown partial state.
     Blocking on ``_apply_lock`` before ``os.execv`` means a pending
     second update always completes before the restart happens.
+
+    ``revalidate`` is an optional zero-argument callable that must return a
+    truthy value for the restart to proceed.  It is invoked once after
+    *delay* and again after the active-work safety wait, immediately before
+    the re-exec, so a pending restart can be cancelled (e.g. an A→B→A
+    revision rollback) instead of bouncing a healthy process.
     """
     import os
     import sys
@@ -1736,6 +1742,18 @@ def _schedule_restart(delay: float = 2.0) -> None:
     def _do():
         import time
         time.sleep(delay)
+        # Optional pre-restart revalidation (e.g. an A→B→A rollback must
+        # cancel a pending self-restart). Runs after the delay and again
+        # after the active-work safety wait, immediately before re-exec.
+        if revalidate is not None:
+            try:
+                if not revalidate():
+                    logger.info("restart cancelled by pre-restart revalidation")
+                    return
+            except Exception:
+                logger.exception(
+                    "restart revalidation failed; proceeding with restart"
+                )
         # Hold _apply_lock through os.execv so no new update can start between
         # the lock-release and the process replacement.  Any in-flight update
         # finishes first (since it holds the lock), and then the process is
@@ -1754,6 +1772,19 @@ def _schedule_restart(delay: float = 2.0) -> None:
             if _AGENT_DIR is not None:
                 _purge_agent_pycache(Path(_AGENT_DIR))
             _purge_agent_pycache(REPO_ROOT)
+            # Revalidate once more after the safety wait: active work may have
+            # taken long enough for a rollback to land while we drained it.
+            if revalidate is not None:
+                try:
+                    if not revalidate():
+                        logger.info(
+                            "restart cancelled by revalidation after safety wait"
+                        )
+                        return
+                except Exception:
+                    logger.exception(
+                        "restart revalidation failed; proceeding with restart"
+                    )
             try:
                 # Re-exec into the just-pulled image.
                 #
