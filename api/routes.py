@@ -15512,7 +15512,24 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         if api_key is not None:
             api_key = str(api_key).strip() or None
-        result = set_provider_key(provider_id, api_key)
+        aws_access_key_id = body.get("aws_access_key_id")
+        aws_secret_access_key = body.get("aws_secret_access_key")
+        if aws_access_key_id is not None:
+            aws_access_key_id = str(aws_access_key_id)
+        if aws_secret_access_key is not None:
+            aws_secret_access_key = str(aws_secret_access_key)
+        # Bedrock may send IAM fields without api_key; omit kwargs for others.
+        if provider_id == "bedrock" and (
+            aws_access_key_id is not None or aws_secret_access_key is not None
+        ):
+            result = set_provider_key(
+                provider_id,
+                api_key,
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key,
+            )
+        else:
+            result = set_provider_key(provider_id, api_key)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
