@@ -1665,7 +1665,7 @@ async function _switchProfileForSessionLoad(profile){
     if(data.default_model) window._defaultModel=data.default_model;
     if(data.default_model_provider) window._activeProvider=data.default_model_provider;
     if(typeof refreshProfileTransitionReasoningChip==='function'){
-      refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
+      refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider, data.agent && data.agent.reasoning_effort);
     }
     if(typeof startGatewaySSE==='function') startGatewaySSE();
     if(typeof syncTopbar==='function') syncTopbar();

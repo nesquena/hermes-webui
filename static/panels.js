@@ -7152,7 +7152,7 @@ async function switchToProfile(name) {
       S.session.profile = data.active || name;
     }
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
-      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
+      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider, data.agent && data.agent.reasoning_effort);
     }
 
     // ── Apply workspace ────────────────────────────────────────────────────
