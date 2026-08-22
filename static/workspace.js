@@ -975,6 +975,10 @@ function showPreview(mode){
   // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
+  // Show the fullscreen toggle for every preview kind (image, pdf, html, media, md/csv/code)
+  const fsBtn=$('btnFullscreenPreview');
+  if(fsBtn) fsBtn.style.display='inline-flex';
+  if(typeof _previewFsSync==='function') _previewFsSync();
   setLargeMarkdownForceRenderVisible(false);
 }
 
@@ -1286,6 +1290,108 @@ function openInBrowser(){
 }
 // openInBrowser keeps the helper-based raw path, which expands to an explicit &inline=1 URL.
 
+// ── Fullscreen mode for file previews (#6675) ─────────────────────────────────
+// Two paths: the native Fullscreen API when available (best for iframes and
+// media), otherwise a CSS fixed-overlay fallback (reliable on mobile browsers
+// that restrict requestFullscreen to <video> elements). Both share the same
+// toggle button in the preview header; the overlay also exits on Escape.
+let _previewFsMode=null; // null | 'api' | 'overlay'
+
+function _previewFsEl(){
+  return $('previewArea');
+}
+
+function _previewFsBtn(){
+  return $('btnFullscreenPreview');
+}
+
+function _previewFsSync(){
+  const btn=_previewFsBtn();
+  if(!btn) return;
+  const active=_previewFsMode!==null;
+  const expand=btn.querySelector('.preview-fs-icon-expand');
+  const compress=btn.querySelector('.preview-fs-icon-compress');
+  if(expand) expand.style.display=active?'none':'';
+  if(compress) compress.style.display=active?'':'none';
+  const activeText=t('preview_fullscreen_exit');
+  const idleText=t('preview_fullscreen');
+  const label=btn.querySelector('.preview-btn-label');
+  if(label) label.textContent=active?activeText:idleText;
+  btn.title=active?activeText:idleText;
+  btn.setAttribute('aria-label',active?activeText:idleText);
+  btn.setAttribute('data-tooltip',active?activeText:idleText);
+}
+
+function _previewFsApiSupported(){
+  return !!(document.fullscreenEnabled||document.webkitFullscreenEnabled);
+}
+
+function _previewFsRequest(el){
+  if(el.requestFullscreen) return el.requestFullscreen();
+  if(el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
+  return Promise.reject(new Error('Fullscreen API unavailable'));
+}
+
+function _previewFsExitApi(){
+  try{
+    if(document.fullscreenElement) document.exitFullscreen();
+    else if(document.webkitFullscreenElement) document.webkitExitFullscreen();
+  }catch(_){}
+}
+
+function _previewFsEnterOverlay(){
+  _previewFsMode='overlay';
+  const el=_previewFsEl();
+  if(el) el.classList.add('preview-fullscreen');
+  _previewFsSync();
+}
+
+function _previewFsExitOverlay(){
+  _previewFsMode=null;
+  const el=_previewFsEl();
+  if(el) el.classList.remove('preview-fullscreen');
+  _previewFsSync();
+}
+
+function _previewFsOnChange(){
+  const nativeActive=!!(document.fullscreenElement||document.webkitFullscreenElement);
+  if(_previewFsMode==='api'&&!nativeActive){
+    // User pressed Escape (or the browser exited) inside native fullscreen
+    _previewFsMode=null;
+    _previewFsSync();
+  }else if(nativeActive){
+    _previewFsMode='api';
+    _previewFsSync();
+  }
+}
+
+function togglePreviewFullscreen(){
+  const el=_previewFsEl();
+  if(!el||!el.classList.contains('visible')) return;
+  if(_previewFsMode==='overlay'){ _previewFsExitOverlay(); return; }
+  if(document.fullscreenElement===el||document.webkitFullscreenElement===el){
+    _previewFsExitApi();
+    return;
+  }
+  if(_previewFsApiSupported()){
+    _previewFsRequest(el).then(()=>{
+      _previewFsMode='api';
+      _previewFsSync();
+    }).catch(()=>{
+      // Native fullscreen rejected (or restricted to <video> on some mobile
+      // browsers) → the fixed-overlay fallback covers every preview kind.
+      _previewFsEnterOverlay();
+    });
+  }else{
+    _previewFsEnterOverlay();
+  }
+}
+
+function _exitPreviewFullscreen(){
+  if(_previewFsMode==='overlay') _previewFsExitOverlay();
+  else if(_previewFsMode==='api') _previewFsExitApi();
+}
+
 async function copyPreviewRelativePath(){
   if(!_previewCurrentPath) return;
   const btn=$('btnCopyPreviewRelPath');
@@ -1545,5 +1651,26 @@ if (typeof document !== 'undefined') {
     document.addEventListener('DOMContentLoaded', _wsUploadInit, {once: true});
   } else {
     _wsUploadInit();
+  }
+}
+
+// Fullscreen preview wiring (#6675): keep state in sync with the native
+// Fullscreen API (Escape/exit handled by the browser) and support Escape to
+// dismiss the fixed-overlay fallback.
+if (typeof document !== 'undefined') {
+  const _wsFullscreenInit = () => {
+    document.addEventListener('fullscreenchange', _previewFsOnChange);
+    document.addEventListener('webkitfullscreenchange', _previewFsOnChange);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && _previewFsMode === 'overlay') {
+        e.preventDefault();
+        _previewFsExitOverlay();
+      }
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _wsFullscreenInit, {once: true});
+  } else {
+    _wsFullscreenInit();
   }
 }
