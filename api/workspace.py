@@ -1030,7 +1030,44 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
 _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+# O_PATH opens a directory fd WITHOUT requiring read permission on the
+# directory itself (only search on its parents). Retained root/intermediate
+# directory fds are used purely as openat anchors, never read, so O_PATH is
+# both sufficient and required to keep a valid 0111 (search-only) allowed
+# root / intermediate servable: the pre-change direct leaf open needed only
+# search on ancestors, and an O_RDONLY open of such a directory would fail
+# with EACCES (403). Falls back to 0 on platforms without O_PATH, where the
+# callers use O_RDONLY instead. (#6988 round 4.)
+_O_PATH = getattr(os, "O_PATH", 0)
+# Windows opens files in TEXT mode by default (CRLF translation); every leaf
+# fd that reaches os.read / response serving must be opened in BINARY mode so
+# media bytes, ETag digests and Content-Lengths are never corrupted. No-op
+# (0) on POSIX. (#6988 round 3.)
 _O_BINARY = getattr(os, "O_BINARY", 0)
+
+
+def _dir_component_flags() -> int:
+    """Flags for retained root/intermediate DIRECTORY descriptors.
+
+    O_PATH | O_DIRECTORY | O_NOFOLLOW when O_PATH is available (no read
+    permission needed on the directory itself), falling back to
+    O_RDONLY | O_DIRECTORY | O_NOFOLLOW on platforms without O_PATH. The
+    returned fd is only ever used as a dir_fd anchor for the openat walk,
+    never read directly.
+    """
+    base = _O_PATH if _O_PATH else os.O_RDONLY
+    return base | _O_DIRECTORY | _O_NOFOLLOW
+
+
+def _leaf_flags(*, want_directory: bool) -> int:
+    """Flags for the FINAL (leaf) component: always readable.
+
+    O_RDONLY | O_NOFOLLOW | O_BINARY (+ O_DIRECTORY when the leaf is a
+    directory). O_PATH is never used for the leaf — the fd is returned to
+    callers that read/scan it (file bytes, os.scandir), and an O_PATH fd
+    cannot be read.
+    """
+    return os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0) | _O_BINARY
 
 
 def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
@@ -1051,12 +1088,9 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
     if not _DIR_FD_OK:
         # Windows / no openat: fall back to a plain pathname open. No new race
         # protection, but no regression vs the prior path-based behaviour, and
-        # symlink creation needs admin on Windows anyway.
-        flags = (
-            os.O_RDONLY
-            | (_O_DIRECTORY if want_dir else _O_BINARY)
-            | _O_NOFOLLOW
-        )
+        # symlink creation needs admin on Windows anyway. O_BINARY is required
+        # so the returned leaf fd reads raw bytes (no CRLF translation).
+        flags = os.O_RDONLY | (_O_DIRECTORY if want_dir else 0) | _O_NOFOLLOW | _O_BINARY
         try:
             return os.open(str(target), flags)
         except OSError:
@@ -1066,22 +1100,100 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
     # collapsed any symlinks to REACH it, e.g. macOS /tmp -> /private/tmp), so its
     # final component is legitimately a real directory — O_NOFOLLOW here only fires
     # if the root itself was raced into a symlink after resolve() (escape attempt).
-    fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+    # When the target IS the root (empty rel_parts), the root fd is the returned
+    # LEAF the caller reads (e.g. os.scandir in list_dir) — keep it O_RDONLY.
+    # Otherwise it is a retained anchor used only as dir_fd: O_PATH when
+    # available, so a search-only (0111) allowed root stays openable.
+    if rel_parts:
+        fd = os.open(str(root_resolved), _dir_component_flags())
+    else:
+        fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = (
-                os.O_RDONLY
-                | _O_NOFOLLOW
-                | (_O_DIRECTORY if want_directory else _O_BINARY)
-            )
+            # Intermediate components are retained anchors (dir_fd only):
+            # O_PATH when available. The FINAL component is the readable leaf
+            # (file bytes, or the directory the caller scans) — never O_PATH.
+            if is_last:
+                flags = _leaf_flags(want_directory=want_directory)
+            else:
+                flags = _dir_component_flags()
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:
                 # ELOOP (component is a symlink — swapped in) or missing/wrong type.
                 raise FileNotFoundError(f"Not found: {target}") from None
+            try:
+                os.close(fd)
+            except BaseException:
+                # Never orphan the freshly-opened descriptor: close nfd before
+                # propagating the close failure. (#6988 round 3.)
+                try:
+                    os.close(nfd)
+                except OSError:
+                    pass
+                raise
+            fd = nfd
+        return fd
+    except BaseException:
+        try:
             os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def open_anchored_fd_from_root(root_fd: int, rel_parts, *, want_dir: bool) -> int:
+    """Walk ``rel_parts`` from an already-open, already-trusted root directory fd.
+
+    Unlike open_anchored_fd(), this NEVER re-resolves the root pathname: the
+    root fd was opened (and authorized) BEFORE this call, so a later swap of
+    the root pathname for a symlink (TOCTOU on the anchor itself) cannot rebind
+    the walk into the replacement tree. ``rel_parts`` must be the relative
+    components of the already-symlink-resolved target under the resolved root
+    (computed ONCE at authorization time); every component is opened with
+    O_NOFOLLOW (and O_DIRECTORY on parents), so a component swapped to a
+    symlink mid-walk is refused (ELOOP -> FileNotFoundError). Ownership of
+    ``root_fd`` transfers to this function: it is closed on success (after the
+    walk) and on failure. Caller owns and must close the returned leaf fd.
+    """
+    if not _DIR_FD_OK:
+        raise ValueError("open_anchored_fd_from_root requires dir_fd support")
+    if not rel_parts:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
+        raise ValueError("Invalid destination: empty relative components")
+    fd = root_fd
+    try:
+        for i, part in enumerate(rel_parts):
+            is_last = i == len(rel_parts) - 1
+            want_directory = (not is_last) or want_dir
+            # Intermediate components are retained anchors (dir_fd only):
+            # O_PATH when available, so a search-only (0111) intermediate
+            # stays traversable. The FINAL component is the readable leaf
+            # (file bytes, or the directory the caller scans) — never O_PATH.
+            if is_last:
+                flags = _leaf_flags(want_directory=want_directory)
+            else:
+                flags = _dir_component_flags()
+            try:
+                nfd = os.open(part, flags, dir_fd=fd)
+            except OSError:
+                # ELOOP (component is a symlink — swapped in) or missing/wrong type.
+                raise FileNotFoundError(f"Not found: {part}") from None
+            try:
+                os.close(fd)
+            except BaseException:
+                # Never orphan the freshly-opened descriptor: close nfd before
+                # propagating the close failure. (#6988 round 3.)
+                try:
+                    os.close(nfd)
+                except OSError:
+                    pass
+                raise
             fd = nfd
         return fd
     except BaseException:
@@ -1116,7 +1228,7 @@ def open_anchored_create_fd(root: Path, dest: Path) -> int:
     if not _DIR_FD_OK:
         # Windows / no openat: create parent dirs then exclusively create the leaf.
         dest.parent.mkdir(parents=True, exist_ok=True)
-        return os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644)
+        return os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY, 0o644)
 
     fd = os.open(str(root_resolved), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
     try:
@@ -1129,11 +1241,20 @@ def open_anchored_create_fd(root: Path, dest: Path) -> int:
             except OSError:
                 # ELOOP — component swapped to a symlink (escape attempt).
                 raise FileNotFoundError(f"Not found: {dest}") from None
-            os.close(fd)
+            try:
+                os.close(fd)
+            except BaseException:
+                # Never orphan the freshly-opened descriptor: close nfd before
+                # propagating the close failure. (#6988 round 3.)
+                try:
+                    os.close(nfd)
+                except OSError:
+                    pass
+                raise
             fd = nfd
         return os.open(
             rel_parts[-1],
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY,
             0o644,
             dir_fd=fd,
         )

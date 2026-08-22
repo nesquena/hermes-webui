@@ -10519,6 +10519,7 @@ from api.workspace import (
     resolve_trusted_workspace,
     resolve_implicit_workspace_with_recovery,
     open_anchored_fd,
+    open_anchored_fd_from_root,
     open_anchored_create_fd,
     open_anchored_write_fd,
     unlink_anchored,
@@ -10528,6 +10529,7 @@ from api.workspace import (
     validate_workspace_to_add,
     _is_blocked_system_path,
     _home_path,
+    _DIR_FD_OK,
     _is_within,
     _strip_surrounding_quotes,
     _is_remote_terminal_backend,
@@ -19414,6 +19416,84 @@ def _open_file_read_fd(target: Path, anchor_root: Path | None = None) -> int:
     return open_anchored_fd(anchor_root, target.resolve(), want_dir=False)
 
 
+def _open_allowed_root_fd(root: Path) -> int | None:
+    """Open an allowed-root directory fd AT AUTHORIZATION time (#6988 round 2).
+
+    The O_DIRECTORY | O_NOFOLLOW open binds the authority to the DIRECTORY the
+    (already resolved) root pathname currently names, and the fd is RETAINED:
+    the serve-time walk starts from this fd, so replacing the root pathname
+    with a symlink after authorization cannot rebind the walk into the
+    replacement tree. Returns None when the root cannot be opened as a real
+    directory (fail closed — never fall through to a pathname open).
+    """
+    try:
+        # Retained root descriptor: used only as a dir_fd anchor for the
+        # serve-time walk, never read. O_PATH | O_DIRECTORY | O_NOFOLLOW when
+        # O_PATH is available — opening the directory with O_RDONLY would
+        # require READ permission on the root directory itself, regressing a
+        # valid search-only (0111) allowed root from HTTP 200 (pre-change
+        # direct leaf open needed only search on ancestors) to HTTP 403.
+        # Falls back to O_RDONLY on platforms without O_PATH. (#6988 round 4.)
+        flags = (
+            (getattr(os, "O_PATH", 0) or os.O_RDONLY)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        return os.open(str(root), flags)
+    except OSError:
+        return None
+
+
+def _open_verified_leaf_fd(target: Path) -> int | None:
+    """Retain an already-verified LEAF fd for an exact-token MEDIA grant (#6988).
+
+    Session MEDIA tokens are exact-path grants. The grant authority must NOT be
+    the mutable ``target.parent`` pathname (a swapped parent would rebind the
+    open into the replacement tree), so we walk every component from the
+    filesystem anchor (``/`` on POSIX) with O_NOFOLLOW: ``target`` is already
+    symlink-resolved, every component is a real directory, and a swap of ANY
+    ancestor — including the immediate parent — between the grant decision and
+    the serve open is refused (ELOOP). The returned leaf fd is retained and the
+    response is served from it, so later pathname changes cannot redirect the
+    serve. Returns None on any failure (fail closed).
+
+    Round 3: on platforms without dir_fd support (Windows — Python's os
+    module has no openat/dir_fd there), there is no stable-handle equivalent
+    to anchor the walk, and a plain pathname open of the resolved leaf would
+    silently re-expose the authorization-to-open race this route exists to
+    close (Windows reparse points are not an acceptable trust primitive).
+    The route therefore FAILS CLOSED (403 via the caller) instead of falling
+    back to a pathname open.
+    """
+    if not _DIR_FD_OK:
+        return None
+    try:
+        anchor = Path(target.anchor)
+        rel = target.relative_to(anchor)
+    except (ValueError, OSError):
+        return None
+    if not rel.parts:
+        return None
+    try:
+        # Filesystem anchor (e.g. "/" on POSIX): retained and used only as a
+        # dir_fd for the component walk, never read. O_PATH when available —
+        # no read permission needed on the anchor directory itself, and the
+        # walk stays identical (openat + O_NOFOLLOW). O_RDONLY fallback on
+        # platforms without O_PATH. (#6988 round 4.)
+        root_fd = os.open(
+            str(anchor),
+            (getattr(os, "O_PATH", 0) or os.O_RDONLY)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return None
+    try:
+        return open_anchored_fd_from_root(root_fd, rel.parts, want_dir=False)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 def _close_fd_quietly(fd: int | None) -> None:
     if fd is None:
         return
@@ -19480,21 +19560,36 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
     return _bytes_etag(data), data, actual_size
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None):
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, anchor_fd: int | None = None, rel_parts=None, download_name: str | None = None):
     """Serve a file with correct MIME/disposition and optional byte-range support.
 
     Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
     the request is short-circuited with 304 so revalidating clients (e.g.
     `no-cache` responses) do not re-download unchanged files.
 
+    ``anchor_fd`` (with ``rel_parts``) is the #6988 fd-based authority: an
+    allowed-root directory fd (or an already-verified leaf fd) retained at
+    authorization time. When ``anchor_fd`` is a root fd, ``rel_parts`` are the
+    pre-computed relative components of ``target`` under that root and the
+    serve open walks them from the retained fd with O_NOFOLLOW (never
+    re-resolving the root/target pathnames). When ``rel_parts`` is None,
+    ``anchor_fd`` IS the verified leaf fd and the bytes are served from it
+    directly. ``anchor_root`` remains the pathname-anchored fallback used by
+    the other file routes.
+
     ``download_name`` overrides the Content-Disposition filename (used when
     serving an immutable media snapshot whose on-disk name is a content digest).
     """
     fd = None
     try:
-        fd = _open_file_read_fd(target, anchor_root)
-        st = os.fstat(fd)
-        file_size = st.st_size
+        if anchor_fd is not None:
+            if rel_parts is None:
+                fd = anchor_fd
+            else:
+                fd = open_anchored_fd_from_root(anchor_fd, rel_parts, want_dir=False)
+        else:
+            fd = _open_file_read_fd(target, anchor_root)
+        file_size = os.fstat(fd).st_size
     except PermissionError:
         _close_fd_quietly(fd)
         return bad(handler, "Permission denied", 403)
@@ -20438,6 +20533,17 @@ def _media_deny_reason(target: Path) -> str | None:
         _ws_state = (_root / "webui_state")
         for _sub in _DENY_SUBDIRS:
             _deny_dirs.append((_ws_state / _sub).resolve())
+        # The default WebUI STATE_DIR is <root>/webui (api/config.py) — the base
+        # profile's state dir, and <root>/profiles/<name>/webui for each named
+        # profile. Only the ACTIVE STATE_DIR was previously denied (as a root
+        # above), so a base/sibling profile's <root>/webui state was servable
+        # through /api/media whenever a named profile was active (#6982). Deny
+        # its state subdirs for every enumerated root/profile-root too. The
+        # `webui` container itself is NOT denied: STATE_DIR/workspace is the
+        # legitimate default workspace and must keep serving. (Fail-closed.)
+        _webui_state = (_root / "webui")
+        for _sub in _DENY_SUBDIRS:
+            _deny_dirs.append((_webui_state / _sub).resolve())
     # The configured media-snapshot store root itself: blobs are internal and
     # only reachable through the validated `snap=` parameter on an authorized
     # path, so a bare `path=` request at or below the store is rejected
@@ -20701,6 +20807,64 @@ def _handle_media(handler, parsed):
     if not target.exists() or not target.is_file():
         return j(handler, {"error": "not found"}, status=404)
 
+    # ── #6988: bind authorization to the object actually opened ──────────────
+    # All allow/deny checks above authorize the RESOLVED pathname, but
+    # _serve_file_bytes() would otherwise re-traverse it by NAME at open time:
+    # an attacker able to mutate an allowed tree (/tmp or the workspace) could
+    # swap an ancestor (e.g. an `alias` dir) for a symlink to a denied
+    # base/sibling webui state dir BETWEEN the checks and os.open — the same
+    # already-authorized pathname would then open the denied object (TOCTOU).
+    # Round 1 anchored the open with anchor_root, but that anchor was itself a
+    # PATHNAME re-resolved at open time, so replacing the selected allowed-root
+    # pathname (or the exact-token target parent) after authorization rebound
+    # root and target together into the replacement tree. Round 2 therefore
+    # retains the authority as an OPENED FD at authorization time:
+    #   - allowed-root grant: open the root dir fd (O_DIRECTORY|O_NOFOLLOW)
+    #     NOW and compute the target's relative components ONCE; the serve
+    #     open walks those components from the retained fd, so no later
+    #     pathname re-resolution can redirect it.
+    #   - exact-token grant: retain an already-verified LEAF fd (walked with
+    #     O_NOFOLLOW from the filesystem anchor) instead of the mutable
+    #     target.parent pathname.
+    # Round 3: the route REQUIRES a genuinely secure handle capability
+    # (dir_fd + per-component no-follow). Platforms without dir_fd (Windows —
+    # Python's os module has no openat equivalent there) have no stable-handle
+    # equivalent for this walk, so the request FAILS CLOSED (403) rather than
+    # re-resolving/opening the authorizing root, target, or target.parent by
+    # pathname after the decision — the known-vulnerable path is never used.
+    # Fail closed (403) when the authority fd cannot be retained — the serve
+    # path must never fall through to an unanchored pathname open. (#6988.)
+    media_anchor_fd = None      # retained authority fd (opened at authorization)
+    media_rel_parts = None      # pre-computed relative components under the fd
+    if session_media_allowed:
+        media_anchor_fd = _open_verified_leaf_fd(target)
+        if media_anchor_fd is None:
+            return bad(handler, "Path not in allowed location", 403)
+    elif within_allowed:
+        # Narrowest matching allowed root -> smallest open scope (the active
+        # workspace root when the file lives there, HERMES_HOME otherwise).
+        matching_roots = [
+            r for r in allowed_roots
+            if r.exists() and _path_is_within_root(target, r)
+        ]
+        if matching_roots:
+            root = max(matching_roots, key=lambda r: len(r.parts))
+            if not _DIR_FD_OK:
+                # No secure anchored-open capability on this platform: fail
+                # closed instead of re-resolving root/target by pathname.
+                return bad(handler, "Path not in allowed location", 403)
+            try:
+                media_rel_parts = target.relative_to(root).parts
+            except ValueError:
+                media_rel_parts = None
+            media_anchor_fd = _open_allowed_root_fd(root)
+            if media_anchor_fd is None or not media_rel_parts:
+                # Authority fd could not be retained, or the relative
+                # components could not be computed: fail closed — never
+                # fall through to a pathname open or serve a directory fd.
+                return bad(handler, "Path not in allowed location", 403)
+    if media_anchor_fd is None:
+        return bad(handler, "Path not in allowed location", 403)
     # HTML inline previews change frequently (agent edits + re-renders).
     # Use no-store so the browser always fetches fresh content, avoiding stale
     # previews that require a manual full-page refresh to update.
@@ -20714,7 +20878,10 @@ def _handle_media(handler, parsed):
         cache_control = "no-store"
     else:
         cache_control = "private, no-cache"
-    return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
+    return _serve_file_bytes(
+        handler, target, mime, disposition, cache_control, csp=csp,
+        anchor_fd=media_anchor_fd, rel_parts=media_rel_parts,
+    )
 
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
