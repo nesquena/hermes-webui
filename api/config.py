@@ -9503,60 +9503,45 @@ SESSION_AGENT_CACHE_LOCK = threading.Lock()
 
 
 def _evict_session_agent(session_id: str) -> None:
-    """Remove a cached agent for a session (on delete, clear, or model switch).
+    """Remove and safely tear down a cached agent at a session boundary.
 
-    Attempts a lifecycle commit before dropping the agent handle so that
-    batch-extraction memory providers can extract any pending work.  If the
-    commit fails or there is uncommitted work with no successful commit, the
-    lifecycle entry is preserved (not unregistered) so a future commit can
-    retry.
+    Teardown is delegated to streaming's shared lifecycle path. If the agent is
+    still owned by a live worker, that path defers provider and SessionDB cleanup
+    until the worker releases its run registries.
     """
-    agent = None
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        return
+
     with SESSION_AGENT_CACHE_LOCK:
-        entry = SESSION_AGENT_CACHE.pop(session_id, None)
-        if entry is not None:
-            agent = entry[0] if isinstance(entry, tuple) else None
-    if agent is None:
+        popped_entry = SESSION_AGENT_CACHE.pop(requested_session_id, None)
+    if popped_entry is None:
         return
-    # A live run for this session may still hold this agent's _session_db (the
-    # worker assigns agent._session_db at run start). Never close it out from
-    # under an in-flight turn — ACTIVE_RUNS is the authoritative liveness signal
-    # (mirrors the worker's own LRU-eviction guard in streaming.py). When a run
-    # is live we still drop the cache handle above (harmless — the worker holds
-    # a local ref), but skip the lifecycle commit + _session_db.close() so the
-    # running turn can finish persisting. Hardens /clear + model-switch eviction
-    # too, not just truncate (#5096 Bug D).
-    _run_active = False
+
     try:
-        with ACTIVE_RUNS_LOCK:
-            for _entry in (ACTIVE_RUNS or {}).values():
-                if (_entry or {}).get("session_id") == session_id:
-                    _run_active = True
-                    break
+        from api import streaming as _streaming
     except Exception:
-        _run_active = False
-    if _run_active:
+        logger.debug(
+            "Could not load cached-agent teardown while evicting session %s",
+            requested_session_id,
+            exc_info=True,
+        )
+        # Fail safe: if teardown could not even be scheduled, restore ownership
+        # unless another worker has already installed a successor entry.
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE.setdefault(requested_session_id, popped_entry)
         return
-    should_close = True
+
     try:
-        from api.session_lifecycle import commit_session_memory, discard_session, has_uncommitted_work, unregister_agent
-        if has_uncommitted_work(session_id):
-            commit_session_memory(session_id, agent=agent, wait=True)
-        if not has_uncommitted_work(session_id):
-            unregister_agent(session_id)
-            # Bound the lifecycle dict: drop the entry now that the session has
-            # no uncommitted work and the agent handle is gone (issue #3506).
-            discard_session(session_id)
-        else:
-            should_close = False
+        _streaming._close_cached_agent_entry_at_session_boundary(requested_session_id, popped_entry)
     except Exception:
-        should_close = False
-        logger.debug("Lifecycle commit on eviction failed for %s", session_id, exc_info=True)
-    if should_close and getattr(agent, '_session_db', None) is not None:
-        try:
-            agent._session_db.close()
-        except Exception:
-            logger.debug("Failed to close _session_db on eviction for %s", session_id, exc_info=True)
+        # The shared helper owns deferred tracking and may have partially
+        # completed teardown. Do not re-cache an entry in an unknown state.
+        logger.debug(
+            "Could not tear down cached agent while evicting session %s",
+            requested_session_id,
+            exc_info=True,
+        )
 
 # ── Thread-local env context ─────────────────────────────────────────────────
 # (_thread_ctx + _thread_local_env_value are defined near the top of this module,

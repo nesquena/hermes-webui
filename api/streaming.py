@@ -8468,22 +8468,45 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     if agent is None:
         return True
 
+    requested_session_id = str(session_id or "").strip()
+    teardown_session_id = _evicted_agent_teardown_session_id(requested_session_id, agent) or requested_session_id
+    if _evicted_agent_has_cache_owner(agent):
+        _clear_deferred_evicted_agent_teardown(agent)
+        return False
+    if _evicted_agent_teardown_is_live_blocked(requested_session_id, agent):
+        _mark_deferred_evicted_agent_teardown(requested_session_id, agent)
+        try:
+            _drain_deferred_evicted_agent_teardowns()
+        except Exception:
+            logger.debug(
+                "Immediate deferred evicted-agent teardown drain failed for session %s",
+                teardown_session_id,
+                exc_info=True,
+            )
+        return False
+
     should_close_evicted_agent = True
     try:
-        _lifecycle_commit_session_memory(session_id, agent=agent, wait=True)
-        if not _lifecycle_has_uncommitted_work(session_id):
-            _lifecycle_unregister_agent(session_id)
+        _lifecycle_commit_session_memory(teardown_session_id, agent=agent, wait=True)
+        if not _lifecycle_has_uncommitted_work(teardown_session_id):
+            _lifecycle_unregister_agent(teardown_session_id)
             # Drop the lifecycle dict entry now that the LRU-evicted agent is
             # gone and no uncommitted work remains, so the dict tracks only live
             # sessions instead of growing unbounded (issue #3506).
-            _lifecycle_discard_session(session_id)
+            _lifecycle_discard_session(teardown_session_id)
         else:
             should_close_evicted_agent = False
     except Exception:
         should_close_evicted_agent = False
-        logger.debug("Lifecycle commit on eviction failed for %s", session_id, exc_info=True)
+        logger.debug("Lifecycle commit on eviction failed for %s", teardown_session_id, exc_info=True)
 
     if not should_close_evicted_agent:
+        # Keep an uncached dirty/failed agent reachable for a later worker-end
+        # drain and schedule an idle retry. Without both, pending memory work and
+        # its open SessionDB could be orphaned after the cache entry was popped
+        # when no later stream happens to finish.
+        _mark_deferred_evicted_agent_teardown(teardown_session_id, agent)
+        _schedule_deferred_evicted_agent_teardown_retry()
         return False
 
     try:
@@ -8492,14 +8515,15 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
             session_messages = vars(agent).get('_session_messages', [])
             shutdown_memory_provider(session_messages)
     except Exception:
-        logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
+        logger.debug("Failed to shut down evicted agent memory provider for session %s", teardown_session_id, exc_info=True)
 
     try:
         session_db = getattr(agent, '_session_db', None)
         if session_db is not None:
             session_db.close()
     except Exception:
-        logger.debug("Failed to close evicted agent session DB for session %s", session_id, exc_info=True)
+        logger.debug("Failed to close evicted agent session DB for session %s", teardown_session_id, exc_info=True)
+    _clear_deferred_evicted_agent_teardown(agent)
     return True
 
 
@@ -8610,6 +8634,262 @@ def _cached_agent_session_identity(agent) -> str | None:
 def _cached_agent_matches_session(agent, session_id: str) -> bool:
     identity = _cached_agent_session_identity(agent)
     return identity is None or identity == str(session_id)
+
+
+_DEFERRED_EVICTION_TEARDOWN_SESSION_ATTR = "_webui_deferred_eviction_teardown_session_id"
+_DEFERRED_EVICTION_TEARDOWN_SESSION_IDS_ATTR = "_webui_deferred_eviction_teardown_session_ids"
+_DEFERRED_EVICTION_TEARDOWN_LOCK = threading.Lock()
+_DEFERRED_EVICTION_TEARDOWNS = {}
+_DEFERRED_EVICTION_TEARDOWN_IN_PROGRESS = set()
+_DEFERRED_EVICTION_RETRY_TIMER = None
+_DEFERRED_EVICTION_RETRY_BASE_DELAY_SECONDS = 1.0
+_DEFERRED_EVICTION_RETRY_MAX_DELAY_SECONDS = 60.0
+_DEFERRED_EVICTION_RETRY_NEXT_DELAY_SECONDS = _DEFERRED_EVICTION_RETRY_BASE_DELAY_SECONDS
+
+
+def _normalize_evicted_agent_session_id(session_id: str | None) -> str | None:
+    normalized = str(session_id or "").strip()
+    return normalized or None
+
+
+def _evicted_agent_teardown_session_id(session_id: str | None, agent) -> str | None:
+    identity = _cached_agent_session_identity(agent)
+    if identity:
+        return identity
+    return _normalize_evicted_agent_session_id(session_id)
+
+
+def _deferred_evicted_agent_teardown_session_ids(agent) -> tuple[str, ...]:
+    if agent is None:
+        return ()
+    try:
+        values = getattr(agent, _DEFERRED_EVICTION_TEARDOWN_SESSION_IDS_ATTR, ())
+    except Exception:
+        values = ()
+    if isinstance(values, str):
+        values = (values,)
+    aliases = []
+    if isinstance(values, (tuple, list, set, frozenset)):
+        for value in values:
+            normalized = _normalize_evicted_agent_session_id(value)
+            if normalized and normalized not in aliases:
+                aliases.append(normalized)
+    marker = _deferred_evicted_agent_teardown_session_id(agent)
+    if marker and marker not in aliases:
+        aliases.append(marker)
+    return tuple(aliases)
+
+
+def _evicted_agent_liveness_session_ids(session_id: str | None, agent) -> tuple[str, ...]:
+    identities = []
+    for value in (
+        _normalize_evicted_agent_session_id(session_id),
+        _cached_agent_session_identity(agent),
+        _deferred_evicted_agent_teardown_session_id(agent),
+    ):
+        normalized = _normalize_evicted_agent_session_id(value)
+        if normalized and normalized not in identities:
+            identities.append(normalized)
+    for value in _deferred_evicted_agent_teardown_session_ids(agent):
+        if value not in identities:
+            identities.append(value)
+    return tuple(identities)
+
+
+def _mark_deferred_evicted_agent_teardown(session_id: str | None, agent) -> None:
+    teardown_session_id = _evicted_agent_teardown_session_id(session_id, agent)
+    if agent is None or not teardown_session_id:
+        return
+    try:
+        with _DEFERRED_EVICTION_TEARDOWN_LOCK:
+            aliases = _evicted_agent_liveness_session_ids(session_id, agent)
+            if teardown_session_id not in aliases:
+                aliases = (teardown_session_id, *aliases)
+            setattr(agent, _DEFERRED_EVICTION_TEARDOWN_SESSION_ATTR, teardown_session_id)
+            setattr(agent, _DEFERRED_EVICTION_TEARDOWN_SESSION_IDS_ATTR, tuple(aliases))
+            _DEFERRED_EVICTION_TEARDOWNS[id(agent)] = agent
+    except Exception:
+        logger.debug(
+            "Failed to mark deferred evicted-agent teardown for session %s",
+            teardown_session_id,
+            exc_info=True,
+        )
+
+
+def _clear_deferred_evicted_agent_teardown(agent) -> None:
+    if agent is None:
+        return
+    agent_id = id(agent)
+    try:
+        with _DEFERRED_EVICTION_TEARDOWN_LOCK:
+            if _DEFERRED_EVICTION_TEARDOWNS.get(agent_id) is agent:
+                _DEFERRED_EVICTION_TEARDOWNS.pop(agent_id, None)
+            _DEFERRED_EVICTION_TEARDOWN_IN_PROGRESS.discard(agent_id)
+            for attr, fallback in (
+                (_DEFERRED_EVICTION_TEARDOWN_SESSION_ATTR, None),
+                (_DEFERRED_EVICTION_TEARDOWN_SESSION_IDS_ATTR, ()),
+            ):
+                try:
+                    if hasattr(agent, attr):
+                        delattr(agent, attr)
+                except Exception:
+                    try:
+                        setattr(agent, attr, fallback)
+                    except Exception:
+                        pass
+    except Exception:
+        logger.debug("Failed to clear deferred evicted-agent teardown marker", exc_info=True)
+
+
+def _deferred_evicted_agent_teardown_session_id(agent) -> str | None:
+    if agent is None:
+        return None
+    try:
+        value = getattr(agent, _DEFERRED_EVICTION_TEARDOWN_SESSION_ATTR, None)
+    except Exception:
+        return None
+    if not isinstance(value, str):
+        return None
+    value = str(value or "").strip()
+    return value or None
+
+
+def _evicted_agent_is_live_instance(agent) -> bool:
+    if agent is None:
+        return False
+    from api import config as _live_config
+
+    with _live_config.STREAMS_LOCK:
+        return any(live_agent is agent for live_agent in _live_config.AGENT_INSTANCES.values())
+
+
+def _evicted_agent_session_has_active_run(session_id: str | None) -> bool:
+    session_id = _normalize_evicted_agent_session_id(session_id)
+    if not session_id:
+        return False
+    from api import config as _live_config
+
+    with _live_config.ACTIVE_RUNS_LOCK:
+        for entry in (_live_config.ACTIVE_RUNS or {}).values():
+            if str((entry or {}).get("session_id") or "").strip() == session_id:
+                return True
+    return False
+
+
+def _evicted_agent_has_cache_owner(agent) -> bool:
+    if agent is None:
+        return False
+    from api import config as _live_config
+
+    with _live_config.SESSION_AGENT_CACHE_LOCK:
+        for entry in (_live_config.SESSION_AGENT_CACHE or {}).values():
+            cached_agent = entry[0] if isinstance(entry, tuple) else entry
+            if cached_agent is agent:
+                return True
+    return False
+
+
+def _evicted_agent_teardown_is_live_blocked(session_id: str | None, agent) -> bool:
+    session_ids = _evicted_agent_liveness_session_ids(session_id, agent)
+    return (
+        _evicted_agent_is_live_instance(agent)
+        or any(_evicted_agent_session_has_active_run(live_session_id) for live_session_id in session_ids)
+    )
+
+
+def _claim_deferred_evicted_agent_teardowns() -> list:
+    claimed = []
+    with _DEFERRED_EVICTION_TEARDOWN_LOCK:
+        for agent_id, agent in list(_DEFERRED_EVICTION_TEARDOWNS.items()):
+            if agent_id in _DEFERRED_EVICTION_TEARDOWN_IN_PROGRESS:
+                continue
+            if agent is None:
+                _DEFERRED_EVICTION_TEARDOWNS.pop(agent_id, None)
+                continue
+            _DEFERRED_EVICTION_TEARDOWN_IN_PROGRESS.add(agent_id)
+            claimed.append(agent)
+    return claimed
+
+
+def _release_deferred_evicted_agent_teardown_claim(agent) -> None:
+    if agent is None:
+        return
+    with _DEFERRED_EVICTION_TEARDOWN_LOCK:
+        _DEFERRED_EVICTION_TEARDOWN_IN_PROGRESS.discard(id(agent))
+
+
+def _schedule_deferred_evicted_agent_teardown_retry() -> None:
+    """Ensure one backoff timer will retry dirty/failed idle teardowns."""
+    global _DEFERRED_EVICTION_RETRY_TIMER
+
+    with _DEFERRED_EVICTION_TEARDOWN_LOCK:
+        timer = _DEFERRED_EVICTION_RETRY_TIMER
+        if timer is not None and timer.is_alive():
+            return
+        timer = threading.Timer(
+            _DEFERRED_EVICTION_RETRY_NEXT_DELAY_SECONDS,
+            _run_deferred_evicted_agent_teardown_retry,
+        )
+        timer.daemon = True
+        _DEFERRED_EVICTION_RETRY_TIMER = timer
+        # Start before releasing the registry lock so another scheduler cannot
+        # observe the stored timer in its pre-start state and create a duplicate.
+        timer.start()
+
+
+def _run_deferred_evicted_agent_teardown_retry() -> None:
+    """Drain deferred teardowns, backing off while dirty work remains."""
+    global _DEFERRED_EVICTION_RETRY_TIMER, _DEFERRED_EVICTION_RETRY_NEXT_DELAY_SECONDS
+
+    try:
+        _drain_deferred_evicted_agent_teardowns()
+    except Exception:
+        logger.debug("Scheduled deferred evicted-agent teardown retry failed", exc_info=True)
+
+    with _DEFERRED_EVICTION_TEARDOWN_LOCK:
+        _DEFERRED_EVICTION_RETRY_TIMER = None
+        pending = bool(_DEFERRED_EVICTION_TEARDOWNS)
+        if pending:
+            _DEFERRED_EVICTION_RETRY_NEXT_DELAY_SECONDS = min(
+                max(
+                    _DEFERRED_EVICTION_RETRY_BASE_DELAY_SECONDS,
+                    _DEFERRED_EVICTION_RETRY_NEXT_DELAY_SECONDS * 2,
+                ),
+                _DEFERRED_EVICTION_RETRY_MAX_DELAY_SECONDS,
+            )
+        else:
+            _DEFERRED_EVICTION_RETRY_NEXT_DELAY_SECONDS = _DEFERRED_EVICTION_RETRY_BASE_DELAY_SECONDS
+    if pending:
+        _schedule_deferred_evicted_agent_teardown_retry()
+
+
+def _drain_deferred_evicted_agent_teardowns() -> int:
+    """Drain globally deferred evicted-agent teardowns.
+
+    Registry ownership is protected by a private lock, but all stream/cache
+    probes and lifecycle/provider/DB cleanup run outside it. Concurrent drainers
+    claim each agent id once; blocked agents stay pending after the claim is
+    released so a later worker completion can retry them.
+    """
+    closed_count = 0
+    for agent in _claim_deferred_evicted_agent_teardowns():
+        try:
+            teardown_session_id = _deferred_evicted_agent_teardown_session_id(agent)
+            if not teardown_session_id:
+                _clear_deferred_evicted_agent_teardown(agent)
+                continue
+            if _evicted_agent_has_cache_owner(agent):
+                _clear_deferred_evicted_agent_teardown(agent)
+                continue
+            if _evicted_agent_teardown_is_live_blocked(teardown_session_id, agent):
+                continue
+            if _close_evicted_agent_at_session_boundary(teardown_session_id, agent):
+                closed_count += 1
+        except Exception:
+            logger.debug("Deferred evicted-agent teardown drain failed", exc_info=True)
+        finally:
+            _release_deferred_evicted_agent_teardown_claim(agent)
+    return closed_count
 
 
 def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
@@ -12847,6 +13127,16 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        try:
+            _drain_deferred_evicted_agent_teardowns()
+        except Exception:
+            logger.debug(
+                "Deferred evicted-agent teardown drain failed after stream %s for session %s",
+                stream_id,
+                session_id,
+                exc_info=True,
+            )
 
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run
