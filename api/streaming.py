@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import traceback
+import unicodedata
 import copy
 import inspect
 from pathlib import Path
@@ -3957,12 +3958,38 @@ def _detect_title_language(text: str) -> str:
     return ''
 
 
+# Unicode-name keywords for alphabetic characters outside the fast ordinal
+# ranges below. Checked in order. This is how half-width katakana, full-width
+# Latin, ligatures, polytonic Greek, and presentation forms land in their real
+# script instead of being dropped or mistaken for foreign text.
+_SCRIPT_NAME_KEYWORDS = (
+    ('KATAKANA', 'cjk'),
+    ('HIRAGANA', 'cjk'),
+    ('HANGUL', 'cjk'),
+    ('IDEOGRAPH', 'cjk'),
+    ('LATIN', 'latin'),
+    ('CYRILLIC', 'cyrillic'),
+    ('ARABIC', 'arabic'),
+    ('HEBREW', 'hebrew'),
+    ('GREEK', 'greek'),
+    ('DEVANAGARI', 'devanagari'),
+    ('THAI', 'thai'),
+    ('GEORGIAN', 'georgian'),
+    ('ARMENIAN', 'armenian'),
+)
+
+
 def _script_counts(text: str) -> dict:
     """Return per-script alphabetic character counts for *text*.
 
     Buckets: ``latin``, ``cjk`` (Han/Hiragana/Katakana/Hangul), ``cyrillic``,
-    ``arabic``, ``hebrew``, ``greek``, ``devanagari``. Non-alphabetic and
-    unclassified characters are ignored.
+    ``arabic``, ``hebrew``, ``greek``, ``devanagari``, ``thai``,
+    ``georgian``, ``armenian``, and ``other``. Common ranges are matched by
+    ordinal for speed; everything alphabetic outside them is classified by
+    its Unicode character name. Nothing alphabetic is dropped: a letter no
+    keyword recognizes counts as ``other``, so a title written in an
+    unclassified script is still visible to drift detection instead of
+    vanishing from the denominator.
     """
     counts: dict[str, int] = {}
     for ch in str(text or ''):
@@ -3988,7 +4015,12 @@ def _script_counts(text: str) -> dict:
         elif 0x0900 <= o <= 0x097F:
             bucket = 'devanagari'
         else:
-            continue
+            name = unicodedata.name(ch, '')
+            bucket = 'other'
+            for keyword, mapped in _SCRIPT_NAME_KEYWORDS:
+                if keyword in name:
+                    bucket = mapped
+                    break
         counts[bucket] = counts.get(bucket, 0) + 1
     return counts
 
@@ -4012,7 +4044,134 @@ def _dominant_script(text: str) -> str:
     return ''
 
 
-def _title_prompt_language_rule(user_text: str) -> str:
+# Maps a pinned ``auxiliary.title_generation.language`` value to the
+# ``_script_counts`` bucket its titles should be written in.
+#
+# Keys are lowercase English names and ISO 639-1 codes, ASCII only. This
+# module has to stay English-only (see
+# test_title_generation_source_has_no_cjk_literals), so a pin written in its
+# own script is not mapped. Diacritics are folded before lookup.
+#
+# Serbian is missing on purpose: it is written in both Cyrillic and Latin,
+# so neither bucket can be asserted. Anything unmapped falls back to
+# conversation-based validation.
+_TITLE_LANGUAGE_SCRIPTS = {
+    # latin
+    'english': 'latin', 'german': 'latin', 'deutsch': 'latin',
+    'french': 'latin', 'francais': 'latin',
+    'spanish': 'latin', 'espanol': 'latin', 'castellano': 'latin',
+    'portuguese': 'latin', 'portugues': 'latin',
+    'italian': 'latin', 'italiano': 'latin',
+    'dutch': 'latin', 'nederlands': 'latin',
+    'polish': 'latin', 'polski': 'latin',
+    'turkish': 'latin', 'turkce': 'latin',
+    'vietnamese': 'latin', 'indonesian': 'latin', 'malay': 'latin',
+    'swedish': 'latin', 'svenska': 'latin', 'norwegian': 'latin', 'norsk': 'latin',
+    'danish': 'latin', 'dansk': 'latin', 'finnish': 'latin', 'suomi': 'latin',
+    'czech': 'latin', 'slovak': 'latin', 'hungarian': 'latin', 'magyar': 'latin',
+    'romanian': 'latin', 'croatian': 'latin', 'catalan': 'latin',
+    'filipino': 'latin', 'tagalog': 'latin', 'swahili': 'latin',
+    'en': 'latin', 'de': 'latin', 'fr': 'latin', 'es': 'latin', 'pt': 'latin',
+    'it': 'latin', 'nl': 'latin', 'pl': 'latin', 'tr': 'latin', 'vi': 'latin',
+    # cyrillic
+    'russian': 'cyrillic', 'ukrainian': 'cyrillic',
+    'bulgarian': 'cyrillic', 'belarusian': 'cyrillic', 'macedonian': 'cyrillic',
+    'ru': 'cyrillic', 'uk': 'cyrillic', 'bg': 'cyrillic',
+    # cjk (one bucket for Han/Hiragana/Katakana/Hangul, same as _script_counts)
+    'japanese': 'cjk', 'chinese': 'cjk', 'mandarin': 'cjk', 'cantonese': 'cjk',
+    'korean': 'cjk',
+    'ja': 'cjk', 'zh': 'cjk', 'ko': 'cjk',
+    # scripts with a dedicated bucket
+    'arabic': 'arabic', 'ar': 'arabic',
+    'hebrew': 'hebrew', 'he': 'hebrew',
+    'greek': 'greek', 'el': 'greek',
+    'hindi': 'devanagari', 'marathi': 'devanagari', 'nepali': 'devanagari',
+    'hi': 'devanagari',
+    'thai': 'thai', 'th': 'thai',
+    'georgian': 'georgian', 'ka': 'georgian',
+    'armenian': 'armenian', 'hy': 'armenian',
+}
+
+
+def _resolve_pinned_title_script(language: str) -> str:
+    """Map a pinned title language to its expected script bucket, or ''.
+
+    Lookup is diacritic-insensitive ("Francais" and its accented spelling
+    both resolve) and tries the whole normalized value first, then individual
+    tokens, so qualified names like "Brazilian Portuguese", "Traditional
+    Chinese", or "pt-BR" resolve. Returns '' for blank or unrecognized
+    values, which callers treat as "validate against the conversation
+    instead" (#3293 behaviour).
+    """
+    normalized = str(language or '').strip().lower()
+    if not normalized:
+        return ''
+    folded = ''.join(
+        ch for ch in unicodedata.normalize('NFKD', normalized)
+        if not unicodedata.combining(ch)
+    )
+    for value in (normalized, folded):
+        hit = _TITLE_LANGUAGE_SCRIPTS.get(value, '')
+        if hit:
+            return hit
+        for token in re.split(r'[\s\-_/(),.]+', value):
+            if token:
+                hit = _TITLE_LANGUAGE_SCRIPTS.get(token, '')
+                if hit:
+                    return hit
+    return ''
+
+
+def _script_drift(title: str, expected_script: str) -> bool:
+    """True when a substantial share of *title* is written outside *expected_script*.
+
+    Same proportion rule as the #3293 cross-script check: some single other
+    script holds >=35% of the title's alphabetic characters with at least 2
+    characters, so a borrowed technical term (a CJK title containing
+    "Python") does not trip it while genuine drift does.
+    """
+    counts = _script_counts(str(title or ''))
+    total = sum(counts.values())
+    if total < 2:
+        return False
+    for script, n in counts.items():
+        if script != expected_script and n >= 2 and (n / total) >= 0.35:
+            return True
+    return False
+
+
+def _configured_title_language() -> str:
+    """Return the trimmed ``auxiliary.title_generation.language`` pin, or ''.
+
+    A nonblank value is authoritative for a whole generation attempt: the same
+    snapshot must drive both the prompt instruction and output validation, so
+    a title requested in the pinned language is never rejected by a validator
+    that expected the conversation's language.
+    """
+    try:
+        return str((_get_aux_title_config() or {}).get("language", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _title_prompt_language_rule(user_text: str, pinned_language: Optional[str] = None) -> str:
+    """Return the language instruction used by every title prompt.
+
+    Honours ``auxiliary.title_generation.language`` when the user has pinned a
+    title language -- Hermes Agent's own generator applies the same pin via
+    ``_TITLE_PROMPT_PINNED_LANGUAGE``, so without this the setting only takes
+    effect on native surfaces and WebUI titles drift independently.
+
+    ``pinned_language`` lets callers that already snapshotted the setting pass
+    it through, keeping prompt and validation consistent within one attempt;
+    ``None`` means read the config here.
+
+    Falls back to the previous "match the conversation start" instruction when
+    no language is configured, so unpinned installs are unaffected.
+    """
+    language = _configured_title_language() if pinned_language is None else str(pinned_language).strip()
+    if language:
+        return f"Write the title in {language}.\n"
     return "Match the language of the user question.\n"
 
 
@@ -4041,13 +4200,8 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
 
     # (1) Cross-script mismatch — language-agnostic.
     user_script = _dominant_script(user_text)
-    if user_script:
-        title_counts = _script_counts(candidate)
-        title_total = sum(title_counts.values())
-        if title_total >= 2:
-            for script, n in title_counts.items():
-                if script != user_script and n >= 2 and (n / title_total) >= 0.35:
-                    return True
+    if user_script and _script_drift(candidate, user_script):
+        return True
 
     # (2) Legacy same-script German→English heuristic.
     if _detect_title_language(user_text) != 'de':
@@ -4064,9 +4218,27 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     return english_hits >= 2
 
 
-def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+def _generated_title_language_mismatch(user_text: str, title: str, pinned_language: str = '') -> bool:
+    """Language-validate a generated title, honouring a resolvable pin.
+
+    A pin that resolves to a script bucket retargets drift detection at the
+    configured language. The title then has to be mostly in the pinned
+    script, whatever language the conversation is in.
+
+    The conversation-based check does not also run in that case, because it
+    measures against the wrong thing: it would reject the pinned title the
+    prompt just asked for. Blank or unresolvable pins keep the #3293
+    conversation-based validation exactly as it was.
+    """
+    pinned_script = _resolve_pinned_title_script(pinned_language)
+    if pinned_script:
+        return _script_drift(title, pinned_script)
+    return _title_language_mismatch(user_text, title)
+
+
+def _title_prompts(user_text: str, assistant_text: str, pinned_language: Optional[str] = None) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
-    language_rule = _title_prompt_language_rule(user_text)
+    language_rule = _title_prompt_language_rule(user_text, pinned_language)
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
@@ -4322,11 +4494,13 @@ def generate_title_raw_via_aux(
     provider: str = '',
     model: str = '',
     base_url: str = '',
+    *,
+    pinned_language: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
@@ -4402,14 +4576,14 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, pinned_language: Optional[str] = None) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, pinned_language)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
@@ -4526,12 +4700,16 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
 
 def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text)
+    # One snapshot drives both the prompt and validation: when a resolvable
+    # language is pinned, the prompt asks for it and validation checks the
+    # title against the pinned script instead of the conversation start.
+    pinned_language = _configured_title_language()
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, pinned_language=pinned_language)
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _generated_title_language_mismatch(user_text, title, pinned_language):
             return None, 'llm_language_mismatch', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid', str(raw)[:120]
@@ -4554,18 +4732,22 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider = ''
         model = ''
         base_url = ''
+    # Same snapshot-once contract as _generate_llm_session_title_for_agent:
+    # a resolvable pin retargets language validation at the pinned script.
+    pinned_language = _configured_title_language()
     raw, status = generate_title_raw_via_aux(
         user_text,
         assistant_text,
         provider=provider,
         model=model,
         base_url=base_url,
+        pinned_language=pinned_language,
     )
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
-        if _title_language_mismatch(user_text, title):
+        if _generated_title_language_mismatch(user_text, title, pinned_language):
             return None, 'llm_language_mismatch_aux', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid_aux', str(raw)[:120]
