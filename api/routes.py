@@ -14064,6 +14064,16 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
+    if parsed.path == "/api/session/context-brief/status":
+        job_id = parse_qs(parsed.query).get("job_id", [""])[0].strip()
+        if not job_id:
+            return bad(handler, "Missing job_id")
+        from api.context_brief import brief_job_status
+        job = brief_job_status(job_id)
+        if not job:
+            return bad(handler, "job not found", 404)
+        return j(handler, {"ok": True, "job": job})
+
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -14897,6 +14907,22 @@ def _resolve_new_session_workspace(body, visible_prev_session_id):
         get_last_workspace,
     )
     return str(workspace)
+
+
+def _delete_context_brief_state(sid: str, *, block_state_db_fallback: bool) -> None:
+    """Fence context-brief workers while the delete route owns the session lock."""
+    try:
+        from api.context_brief import delete_stored_brief
+
+        delete_stored_brief(
+            SESSION_DIR.parent,
+            sid,
+            block_state_db_fallback=block_state_db_fallback,
+            _session_lock_held=True,
+        )
+    except Exception:
+        logger.debug("context brief cleanup failed for deleted session %s", sid, exc_info=True)
+
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
@@ -15902,9 +15928,7 @@ def handle_post(handler, parsed) -> bool:
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
-        # A delegated subagent child (#5307) is view-only and owned by the
-        # delegate runner. Deleting it here would call delete_cli_session() and
-        # erase the child's state.db transcript — refuse it.
+        # Delegated subagent children are view-only and owned by their runner (#5307).
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
@@ -15935,6 +15959,7 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            _delete_context_brief_state(sid, block_state_db_fallback=not is_messaging_session)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -16013,6 +16038,49 @@ def handle_post(handler, parsed) -> bool:
                 **worktree_retained,
             },
         )
+
+    if parsed.path == "/api/session/context-brief":
+        # Read-only session context brief for the Context panel: deterministic
+        # assembly (goal, todos, recent requests, verified outcomes, live
+        # state) + persisted LLM narrative annotated with staleness.
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body["session_id"]).strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session id", 400)
+        from api.context_brief import BriefError, get_brief_payload
+        try:
+            brief = get_brief_payload(sid)
+        except BriefError as exc:
+            return bad(handler, str(exc), exc.status)
+        except Exception:
+            logger.exception("context brief build failed for %s", sid)
+            return bad(handler, "Failed to build context brief", status=500)
+        return j(handler, {"ok": True, "brief": brief})
+
+    if parsed.path == "/api/session/context-brief/refresh":
+        # Start (or refuse to duplicate) the background job that regenerates
+        # the LLM narrative layer. Runs as a job polled via
+        # GET /api/session/context-brief/status — aux-LLM generation can take
+        # minutes on long transcripts.
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body["session_id"]).strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session id", 400)
+        from api.context_brief import BriefError, start_brief_job
+        try:
+            job = start_brief_job(sid)
+        except BriefError as exc:
+            return bad(handler, str(exc), exc.status)
+        except Exception:
+            logger.exception("context brief refresh start failed for %s", sid)
+            return bad(handler, "Failed to start context brief refresh", status=500)
+        return j(handler, {"ok": True, "job": job})
 
     if parsed.path == "/api/session/clear":
         try:
