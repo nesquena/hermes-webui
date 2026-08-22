@@ -214,6 +214,35 @@ def test_incomplete_multihop_parent_signatures_disable_cache(hermes_home, monkey
     ) is None
 
 
+def test_parent_replace_during_load_is_not_published(lineage, monkeypatch):
+    """A parent signature must bracket the snapshot used for the cached stitch."""
+    routes, Session, child = lineage
+    real_load = Session.load
+    replaced = False
+
+    def load_and_replace(cls, session_id):
+        nonlocal replaced
+        loaded = real_load(session_id)
+        if session_id == "lineage_parent" and not replaced:
+            replaced = True
+            replacement = real_load(session_id)
+            replacement.messages[0] = {
+                "role": "user",
+                "content": "parent-new",
+                "timestamp": 1000,
+            }
+            replacement.save()
+        return loaded
+
+    monkeypatch.setattr(Session, "load", classmethod(load_and_replace))
+
+    first = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert first[0]["content"] == "question 0"
+
+    second = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert second[0]["content"] == "parent-new"
+
+
 def test_sessions_without_lineage_do_not_pollute_cache(lineage):
     routes, Session, child = lineage
     routes._lineage_display_cache.clear()

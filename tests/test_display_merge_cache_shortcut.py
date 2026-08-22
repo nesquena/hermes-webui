@@ -229,6 +229,36 @@ def test_msg_before_pagination_never_uses_tail_cache(stable_key):
     ) is None
 
 
+def test_msg_before_full_read_cannot_hit_inner_tail_cache(stable_key):
+    """The merge helper must not reuse the initial backstop result after paging."""
+    session = _Session()
+    tail_rows = [
+        {"role": "user", "content": "row-2", "timestamp": 2.0},
+        {"role": "assistant", "content": "row-3", "timestamp": 3.0},
+    ]
+    full_rows = [
+        {"role": "assistant", "content": "row-1", "timestamp": 1.0},
+        *tail_rows,
+    ]
+
+    initial = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        [],
+        tail_rows,
+        state_db_signature=stable_key,
+    )
+    assert [row["content"] for row in initial] == ["row-2", "row-3"]
+
+    paging = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        [],
+        full_rows,
+        state_db_signature=stable_key,
+        msg_before=2,
+    )
+    assert [row["content"] for row in paging] == ["row-1", "row-2", "row-3"]
+
+
 def test_probe_fails_closed_when_bounded_signature_unavailable(monkeypatch):
     """Without the bounded signature the key would need the rows we skipped.
 
