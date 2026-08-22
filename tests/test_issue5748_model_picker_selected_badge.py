@@ -34,15 +34,25 @@ def test_model_picker_renders_selected_badge_without_replacing_configured_badge(
 
 
 def test_selected_badge_is_keyed_to_current_model_value():
-    assert "String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" in UI_JS
+    # The selected badge must key on the resolved model identity, not a raw
+    # string of the dropdown value: catalog rows carry the qualified
+    # @custom:<slug>:<model> value while the outgoing state model is bare
+    # (#6884), so both sides are normalized via _modelPickerOptionIdentity
+    # before comparison.
+    assert "const _norm=(model,provider)=>typeof _modelPickerOptionIdentity==='function'" in UI_JS
+    assert "_norm(_rowModel,_rowProvider)===_norm(_stateModel,_stateProvider)" in UI_JS
 
 
 def test_selected_badge_is_keyed_to_current_model_provider():
     assert "const _selectedModelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(sel,sel.value)" in UI_JS
     assert "const _modelProviderForSelectedBadge=(m)=>" in UI_JS
     assert "return (_provider&&_provider!=='default')?_provider:null;" in UI_JS
-    assert "String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'')" in UI_JS
-    assert "const _isSelectedModelRow=(m)=>" in UI_JS
+    # Provider identity still gates the row match — the normalized model
+    # comparison alone would collapse same-id rows across provider groups.
+    assert "_rowProvider=String(_modelProviderForSelectedBadge(m)||'')" in UI_JS
+    assert "_stateProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'')" in UI_JS
+    assert "_rowProvider===_stateProvider" in UI_JS
+    assert "const _isSelectedModelRow=(m)=>{" in UI_JS
     assert "row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');" in UI_JS
 
 

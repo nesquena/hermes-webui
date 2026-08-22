@@ -3057,7 +3057,25 @@ function _modelStateForSelect(sel, modelId){
     // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
-    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+    // Normally-rendered catalog options only carry the qualified
+    // @custom:<slug>:<model> value — data-model is set solely by the fallback
+    // injection path (_ensureModelOptionInDropdown). When it is missing, strip
+    // the @custom:<slug>: prefix instead of sending the raw dropdown value as
+    // the model id (#6884). The prefix must come from the option metadata's
+    // authoritative provider (routedProvider), NOT from explicitProvider: the
+    // latter re-parses the value at its LAST colon, so a colon-bearing model
+    // id like @custom:backup:model-a:free would otherwise strip to just
+    // "free" (re-gate on the #6221 family). Only custom providers are
+    // stripped: a non-custom qualified id like @safe:gpt-4o-mini is a real
+    // provider namespace and must be preserved (#1771).
+    const effectiveProvider=routedProvider||explicitProvider;
+    const effectiveProviderLc=effectiveProvider.toLowerCase();
+    const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
+    const explicitPrefix=`@${effectiveProvider}:`;
+    const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+      ?value.slice(explicitPrefix.length)
+      :value;
+    return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
@@ -4413,7 +4431,23 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  const _isSelectedModelRow=(m)=>{
+    const _rowModel=String((m&&m.value)||'');
+    const _rowProvider=String(_modelProviderForSelectedBadge(m)||'');
+    const _stateModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    const _stateProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');
+    // Normalize both sides to the same model/provider identity. Catalog rows
+    // carry the qualified @custom:<slug>:<model> value while the outgoing
+    // state model is bare (#6884) — a raw string comparison would leave no
+    // row marked active/"Selected" after a restore. _modelPickerOptionIdentity
+    // is the same identity used for picker dedup, so the row that survives is
+    // exactly the one the send path resolves.
+    const _norm=(model,provider)=>typeof _modelPickerOptionIdentity==='function'
+      ?_modelPickerOptionIdentity(model,provider)
+      :String(model||'');
+    return _norm(_rowModel,_rowProvider)===_norm(_stateModel,_stateProvider)
+      &&_rowProvider===_stateProvider;
+  };
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
