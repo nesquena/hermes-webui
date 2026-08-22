@@ -9750,7 +9750,20 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    is_squashed_transcript = (
+        bool(sidecar_messages)
+        and isinstance(sidecar_messages[0], dict)
+        and sidecar_messages[0].get("_squash_summary") is True
+        and getattr(session, "truncation_watermark", None) is not None
+    )
     if cli_messages:
+        if is_squashed_transcript:
+            return merge_session_messages_append_only(
+                sidecar_messages,
+                cli_messages,
+                truncation_watermark=getattr(session, "truncation_watermark", None),
+                truncation_boundary=getattr(session, "truncation_boundary", None),
+            )
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
                 return merge_session_messages_append_only(

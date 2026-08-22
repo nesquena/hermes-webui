@@ -12,6 +12,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,9 +186,21 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+_SESSION_SAVE_AUTHORITIES_LOCK = threading.Lock()
+_SESSION_SAVE_AUTHORITIES: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
+
+
+def _session_save_authority(session_id: str) -> threading.RLock:
+    """Return the process-wide reentrant save authority for one session ID."""
+    with _SESSION_SAVE_AUTHORITIES_LOCK:
+        authority = _SESSION_SAVE_AUTHORITIES.get(session_id)
+        if authority is None:
+            authority = threading.RLock()
+            _SESSION_SAVE_AUTHORITIES[session_id] = authority
+        return authority
 
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
@@ -438,7 +451,15 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                 raise ValueError("session index must be a list")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
-                updated_map = {s.session_id: s.compact() for s in updates}
+            # Callers may pass already-owned compact entries.  In particular,
+            # Session.save() does so to prevent the index writer from rereading
+            # mutable Session state after the matching sidecar was published.
+            updated_map = {}
+            for update in updates:
+                entry = update if isinstance(update, dict) else update.compact()
+                sid = entry.get('session_id') if isinstance(entry, dict) else None
+                if sid:
+                    updated_map[sid] = entry
 
             existing = [
                 e for e in existing
@@ -1124,6 +1145,7 @@ def _load_session_from_path(path: Path) -> "Session | None":
     except Exception:
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+    data['messages'], _collapsed_incomplete_ids = _collapse_duplicate_incomplete_message_ids(data.get('messages'))
     return Session(**data)
 
 
@@ -1368,6 +1390,14 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        # Distinct Session objects can represent the same durable sidecar.  One
+        # stable SID authority therefore spans snapshot creation, sidecar
+        # replacement, and publication of the matching compact index row.
+        authority = _session_save_authority(self.session_id)
+        with authority:
+            self._save_owned_generation(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_owned_generation(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1387,8 +1417,24 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # Persist a collapsed snapshot without rebinding or mutating the live
+        # list.  Active workers can hold an alias to ``self.messages``; replacing
+        # it here would detach an append that lands while save() is preparing
+        # the payload.  A later save will include any concurrent append.
+        # Own the complete snapshot BEFORE duplicate selection.  Otherwise a
+        # nested mutation after selection but before deepcopy can invalidate the
+        # equality decision and leak into this save's payload (#6600).
         if touch_updated_at:
             self.updated_at = time.time()
+        # Freeze every persisted/indexed field, not only messages.  The sidecar
+        # and compact row below are projections of this one immutable generation.
+        generation = copy.copy(self)
+        generation.__dict__ = {
+            key: copy.deepcopy(value)
+            for key, value in self.__dict__.items()
+        }
+        owned_messages = generation.messages
+        messages_to_persist, _ = _collapse_duplicate_incomplete_message_ids(owned_messages)
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -1419,28 +1465,28 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
         ]
-        meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta = {k: getattr(generation, k, None) for k in METADATA_FIELDS}
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
         # scene bodies. message_count is placed BEFORE anchor_scene_index so a
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
-        meta['message_count'] = len(self.messages or [])
-        meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
+        meta['message_count'] = len(messages_to_persist or [])
+        meta['anchor_scene_index'] = _anchor_scene_index_from_records(generation.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
         # sees the current value rather than a stale load-time snapshot (#5854
         # defense-in-depth; the cached-side freshness check reads real records,
         # not this, so this is belt-and-suspenders).
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
-        meta['messages'] = self.messages
-        meta['tool_calls'] = self.tool_calls
-        meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
+        meta['messages'] = messages_to_persist
+        meta['tool_calls'] = generation.tool_calls
+        meta['anchor_activity_scenes'] = generation.anchor_activity_scenes if isinstance(generation.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
         _placed = {'message_count', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
-        extra = {k: v for k, v in self.__dict__.items()
+        extra = {k: v for k, v in generation.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
@@ -1465,11 +1511,11 @@ class Session:
                     existing_msg_count = len(existing.get('messages') or [])
                 except (json.JSONDecodeError, ValueError):
                     existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                incoming_msg_count = len(messages_to_persist or [])
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
-                    and (self.active_stream_id or self.pending_user_message)
+                    and (generation.active_stream_id or generation.pending_user_message)
                 ):
                     logger.warning(
                         "refusing to overwrite session %s messages with empty active/pending snapshot "
@@ -1477,7 +1523,7 @@ class Session:
                         self.session_id,
                         existing_msg_count,
                         incoming_msg_count,
-                        self.active_stream_id,
+                        generation.active_stream_id,
                     )
                     return
                 if existing_msg_count > incoming_msg_count:
@@ -1522,12 +1568,20 @@ class Session:
                 pass
             raise
         if not skip_index:
-            _write_session_index(updates=[self])
+            # #6600: project the sidebar index from the SAME detached snapshot
+            # just serialized — never from the live list — so _index.json can
+            # neither record the uncollapsed message_count nor adopt a dropped
+            # duplicate row's later timestamp.
+            index_entry = generation.compact(projection_messages=messages_to_persist)
+            _write_session_index(updates=[index_entry])
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
         # row is alive (the #4985 "zero-message orphan" only ever exists
-        # when ``len(self.messages) == 0``). Clear the tombstone so the
+        # when the OWNED, persisted generation has no messages). Never
+        # re-read mutable ``self.messages`` here: a worker can append through a
+        # live alias after generation capture, and that later append is not proof
+        # that this save published a non-empty sidecar. Clear the tombstone so the
         # next ``/api/sessions`` poll does not need the prune helper to
         # run before the row re-appears — useful when the message-commit
         # happens on a poll that does not yet see state.db.messages rows
@@ -1537,7 +1591,7 @@ class Session:
         # save. The helper's self-healing branch in
         # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
         # fix; this is the belt.
-        if self.messages:
+        if messages_to_persist:
             try:
                 _clear_webui_zero_message_orphan_tombstone(self.session_id)
                 _clear_webui_deleted_session_tombstone(self.session_id)
@@ -1564,15 +1618,16 @@ class Session:
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        data['messages'], _collapsed_incomplete_ids = _collapse_duplicate_incomplete_message_ids(data.get('messages'))
         session = cls(**data)
-        if _collapsed_partials:
+        if _collapsed_partials or _collapsed_incomplete_ids:
             try:
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
                 # intentionally shrinks the transcript (#2592).
                 session.save(touch_updated_at=False, skip_index=True)
             except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                logger.debug("Failed to persist collapsed duplicate assistant rows for %s", sid, exc_info=True)
         else:
             # #5854: for a LEGACY sidecar (no modern anchor_scene_index key), the
             # cheap metadata-prefix read cannot recover message_count/scenes when
@@ -1582,8 +1637,8 @@ class Session:
             # Keyed by stat signature, so any edit invalidates it; the next
             # save() rewrites the modern layout and the fallback stops firing.
             # expected_sig guards against an atomic replace during the read.
-            # (When _collapsed_partials fired, save() above already rewrote the
-            # modern layout, so no legacy caching is needed.)
+            # (When either duplicate-row repair fired, save() above already
+            # rewrote the modern layout, so no legacy caching is needed.)
             if 'anchor_scene_index' not in data:
                 try:
                     _legacy_sidecar_facts_put(
@@ -1721,18 +1776,28 @@ class Session:
                     n += 1
         return n
 
-    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+    def compact(self, include_runtime=False, active_stream_ids=None, projection_messages=None) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
-        message_count = (
-            self._metadata_message_count
-            if self._metadata_message_count is not None
-            else len(self.messages)
-        )
-        if has_pending_user_message:
+        # #6600: during save()'s index update this is the detached, collapsed
+        # snapshot just written to the sidecar, keeping the index projection
+        # identical to the persisted payload.  Outside save() it is None and
+        # the live list is used as before.
+        has_index_projection = projection_messages is not None
+        if not has_index_projection:
+            projection_messages = self.messages
+        if has_index_projection:
+            message_count = len(projection_messages)
+        else:
+            message_count = (
+                self._metadata_message_count
+                if self._metadata_message_count is not None
+                else len(projection_messages)
+            )
+        if has_pending_user_message and not has_index_projection:
             message_count = max(message_count, 1)
-        last_message_at = _last_message_timestamp(self.messages) or self.updated_at
-        if has_pending_user_message and self.pending_started_at:
+        last_message_at = _last_message_timestamp(projection_messages) or self.updated_at
+        if has_pending_user_message and self.pending_started_at and not has_index_projection:
             last_message_at = self.pending_started_at
         return {
             'session_id': self.session_id,
@@ -1790,7 +1855,7 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
-            'user_message_count': Session._compute_user_message_count(self.messages),
+            'user_message_count': Session._compute_user_message_count(projection_messages),
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
@@ -2392,6 +2457,135 @@ def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
         else:
             previous_partial_sig = None
         collapsed.append(message)
+    return collapsed, changed
+
+
+def _strict_incomplete_message_id_key(message_id):
+    """Return a type-tagged deletion key for a persisted message id, or None.
+
+    Only exact ``str``/``int``/finite-``float`` scalars carry deletion
+    authority.  Booleans, containers, subclass instances (e.g. enum-like
+    ids), and non-finite floats are rejected so distinct typed ids such as
+    ``1`` vs ``"1"`` or ``True`` vs ``"True"`` can never collapse into the
+    same bucket — a genuinely distinct backup row must never be classified
+    as a duplicate-only replay (#6600 review).
+    """
+    if isinstance(message_id, bool):
+        return None
+    if type(message_id) is str:
+        return ('str', message_id) if message_id != '' else None
+    if type(message_id) is int:
+        return ('int', message_id)
+    if type(message_id) is float:
+        return ('float', message_id) if math.isfinite(message_id) else None
+    return None
+
+
+def _strip_thinking_markup_for_incomplete(text: str) -> str:
+    """Emptiness-equivalent mirror of api.streaming._strip_thinking_markup.
+
+    Keep the regexes in sync with api.streaming._strip_thinking_markup; the
+    durable incomplete-row predicate must consider exactly the same content
+    "blank" as the reconciliation layer.  Duplicated (rather than imported)
+    because api.streaming already imports api.models at module load, and the
+    .bak recovery path must not depend on the streaming import chain.
+    Parity is pinned by tests/test_issue2592_partial_dedupe.py.
+    """
+    if not text:
+        return ''
+    s = str(text)
+    s = re.sub(r'^\s*<think>.*?</think>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*<\|channel\|?>thought\n?.*?<channel\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*<\|turn\|>thinking\n.*?<turn\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)  # Gemma 4
+    s = re.sub(r'^\s*(the|ther)\s+user\s+is\s+asking[^\n]*(?:\n|$)', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"^\s*(?:here(?:'s| is) (?:a |my )?(?:thinking|thought) (?:process|trace|through)\b[^\n]*\n?"
+        r"|let me (?:think|work|reason|analyze|walk) (?:through|about|this|step)\b[^\n]*\n?"
+        r"|i(?:'ll| will) (?:think|work|reason|analyze|break this down)\b[^\n]*\n?"
+        r"|(?:okay|alright|sure|of course),?\s+let me\b[^\n]*\n?)",
+        ' ', s, flags=re.IGNORECASE
+    )
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _incomplete_message_content_text(content) -> str:
+    """Extract visible text for the incomplete-row eligibility predicate.
+
+    Mirrors api.streaming._message_text (structured content parts +
+    thinking-markup stripping) so the persistence boundary empties exactly
+    the rows the reconciliation layer empties (#6600 review: one shared
+    eligibility semantics for both layers).
+    """
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get('type') or '').lower()
+            if part_type in ('', 'text', 'input_text', 'output_text'):
+                parts.append(str(
+                    part.get('text') or part.get('content') or part.get('input_text') or part.get('output_text') or ''
+                ))
+        return _strip_thinking_markup_for_incomplete('\n'.join(parts).strip())
+    return _strip_thinking_markup_for_incomplete(str(content or '').strip())
+
+
+def _incomplete_reasoning_message_id(message):
+    """Return the strict typed identity key of an empty incomplete assistant result.
+
+    This is the SINGLE eligibility predicate shared by the persistence
+    boundary (Session.save/load and .bak recovery) and the in-memory
+    reconciliation layer (api.streaming._message_identity): a row one layer
+    collapses is exactly a row the other layer collapses, so neither can
+    drop a row the other considers distinct.  Returns a hashable
+    type-tagged tuple, or None when the row is not an eligible empty
+    incomplete assistant result.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'assistant':
+        return None
+    if str(message.get('finish_reason') or '').lower() != 'incomplete':
+        return None
+    if _incomplete_message_content_text(message.get('content')):
+        return None
+    if message.get('tool_call_id') or message.get('tool_calls'):
+        return None
+    return _strict_incomplete_message_id_key(message.get('id'))
+
+
+def _message_information_score(message) -> int:
+    """Prefer the richest replay when one stable incomplete id occurs repeatedly."""
+    if not isinstance(message, dict):
+        return 0
+    try:
+        return len(json.dumps(message, sort_keys=True, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return len(str(message))
+
+
+def _collapse_duplicate_incomplete_message_ids(messages) -> tuple[list, bool]:
+    """Collapse non-adjacent replays of empty incomplete assistant message ids."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    seen_indexes = {}
+    changed = False
+    for message in messages:
+        message_id = _incomplete_reasoning_message_id(message)
+        if message_id is None:
+            collapsed.append(message)
+            continue
+        existing_index = seen_indexes.get(message_id)
+        if existing_index is None:
+            seen_indexes[message_id] = len(collapsed)
+            collapsed.append(message)
+            continue
+        changed = True
+        existing = collapsed[existing_index]
+        if message == existing:
+            continue
+        if _message_information_score(message) > _message_information_score(existing):
+            collapsed[existing_index] = message
     return collapsed, changed
 
 
