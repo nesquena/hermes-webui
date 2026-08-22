@@ -150,6 +150,7 @@ def _pool_source(scenario: str, next_hop_protocol: str | None = "http/1.1") -> s
         + "eval(extractFunc('_markLiveStreamTransportUncertain'));\n"
         + "eval(extractFunc('_touchLiveStreamUse'));\n"
         + "eval(extractFunc('closeOtherLiveStreams'));\n"
+        + "eval(extractFunc('_registerLiveStream'));\n"
         + scenario
     )
 
@@ -402,6 +403,26 @@ console.log(JSON.stringify({
     assert "a" in out["open"]
     assert len(out["open"]) == out["cap"]
     assert len(out["closed"]) == 1
+
+
+def test_late_stream_registrations_rearbitrate_and_keep_foreground():
+    out = json.loads(_run_node(_pool_source("""
+globalThis.S={session:{session_id:'front'}};
+LIVE_STREAMS.front={streamId:'s-front',source:{readyState:1,close(){}}};
+LIVE_STREAMS.b={streamId:'s-b',source:{readyState:1,close(){}}};
+LIVE_STREAMS.c={streamId:'s-c',source:{readyState:1,close(){}}};
+_touchLiveStreamUse('front'); _touchLiveStreamUse('b'); _touchLiveStreamUse('c');
+_registerLiveStream('late-1','s-late-1',{readyState:1,close(){}});
+_registerLiveStream('late-2','s-late-2',{readyState:1,close(){}});
+console.log(JSON.stringify({
+  cap:_liveStreamPoolMax(), open:Object.keys(LIVE_STREAMS).sort(),
+  closed:closed.slice().sort(),
+}));
+""")))
+    assert out["cap"] == _source_const("LIVE_STREAM_POOL_MAX_HTTP1")
+    assert "front" in out["open"]
+    assert len(out["open"]) <= out["cap"]
+    assert len(out["closed"]) >= 2
 
 
 def test_newest_resource_overrides_stale_navigation_transport():

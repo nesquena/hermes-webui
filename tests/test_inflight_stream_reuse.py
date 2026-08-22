@@ -151,6 +151,16 @@ def test_stream_error_forces_safe_pool_before_reconnect_probe():
     assert error_pos < mark_pos < probe_pos
 
 
+def test_wire_sse_registers_through_late_budget_chokepoint():
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    wire_pos = body.find("function _wireSSE(source)")
+    register_pos = body.find("_registerLiveStream(activeSid,streamId,source)", wire_pos)
+    direct_publish_pos = body.find("LIVE_STREAMS[activeSid]=", wire_pos)
+    assert wire_pos != -1
+    assert register_pos != -1
+    assert direct_publish_pos == -1
+
+
 def test_attach_live_stream_updates_uploads_before_same_stream_reuse():
     """Reusing transport must not skip per-session uploaded attachment state."""
     body = _function_body(MESSAGES_JS, "attachLiveStream")
