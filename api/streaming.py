@@ -11391,6 +11391,7 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
+                            '_provider_error_type': _err_type,
                         }
                         if _turn_duration is not None:
                             _error_message['_turnDuration'] = _turn_duration
@@ -12724,6 +12725,7 @@ def _run_agent_streaming(
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                     'timestamp': int(time.time()),
                     '_error': True,
+                    '_provider_error_type': _exc_type,
                 }
                 if _turn_duration is not None:
                     _error_message['_turnDuration'] = _turn_duration

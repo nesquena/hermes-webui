@@ -6633,7 +6633,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           } else {
             const recovery=(d.compression_recovery&&typeof d.compression_recovery==='object')?d.compression_recovery:null;
-            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_compressionRecovery:recovery||undefined});
+            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel,_compressionRecovery:recovery||undefined,_provider_error_type:d.type||'error',_error:true});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
           }
           if(!isRecoveryControlMessage){

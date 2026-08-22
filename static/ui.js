@@ -617,6 +617,7 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
+  if(typeof _isProviderErrorCardMessage==='function'&&_isProviderErrorCardMessage(m)&&m._dismissed===true) return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
@@ -11161,6 +11162,87 @@ function _isRecoveryControlMessage(m){
   // interrupted" card carries 'Interruption details' and must stay visible.
   return _isRecoveryControlMessageText(msgContent(m)||String(m.content||''));
 }
+function _isProviderErrorCardMessage(m){
+  if(!m||m.role!=='assistant'||m._error!==true) return false;
+  if(Object.prototype.hasOwnProperty.call(m,'_compressionRecovery')||Object.prototype.hasOwnProperty.call(m,'_statusCard')||m.recovery_control===true||m._pending_journal_recovery===true) return false;
+  if(m.type==='interrupted'||m.interruption_cause) return false;
+  const providerErrorType=String(m._provider_error_type||'').trim().toLowerCase();
+  if(providerErrorType) return ['error','quota_exhausted','rate_limit','auth_mismatch','model_not_found','no_response','credential_pool_empty','gateway_error','gateway_http_error','gateway_auth_error','gateway_empty_response'].includes(providerErrorType);
+  if(!Object.prototype.hasOwnProperty.call(m,'provider_details')) return false;
+  const label=String(m.provider_details_label||'').trim().toLowerCase();
+  if(['cancellation details','interruption details','terminal state details'].includes(label)) return false;
+  return !/^\*\*(task cancel+ed|response interrupted|connection interrupted|tool iteration limit reached|context compression exhausted):/i.test(String(m.content||'').trim());
+}
+function _providerErrorDismissalSessionAllowed(session){
+  if(!session) return false;
+  if(session.is_cli_session===true||session.read_only===true||session.is_read_only===true) return false;
+  if(typeof _isExternalSession==='function'&&_isExternalSession(session)) return false;
+  if(typeof _isMessagingSession==='function'&&_isMessagingSession(session)) return false;
+  const source=String(session.session_source||session.raw_source||session.source_tag||session.source||'').trim().toLowerCase();
+  if(source&&source!=='webui'&&source!=='fork') return false;
+  if(session.profile&&S&&S.activeProfile&&session.profile!==S.activeProfile) return false;
+  return true;
+}
+function _providerErrorDismissalButtonHtml(message, rawIdx, readOnlySession){
+  if(readOnlySession||!_providerErrorDismissalSessionAllowed(S&&S.session)||!_isProviderErrorCardMessage(message)||message._dismissed===true) return '';
+  const session=S&&S.session||{};
+  if(!!S.busy||!!S.activeStreamId||!!session.active_stream_id||!!session.pending_user_message||!!session.pending_started_at||!!session.has_pending_user_message) return '';
+  const label=esc(t('dismiss_error_card'));
+  const sessionIdx=_messageSessionIndexForRawIdx(rawIdx);
+  return `<button type="button" class="msg-action-btn msg-dismiss-error-btn" title="${label}" aria-label="${label}" data-message-index="${sessionIdx}" data-raw-index="${rawIdx}" onclick="dismissProviderError(this)">${li('trash-2',13)}</button>`;
+}
+async function dismissProviderError(button){
+  if(!button||!S||!S.session) return;
+  const sid=String(S.session.session_id||'');
+  const rawIdx=Number(button.dataset&&button.dataset.rawIndex);
+  const messageIdx=Number(button.dataset&&button.dataset.messageIndex);
+  const message=Array.isArray(S.messages)&&Number.isInteger(rawIdx)?S.messages[rawIdx]:null;
+  if(!sid||!Number.isInteger(messageIdx)||!_isProviderErrorCardMessage(message)) return;
+  const generation=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
+  const ownsSessionId=()=>!!(S.session&&S.session.session_id===sid);
+  const ownsCurrentSession=()=>!!(S.session&&S.session.session_id===sid)&&(
+    generation===null||typeof _loadSessionGeneration!=='number'||_loadSessionGeneration===generation
+  );
+  button.disabled=true;
+  button.setAttribute('aria-busy','true');
+  try{
+    const confirmed=await showConfirmDialog({
+      title:t('dismiss_error_card'),
+      message:t('dismiss_error_confirm'),
+      confirmLabel:t('remove'),
+      danger:true,
+      focusCancel:true
+    });
+    if(!ownsCurrentSession()) return;
+    if(!confirmed) return;
+    const expected={
+      role:String(message.role||''),
+      content:msgContent(message),
+      timestamp:message._ts??message.timestamp??null
+    };
+    await api('/api/session/message/dismiss-error',{method:'POST',body:JSON.stringify({
+      session_id:sid,message_index:messageIdx,expected_message:expected
+    })});
+    if(!ownsCurrentSession()) return;
+    await loadSession(sid,{force:true,externalRefreshReason:'dismiss-provider-error'});
+    if(!ownsSessionId()) return;
+  }catch(err){
+    if(!ownsCurrentSession()) return;
+    if(Number(err&&err.status)===409){
+      showToast(t('dismiss_error_stale'));
+      try{
+        await loadSession(sid,{force:true,externalRefreshReason:'dismiss-provider-error-conflict'});
+      }catch(_){ /* keep the current transcript when refresh also fails */ }
+    }else{
+      showToast(t('dismiss_error_failed'));
+    }
+  }finally{
+    if(ownsSessionId()){
+      button.disabled=false;
+      button.removeAttribute('aria-busy');
+    }
+  }
+}
 function _assistantAnchorSceneFinalAnswerText(m){
   const scene=m&&m._anchor_activity_scene&&typeof m._anchor_activity_scene==='object'
     ? m._anchor_activity_scene
@@ -17044,6 +17126,7 @@ function renderMessages(options){
       : false;
     const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const dismissErrorBtn = !isUser&&typeof _providerErrorDismissalButtonHtml==='function' ? _providerErrorDismissalButtonHtml(m, rawIdx, readOnlySession) : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -17060,7 +17143,7 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${dismissErrorBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;

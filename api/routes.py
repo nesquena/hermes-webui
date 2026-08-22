@@ -3969,6 +3969,90 @@ def _assistant_anchor_scene_message_ref(message) -> str:
     return _anchor_scene_message_ref_digest(payload)
 
 
+_PROVIDER_ERROR_CONTROL_LABELS = frozenset({
+    "cancellation details",
+    "interruption details",
+    "terminal state details",
+})
+_PROVIDER_ERROR_TYPES = frozenset({
+    "error",
+    "quota_exhausted",
+    "rate_limit",
+    "auth_mismatch",
+    "model_not_found",
+    "no_response",
+    "credential_pool_empty",
+    "gateway_error",
+    "gateway_http_error",
+    "gateway_auth_error",
+    "gateway_empty_response",
+})
+
+
+def _is_provider_error_card_message(message) -> bool:
+    """Return whether a row is a user-curatable terminal provider error."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    if message.get("_error") is not True:
+        return False
+    if (
+        "_compressionRecovery" in message
+        or "_statusCard" in message
+        or message.get("recovery_control") is True
+        or message.get("_pending_journal_recovery") is True
+        or message.get("type") == "interrupted"
+        or bool(message.get("interruption_cause"))
+    ):
+        return False
+    provider_error_type = str(message.get("_provider_error_type") or "").strip().lower()
+    if provider_error_type:
+        return provider_error_type in _PROVIDER_ERROR_TYPES
+    if "provider_details" not in message:
+        return False
+    label = str(message.get("provider_details_label") or "").strip().lower()
+    if label in _PROVIDER_ERROR_CONTROL_LABELS:
+        return False
+    content = str(message.get("content") or "").strip().lower()
+    return not content.startswith((
+        "**task cancelled:",
+        "**task canceled:",
+        "**response interrupted:",
+        "**connection interrupted:",
+        "**tool iteration limit reached:",
+        "**context compression exhausted:",
+    ))
+
+
+def _dismiss_error_source_rejection(sid: str, handler):
+    """Reject foreign sessions before any missing-sidecar materialization."""
+    try:
+        existing = get_session(sid, metadata_only=True)
+    except KeyError:
+        existing = None
+    if existing is not None:
+        if not _session_visible_to_active_profile(getattr(existing, "profile", None), handler):
+            return "Session not found", 404
+        if _session_is_subagent_view_only(sid):
+            return "Subagent sessions are view-only and cannot be modified from WebUI", 400
+        if (
+            getattr(existing, "read_only", False)
+            or getattr(existing, "is_cli_session", False)
+            or _is_messaging_session_record(existing)
+        ):
+            return "Read-only imported sessions cannot be modified", 403
+        return None
+
+    cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True) or {}
+    state_source = _state_db_session_source(sid)
+    if cli_meta and not _session_visible_to_active_profile(cli_meta.get("profile"), handler):
+        return "Session not found", 404
+    if _session_is_subagent_view_only(sid):
+        return "Subagent sessions are view-only and cannot be modified from WebUI", 400
+    if cli_meta or state_source not in {"", "webui", "fork"}:
+        return "Read-only imported sessions cannot be modified", 403
+    return None
+
+
 def _assistant_anchor_scene_message_ref_payload(message) -> dict:
     role = str(message.get("role") or "")
     content = message.get("content")
@@ -5210,7 +5294,9 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
-def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
+def _get_or_materialize_session(
+    sid: str, *, refresh_cli_messages: bool = False, allow_materialize: bool = True
+):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
     Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
@@ -5257,6 +5343,9 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         return s
     except KeyError:
         pass
+
+    if not allow_materialize:
+        raise KeyError(sid)
 
     # Fallback: try to materialize from CLI/agent session metadata
     cli_meta = _lookup_cli_session_metadata(sid)
@@ -16152,6 +16241,85 @@ def handle_post(handler, parsed) -> bool:
                 "session": public_session_projection(
                     s.compact() | {"messages": s.messages}
                 ),
+            },
+        )
+
+    if parsed.path == "/api/session/message/dismiss-error":
+        if not isinstance(body, dict):
+            return bad(handler, "Request body must be an object", 400)
+        sid = body.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            return bad(handler, "session_id must be a string", 400)
+        message_index = body.get("message_index")
+        if isinstance(message_index, bool) or not isinstance(message_index, int):
+            return bad(handler, "message_index must be an integer", 400)
+        if message_index < 0 or message_index > 1_000_000:
+            return bad(handler, "message_index is outside the supported range", 400)
+        expected = body.get("expected_message")
+        if not isinstance(expected, dict):
+            return bad(handler, "expected_message must be an object", 400)
+        if set(expected) - {"role", "content", "timestamp"}:
+            return bad(handler, "expected_message contains unsupported fields", 400)
+        if expected.get("role") != "assistant" or not isinstance(expected.get("content"), str):
+            return bad(handler, "expected_message must contain assistant role and text content", 400)
+        if not isinstance(expected.get("timestamp"), (str, int, float, type(None))) or isinstance(expected.get("timestamp"), bool):
+            return bad(handler, "expected_message.timestamp has an invalid type", 400)
+        try:
+            if len(json.dumps(expected, ensure_ascii=False, separators=(",", ":"))) > 8_192:
+                return bad(handler, "expected_message is too large", 400)
+        except (TypeError, ValueError):
+            return bad(handler, "expected_message is invalid", 400)
+
+        try:
+            source_rejection = _dismiss_error_source_rejection(sid, handler)
+            if source_rejection is not None:
+                return bad(handler, *source_rejection)
+            with _get_session_agent_lock(sid):
+                if _session_is_subagent_view_only(sid):
+                    return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+                try:
+                    s = _get_or_materialize_session(sid, allow_materialize=False)
+                except PermissionError:
+                    return bad(handler, "Read-only imported sessions cannot be modified", 403)
+                except KeyError:
+                    return bad(handler, "Session not found", 404)
+                if not _session_visible_to_active_profile(getattr(s, "profile", None), handler):
+                    return bad(handler, "Session not found", 404)
+                if (
+                    getattr(s, "read_only", False)
+                    or getattr(s, "is_cli_session", False)
+                    or _is_messaging_session_record(s)
+                ):
+                    return bad(handler, "Read-only imported sessions cannot be modified", 403)
+                if (
+                    getattr(s, "active_stream_id", None)
+                    or getattr(s, "pending_user_message", None)
+                    or getattr(s, "pending_started_at", None)
+                    or getattr(s, "has_pending_user_message", False)
+                ):
+                    return bad(handler, "Cannot dismiss an error while the session is active", 409)
+                messages = getattr(s, "messages", None)
+                if not isinstance(messages, list) or not 0 <= message_index < len(messages):
+                    return bad(handler, "Message not found", 404)
+                message = messages[message_index]
+                if not _is_provider_error_card_message(message):
+                    return bad(handler, "Message is not a dismissible provider error", 409)
+                if _assistant_anchor_scene_message_ref(message) != _assistant_anchor_scene_message_ref(expected):
+                    return bad(handler, "Message changed; reload the session and try again", 409)
+                if not message.get("_dismissed"):
+                    message["_dismissed"] = True
+                    s.save()
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning("provider-error dismissal failed for %s: %s", sid, exc)
+            return bad(handler, "Could not persist the dismissal", 409)
+
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session": public_session_projection(s.compact() | {"messages": s.messages}),
             },
         )
 

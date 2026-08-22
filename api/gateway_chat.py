@@ -846,6 +846,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
             ) + (f"\n\n*{error_payload['hint']}*" if error_payload.get("hint") else ""),
             "timestamp": int(time.time()),
             "_error": True,
+            "_provider_error_type": error_classification["type"],
         }
         if turn_duration is not None:
             error_message["_turnDuration"] = turn_duration
