@@ -2925,6 +2925,7 @@ from api.helpers import (
     require,
     bad,
     safe_resolve,
+    arm_connection_close_if_body_pending,
     j,
     t,
     read_body,
@@ -5686,6 +5687,15 @@ def _csrf_rejection_error(handler) -> str:
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
     if not _check_same_origin_browser_request(handler):
+        # CSRF checks run before read_body(), so close rather than reusing an
+        # HTTP/1.1 connection whose unread body would corrupt the next request --
+        # but ONLY when the framing says bytes are really queued. Arming
+        # unconditionally dropped a healthy pooled connection on a body-less
+        # write: verified on the wire, `POST /api/session/new` with
+        # `Origin: http://evil.invalid` and no `Content-Length` (and with
+        # `Content-Length: 0`) answered 403 + `Connection: close` and the
+        # pipelined `GET /api/health/agent` was never served.
+        arm_connection_close_if_body_pending(handler)
         return False
     if not _is_browser_unsafe_request(handler):
         return True  # non-browser clients (curl, MCP, agent) have no Origin/Referer
@@ -5698,6 +5708,11 @@ def _check_csrf(handler) -> bool:
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
+    # Same framing rule as the origin rejection above: a token mismatch on a
+    # body-less write has nothing unread to protect. Verified on the wire with an
+    # authenticated same-origin `POST /api/session/new` carrying no CSRF token and
+    # no `Content-Length`: 403 + `Connection: close`, follow-up dropped.
+    arm_connection_close_if_body_pending(handler)
     return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
@@ -5877,6 +5892,14 @@ def _handle_extension_sidecar_proxy(
     # DELETE fell through the CSRF compatibility path that intentionally admits
     # non-browser clients, giving unsafe methods weaker provenance than GET.
     if not _check_same_origin_browser_request(handler, require_provenance=True):
+        # Provenance rejection runs before read_body(), so close-and-advertise
+        # whenever the request DECLARED a body (Content-Length non-zero, or any
+        # Transfer-Encoding): those bytes are still queued in rfile and a reused
+        # HTTP/1.1 connection would parse them as the next request line (same
+        # class as _check_csrf). Gating on read_request_body instead was wrong in
+        # both directions — it missed a GET that carries a declared body, and it
+        # closed a healthy connection on a body-less DELETE/PUT/PATCH.
+        arm_connection_close_if_body_pending(handler)
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None
@@ -6319,6 +6342,13 @@ def _handle_csp_report(handler) -> bool:
             "Dropped CSP report from %s: rate limit exceeded",
             _client_ip_for_rate_limit(handler),
         )
+        # Rate-limit rejection runs before the body is read; close-and-advertise
+        # so the unread report can't corrupt the next pooled request -- but only
+        # when a body was really declared. A body-less report answered 204 WITH
+        # `Connection: close` once the 100-per-60s limiter tripped (reproduced on
+        # the wire at request 101; the pipelined `GET /api/health/agent` was
+        # dropped), so a browser that keeps reporting loses its socket each time.
+        arm_connection_close_if_body_pending(handler)
         return _send_no_content(handler)
 
     payload = _read_csp_report_payload(handler)
@@ -12762,6 +12792,15 @@ def _handle_shutdown(handler) -> bool:
 
 def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
+    # This endpoint never consumes its request body on any outcome, so close when
+    # one was DECLARED -- and only then. Arming unconditionally closed the socket
+    # on every call including the successful, body-less one the WebUI actually
+    # makes: verified on the wire, `POST /api/health/restart` with no
+    # `Content-Length` answered with `Connection: close` and the pipelined
+    # `GET /api/health/agent` was never served. The single arming covers every
+    # outcome below (completed / in_progress / busy / error) because the framing,
+    # not the result, decides.
+    arm_connection_close_if_body_pending(handler)
     outcome = restart_active_profile_gateway()
 
     if outcome.get("status") == "completed":
@@ -14923,6 +14962,12 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.stage("process_complete_ack_deprecated")
         try:
+            # The 410 runs before the stale tab's JSON body is read;
+            # close-and-advertise so those unread bytes can't corrupt the next
+            # pooled request -- but a body-less ack has none, and closing then
+            # just kills keep-alive (on the wire: 410 + `Connection: close` with
+            # no `Content-Length`, pipelined follow-up dropped).
+            arm_connection_close_if_body_pending(handler)
             j(
                 handler,
                 {

@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from api.config import STATE_DIR, get_config, load_settings
+from api.helpers import request_declares_body
 
 logger = logging.getLogger(__name__)
 
@@ -1185,6 +1186,42 @@ def check_auth(handler, parsed) -> bool:
         handler.send_header('Location', 'login?next=' + _next)
         handler.send_header('Content-Length', '0')
         handler.end_headers()
+    return False
+
+
+def check_auth_or_close(handler, parsed) -> bool:
+    """Check auth; when rejected, close so an unread body can't poison HTTP/1.1 reuse.
+
+    The flag is armed BEFORE check_auth() writes its 401/302, so end_headers()
+    can advertise ``Connection: close``; success restores the prior flag so an
+    authenticated request keeps its keep-alive.
+
+    Armed ONLY when the request's framing declares a body still queued in
+    ``rfile`` (see ``request_declares_body()``), which is the same rule the other
+    reject-before-read sites apply through ``arm_connection_close_if_body_pending()``.
+    Arming unconditionally was the mirror image of the over-close this PR already
+    fixed on the sidecar path: a body-less POST that failed auth answered
+    ``401`` WITH ``Connection: close`` and dropped the client's pipelined
+    follow-up, killing a healthy keep-alive connection for no framing reason.
+    Verified on the wire, pipelined down one socket against the production
+    handler: ``POST /api/session/new`` with no ``Content-Length`` (and with
+    ``Content-Length: 0``) answered ``401`` + ``Connection: close`` and the
+    following ``GET /api/auth/status`` was never served. The helper cannot be
+    swapped in directly here because the arming has to happen before
+    ``check_auth()`` writes its response and be undone if it succeeds.
+
+    ``close_connection`` only exists once BaseHTTPRequestHandler has parsed a
+    request line, so partially-built handler stubs may not have it at all. Read
+    it defensively and only arm/restore when it was really there: inventing the
+    attribute on a stub would leave a bogus keep-alive verdict behind.
+    """
+    if not hasattr(handler, 'close_connection') or not request_declares_body(handler):
+        return check_auth(handler, parsed)
+    prior_close = handler.close_connection
+    handler.close_connection = True
+    if check_auth(handler, parsed):
+        handler.close_connection = prior_close
+        return True
     return False
 
 
