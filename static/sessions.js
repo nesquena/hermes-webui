@@ -1409,12 +1409,34 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // Explicit profile switch wins, then the current conversation, then the profile default.
+    // Chat-header/rail "+" (btnNewChat) with an active project filter applies
+    // that project's bindings (default workspace / model / effort) exactly
+    // like the project-chip quick-create (+): selecting a project then
+    // pressing the top-level New Chat button must open the session in the
+    // project's pinned workspace. Only merge when the caller did NOT pass an
+    // explicit project_id (chip + passes one — never double-apply), and only
+    // fill fields the caller did not already set explicitly.
+    if(!Object.prototype.hasOwnProperty.call(options,'project_id')
+       && _activeProject && _activeProject!==NO_PROJECT_FILTER){
+      const _proj=(typeof _allProjects!=='undefined'?_allProjects:[]).find(p=>p.project_id===_activeProject);
+      if(_proj){
+        const _pb=_projectBindingsForNewSession(_proj);
+        const _merged=Object.assign({},options);
+        if(_pb.workspace&&!Object.prototype.hasOwnProperty.call(_merged,'workspace')) _merged.workspace=_pb.workspace;
+        if(_pb.model&&!Object.prototype.hasOwnProperty.call(_merged,'model')) _merged.model=_pb.model;
+        if(_pb.model_provider&&!Object.prototype.hasOwnProperty.call(_merged,'model_provider')) _merged.model_provider=_pb.model_provider;
+        if(_pb.reasoning_effort&&!Object.prototype.hasOwnProperty.call(_merged,'reasoning_effort')) _merged.reasoning_effort=_pb.reasoning_effort;
+        options=_merged;
+      }
+    }
+    // Project-bound workspace (quick-create with bindings) wins first,
+    // then explicit profile-switch, then current conversation, then profile default.
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
     const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
-    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
+    const boundWs=(options&&options.workspace)||null;
+    const inheritWs=boundWs||switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
@@ -1439,11 +1461,17 @@ async function newSession(flash, options={}){
     const explicitModelOverride=(typeof _readEmptyComposerModelOverride==='function')
       ? _readEmptyComposerModelOverride()
       : null;
+    // Project-bound model (quick-create with bindings) wins over everything
+    // else — the project pins the model for sessions opened from its + button.
+    const boundModel=(options&&options.model)||null;
+    const boundProvider=(options&&options.model_provider)||null;
     const hasLoadedSession=!!(S.session&&S.session.session_id);
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
-    if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
+    if(boundModel){
+      newModelState={model:boundModel, model_provider:boundProvider||null};
+    }else if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
       newModelState=explicitModelOverride;
       consumedExplicitModelOverride=true;
     }else if(window._defaultModel){
@@ -1486,9 +1514,12 @@ async function newSession(flash, options={}){
       // server fast path passes the pair through verbatim (no validation) and
       // silently routes to the wrong backend — so leave model_provider=null and
       // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
-      const _fallbackProvider=_bareModel
-        ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
-        : '';
+      const _fallbackProvider=boundModel&&!boundProvider
+        ? ''  // project-bound model without an explicit provider: pin nothing,
+              // let the server's slow-path normalization resolve the family
+        : (_bareModel
+          ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
+          : '');
       const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
         if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
@@ -1510,6 +1541,28 @@ async function newSession(flash, options={}){
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
+    // Project-bound reasoning effort: apply after the session exists so the
+    // effort chip / agent config reflects the project's pinned level. The
+    // binding's own model+provider are used as the effort context (falling
+    // back to the session's model) so the effort is attached to the right
+    // model family rather than the currently-selected one.
+    // Authority: this intentionally mutates the profile-default preference
+    // (agent.reasoning_effort per model family in config.yaml via
+    // /api/reasoning), not a session-local override. Nathan to decide if
+    // project/session-local scoping is desired — current contract matches
+    // the existing global reasoning_effort model.
+    const boundEffort=(options&&options.reasoning_effort)||null;
+    if(boundEffort&&typeof api==='function'){
+      const effModel=boundModel||(data.session&&data.session.model)||null;
+      const effProvider=boundProvider||(data.session&&data.session.model_provider)||null;
+      const effBody={effort:boundEffort};
+      if(effModel) effBody.model=effModel;
+      if(effProvider) effBody.provider=effProvider;
+      try{
+        const st=await api('/api/reasoning',{method:'POST',body:JSON.stringify(effBody)});
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip((st&&st.reasoning_effort)||boundEffort, st||{});
+      }catch(_){ /* effort is a preference; a failed apply must not fail the session */ }
+    }
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -7614,6 +7667,27 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
 }
 
+function _projectBindingsForNewSession(project){
+  // Assemble the newSession options that carry a project's pinned context:
+  // default workspace / model / model_provider / reasoning_effort. Only
+  // fields that are actually bound are forwarded — an unbound project
+  // creates sessions with the usual defaults.
+  const o={};
+  if(project){
+    // Multi-workspace projects use the marked default (falls back to the
+    // first bound workspace; legacy single `workspace` field still works).
+    const ws=project.default_workspace
+      ||(Array.isArray(project.workspaces)&&project.workspaces[0])
+      ||project.workspace
+      ||null;
+    if(ws) o.workspace=ws;
+    if(project.model) o.model=project.model;
+    if(project.model_provider) o.model_provider=project.model_provider;
+    if(project.reasoning_effort) o.reasoning_effort=project.reasoning_effort;
+  }
+  return o;
+}
+
 function _attachProjectQuickCreateButton(chip, project){
   const btn=document.createElement('button');
   btn.type='button';
@@ -7634,10 +7708,11 @@ function _attachProjectQuickCreateButton(chip, project){
   };
   btn.onclick=async(e)=>{
     stop(e);
+    const bindings=_projectBindingsForNewSession(project);
     if(_newSessionInFlight){
       // The initiating tap already owns the filter change and rollback path.
       try{
-        await newSession(false,{project_id:project.project_id});
+        await newSession(false,Object.assign({project_id:project.project_id},bindings));
       }catch(_){
         // The initiating tap already owns the visible failure path.
       }
@@ -7646,7 +7721,7 @@ function _attachProjectQuickCreateButton(chip, project){
     const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
     _setActiveProjectFilter(project.project_id);
     try{
-      await newSession(false,{project_id:project.project_id});
+      await newSession(false,Object.assign({project_id:project.project_id},bindings));
       // newSession() does not repaint the sidebar (callers own that — see the
       // newSession contract). Repaint from the post-create state so the new
       // project-assigned session appears deterministically.
@@ -9382,6 +9457,452 @@ function _startProjectCreate(bar, addBtn){
   setTimeout(()=>inp.focus(),10);
 }
 
+async function _saveProjectBindings(proj, fields){
+  // Persist one or more binding fields via /api/projects/bind (null clears a
+  // field), then refresh the in-memory project cache + sidebar so chips and
+  // future quick-creates see the new bindings immediately.
+  const body=Object.assign({project_id:proj.project_id}, fields||{});
+  try{
+    const res=await api('/api/projects/bind',{method:'POST',body:JSON.stringify(body)});
+    const updated=res&&res.project;
+    if(updated&&Array.isArray(_allProjects)){
+      const idx=_allProjects.findIndex(p=>p.project_id===proj.project_id);
+      if(idx>=0) _allProjects[idx]=updated;
+    }
+    try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+    try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+    if(typeof showToast==='function') showToast('Project bindings updated');
+  }catch(e){
+    if(typeof showToast==='function') showToast('Binding update failed: '+(e&&e.message||e));
+  }
+}
+
+// Custom combobox for the bindings dialog: same look as a native select
+// (see .project-bindings-combo-* in style.css), but rendered as divs so an
+// option can carry a primary name AND a secondary path/subtitle. All three
+// binding fields share this component, so the dropdowns are visually
+// identical across workspace / model / effort.
+function _makeBindingsCombo(o){
+  const wrap=document.createElement('div');
+  wrap.className='project-bindings-combo';
+  const trigger=document.createElement('div');
+  trigger.className='project-bindings-combo-trigger';
+  trigger.tabIndex=0;
+  trigger.setAttribute('role','combobox');
+  trigger.setAttribute('aria-haspopup','listbox');
+  trigger.setAttribute('aria-expanded','false');
+  const nameSpan=document.createElement('span');
+  nameSpan.className='combo-trigger-name';
+  const subSpan=document.createElement('span');
+  subSpan.className='combo-trigger-sub';
+  trigger.appendChild(nameSpan);
+  trigger.appendChild(subSpan);
+  const menu=document.createElement('div');
+  menu.className='project-bindings-combo-menu';
+  menu.setAttribute('role','listbox');
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+
+  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[], onChange:(o&&typeof o.onChange==='function')?o.onChange:null};
+
+  function _currentOption(){
+    return state.options.find(opt=>opt.value===state.value)||null;
+  }
+  function _renderTrigger(){
+    const cur=_currentOption();
+    nameSpan.textContent=(cur&&cur.name)||(o&&o.placeholder)||'';
+    subSpan.textContent=(cur&&cur.sub)||'';
+    subSpan.style.display=(cur&&cur.sub)?'':'none';
+  }
+  function _close(){
+    menu.classList.remove('open');
+    trigger.classList.remove('open');
+    trigger.setAttribute('aria-expanded','false');
+  }
+  function _open(){
+    // Rebuild options so freshly-fetched lists (workspace names) appear.
+    menu.innerHTML='';
+    const items=state.options;
+    if(!items.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent='No options';
+      menu.appendChild(empty);
+    }else{
+      items.forEach(opt=>{
+        const row=document.createElement('div');
+        row.className='ws-opt'+(opt.value===state.value?' active':'');
+        row.setAttribute('role','option');
+        row.setAttribute('aria-selected',String(opt.value===state.value));
+        const n=document.createElement('span');
+        n.className='ws-opt-name';
+        n.textContent=opt.name||opt.value||'';
+        row.appendChild(n);
+        if(opt.sub){
+          const p=document.createElement('span');
+          p.className='ws-opt-path';
+          p.textContent=opt.sub;
+          row.appendChild(p);
+        }
+        row.onmousedown=(e)=>{e.preventDefault();};
+        row.onclick=(e)=>{
+          e.stopPropagation();
+          state.value=opt.value;
+          _renderTrigger();
+          _close();
+          if(typeof state.onChange==='function') state.onChange(opt);
+        };
+        menu.appendChild(row);
+      });
+    }
+    // Position the menu FIXED to the trigger's viewport rect so the dialog's
+    // overflow:auto can never clip it. Flip upward when the bottom edge of
+    // the viewport would be hit.
+    const rect=trigger.getBoundingClientRect();
+    const menuHeight=Math.min(menu.scrollHeight||240, 320);
+    const spaceBelow=window.innerHeight-rect.bottom-8;
+    const flipUp=spaceBelow<menuHeight+8&&rect.top>spaceBelow;
+    if(flipUp){
+      menu.style.top='auto';
+      menu.style.bottom=(window.innerHeight-rect.top+6)+'px';
+    }else{
+      menu.style.top=(rect.bottom+4)+'px';
+      menu.style.bottom='auto';
+    }
+    menu.style.left=rect.left+'px';
+    menu.style.width=rect.width+'px';
+    menu.style.position='fixed';
+    menu.classList.add('open');
+    trigger.classList.add('open');
+    trigger.setAttribute('aria-expanded','true');
+  }
+  trigger.onclick=(e)=>{
+    e.stopPropagation();
+    if(menu.classList.contains('open')){_close();}else{_open();}
+  };
+  trigger.onkeydown=(e)=>{
+    if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+      e.preventDefault();
+      if(!menu.classList.contains('open')) _open();
+    }else if(e.key==='Escape'){
+      _close();
+    }else if(e.key==='ArrowUp'&&menu.classList.contains('open')){
+      // Move selection up through the rendered options.
+      e.preventDefault();
+      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+      const idx=rows.findIndex(r=>r.classList.contains('active'));
+      const next=idx<=0?rows.length-1:idx-1;
+      if(rows[next]){rows[next].click();}
+    }else if(e.key==='ArrowDown'&&menu.classList.contains('open')){
+      e.preventDefault();
+      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+      const idx=rows.findIndex(r=>r.classList.contains('active'));
+      const next=idx<0?0:(idx+1)%rows.length;
+      if(rows[next]){rows[next].click();}
+    }
+  };
+  document.addEventListener('click',(e)=>{
+    if(!wrap.contains(e.target)) _close();
+  });
+  _renderTrigger();
+  return {
+    el:wrap,
+    getValue:()=>state.value,
+    setValue:(v)=>{state.value=v||'';_renderTrigger();},
+    setOptions:(opts)=>{state.options=Array.isArray(opts)?opts:[];_renderTrigger();},
+    setOnChange:(fn)=>{state.onChange=typeof fn==='function'?fn:null;},
+  };
+}
+
+// Modal dialog for editing a project's bindings (workspace / model / effort).
+// All three fields use the SAME custom combobox component so the dropdowns
+// look identical; workspace options show name-first with the path as the
+// secondary line. Each field has a "(none)" option to unbind it.
+function _showProjectBindingsDialog(proj){
+  const overlay=document.createElement('div');
+  overlay.className='project-bindings-overlay';
+  // z-index below the app dialog (1100) so showPromptDialog / confirm
+  // dialogs opened from inside the bindings dialog stay on top.
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1050;display:flex;align-items:center;justify-content:center;';
+  const dialog=document.createElement('div');
+  dialog.className='project-bindings-dialog';
+  dialog.style.cssText='background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;width:min(520px,92vw);max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.45);color:var(--text);font-size:13px;';
+  const title=document.createElement('div');
+  title.textContent='Bindings — '+proj.name;
+  title.style.cssText='font-size:15px;font-weight:600;margin-bottom:14px;';
+  dialog.appendChild(title);
+
+  const _field=(labelText,control)=>{
+    const wrap=document.createElement('div');
+    wrap.style.cssText='margin-bottom:12px;';
+    const lab=document.createElement('div');
+    lab.textContent=labelText;
+    lab.style.cssText='font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:5px;';
+    wrap.appendChild(lab);
+    wrap.appendChild(control);
+    return wrap;
+  };
+
+  // ── Workspace: multi-value list with default marking + add control ──
+  // Bound workspaces render as rows (name-first with path subtitle). One
+  // row can be marked default (used when the + button starts a session);
+  // the add combobox below pulls from saved workspaces or accepts a fresh
+  // path (server auto-registers it).
+  const wsList=[];   // [{value,name,sub}]
+  const wsListEl=document.createElement('div');
+  wsListEl.className='project-bindings-ws-list';
+  const _wsDefault=()=>wsList.find(x=>x.isDefault)||wsList[0]||null;
+
+  const _wsNameFromPath=(p)=>String(p||'').split(/[\\/]/).pop()||'';
+  function _seedWsList(){
+    const seeded=(Array.isArray(proj.workspaces)&&proj.workspaces.length)
+      ? proj.workspaces.map(p=>({value:p,name:_wsNameFromPath(p),sub:p}))
+      : (proj.workspace?[{value:proj.workspace,name:_wsNameFromPath(proj.workspace),sub:proj.workspace}]:[]);
+    wsList.length=0;
+    seeded.forEach(x=>wsList.push(x));
+    const def=proj.default_workspace||null;
+    if(def){
+      const hit=wsList.find(x=>x.value===def);
+      if(hit) hit.isDefault=true;
+      else if(wsList.length) wsList[0].isDefault=true;
+    }else if(wsList.length){
+      wsList[0].isDefault=true;
+    }
+    _renderWsList();
+  }
+  function _renderWsList(){
+    wsListEl.innerHTML='';
+    if(!wsList.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent='No workspaces bound';
+      wsListEl.appendChild(empty);
+      return;
+    }
+    wsList.forEach((item,idx)=>{
+      const row=document.createElement('div');
+      row.className='project-bindings-ws-row';
+      const info=document.createElement('div');
+      info.className='ws-row-info';
+      const n=document.createElement('div');
+      n.className='ws-row-name';
+      n.textContent=item.name||item.value;
+      info.appendChild(n);
+      const p=document.createElement('div');
+      p.className='ws-row-path';
+      p.textContent=item.sub||item.value;
+      info.appendChild(p);
+      row.appendChild(info);
+      const defBtn=document.createElement('button');
+      defBtn.type='button';
+      defBtn.className='ws-row-default'+(item.isDefault?' is-default':'');
+      defBtn.textContent=item.isDefault?'★ Default':'Set default';
+      defBtn.title='Use this workspace for new sessions from the + button';
+      defBtn.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.forEach(x=>x.isDefault=false);
+        item.isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(defBtn);
+      const rm=document.createElement('button');
+      rm.type='button';
+      rm.className='ws-row-remove';
+      rm.textContent='×';
+      rm.title='Unbind this workspace';
+      rm.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.splice(idx,1);
+        if(!_wsDefault()&&wsList.length) wsList[0].isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(rm);
+      wsListEl.appendChild(row);
+    });
+  }
+
+  // Add-workspace combobox: saved workspaces not yet bound + a "type a path"
+  // entry that opens a small input dialog (the server auto-registers fresh
+  // paths).
+  const addCombo=_makeBindingsCombo({
+    placeholder:'Add workspace…',
+    value:'',
+    options:[],
+  });
+  addCombo._customOption={value:'__custom_path__',name:'Type a path…',sub:'Enter a new workspace path'};
+  const addRow=document.createElement('div');
+  addRow.className='project-bindings-ws-add';
+  addRow.appendChild(addCombo.el);
+  const addBtn=document.createElement('button');
+  addBtn.type='button';
+  addBtn.className='ws-add-btn';
+  addBtn.textContent='Add';
+  const _applyAdd=(val)=>{
+    val=String(val||'').trim();
+    if(!val) return;
+    if(wsList.some(x=>x.value===val)){ showToast('Workspace already bound'); return; }
+    wsList.push({value:val,name:_wsNameFromPath(val),sub:val});
+    if(!_wsDefault()) wsList[0].isDefault=true;
+    addCombo.setValue('');
+    _renderWsList();
+  };
+  addCombo.setOnChange((opt)=>{
+    if(opt&&opt.value==='__custom_path__'){
+      // The combo selected the custom entry — clear it and prompt instead.
+      addCombo.setValue('');
+      showPromptDialog({
+        title:'Add workspace',
+        message:'Workspace path to bind to this project (auto-registered in the saved list):',
+        value:'',
+        placeholder:'D:\\projects\\…',
+        confirmLabel:'Add',
+      }).then(inp=>{
+        if(inp===null||inp===undefined) return;
+        _applyAdd(inp);
+      });
+    }
+  });
+  addBtn.onclick=()=>{ _applyAdd(addCombo.getValue()); };
+  addRow.appendChild(addBtn);
+  // Fill the add list with saved workspaces NOT already bound + custom entry.
+  (async()=>{
+    try{
+      const wsRes=await api('/api/workspaces');
+      const rows=(wsRes&&wsRes.workspaces||[]).map(w=>({
+        value:w&&w.path||'',
+        name:(w&&w.name)||_wsNameFromPath(w&&w.path)||'',
+        sub:w&&w.path||'',
+      })).filter(x=>x.value);
+      addCombo.setOptions([addCombo._customOption,...rows]);
+    }catch(_){ addCombo.setOptions([addCombo._customOption]); }
+  })();
+
+  const wsWrap=_field('Workspaces',wsListEl);
+  // NOTE: appended below Model/Reasoning effort (layout: config on top,
+  // workspace list + auto-assign underneath).
+
+  // ── Model: name-first combobox cloned from the composer modelSelect ──
+  const modelOptions=[{value:'',name:'(none) — inherit default'}];
+  const srcModelSel=(typeof $==='function')?$('modelSelect'):null;
+  if(srcModelSel&&srcModelSel.options){
+    Array.from(srcModelSel.options).forEach(o=>{
+      const val=o.value||'';
+      if(!val) return;
+      const label=(o.textContent||val).trim();
+      const provider=(o.dataset&&o.dataset.provider)||'';
+      if(!modelOptions.some(x=>x.value===val&&x.sub===provider)){
+        modelOptions.push({value:val,name:label,sub:provider});
+      }
+    });
+  }
+  // Provider-scoped key: same bare model id under multiple providers must not collapse.
+  // When duplicates exist, the synthetic key is "providervalue" for display/selection,
+  // wire value stays the bare model id (provider sent separately).
+  const _modelValueKeyFor=(val,prov)=>prov?(prov+""+val):val;
+  const _modelValueFor=(k)=>{const i=k.indexOf("");return i>=0?k.slice(i+1):k;};
+  const _modelProvFor=(k)=>{const i=k.indexOf("");return i>=0?k.slice(0,i):"";};
+  const _hasDuplicateModelValues=(()=>{const c={};for(const o of modelOptions){if(!o.value)continue;c[o.value]=(c[o.value]||0)+1;}return Object.values(c).some(n=>n>1);})();
+  if(_hasDuplicateModelValues){
+    // Rewrite options to use provider-scoped keys so each provider route is independently selectable.
+    modelOptions.forEach(o=>{ if(o.value) o._key=_modelValueKeyFor(o.value,o.sub||""); else o._key=""; });
+    // Preserve providers detail under _provider for clarity
+    modelOptions.forEach(o=>{ o._provider=o.sub||""; });
+  }
+  const _initialModelKey=(()=>{ if(!proj.model) return ""; if(_hasDuplicateModelValues){ const prov=(proj.model_provider||""); const k=_modelValueKeyFor(proj.model, prov); if(modelOptions.some(o=>o._key===k)) return k; const hit=modelOptions.find(o=>o.value===proj.model); return hit?hit._key||hit.value:""; } return proj.model; })();
+  const modelCombo=_makeBindingsCombo({
+    placeholder:'(none) — inherit default',
+    value:_initialModelKey,
+    options:(()=>{ if(!_hasDuplicateModelValues) return modelOptions; return modelOptions.map(o=>({value:o._key, name:o.name, sub:o.sub})); })(),
+  });
+  dialog.appendChild(_field('Model',modelCombo.el));
+
+  // ── Reasoning effort: name-first combobox of the standard ladder ──
+  const effortOptions=[{value:'',name:'(none) — inherit default'}];
+  ['minimal','low','medium','high','xhigh','max'].forEach(eff=>{
+    effortOptions.push({value:eff,name:eff.charAt(0).toUpperCase()+eff.slice(1)});
+  });
+  const effortCombo=_makeBindingsCombo({
+    placeholder:'(none) — inherit default',
+    value:proj.reasoning_effort||'',
+    options:effortOptions,
+  });
+  dialog.appendChild(_field('Reasoning effort',effortCombo.el));
+
+  // ── Workspaces list + auto-assign (below the model/effort config) ──
+  dialog.appendChild(wsWrap);
+  dialog.appendChild(addRow);
+
+  const aaRow=document.createElement('label');
+  aaRow.className='project-bindings-auto-assign';
+  const aaCb=document.createElement('input');
+  aaCb.type='checkbox';
+  aaCb.checked=!!proj.auto_assign;
+  aaRow.appendChild(aaCb);
+  const aaText=document.createElement('span');
+  const aaTitle=document.createElement('div');
+  aaTitle.className='aa-label';
+  aaTitle.textContent='Auto-assign sessions by workspace';
+  const aaHint=document.createElement('div');
+  aaHint.className='aa-hint';
+  aaHint.textContent='All existing and future sessions in the bound workspaces are filed under this project.';
+  aaText.appendChild(aaTitle);
+  aaText.appendChild(aaHint);
+  aaRow.appendChild(aaText);
+  dialog.appendChild(aaRow);
+
+  _seedWsList();
+
+  // ── Actions ──
+  const btnRow=document.createElement('div');
+  btnRow.style.cssText='display:flex;gap:8px;justify-content:flex-end;margin-top:16px;';
+  const _btn=(label,style,onclick)=>{
+    const b=document.createElement('button');
+    b.type='button';
+    b.textContent=label;
+    b.style.cssText='padding:7px 16px;border-radius:8px;border:1px solid var(--border);cursor:pointer;font-size:13px;'+style;
+    b.onclick=onclick;
+    return b;
+  };
+  btnRow.appendChild(_btn('Cancel','background:transparent;color:var(--muted);',()=>{overlay.remove();}));
+  btnRow.appendChild(_btn('Save','background:var(--accent,#6366f1);color:#fff;border-color:transparent;',async()=>{
+    const modelVal=modelCombo.getValue();
+    const effortVal=effortCombo.getValue();
+    const fields={};
+    // Workspaces: the current list (empty → unbind all). Send the array so
+    // the server replaces the full binding; null clears.
+    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
+    fields.workspaces=wsPaths.length?wsPaths:null;
+    const def=_wsDefault();
+    fields.default_workspace=(def&&def.value)||null;
+    fields.auto_assign=!!aaCb.checked;
+    // Model: empty → unbind; else bind model (+ provider from the option).
+    // Always send model_provider — a selected model WITHOUT provider metadata
+    // must CLEAR any previously-bound provider, otherwise the server keeps the
+    // stale one and quick-create submits an incompatible pair.
+    if(modelVal){
+      const _bare=_hasDuplicateModelValues?_modelValueFor(modelVal):modelVal;
+      fields.model=_bare;
+      const _prov=_hasDuplicateModelValues?_modelProvFor(modelVal):null;
+      const hit=modelOptions.find(x=>_hasDuplicateModelValues ? (x._key===modelVal) : (x.value===modelVal));
+      fields.model_provider=(_hasDuplicateModelValues ? (_prov||null) : (hit&&hit.sub)||null);
+      // Fallback: if synthetic key unexpectedly missing provider, read from hit
+      if(_hasDuplicateModelValues && !fields.model_provider && hit) fields.model_provider=(hit.sub||null);
+    }else{
+      fields.model=null;
+      fields.model_provider=null;
+    }
+    fields.reasoning_effort=effortVal||null;
+    overlay.remove();
+    await _saveProjectBindings(proj,fields);
+  }));
+  dialog.appendChild(btnRow);
+
+  overlay.appendChild(dialog);
+  overlay.onclick=(e)=>{if(e.target===overlay) overlay.remove();};
+  document.body.appendChild(overlay);
+  try{overlay.querySelector('.project-bindings-combo-trigger').focus();}catch(_){}
+}
+
 function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
@@ -9460,6 +9981,58 @@ function _showProjectContextMenu(e, proj, chip){
     colorRow.appendChild(dot);
   });
   menu.appendChild(colorRow);
+
+  // Divider before bindings
+  const bindSep=document.createElement('hr');
+  bindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(bindSep);
+
+  // ── Project bindings: workspaces / model / reasoning effort ─────────────
+  // One entry opens a modal dialog with a multi-workspace list (default
+  // marked, add/remove), an auto-assign toggle, and single-value model +
+  // effort dropdowns. Each field keeps its unbind affordance.
+  const boundParts=[];
+  const boundWsCount=(Array.isArray(proj.workspaces)&&proj.workspaces.length)
+    ? proj.workspaces.length
+    : (proj.workspace?1:0);
+  if(boundWsCount) boundParts.push('ws×'+boundWsCount);
+  if(proj.model) boundParts.push('model');
+  if(proj.reasoning_effort) boundParts.push('effort:'+proj.reasoning_effort);
+  if(proj.auto_assign) boundParts.push('auto');
+  const bindItem=document.createElement('div');
+  bindItem.textContent=boundParts.length
+    ? 'Bindings… ('+boundParts.join(' · ')+')'
+    : 'Bindings…';
+  bindItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  bindItem.onmouseenter=()=>bindItem.style.background='var(--hover-bg)';
+  bindItem.onmouseleave=()=>bindItem.style.background='';
+  bindItem.onclick=()=>{
+    menu.remove();
+    _showProjectBindingsDialog(proj);
+  };
+  menu.appendChild(bindItem);
+
+  // Unbind items — only shown for fields that are currently bound.
+  const _unbindItem=(label,key)=>{
+    const item=document.createElement('div');
+    item.textContent='Unbind '+label;
+    item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--muted);';
+    item.onmouseenter=()=>item.style.background='var(--hover-bg)';
+    item.onmouseleave=()=>item.style.background='';
+    item.onclick=()=>{menu.remove();_saveProjectBindings(proj,{[key]:null});};
+    return item;
+  };
+  const hasWs=!!proj.workspace;
+  const hasModel=!!proj.model;
+  const hasEffort=!!proj.reasoning_effort;
+  if(hasWs||hasModel||hasEffort){
+    const unbindSep=document.createElement('hr');
+    unbindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+    menu.appendChild(unbindSep);
+    if(hasWs) menu.appendChild(_unbindItem('workspace','workspace'));
+    if(hasModel) menu.appendChild(_unbindItem('model','model'));
+    if(hasEffort) menu.appendChild(_unbindItem('reasoning effort','reasoning_effort'));
+  }
 
   // Divider + Delete
   const sep=document.createElement('hr');

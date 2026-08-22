@@ -47,7 +47,11 @@ def test_quick_create_button_attaches_filter_align_and_request_path():
     helper = _extract_function(src, "_attachProjectQuickCreateButton")
     assert "project-chip-quick-create" in helper
     assert "_setActiveProjectFilter(project.project_id)" in helper
-    assert "newSession(false,{project_id:project.project_id})" in helper
+    # Bindings feature: the + button forwards the project's pinned context via
+    # Object.assign so an unbound project behaves exactly like the legacy
+    # `newSession(false,{project_id:...})` call.
+    assert "newSession(false,Object.assign({project_id:project.project_id},bindings))" in helper
+    assert "_projectBindingsForNewSession(project)" in helper
     assert "if(_newSessionInFlight)" in helper
     assert "_setActiveProjectFilter(previousProject)" in helper
     assert "btn.ondblclick" in helper
@@ -74,7 +78,9 @@ def test_project_quick_create_styles_exist_and_are_discrete_to_pointer_layouts()
     assert "@media (hover:none) and (pointer:coarse)" in css
 
 
-def _run_new_session_case(options, active_project=None):
+def _run_new_session_case(options, active_project=None, all_projects=None):
+    if all_projects is None:
+        all_projects = []
     _DRIVER = r"""
 const fs = require('fs');
 const [path, argsJson] = process.argv.slice(-2);
@@ -97,7 +103,25 @@ function extractAsyncFunction(source, name) {
   throw new Error('function body not closed for ' + name);
 }
 
+function extractFunction(source, name) {
+  const marker = `function ${name}(`;
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error(name + ' not found');
+  const brace = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('function body not closed for ' + name);
+}
+
 const newSessionSrc = extractAsyncFunction(src, 'newSession');
+const bindingsSrc = extractFunction(src, '_projectBindingsForNewSession');
+eval(bindingsSrc);
 
 globalThis.window = globalThis;
 globalThis.document = {
@@ -119,6 +143,7 @@ globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 globalThis.history = { replaceState: () => {} };
 globalThis.NO_PROJECT_FILTER = '__none__';
 globalThis._activeProject = args.activeProject;
+globalThis._allProjects = args.allProjects || [];
 globalThis._sessionSourceFilter = 'webui';
 globalThis._newSessionInFlight = null;
 globalThis._messagesTruncated = false;
@@ -177,6 +202,7 @@ eval(newSessionSrc);
         "activeProject": active_project,
         "options": options,
         "session": {"session_id": "session-1"},
+        "allProjects": all_projects,
     }
     result = subprocess.run(
         [NODE, "-e", _DRIVER, str(SESSIONS_JS), json.dumps(payload)],
@@ -209,6 +235,87 @@ def test_new_session_respects_explicit_project_id_none():
 def test_new_session_falls_back_to_active_project_when_override_missing():
     body = _run_new_session_case({}, active_project="active-project")
     assert body["project_id"] == "active-project"
+
+
+_BOUND_PROJECTS = [
+    {
+        "project_id": "proj-alpha",
+        "workspaces": ["D:/alpha"],
+        "default_workspace": "D:/alpha",
+        "model": "alpha-model",
+        "model_provider": "alpha-prov",
+        "reasoning_effort": "high",
+    },
+    {
+        "project_id": "proj-beta",
+        "workspaces": ["D:/beta"],
+        "default_workspace": "D:/beta",
+        "model": "beta-model",
+        "model_provider": "beta-prov",
+        "reasoning_effort": "medium",
+    },
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_applies_active_project_bindings_from_chat_plus():
+    """The chat-header/rail '+' (btnNewChat) with an active project filter must
+    apply that project's bindings (default workspace / model / effort) exactly
+    like the project-chip quick-create '+': selecting a project then pressing
+    the top-level New Chat button opens the session in the project's pinned
+    workspace.
+    """
+    body = _run_new_session_case(
+        {},
+        active_project="proj-alpha",
+        all_projects=_BOUND_PROJECTS,
+    )
+    assert body["project_id"] == "proj-alpha"
+    assert body["workspace"] == "D:/alpha"
+    assert body["model"] == "alpha-model"
+    assert body["model_provider"] == "alpha-prov"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_switch_project_reapplies_new_bindings():
+    """User scenario: create a session (project A active) → switch to project B
+    → press '+' again. The second session must pick up project B's bindings,
+    not stale A's settings.
+    """
+    body_a = _run_new_session_case(
+        {},
+        active_project="proj-alpha",
+        all_projects=_BOUND_PROJECTS,
+    )
+    assert body_a["project_id"] == "proj-alpha"
+    assert body_a["workspace"] == "D:/alpha"
+    assert body_a["model"] == "alpha-model"
+
+    body_b = _run_new_session_case(
+        {},
+        active_project="proj-beta",
+        all_projects=_BOUND_PROJECTS,
+    )
+    assert body_b["project_id"] == "proj-beta"
+    assert body_b["workspace"] == "D:/beta"
+    assert body_b["model"] == "beta-model"
+    assert body_b["model_provider"] == "beta-prov"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_session_explicit_options_beat_active_project_bindings():
+    """An explicit workspace/model passed by the caller (e.g. chip '+', which
+    passes bindings itself) must NOT be overwritten by the active project's
+    bindings merge.
+    """
+    body = _run_new_session_case(
+        {"project_id": "proj-alpha", "workspace": "D:/explicit", "model": "explicit-model"},
+        active_project="proj-alpha",
+        all_projects=_BOUND_PROJECTS,
+    )
+    assert body["project_id"] == "proj-alpha"
+    assert body["workspace"] == "D:/explicit"
+    assert body["model"] == "explicit-model"
 
 
 _HELPER = r"""
@@ -276,7 +383,22 @@ globalThis._newSessionInFlight = params.newSessionInFlightReject
       ? Promise.resolve(params.newSessionInFlight)
       : null);
 
+// The + button forwards the project's pinned bindings (workspace/model/
+// effort) alongside project_id. A bare {project_id} project yields no
+// bindings, matching the pre-bindings behavior.
+globalThis._projectBindingsForNewSession = (project) => {
+  const o = {};
+  if (project) {
+    if (project.workspace) o.workspace = project.workspace;
+    if (project.model) o.model = project.model;
+    if (project.model_provider) o.model_provider = project.model_provider;
+    if (project.reasoning_effort) o.reasoning_effort = project.reasoning_effort;
+  }
+  return o;
+};
+
 eval(extractFunction(sessionsSrc, '_attachProjectQuickCreateButton'));
+eval(extractFunction(sessionsSrc, '_projectBindingsForNewSession'));
 
 const chip = {
   appended: [],

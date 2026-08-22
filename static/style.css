@@ -2237,6 +2237,43 @@
   select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg);}
   optgroup{color:var(--muted);font-size:11px;font-weight:700;}
   option{background:var(--bg);color:var(--text);padding:6px;}
+
+  /* Project-bindings dialog: custom combobox controls matching the native
+     select look above (same border/radius/arrow), but rendered as divs so a
+     workspace option can show BOTH its name and its path (see .ws-opt). */
+  .project-bindings-combo{position:relative;margin-bottom:6px;}
+  .project-bindings-combo-trigger{width:100%;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--input-bg);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:8px 28px 8px 10px;font-size:12px;outline:none;cursor:pointer;text-align:left;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238888aa' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;}
+  .project-bindings-combo-trigger:focus-visible{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg);}
+  .project-bindings-combo-trigger.open{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg);}
+  .project-bindings-combo-trigger .combo-trigger-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .project-bindings-combo-trigger .combo-trigger-sub{flex:0 0 auto;max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:var(--muted);opacity:.75;}
+  .project-bindings-combo-menu{display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 4px 24px rgba(0,0,0,.4);z-index:9999;overflow:hidden;max-height:min(60vh,320px);overflow-y:auto;}
+  .project-bindings-combo-menu.open{display:block;}
+  .project-bindings-combo-menu .ws-opt{padding:8px 12px;}
+  .project-bindings-combo-menu .ws-opt.active{background:var(--accent-bg);}
+  .project-bindings-combo-empty{padding:10px 14px;color:var(--muted);font-size:12px;text-align:center;}
+  .project-bindings-combo-sep{height:1px;background:var(--border2);margin:4px 0;}
+
+  /* Multi-workspace list inside the bindings dialog */
+  .project-bindings-ws-list{margin:2px 0 8px;}
+  .project-bindings-ws-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border2);border-radius:8px;margin-bottom:6px;background:var(--input-bg);}
+  .project-bindings-ws-row .ws-row-info{flex:1;min-width:0;}
+  .project-bindings-ws-row .ws-row-name{font-size:13px;color:var(--text);font-weight:500;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .project-bindings-ws-row .ws-row-path{font-size:10px;color:var(--muted);opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .project-bindings-ws-row .ws-row-default{flex:0 0 auto;font-size:10px;padding:2px 8px;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);font-weight:700;cursor:pointer;border:1px solid transparent;}
+  .project-bindings-ws-row .ws-row-default:not(.is-default):hover{background:var(--hover-bg);color:var(--text);}
+  .project-bindings-ws-row .ws-row-default.is-default{border-color:var(--accent);}
+  .project-bindings-ws-row .ws-row-remove{flex:0 0 auto;width:22px;height:22px;border:1px solid var(--border2);border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;font-size:12px;line-height:1;display:inline-flex;align-items:center;justify-content:center;}
+  .project-bindings-ws-row .ws-row-remove:hover{color:var(--error,#e94560);border-color:var(--error,#e94560);}
+  .project-bindings-ws-add{display:flex;gap:6px;align-items:center;}
+  .project-bindings-ws-add .project-bindings-combo{flex:1;margin-bottom:0;}
+  .project-bindings-ws-add .ws-add-btn{flex:0 0 auto;padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);cursor:pointer;font-size:12px;}
+  .project-bindings-ws-add .ws-add-btn:hover{border-color:var(--accent);color:var(--accent-text);}
+  .project-bindings-auto-assign{display:flex;align-items:flex-start;gap:8px;margin:4px 0 12px;cursor:pointer;}
+  .project-bindings-auto-assign input[type="checkbox"]{margin-top:2px;accent-color:var(--accent);width:14px;height:14px;flex:0 0 auto;}
+  .project-bindings-auto-assign .aa-label{font-size:12px;color:var(--text);line-height:1.4;}
+  .project-bindings-auto-assign .aa-hint{font-size:11px;color:var(--muted);line-height:1.35;}
+
   .sidebar-actions{display:flex;gap:6px;}
   .sm-btn{flex:1;padding:8px 0;border-radius:8px;font-size:11px;font-weight:500;background:var(--input-bg);border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:all .15s;text-align:center;letter-spacing:.02em;}
   .sm-btn:hover{background:rgba(255,255,255,0.09);color:var(--text);border-color:rgba(255,255,255,.15);}
