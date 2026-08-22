@@ -13950,6 +13950,10 @@ def handle_post(handler, parsed) -> bool:
         diag.stage("csrf")
     if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
         try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        try:
             return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:
             if diag:
