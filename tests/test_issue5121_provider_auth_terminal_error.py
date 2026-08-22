@@ -384,6 +384,64 @@ def test_captured_terminal_http_400_beats_structured_final_answer(tmp_path, monk
     assert saved.messages[-1]["_error"] is True
 
 
+def test_captured_terminal_http_400_evicts_cached_agent(tmp_path, monkeypatch):
+    """#6625 review: a captured non-retryable HTTP 400 terminal failure must
+    evict (and close) the session's cached agent so the next turn rebuilds with
+    clean state instead of reusing the poisoned agent."""
+    import api.streaming as streaming
+
+    session = _prepare_session(
+        "captured_terminal_http_400_evicts",
+        "stream_captured_terminal_http_400_evicts",
+        pending_user_message="Please use the tool",
+    )
+
+    # Seed a stale cache entry under the session key. The streaming path will
+    # compute a fresh agent signature (mismatch), replace the entry with the
+    # live failing agent, then the terminal 400 must evict it.
+    config.SESSION_AGENT_CACHE["captured_terminal_http_400_evicts"] = (object(), "stale-sig")
+
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry: closed_entries.append((session_id, entry)),
+    )
+
+    class CapturedTerminalHttp400EvictAgent(MockAgent):
+        def __init__(self, status_callback=None, **kwargs):
+            super().__init__(**kwargs)
+            self.status_callback = status_callback
+
+        def run_conversation(self, **kwargs):
+            status_cb = getattr(self, "status_callback", None)
+            if status_cb is not None:
+                status_cb("lifecycle", "❌ Non-retryable error (HTTP 400): invalid model")
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("Partial text before failure")
+            return {
+                "messages": list(kwargs.get("conversation_history") or []),
+                "error": "",
+            }
+
+    fake_queue = _run_stream(
+        monkeypatch,
+        session,
+        "stream_captured_terminal_http_400_evicts",
+        CapturedTerminalHttp400EvictAgent,
+        workspace=str(tmp_path),
+    )
+
+    events = _queue_events(fake_queue)
+    apperrors = [data for event, data in events if event == "apperror"]
+    assert apperrors, "expected apperror for captured terminal HTTP 400"
+
+    # The poisoned cached agent must be evicted and closed.
+    assert "captured_terminal_http_400_evicts" not in config.SESSION_AGENT_CACHE
+    assert closed_entries, "expected the poisoned cached agent to be closed"
+    assert closed_entries[0][0] == "captured_terminal_http_400_evicts"
+
+
 def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
     session = _prepare_session("auth_retry", "stream_auth_retry", pending_user_message="Please retry")
     agent_cls = _build_auth_failure_agent(token_text="")

@@ -8509,6 +8509,76 @@ def _close_cached_agent_entry_at_session_boundary(session_id: str, cache_entry) 
     return _close_evicted_agent_at_session_boundary(session_id, agent)
 
 
+# #6625: terminal err types that do NOT poison reusable AIAgent state.
+# Evicting the cached agent on these would force a costly full rebuild
+# (system-prompt re-cache included) on the next turn for zero benefit — the
+# agent is healthy, the failure is transient (rate/quota), user-initiated
+# (cancelled/interrupted), an iteration budget (tool_limit_reached), or a
+# compression recovery issue (compression_exhausted). Only genuinely
+# non-retryable provider failures (HTTP 400 etc.) can leave the agent with
+# poisoned state that reproduces the same error on reuse (#6625).
+_CACHE_PRESERVED_TERMINAL_ERR_TYPES = frozenset({
+    'cancelled',
+    'interrupted',
+    'quota_exhausted',
+    'rate_limit',
+    'tool_limit_reached',
+    'compression_exhausted',
+})
+
+
+def _is_cache_poisoning_terminal_err_type(err_type: str) -> bool:
+    """True only for terminal failures that can poison reusable AIAgent state."""
+    return err_type not in _CACHE_PRESERVED_TERMINAL_ERR_TYPES
+
+
+def _invalidate_cached_agent_on_terminal_error(session_id: str, err_type: str, agent=None) -> None:
+    """#6625: pop + close the cached agent entry when a terminal failure can
+    poison reusable AIAgent state.
+
+    Only genuinely non-retryable failures (HTTP 400 etc.) evict; user-initiated
+    stops, transient rate/quota limits, iteration budgets, and compression
+    exhaustion preserve the cached agent so the next turn avoids a costly full
+    rebuild + system-prompt re-cache.
+
+    `session_id` MUST be the same id reported in the error payload
+    (``s.session_id``): on the compression-continuation path the live agent is
+    migrated under ``new_sid`` (== ``s.session_id``), while the local
+    ``session_id`` variable still holds ``old_sid`` — popping the latter would
+    miss the entry.
+
+    When ``agent`` is given, only evict if the cached entry still IS that
+    agent, so a replacement cached by a concurrent turn is never evicted.
+    """
+    if not _is_cache_poisoning_terminal_err_type(err_type):
+        return
+    if agent is None:
+        # No agent was used this turn — any cached entry belongs to a previous
+        # healthy turn and was not poisoned by this failure.
+        return
+    try:
+        from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SACL
+        with _SACL:
+            _cached = _SAC.get(session_id)
+            if _cached is None:
+                return
+            _cached_agent = _cached[0] if isinstance(_cached, tuple) else _cached
+            if _cached_agent is not agent:
+                # A concurrent turn replaced the entry — never evict a healthy
+                # replacement.
+                return
+            _evicted = _SAC.pop(session_id, None)
+        if _evicted is not None:
+            _close_cached_agent_entry_at_session_boundary(session_id, _evicted)
+            logger.debug(
+                '[webui] Invalidated cached agent for session %s on non-retryable terminal failure %s',
+                session_id,
+                err_type,
+            )
+    except Exception:
+        logger.debug('[webui] Failed to invalidate cached agent for session %s', session_id, exc_info=True)
+
+
 def _refresh_cached_agent_runtime(agent, agent_kwargs: dict) -> bool:
     """Refresh volatile runtime credentials on a reused cached AIAgent.
 
@@ -11427,6 +11497,21 @@ def _run_agent_streaming(
                         if _err_type == 'tool_limit_reached':
                             _error_payload['terminal_state'] = 'tool_limit_reached'
                             _error_payload['terminal_reason'] = 'max_iterations'
+                        # #6625: Invalidate SESSION_AGENT_CACHE only when the terminal
+                        # failure can poison reusable AIAgent state (non-retryable
+                        # provider errors like HTTP 400). Skip user-initiated stops,
+                        # transient rate/quota limits, iteration budgets, and
+                        # compression exhaustion — evicting there would force a costly
+                        # system-prompt rebuild on the next turn for no benefit. Key the
+                        # pop off the SAME session id the error payload reports
+                        # (s.session_id): on the compression-continuation path the live
+                        # agent lives under new_sid (= s.session_id), not the local
+                        # session_id variable, which still holds old_sid.
+                        _invalidate_cached_agent_on_terminal_error(
+                            getattr(s, 'session_id', session_id),
+                            _err_type,
+                            agent=agent,
+                        )
                         put('apperror', _error_payload)
                         # Legacy #373 source tests and clients look for the
                         # no_response type; #1765 keeps that type but improves
@@ -12762,6 +12847,15 @@ def _run_agent_streaming(
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
             _error_payload['session_id'] = getattr(s, 'session_id', session_id)
             _error_payload['old_session_id'] = session_id
+            # #6625: same cache-poisoning guard as the captured-terminal-error path.
+            # The exception path can carry the same provider-side 400, so the stale
+            # entry must be invalidated here too — keyed off the same session id
+            # reported in the payload (s.session_id, not the local session_id).
+            _invalidate_cached_agent_on_terminal_error(
+                getattr(s, 'session_id', session_id),
+                _exc_type,
+                agent=agent,
+            )
         put('apperror', _error_payload)
     finally:
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
