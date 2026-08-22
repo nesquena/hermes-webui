@@ -10027,11 +10027,18 @@ async function refreshSession() {
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
-    if (typeof _mergePendingSessionMessage !== 'function') {
-      throw new Error('Pending-session merge helper unavailable');
+    const pendingMsg=getPendingSessionMessage(data.session,S.messages);
+    if(pendingMsg) {
+      // On mid-stream reconnect, insert pending user message before the
+      // live assistant message so the ordering is user->assistant, not
+      // assistant->user (refs #6419).
+      const msgs=S.messages;
+      let liveIdx=-1;
+      for(let i=0;i<msgs.length;i++){if(msgs[i]&&msgs[i]._live){liveIdx=i;break;}}
+      if(liveIdx>=0) msgs.splice(liveIdx,0,pendingMsg);
+      else msgs.push(pendingMsg);
     }
-    _mergePendingSessionMessage(data.session, S.messages);
-    S.activeStreamId = data.session.active_stream_id || null;
+    S.activeStreamId=data.session.active_stream_id||null;
 
     syncTopbar(); _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
