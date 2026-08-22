@@ -101,6 +101,240 @@ console.log(JSON.stringify(metrics));
     assert metrics["bottomPad"] == 0
 
 
+def test_compaction_cards_cross_virtualization_threshold_with_one_task_owner():
+    """Execute the real window and compaction DOM helpers with a tiny DOM.
+
+    This deliberately reuses issue #500's proven virtualization harness instead
+    of evaluating all of renderMessages() against a hand-built browser clone.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+const assert = require('assert');
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = {
+  user: 120,
+  assistant: 160,
+  tool_call: 400,
+  default: 140,
+};
+const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
+const MESSAGE_VIRTUAL_BUFFER_PX = 0;
+eval(extractFunc('_messageVirtualDefaultHeightForRole'));
+eval(extractFunc('_messageVirtualWindow'));
+eval(extractFunc('_compactionDigestText'));
+eval(extractFunc('_compactionCardPreview'));
+eval(extractFunc('_compressionReferenceCardHtml'));
+eval(extractFunc('_selectCompactionCardPlacements'));
+eval(extractFunc('_pinCompactionCardAtTop'));
+eval(extractFunc('_insertCompactionCardNodes'));
+eval(extractFunc('_insertPreservedCompressionTaskFallback'));
+eval(extractFunc('_insertCompressionLikeNodeByRawIdx'));
+
+class MiniClassList {
+  constructor(...names) { this.names = new Set(names); }
+  add(...names) { names.forEach(name => this.names.add(name)); }
+  contains(name) { return this.names.has(name); }
+  toggle(name) {
+    if (this.names.has(name)) {
+      this.names.delete(name);
+      return false;
+    }
+    this.names.add(name);
+    return true;
+  }
+}
+class MiniNode {
+  constructor(label, rawIdx = null) {
+    this.label = label;
+    this.rawIdx = rawIdx;
+    this.children = [];
+    this.parentElement = null;
+    this.classList = new MiniClassList();
+  }
+  appendChild(node) {
+    if (node.parentElement) node.remove();
+    node.parentElement = this;
+    this.children.push(node);
+    return node;
+  }
+  insertBefore(node, reference) {
+    if (node.parentElement) node.remove();
+    node.parentElement = this;
+    const index = this.children.indexOf(reference);
+    if (index < 0) this.children.push(node);
+    else this.children.splice(index, 0, node);
+    return node;
+  }
+  remove() {
+    if (!this.parentElement) return;
+    const index = this.parentElement.children.indexOf(this);
+    if (index >= 0) this.parentElement.children.splice(index, 1);
+    this.parentElement = null;
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (selector === '.tool-card' && node.classList.contains('tool-card')) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+}
+function _assistantTurnBlocks() { return null; }
+function _engineAwareCompressionCopy() {
+  return {label: 'Context compacted', preview: 'Reference only'};
+}
+function esc(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+function li(name) { return `<i data-icon="${name}"></i>`; }
+function t(key) { return key; }
+function taskCount(node) {
+  return (node.label === 'task' ? 1 : 0)
+    + node.children.reduce((total, child) => total + taskCount(child), 0);
+}
+function card(kind, rawIdx, taskOwner) {
+  const node = new MiniNode(`${kind}:${rawIdx}`, rawIdx);
+  const marker = `[CONTEXT COMPACTION — REFERENCE ONLY]\n## Goal\nDigest ${rawIdx}`;
+  const html = _compressionReferenceCardHtml(marker, false);
+  const handler = html.match(/class="tool-card-header" onclick="([^"]+)"/);
+  assert.ok(handler, `card ${rawIdx} must expose its disclosure handler`);
+  const disclosure = new MiniNode(`disclosure:${rawIdx}`);
+  disclosure.classList.add('tool-card');
+  const header = new MiniNode(`header:${rawIdx}`);
+  header.click = () => Function(handler[1]).call(header);
+  disclosure.appendChild(header);
+  node.appendChild(disclosure);
+  node.disclosure = disclosure;
+  node.markerHtml = html;
+  if (taskOwner && taskOwner.kind === kind && taskOwner.rawIdx === rawIdx) {
+    node.appendChild(new MiniNode('task'));
+  }
+  return {kind, rawIdx, node};
+}
+function compactionCards(node) {
+  return node.children.filter(child => /^pre-window:|^inline:/.test(child.label));
+}
+function reopen(cardNode) {
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), false);
+  cardNode.children[0].children[0].click();
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), true);
+  cardNode.children[0].children[0].click();
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), false);
+  cardNode.children[0].children[0].click();
+  assert.strictEqual(cardNode.disclosure.classList.contains('open'), true);
+  assert.ok(cardNode.markerHtml.includes(`Digest ${cardNode.rawIdx}`));
+}
+
+const visible = Array.from({length: 100}, (_, index) => ({
+  rawIdx: index * 2,
+  m: {role: 'user'},
+}));
+const virtualWindow = _messageVirtualWindow({
+  total: visible.length,
+  scrollTop: 120 * 200,
+  viewportHeight: 720,
+  heights: Array.from({length: visible.length}, () => 120),
+  defaultHeight: 120,
+  bufferPx: 0,
+  threshold: MESSAGE_VIRTUAL_THRESHOLD_ROWS,
+  keepTailCount: 20,
+});
+assert.strictEqual(virtualWindow.virtualized, true);
+const renderVisWithIdx = visible.slice(virtualWindow.start);
+const firstRenderedRawIdx = renderVisWithIdx[0].rawIdx;
+assert.strictEqual(firstRenderedRawIdx, 160);
+
+let inner;
+let assistantSegments;
+let userRows;
+function renderScenario(markers) {
+  const placements = _selectCompactionCardPlacements(markers, firstRenderedRawIdx);
+  inner = new MiniNode('inner');
+  assistantSegments = new Map();
+  userRows = new Map();
+  let taskOwnerNode = null;
+
+  if (placements.preWindowMarkers.length) {
+    const entries = placements.preWindowMarkers.map(rawIdx =>
+      card('pre-window', rawIdx, placements.taskOwner)
+    );
+    const mounted = _insertCompactionCardNodes(
+      entries,
+      placements.taskOwner,
+      node => _pinCompactionCardAtTop(inner, node),
+    );
+    taskOwnerNode = mounted.taskOwnerNode;
+  }
+
+  for (const entry of renderVisWithIdx) {
+    const row = new MiniNode(`row:${entry.rawIdx}`, entry.rawIdx);
+    inner.appendChild(row);
+    userRows.set(entry.rawIdx, row);
+  }
+
+  const inlineEntries = placements.inlineMarkers.map(rawIdx =>
+    card('inline', rawIdx, placements.taskOwner)
+  );
+  const mounted = _insertCompactionCardNodes(
+    inlineEntries,
+    placements.taskOwner,
+    (node, rawIdx) => _insertCompressionLikeNodeByRawIdx(node, rawIdx),
+  );
+  taskOwnerNode = mounted.taskOwnerNode || taskOwnerNode;
+
+  const fallback = new MiniNode('standalone-tasks');
+  fallback.appendChild(new MiniNode('task'));
+  const fallbackInserted = _insertPreservedCompressionTaskFallback(
+    taskOwnerNode,
+    fallback,
+    node => { inner.appendChild(node); return true; },
+  );
+  return {placements, inner, taskOwnerNode, fallbackInserted};
+}
+
+const mixed = renderScenario([1, 79, 159, 170]);
+assert.deepStrictEqual(mixed.placements, {
+  preWindowMarkers: [1, 79, 159],
+  inlineMarkers: [170],
+  taskOwner: {kind: 'inline', rawIdx: 170},
+});
+const mixedCards = compactionCards(mixed.inner);
+assert.deepStrictEqual(mixedCards.map(node => node.rawIdx), [1, 79, 159, 170]);
+reopen(mixedCards[0]);
+assert.strictEqual(mixedCards[1].disclosure.classList.contains('open'), false);
+reopen(mixedCards[1]);
+assert.ok(
+  mixed.inner.children.indexOf(mixed.taskOwnerNode)
+    < mixed.inner.children.findIndex(node => node.rawIdx > 170),
+);
+assert.deepStrictEqual(
+  mixedCards.filter(node => node.children.some(child => child.label === 'task')).map(node => node.rawIdx),
+  [170],
+);
+assert.strictEqual(taskCount(mixed.inner), 1);
+assert.strictEqual(mixed.fallbackInserted, false);
+
+const preWindowOnly = renderScenario([1, 79, 159]);
+assert.deepStrictEqual(compactionCards(preWindowOnly.inner).map(node => node.rawIdx), [1, 79, 159]);
+assert.strictEqual(preWindowOnly.taskOwnerNode.label, 'pre-window:159');
+assert.deepStrictEqual(
+  compactionCards(preWindowOnly.inner)
+    .filter(node => node.children.some(child => child.label === 'task'))
+    .map(node => node.rawIdx),
+  [159],
+);
+assert.strictEqual(taskCount(preWindowOnly.inner), 1);
+assert.strictEqual(preWindowOnly.fallbackInserted, false);
+
+const noMarkers = renderScenario([]);
+assert.strictEqual(noMarkers.taskOwnerNode, null);
+assert.strictEqual(noMarkers.fallbackInserted, true);
+assert.strictEqual(taskCount(noMarkers.inner), 1);
+console.log('ok');
+"""
+    assert _run_node(source) == "ok"
+
+
 def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     render_start = js.index("function renderMessages(options)")
