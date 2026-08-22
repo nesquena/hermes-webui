@@ -2990,6 +2990,8 @@ function _providerFromModelValue(modelId){
 }
 function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
+  const presetRest=(typeof _providerQualifiedPresetRest==='function')?_providerQualifiedPresetRest(value,providerId):null;
+  if(presetRest) value=presetRest;
   const provider=String(providerId||'').trim();
   if(value.startsWith('@')&&value.includes(':')){
     const exactPrefix=provider ? `@${provider}:` : '';
@@ -3004,6 +3006,37 @@ function _modelPickerOptionIdentity(modelId, providerId){
     }
   }
   return value.replace(/-/g,'.').toLowerCase();
+}
+// Provider-qualified "@"-qualified remainder (e.g. "openrouter/@preset/<name>"
+// → "@preset/<name>") when the value's first-slash prefix matches its option's
+// own provider group and the remainder is "@"-qualified. Returns null otherwise,
+// so vendor-prefixed model ids (e.g. "kilo/minimax/minimax-m3") are left
+// untouched: their group provider is not their first-slash prefix and their
+// remainder is not "@"-qualified. Shared by the outgoing normalization
+// (_modelStateForSelect) and the canonical identity below so the OpenRouter
+// @preset round-trip stays closed (#6936).
+function _providerQualifiedPresetRest(modelId, providerId){
+  const value=String(modelId||'');
+  const provider=String(providerId||'').trim();
+  if(!value||!provider) return null;
+  const slashAt=value.indexOf('/');
+  if(slashAt<=0) return null;
+  const valuePrefix=value.slice(0,slashAt);
+  const valueRest=value.slice(slashAt+1);
+  if(!valuePrefix||!valueRest.startsWith('@')) return null;
+  if(valuePrefix.toLowerCase()!==provider.toLowerCase()) return null;
+  return valueRest;
+}
+// Canonical identity used by the model-picker lookup, dedup and selected-row
+// paths: the catalog option value "openrouter/@preset/<name>" and the normalized
+// send/session form "@preset/<name>" (with provider "openrouter") resolve to the
+// SAME key, so a restored preset re-finds its existing option instead of
+// injecting a duplicate row and losing the selection (#6936 round-trip).
+function _modelPickerCanonicalIdentity(modelId, providerId){
+  let value=String(modelId||'');
+  const presetRest=(typeof _providerQualifiedPresetRest==='function')?_providerQualifiedPresetRest(value,providerId):null;
+  if(presetRest) value=presetRest;
+  return _modelPickerOptionIdentity(value,providerId);
 }
 function _deduplicateModelPickerOptions(sel,selectedValue){
   if(!sel||!sel.querySelectorAll) return 0;
@@ -3020,13 +3053,46 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     for(const candidates of byIdentity.values()){
       if(candidates.length<2) continue;
       const selected=candidates.find(opt=>opt.value===selectedValue);
+      // Prefer the REAL catalog row (no data-custom) over any synthetic
+      // injected duplicate: a restored OpenRouter preset must collapse back
+      // onto "openrouter/@preset/<name>", not onto the injected
+      // "@openrouter:@preset/<name>" row (#6936 round-trip). Only when a
+      // synthetic row is actually present: live-model custom proxies
+      // ("@custom:llm-proxy:x-ai/grok-4.5") carry no data-custom and must
+      // keep the routable-survivor rule (#5989).
+      const synthetic=candidates.find(opt=>opt.dataset&&opt.dataset.custom==='1');
+      const realRow=synthetic?candidates.find(opt=>!(opt.dataset&&opt.dataset.custom==='1')):null;
       const routable=candidates.find(opt=>String(opt.value||'').startsWith('@'));
-      const survivor=selected||routable||candidates[0];
+      const survivor=selected||realRow||routable||candidates[0];
       for(const opt of candidates){
         if(opt===survivor) continue;
         group.removeChild(opt);
         removed++;
       }
+    }
+  }
+  // Synthetic rows injected by _ensureModelOptionInDropdown are appended
+  // directly to the <select> (outside any optgroup). If the real catalog row
+  // with the same canonical identity exists inside an optgroup, drop the
+  // orphan so "one option remains" after reconcile (#6936 round-trip).
+  const orphans=Array.from(sel.children||[]).filter(opt=>opt&&opt.tagName==='OPTION'&&opt.dataset&&opt.dataset.custom==='1');
+  for(const orphan of orphans){
+    const identity=typeof _modelPickerCanonicalIdentity==='function'
+      ?_modelPickerCanonicalIdentity(orphan.value,_getOptionProviderId(orphan)||'')
+      :_modelPickerOptionIdentity(orphan.value,_getOptionProviderId(orphan));
+    if(!identity) continue;
+    const realTwin=(()=>{
+      for(const group of sel.querySelectorAll('optgroup')){
+        const twin=Array.from(group.children||[]).find(opt=>opt&&opt.tagName==='OPTION'
+          &&!(opt.dataset&&opt.dataset.custom==='1')
+          &&_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt))===identity);
+        if(twin) return twin;
+      }
+      return null;
+    })();
+    if(realTwin){
+      if(sel.removeChild) sel.removeChild(orphan);
+      removed++;
     }
   }
   return removed;
@@ -3078,7 +3144,19 @@ function _modelStateForSelect(sel, modelId){
     opt=Array.from(sel.options).find(o=>String(o.value||'')===value)||null;
   }
   const provider=String(_getOptionProviderId(opt)||'').trim();
-  return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
+  // Catalog-rendered OpenRouter preset options carry the provider prefix baked
+  // into their value ("openrouter/@preset/<name>") but never set data-model
+  // (that attribute is only set by the fallback injection path
+  // _ensureModelOptionInDropdown), so the raw value would otherwise be sent as
+  // the model id. Send the "@"-qualified remainder as model with the provider
+  // split out, via the same shared helper the reverse/restore paths use — the
+  // session then stores "@preset/<name>" + model_provider "openrouter", which
+  // the canonical identity round-trips back to the original catalog option
+  // (#6936). Vendor-prefixed model ids (e.g. "kilo/minimax/minimax-m3") are
+  // left untouched: their group provider is not their first-slash prefix.
+  const presetRest=(typeof _providerQualifiedPresetRest==='function')?_providerQualifiedPresetRest(value,provider):null;
+  const resolvedModel=presetRest||value;
+  return {model:resolvedModel,model_provider:(provider&&provider!=='default')?provider:null};
 }
 function _captureModelDropdownSelection(sel){
   if(!sel||!sel.value) return null;
@@ -3343,6 +3421,30 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     explicitProvider=rawModel.slice(1,rawModel.lastIndexOf(':'));
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
+  // 0.5 Provider-aware canonical (model, provider) identity — the SAME key the
+  // outgoing path (_modelStateForSelect), dedup and the selected-row check use.
+  // A restored preset "@preset/<name>" (provider "openrouter") and the real
+  // catalog option "openrouter/@preset/<name>" (provider "openrouter") resolve
+  // to ONE identity, so reverse lookup re-finds the catalog row instead of
+  // falling through to synthetic injection (@openrouter:@preset/<name>).
+  // Prefer the real catalog row (no data-custom) when it exists (#6936).
+  if(typeof _modelPickerCanonicalIdentity==='function'){
+    const canonicalTarget=_modelPickerCanonicalIdentity(modelId,preferredProviderId||explicitProvider||'');
+    if(canonicalTarget){
+      const canonicalMatches=options.filter(o=>{
+        const oProv=String(_getOptionProviderId(o)||'').toLowerCase();
+        if(preferred && oProv && oProv!==preferred) return false;
+        return _modelPickerCanonicalIdentity(o.value,oProv||'')===canonicalTarget;
+      });
+      if(canonicalMatches.length){
+        const distinctProviders=new Set(canonicalMatches.map(o=>String(_getOptionProviderId(o)||'').toLowerCase()));
+        if(preferred || distinctProviders.size===1){
+          const realRow=canonicalMatches.find(o=>!(o.dataset&&o.dataset.custom==='1'));
+          return (realRow||canonicalMatches[0]).value;
+        }
+      }
+    }
+  }
   if(preferred){
     if(preferred==='custom'||preferred.startsWith('custom:')){
       // A slash is part of a custom endpoint's upstream model ID, not a
@@ -4413,7 +4515,23 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  // Same provider-aware semantic (model, provider) identity the outgoing,
+  // reverse and dedup paths use: the real catalog row
+  // "openrouter/@preset/<name>" matches a selected state of
+  // "@preset/<name>" + provider "openrouter", so it is marked active and gets
+  // the Selected badge instead of staying unhighlighted (#6936 round-trip).
+  const _isSelectedModelRow=(m)=>{
+    const rowValue=String((m&&m.value)||'');
+    const rowProvider=String(_modelProviderForSelectedBadge(m)||'');
+    const selModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    const selProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');
+    if(typeof _modelPickerCanonicalIdentity==='function'&&rowProvider.toLowerCase()===selProvider.toLowerCase()){
+      try{
+        if(_modelPickerCanonicalIdentity(rowValue,rowProvider||null)===_modelPickerCanonicalIdentity(selModel,selProvider||null)) return true;
+      }catch(_e){}
+    }
+    return rowValue===selModel&&rowProvider.toLowerCase()===selProvider.toLowerCase();
+  };
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
