@@ -770,6 +770,26 @@ def _worktree_retained_payload_for_session_id(sid: str) -> dict:
         return {}
 
 
+def _pre_delete_session_metadata(sid: str):
+    """Capture the session object BEFORE destructive delete cleanup (#6855).
+
+    The delete handler previously resolved ``get_session()`` and the worktree
+    payload AFTER ``SESSIONS.pop`` and sidecar deletion, so by the time they
+    ran the session was already gone — silently dropping ``worktree_retained``
+    and the session-delete profile. This helper is called right before the
+    pop, while the session is still resolvable. state.db-only unsafe ids are
+    never in ``SESSIONS``, so it returns None for them and the handler falls
+    back to the CLI metadata captured at authorization time.
+    """
+    try:
+        return get_session(sid, metadata_only=True)
+    except KeyError:
+        return None
+    except Exception:
+        logger.debug("Failed to resolve session for deleted session %s", sid)
+        return None
+
+
 def _active_profile_config_path() -> Path:
     """Return config.yaml for the request's active WebUI profile.
 
@@ -8083,14 +8103,25 @@ def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
 
 
 def _state_db_session_source(sid: str) -> str:
-    """Return the lowercased ``sessions.source`` for ``sid`` from state.db.
+    """Return the authoritative ``sessions.source`` for ``sid`` from state.db.
 
     Cheap single-row lookup used to distinguish delegated ``subagent`` children
     (which have a recoverable state.db transcript) from genuinely-deleted WebUI
     sessions.  Returns "" on any error / missing row so callers fall back to
     their existing behaviour.
+
+    The raw stored value is returned WITHOUT normalization (#6855): the
+    api_server-class provenance gates consume this value and must fail closed,
+    so ``strip().lower()`` widening here would let non-canonical sources like
+    ``API_SERVER`` or `` api_server`` authorize destructive paths. Rows are
+    stored canonically (``api`` / ``api_server`` / ``subagent`` / ...), so
+    callers comparing against those exact lowercase values are unaffected.
+
+    The lookup is a parameterized SQL query, so it is safe for session ids that
+    are not path-safe (e.g. imported external rows like
+    ``miloco:agent:main:...`` whose ids contain colons) — see #6843.
     """
-    if not sid or not is_safe_session_id(sid):
+    if not sid:
         return ""
     try:
         from api.models import _active_state_db_path
@@ -8106,7 +8137,132 @@ def _state_db_session_source(sid: str) -> str:
         return ""
     if not row:
         return ""
-    return str(row[0] or "").strip().lower()
+    return str(row[0] or "")
+
+
+def _is_api_server_class_state_db_source(source: str) -> bool:
+    """Return True when a state.db ``sessions.source`` is the imported/read-only
+    ``api_server`` class (#6843).
+
+    Mirrors the archive handler's read_only/source condition: ONLY these rows
+    may carry ids that are not path-safe as sidecar filenames (colons, ...),
+    because the WebUI archives/deletes them directly in state.db. Any other
+    real state.db row (messaging, gateway, cron, subagent, ...) keeps the
+    path-safe id requirement.
+    EXACT raw membership only (#6855): no trimming, no case-folding, no
+    hyphen/space normalization and no derived-label fallback. A genuine
+    api_server row is always stored canonically (``api`` / ``api_server``); a
+    non-canonical value like ``API_SERVER``, `` api_server`` or ``api_serverx``
+    must NOT authorize the destructive delete/archive paths — fail closed.
+    """
+    return str(source or "") in {"api", "api_server"}
+
+
+def _delete_unsafe_id_authorized(sid: str) -> bool:
+    """Return True when a non-path-safe session id may be deleted.
+
+    Only imported/read-only api_server-class state.db rows may carry ids that
+    are not path-safe as sidecar filenames (colons, ...) (#6843). The check
+    must run BEFORE any destructive cleanup (SESSIONS.pop, sidecar unlink,
+    index prune, .json.bak unlink): a rejected unsafe id must leave the
+    sidecar / backup / index / cache state intact (#6855).
+    """
+    if is_safe_session_id(sid):
+        return True
+    return _is_api_server_class_state_db_source(_state_db_session_source(sid))
+
+
+def _set_state_db_session_archived(
+    sid: str, archived: bool, require_source_in: tuple[str, ...] | None = None
+) -> bool:
+    """Flip the ``archived`` flag on a state.db-only session row.
+
+    Imported/read-only rows (e.g. ``api_server``) are local ``state.db`` rows
+    without a WebUI sidecar, and some ids are not path-safe enough to
+    materialize as ``webui/sessions/*.json`` sidecars. Archiving them is
+    WebUI-local view state, so update the agent's ``sessions.archived`` column
+    in place rather than materializing a writable sidecar (which previously
+    raised an unhandled ``ValueError`` -> HTTP 500, #6843).
+
+    ``require_source_in`` (optional, #6855): when given, the row's CURRENT
+    ``sessions.source`` must be an exact member of this set INSIDE the same
+    ``BEGIN IMMEDIATE`` transaction as the UPDATE. The route-level class
+    check is re-verified atomically with the mutation (no cached-metadata
+    fallback, no check/act gap): a source flipped between the two fails
+    closed with the flag untouched.
+
+    Returns True when the row was found and updated, False otherwise.
+    Older/minimal state.db schemas may not have the optional ``archived``
+    column at all; the sidebar projection already tolerates that via
+    ``_optional_col``, so the UPDATE must too — an unconditional UPDATE would
+    raise a suppressed SQLite "no such column" error that surfaces as a
+    misleading 404 and leaves the imported session visible and unarchivable
+    (review #6855).
+    """
+    if not sid:
+        return False
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return False
+        import sqlite3 as _sqlite
+        with closing(_sqlite.connect(str(db_path))) as _conn:
+            _conn.execute("BEGIN IMMEDIATE")
+            try:
+                # Make the UPDATE conditional on the column's existence: add the
+                # WebUI-local view-state column first when the agent schema is too
+                # old to have it (same tolerance as the projection's _optional_col).
+                cols = {row[1] for row in _conn.execute("PRAGMA table_info(sessions)")}
+                if "archived" not in cols:
+                    try:
+                        _conn.execute(
+                            "ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0"
+                        )
+                    except _sqlite.OperationalError:
+                        # Concurrent archive requests can both observe the column
+                        # missing and race the ALTER (review #6855); with
+                        # BEGIN IMMEDIATE the loser waits and then sees the
+                        # column already present, but tolerate it anyway — the
+                        # UPDATE below targets the column either way.
+                        pass
+                # #6855: authoritative source revalidation in the SAME
+                # transaction as the UPDATE. The route's pre-check may have
+                # raced; this SELECT holds the write lock, so the source read
+                # here is the current one and the UPDATE is conditional on it.
+                if require_source_in is not None:
+                    if "source" not in cols:
+                        _conn.rollback()
+                        return False
+                    src_row = _conn.execute(
+                        "SELECT source FROM sessions WHERE id = ?", (sid,)
+                    ).fetchone()
+                    if (
+                        not src_row
+                        or str(src_row[0] or "") not in require_source_in
+                    ):
+                        _conn.rollback()
+                        return False
+                cur = _conn.execute(
+                    "UPDATE sessions SET archived = ? WHERE id = ?",
+                    (1 if archived else 0, sid),
+                )
+                _conn.commit()
+                return cur.rowcount > 0
+            except Exception:
+                try:
+                    _conn.rollback()
+                except Exception:
+                    pass
+                raise
+    except Exception:
+        logger.debug(
+            "Failed to set archived=%s for state.db session %s",
+            archived,
+            sid,
+            exc_info=True,
+        )
+        return False
 
 
 def _is_subagent_child_session_id(sid: str) -> bool:
@@ -15897,31 +16053,34 @@ def handle_post(handler, parsed) -> bool:
         sid = body.get("session_id", "")
         if not sid:
             return bad(handler, "session_id is required")
-        if not is_safe_session_id(sid):
+        if not _delete_unsafe_id_authorized(sid):
             return bad(handler, "Invalid session_id", 400)
+        unsafe_id = not is_safe_session_id(sid)
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
-        # A delegated subagent child (#5307) is view-only and owned by the
-        # delegate runner. Deleting it here would call delete_cli_session() and
-        # erase the child's state.db transcript — refuse it.
+        # Delegated subagent children (#5307) are view-only; deleting one
+        # would erase its state.db transcript.
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
-        worktree_retained = _worktree_retained_payload_for_session_id(sid)
-        try:
-            event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)
-        except KeyError:
-            event_profile = None
-        except Exception:
-            logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
-            event_profile = None
-        # Serialize with recovery, but bound contention so a browser timeout
-        # cannot be followed by a delayed server-side delete.
+        state_db_cleanup_failed = False
+        # Serialize with recovery so lock contention can't delay the delete.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
+            # #6855: unsafe-id source revalidated in the delete txn (atomic check+act).
+            if unsafe_id and not is_messaging_session:
+                try:
+                    from api.models import delete_cli_session
+                    state_db_cleanup_failed = not delete_cli_session(sid, require_source_in=("api", "api_server"))
+                except Exception:
+                    state_db_cleanup_failed = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
+                if state_db_cleanup_failed:
+                    return bad(handler, "Invalid session_id", 400)
+            session_for_delete = _pre_delete_session_metadata(sid)
             with LOCK:
                 SESSIONS.pop(sid, None)
             try:
@@ -15929,20 +16088,20 @@ def handle_post(handler, parsed) -> bool:
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
+            try:
+                prune_session_from_index(sid)
+            except Exception:
+                logger.debug("Failed to prune index entry: %s", sid, exc_info=True)
+            try:
+                p.with_suffix('.json.bak').unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
             sidecar_deleted = False
             try:
                 p.unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
-            try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
@@ -15950,14 +16109,42 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
+        # #6855 review: the session object was captured BEFORE SESSIONS.pop +
+        # sidecar deletion (see _pre_delete_session_metadata) — reading it here
+        # would raise KeyError and silently drop worktree_retained/profile.
+        if session_for_delete is not None:
+            event_profile = getattr(session_for_delete, "profile", None)
+            worktree_retained = _worktree_retained_payload(session_for_delete)
+        else:
+            # state.db-only unsafe id: never in SESSIONS, so the profile comes
+            # from the CLI metadata captured at authorization time (#6855).
+            event_profile = cli_meta_for_delete.get("profile")
+            worktree_retained = {}
+        # The api_server-class authorization for unsafe ids already ran at the
+        # top of this handler (before any destructive cleanup) — see
+        # _delete_unsafe_id_authorized (#6855).
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
         try:
-            from api.upload import _session_attachment_dir
+            if unsafe_id:
+                # #6855 review: unsafe state.db-only ids are NOT path-safe as
+                # attachment directories — the sanitizer in api/upload.py
+                # collapses distinct ids (e.g. ``victim:session`` and
+                # ``victim_session``) onto the SAME directory, so cleaning it
+                # here would erase another session's attachments (reproduced
+                # cross-session data loss). Imported api_server rows never
+                # upload through the WebUI anyway; skip attachment cleanup for
+                # them entirely.
+                logger.debug(
+                    "Skipping attachment cleanup for unsafe session id %s (identity collision risk, #6855)",
+                    sid,
+                )
+            else:
+                from api.upload import _session_attachment_dir
 
-            shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
+                shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
         except Exception:
             logger.debug("Failed to clean attachment dir for deleted session %s", sid)
         # Remove the turn-journal shards and the run-journal directory so a
@@ -15995,12 +16182,34 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         # Also delete from CLI state.db for CLI sessions shown in sidebar,
         # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
+        # Unsafe ids already ran the authoritative (in-transaction) delete
+        # above (#6855) — do not run it a second time.
+        if not is_messaging_session and not unsafe_id:
             try:
                 from api.models import delete_cli_session
 
-                state_db_cleanup_failed = not delete_cli_session(sid)
+                # #6855 review: the destructive call must authorize on the
+                # provenance resolved at the call site
+                # (``cli_meta_for_delete``), not on the upstream read_only
+                # projection staying correct. Rows that reach this branch are
+                # WebUI-owned; an api_server-class (imported/read-only) row
+                # must never be erased here — fail closed, and when a source
+                # WAS resolved, re-verify that exact source inside the delete
+                # transaction (same fail-closed shape as the unsafe-id path,
+                # scoped to the call-site provenance instead of the
+                # api_server-class set).
+                resolved_source = (cli_meta_for_delete.get("source_tag") or "")
+                if _is_api_server_class_state_db_source(resolved_source):
+                    state_db_cleanup_failed = True
+                elif resolved_source:
+                    state_db_cleanup_failed = not delete_cli_session(
+                        sid, require_source_in=(resolved_source,)
+                    )
+                else:
+                    # No state.db row surfaced at the call site (typical
+                    # sidecar-only WebUI session): the historical unrestricted
+                    # cleanup is a no-op returning True for absent rows.
+                    state_db_cleanup_failed = not delete_cli_session(sid)
             except Exception:
                 state_db_cleanup_failed = True
                 logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
@@ -17043,8 +17252,6 @@ def handle_post(handler, parsed) -> bool:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
-            if cli_meta.get("read_only"):
-                return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
             # delegate runner — never materialize one into a writable WebUI
             # sidecar via the archive fallback (the 3rd of the shared
@@ -17052,6 +17259,44 @@ def handle_post(handler, parsed) -> bool:
             _arch_source_tag = (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower()
             if _arch_source_tag == "subagent" or _is_subagent_child_session_id(sid):
                 return bad(handler, "Subagent sessions cannot be archived from WebUI", 400)
+            # #6843: imported/read-only rows (e.g. api_server) are local
+            # state.db rows without a WebUI sidecar, and some ids are not
+            # path-safe enough to materialize as a sidecar (colons, ...).
+            # Archiving is WebUI-local view state: flip the state.db `archived`
+            # flag directly instead of materializing a writable sidecar (which
+            # previously 400'd for read_only rows and crashed with an
+            # unhandled ValueError -> HTTP 500 for unsafe ids).
+            if cli_meta.get("read_only") or not is_safe_session_id(sid):
+                # #6855: the state.db `archived` flag is WebUI-local view
+                # state that the sidebar projection ONLY honors for the
+                # imported/read-only api_server class (api/models.py:7592
+                # is_api_server_class_row). Flipping it for any OTHER
+                # read-only source (telegram, ...) would return 200 yet leave
+                # the row visible — a silent no-op that misleads the user.
+                # Require api_server-class provenance here; other read-only
+                # sources keep the prior rejection.
+                # #6855: no cached-metadata fallback — the archive decision
+                # must come from the AUTHORITATIVE current state.db source
+                # (``_arch_source_tag`` was previously OR-ed in, letting a
+                # real telegram row with stale api_server metadata archive
+                # with 200). And the UPDATE below revalidates that same
+                # source inside its own BEGIN IMMEDIATE transaction, so the
+                # check and the act are one atomic step (mirroring the
+                # delete-path fix).
+                if not _is_api_server_class_state_db_source(_state_db_session_source(sid)):
+                    return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
+                if not _set_state_db_session_archived(
+                    sid,
+                    bool(body.get("archived", True)),
+                    require_source_in=("api", "api_server"),
+                ):
+                    return bad(handler, "Session not found", 404)
+                publish_session_list_changed(
+                    "session_archive",
+                    profile=cli_meta.get("profile"),
+                    session_id=sid,
+                )
+                return j(handler, {"ok": True, "session": None})
             if _is_messaging_session_record(cli_meta):
                 s = Session(
                     session_id=sid,

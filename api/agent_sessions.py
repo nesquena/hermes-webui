@@ -123,6 +123,32 @@ def _with_normalized_source(row: dict) -> dict:
     return {**row, **normalized}
 
 
+# #6843: imported/read-only rows of the api_server class are local state.db
+# rows without a WebUI sidecar. They are the ONLY state.db-only rows the WebUI
+# treats as importable/read-only: archiving/deleting them is WebUI-local view
+# state applied directly to the state.db row (some ids are not path-safe as
+# sidecar filenames, e.g. ``miloco:agent:main:...``). Gateway, messaging, cron,
+# subagent, and other sidecar-less rows keep their existing visibility rules.
+_API_SERVER_CLASS_SOURCES = frozenset({"api", "api_server"})
+
+
+def is_api_server_class_row(row: dict) -> bool:
+    """Return True when a session row belongs to the imported/read-only
+    ``api_server`` class (#6843).
+
+    EXACT raw membership on the authoritative ``source`` field only (#6855):
+    no trimming, no case-folding, no hyphen/space normalization and no
+    derived-label fallback, mirroring
+    ``routes._is_api_server_class_state_db_source``. A raw source like
+    ``api-server``, ``API_SERVER`` or `` api_server`` must NOT be classified
+    as the api_server class by the sidebar projection — only the exact
+    ``api`` / ``api_server`` values may (rows are stored canonically).
+    """
+    if not isinstance(row, dict):
+        return False
+    return str(row.get("source") or "") in _API_SERVER_CLASS_SOURCES
+
+
 def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
@@ -582,6 +608,10 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        # #6843: imported/read-only rows (e.g. api_server) are archived by the
+        # WebUI directly in state.db (no sidecar); surface the flag so the
+        # sidebar can drop them from the default visible list.
+        archived_expr = _optional_col('archived', session_cols, '0')
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -692,6 +722,7 @@ def read_importable_agent_session_rows(
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
+                   {archived_expr},
                    {session_source_expr},
                    {user_id_expr},
                    {chat_id_expr},

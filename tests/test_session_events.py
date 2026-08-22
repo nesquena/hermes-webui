@@ -45,8 +45,13 @@ def test_session_events_publish_for_minimal_sidebar_mutations():
     assert 'publish_session_list_changed(\n            "session_rename",' in ROUTES
     assert '_persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")' in ROUTES
     assert "session_id=sid" in ROUTES
-    assert 'event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)' in ROUTES
-    assert "Failed to resolve profile for deleted session" in ROUTES
+    # #6855 review: the session-delete profile comes from the object captured
+    # BEFORE SESSIONS.pop + sidecar deletion (a post-delete get_session()
+    # would raise KeyError and drop the profile), or from the CLI metadata
+    # captured at authorization time for state.db-only unsafe ids.
+    assert "session_for_delete = _pre_delete_session_metadata(sid)" in ROUTES
+    assert 'event_profile = getattr(session_for_delete, "profile", None)' in ROUTES
+    assert 'event_profile = cli_meta_for_delete.get("profile")' in ROUTES
     assert '_publish_session_list_changed("session_delete", profile=event_profile)' in ROUTES
     assert 'publish_session_list_changed(\n                "session_branch",' in ROUTES
     assert 'publish_session_list_changed(\n            "session_pin",' in ROUTES
