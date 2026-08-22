@@ -95,6 +95,16 @@ const cases = {{
     {{ _usedModel: 'gpt-5.6-sol', _usedProvider: 'openai-codex', _requestedProvider: 'openai-codex' }}, '@openai-codex:gpt-5.6-sol'),
   notationOnlyCustom: _localModelSwitchText(
     {{ _usedModel: 'k3-256k', _usedProvider: 'custom:kimi-coding', _requestedProvider: 'custom:kimi-coding' }}, '@custom:kimi-coding:k3-256k'),
+  customPrefixNoProvenanceSame: _localModelSwitchText(
+    {{ _usedModel: 'k3-256k', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
+  customPrefixNoProvenanceTaggedSame: _localModelSwitchText(
+    {{ _usedModel: 'llama3:8b', _requestedModel: '@custom:local:llama3:8b' }}),
+  customPrefixNoProvenanceDifferent: _localModelSwitchText(
+    {{ _usedModel: 'k3-128k', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
+  customPrefixContradictoryProvenance: _localModelSwitchText(
+    {{ _usedModel: 'k3-256k', _usedProvider: 'custom:other', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
+  customPrefixContradictoryEmbeddedProvenance: _localModelSwitchText(
+    {{ _usedModel: '@custom:other:k3-256k', _requestedModel: '@custom:kimi-coding:k3-256k' }}),
   colonTaggedSwitch: _localModelSwitchText(
     {{ _usedModel: '@ollama:qwen2.5:8b', _usedProvider: 'ollama', _requestedProvider: 'ollama' }},
     '@ollama:llama3:8b'),
@@ -283,6 +293,12 @@ def test_footer_surfaces_local_switch_and_stays_silent_otherwise():
     assert cases["slashHintedSameReverse"] == ""
     assert cases["notationOnly"] == ""
     assert cases["notationOnlyCustom"] == ""
+    assert cases["customPrefixNoProvenanceSame"] == ""
+    assert cases["customPrefixNoProvenanceTaggedSame"] == ""
+    assert "k3-256k" in cases["customPrefixNoProvenanceDifferent"]
+    assert "k3-128k" in cases["customPrefixNoProvenanceDifferent"]
+    assert cases["customPrefixContradictoryProvenance"]
+    assert cases["customPrefixContradictoryEmbeddedProvenance"]
     assert cases["identical"] == ""
     assert cases["caseInsensitive"] == ""
     assert cases["gatewayOwned"] == "", "gateway turns already own the warning"

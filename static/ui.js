@@ -5152,18 +5152,22 @@ function _formatReasoningEffortLabel(effort){
 }
 
 function _bareModelId(modelId, providerId){
-  // Mirror of api/streaming.py::_bare_model_id — remove only the routing prefix
-  // identified by the adjacent provider field, then keep the complete bare model
-  // (including slash namespaces and Ollama-style tags such as ':8b').
+  // Mirror of api/streaming.py::_bare_model_id — remove only the routing prefix,
+  // then keep the complete bare model (including slash namespaces and tags).
+  // Older messages can lack provider provenance, so recognize both the ordinary
+  // @provider:model grammar and the two-segment @custom:<slug>:<model> grammar.
   let m=String(modelId||'').trim();
   if(!m)return'';
   const provider=String(providerId||'').trim();
   const prefix=provider?`@${provider}:`:'';
   if(prefix&&m.toLowerCase().startsWith(prefix.toLowerCase())){
     m=m.slice(prefix.length);
-  }else if(m.charAt(0)==='@'&&m.indexOf(':')>=0&&!m.startsWith('@custom:')){
-    // A non-custom provider is one grammar segment. This compatibility path is
-    // for older messages that predate the persisted provider provenance fields.
+  }else if(!provider&&m.toLowerCase().startsWith('@custom:')){
+    const splitAt=m.indexOf(':','@custom:'.length);
+    if(splitAt>=0)m=m.slice(splitAt+1);
+  }else if(!provider&&m.charAt(0)==='@'&&m.indexOf(':')>=0){
+    // A non-custom provider is one grammar segment. These compatibility paths
+    // are for messages that predate the persisted provider provenance fields.
     m=m.slice(m.indexOf(':')+1);
   }
   return m.trim();
@@ -5172,8 +5176,8 @@ function _localModelSwitchText(msg, requestedModel){
   // Notice for a LOCAL fallback switch: the configured provider failed and
   // fallback_providers served the turn with another model. Gateway turns own
   // their own warning via _gatewayModelWarningText, so stay silent there to
-  // keep one notice per turn. Fails closed: renders nothing unless both sides
-  // are known and genuinely differ.
+  // keep one notice per turn. Fails closed: renders nothing unless both model
+  // identities are known, and keeps the warning on conflicting provenance.
   if(!msg)return'';
   if(msg._gatewayRouting)return'';
   const used=String(msg._usedModel||'').trim();
@@ -5182,7 +5186,20 @@ function _localModelSwitchText(msg, requestedModel){
   const usedId=_bareModelId(used,msg._usedProvider).toLowerCase();
   const requestedId=_bareModelId(requested,msg._requestedProvider).toLowerCase();
   if(!usedId||!requestedId)return'';
-  if(usedId===requestedId)return'';
+  const routeProvider=modelId=>{
+    const match=String(modelId||'').trim().match(/^@(custom:[^:]+|[^:]+):/i);
+    return match?match[1].toLowerCase():'';
+  };
+  const requestedRouteProvider=routeProvider(requested);
+  const usedRouteProvider=routeProvider(used);
+  const requestedProvider=String(msg._requestedProvider||'').trim().toLowerCase();
+  const usedProvider=String(msg._usedProvider||'').trim().toLowerCase();
+  const mismatch=(a,b)=>!!a&&!!b&&a!==b;
+  const provenanceContradicts=
+    mismatch(requestedRouteProvider,requestedProvider)
+    ||mismatch(usedRouteProvider,usedProvider)
+    ||mismatch(requestedProvider||requestedRouteProvider,usedProvider||usedRouteProvider);
+  if(usedId===requestedId&&!provenanceContradicts)return'';
   // _bareModelId removes only the @provider: routing notation. A remaining slash
   // namespace is identity-bearing, even when the other id has the same basename.
   return`${t('model_switched')||'Model switched'}: ${getModelLabel(requested)} → ${getModelLabel(used)}`;
