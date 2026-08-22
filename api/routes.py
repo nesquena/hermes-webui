@@ -9663,12 +9663,18 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     parent_signatures_complete = True
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
-        if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
+        if not parent_id:
+            break
+        if parent_id in seen or not is_safe_session_id(parent_id):
+            parent_signatures_complete = False
             break
         parent_path = SESSION_DIR / f"{parent_id}.json"
         parent_sig_before = _sidecar_stat_signature(parent_path)
         parent = Session.load(parent_id)
-        if not parent or not getattr(parent, "pre_compression_snapshot", False):
+        if not parent:
+            parent_signatures_complete = False
+            break
+        if not getattr(parent, "pre_compression_snapshot", False):
             break
         parent_sig = _sidecar_stat_signature(parent_path)
         if (
@@ -9690,6 +9696,10 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         segments.append(parent)
         seen.add(parent_id)
         current = parent
+    else:
+        # Exhausting max_hops means the declared ancestry may continue beyond
+        # the signatures captured above. Never publish partial provenance.
+        parent_signatures_complete = False
 
     if not segments:
         return list(getattr(session, "messages", []) or [])

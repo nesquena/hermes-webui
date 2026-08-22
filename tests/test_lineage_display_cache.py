@@ -292,6 +292,27 @@ def test_unverifiable_warm_parent_evicts_lineage_and_blocks_display_hit(
     assert routes._display_merge_cached_messages(child, rebuilt) is None
 
 
+def test_missing_declared_ancestor_disables_cache_until_it_appears(lineage):
+    """Negative lineage provenance must invalidate when the file appears later."""
+    routes, Session, child = lineage
+    parent = Session.load("lineage_parent")
+    parent.parent_session_id = "lineage_grand"
+    parent.save()
+
+    first = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert all(row["content"] != "grand" for row in first)
+    with routes._lineage_display_cache_lock:
+        assert child.session_id not in routes._lineage_display_cache
+
+    grand = Session(session_id="lineage_grand", workspace=".")
+    grand.pre_compression_snapshot = True
+    grand.messages = [{"role": "user", "content": "grand", "timestamp": 10}]
+    grand.save()
+
+    second = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert second[0]["content"] == "grand"
+
+
 def test_sessions_without_lineage_do_not_pollute_cache(lineage):
     routes, Session, child = lineage
     routes._lineage_display_cache.clear()
