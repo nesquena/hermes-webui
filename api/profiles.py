@@ -852,6 +852,18 @@ _TERMINAL_ENV_MAPPINGS = {
     'ssh_key': 'TERMINAL_SSH_KEY',
     'ssh_persistent': 'TERMINAL_SSH_PERSISTENT',
     'local_persistent': 'TERMINAL_LOCAL_PERSISTENT',
+    # Canonical fields the agent's TERMINAL_CONFIG_ENV_MAP also supports
+    # (hermes_cli/config.py) — omitted here, a profile configured them in
+    # config.yaml yet the WebUI snapshot fell back to hard-coded defaults.
+    'vercel_runtime': 'TERMINAL_VERCEL_RUNTIME',
+    'docker_network': 'TERMINAL_DOCKER_NETWORK',
+    'docker_extra_args': 'TERMINAL_DOCKER_EXTRA_ARGS',
+    'docker_shm_size': 'TERMINAL_DOCKER_SHM_SIZE',
+    'docker_run_as_host_user': 'TERMINAL_DOCKER_RUN_AS_HOST_USER',
+    'docker_persist_across_processes': 'TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES',
+    'docker_orphan_reaper': 'TERMINAL_DOCKER_ORPHAN_REAPER',
+    'sandbox_dir': 'TERMINAL_SANDBOX_DIR',
+    'degraded_mode': 'TERMINAL_DEGRADED_MODE',
 }
 
 

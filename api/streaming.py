@@ -12,6 +12,8 @@ import mimetypes
 import os
 import queue
 import random
+import hashlib
+import importlib
 import re
 import sqlite3
 import shlex
@@ -19,6 +21,7 @@ import sys
 import subprocess
 import threading
 import time
+import types
 import traceback
 import copy
 import inspect
@@ -2487,7 +2490,6 @@ from api.workspace import set_last_workspace
 # metadata added by the webui and must be stripped before the API call.
 # `reasoning_content` is provider-facing for reasoning-capable models. Display
 # metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
-_API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
@@ -2732,6 +2734,1546 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
         override_mod.reset_hermes_home_override(override_token)
     except Exception:
         logger.debug("Failed to reset streaming Hermes home override", exc_info=True)
+
+
+# ── Terminal backend identity and generation tracking (issue #5937) ──────
+# When WebUI switches between profiles with different terminal backends
+# (e.g., local ↔ SSH or SSH host A → host B), the agent's
+# `_active_environments["default"]` cache may still hold an environment
+# created under the *previous* profile's backend vars.  This is a
+# security-class issue: a turn using profile B must never reuse an
+# environment created for profile A, even when both use the same
+# TERMINAL_ENV type.
+#
+# Design:
+#  1. Compute a normalized **fingerprint** of ALL terminal-relevant env
+#     vars (the same set consumed by terminal_tool._get_env_config()).
+#  2. Maintain a monotonic **generation counter**; bump it when the
+#     fingerprint changes between turns.
+#  3. Tag every live environment object with the generation that created it
+#     (atomically at creation, via a wrapper on _create_environment — the
+#     single creation funnel shared by terminal/file/code-execution paths).
+#  4. At turn setup, compare fingerprints; the identity transition and the
+#     ownership registration (recorded owner = new generation) are ATOMIC
+#     under one lock hold, and the stale generation is recorded in
+#     _pending_eviction_generations.
+#  5. ONE shared acquisition boundary (terminal_tool.terminal_tool,
+#     file_tools._get_file_ops, code_execution_tool._get_or_create_env)
+#     compares the live env's tag against the CALLING TURN's captured
+#     (ContextVar) generation — never the process-global current
+#     generation — and never reuses or tears down an env an active
+#     old-backend turn still owns (retire deferred until drain).
+#     Validation, stale compare-and-remove, reuse/create, object tagging,
+#     owner publication and the final exact-object check are ONE
+#     _backend_acquisition_lock transaction (see _acquire_backend_object),
+#     so no concurrent guarded acquisition can install an env between the
+#     ownership check and the real acquire (empty-slot TOCTOU).
+#  6. Retire is compare-and-remove under the registry lock, cleaning up the
+#     exact removed object OUTSIDE the lock, eliminating the
+#     setup-to-tool os.environ race and the read/retire replacement gap.
+
+# All env var keys that terminal_tool._get_env_config() reads, sorted.
+# Must be kept in sync with tools/terminal_tool.py:_get_env_config().
+_BACKEND_IDENTITY_KEYS: tuple[str, ...] = (
+    'TERMINAL_ENV',
+    'TERMINAL_CWD',
+    'TERMINAL_TIMEOUT',
+    'TERMINAL_LIFETIME_SECONDS',
+    'TERMINAL_MODAL_MODE',
+    'TERMINAL_DOCKER_IMAGE',
+    'TERMINAL_DOCKER_FORWARD_ENV',
+    'TERMINAL_DOCKER_ENV',
+    'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE',
+    'TERMINAL_SINGULARITY_IMAGE',
+    'TERMINAL_MODAL_IMAGE',
+    'TERMINAL_DAYTONA_IMAGE',
+    'TERMINAL_CONTAINER_CPU',
+    'TERMINAL_CONTAINER_MEMORY',
+    'TERMINAL_CONTAINER_DISK',
+    'TERMINAL_CONTAINER_PERSISTENT',
+    'TERMINAL_DOCKER_VOLUMES',
+    'TERMINAL_PERSISTENT_SHELL',
+    'TERMINAL_SSH_HOST',
+    'TERMINAL_SSH_USER',
+    'TERMINAL_SSH_PORT',
+    'TERMINAL_SSH_KEY',
+    'TERMINAL_SSH_PERSISTENT',
+    'TERMINAL_LOCAL_PERSISTENT',
+    'TERMINAL_DOCKER_RUN_AS_HOST_USER',
+    'TERMINAL_DOCKER_NETWORK',
+    'TERMINAL_DOCKER_EXTRA_ARGS',
+    'TERMINAL_DOCKER_SHM_SIZE',
+    'TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES',
+    'TERMINAL_DOCKER_ORPHAN_REAPER',
+    'TERMINAL_VERCEL_RUNTIME',
+    'TERMINAL_SANDBOX_DIR',
+    'TERMINAL_DEGRADED_MODE',
+)
+
+# Backends whose environment is a container/sandbox (mirrors
+# tools/terminal_tool.py:_CONTAINER_BACKENDS).  Used by the terminal wrapper
+# when it builds the container_config for the agent's creation funnel.
+_TERMINAL_CONTAINER_BACKENDS: frozenset[str] = frozenset({
+    'docker', 'singularity', 'modal', 'daytona', 'vercel_sandbox',
+})
+
+# Backend identity and generation tracking
+_backend_generation_lock = threading.Lock()
+_current_backend_generation: int = 0  # monotonically increasing, bumps on identity change
+_env_backend_generations: dict[str, int] = {}  # task_key -> generation that created it
+_file_backend_generations: dict[str, int] = {}  # task_key -> generation for file ops cache
+_last_backend_identity: str | None = None  # sha256 fingerprint of the last-seen config
+_terminal_env_guard_installed: bool = False
+# Active-use ownership: generation -> number of turns currently executing under
+# it.  A stale generation is only retired once no turn is still using it, so a
+# replacement can never tear down an environment another turn is mid-execution.
+_active_turn_generations: dict[int, int] = {}
+# Every deferred stale generation (not one lossy scalar): a generation is
+# retired only once no turn still executes under it.  Guarded by
+# _backend_generation_lock; drained by _drain_pending_evictions().
+_pending_eviction_generations: set[int] = set()
+# Condition notified whenever a turn exits, so an acquisition blocked on an
+# active old generation's drain can proceed the moment it completes.
+_backend_generation_cond = threading.Condition(_backend_generation_lock)
+# The calling turn's captured backend generation, bound as a ContextVar so the
+# installed Agent's concurrent-tool workers inherit it.  The Agent dispatches
+# parallel-safe tool calls on child threads and propagates ContextVars
+# (contextvars.copy_context() in tools/thread_context.propagate_context_to_thread
+# — agent/tool_executor.py:931-944), NOT arbitrary thread-locals.  A private
+# threading.local() is therefore invisible inside tool workers, and acquisition
+# there fell back to the process-global per-task owner — so a concurrent
+# profile generation change could make file/code-exec validate against the
+# wrong owner and reuse state outside the calling turn's captured generation.
+_TURN_BACKEND_GENERATION: contextvars.ContextVar[int | None] = (
+    contextvars.ContextVar('webui_turn_backend_generation', default=None)
+)
+# The calling turn's immutable, normalized terminal backend config, bound at
+# turn setup and inherited by the Agent's concurrent tool workers.  The
+# identity fingerprint, the owner-generation publish AND every real
+# constructor path (the wrapped ``_get_env_config``) consume this SAME
+# object — process-global ``os.environ`` is never the later construction
+# authority.  A concurrent profile turn can replace ``os.environ`` between
+# this turn's identity capture and its actual constructor read; binding one
+# immutable config closes that TOCTOU so a backend built from profile B is
+# never tagged as profile A (or vice versa).
+_TURN_BACKEND_CONFIG: contextvars.ContextVar[types.MappingProxyType | None] = (
+    contextvars.ContextVar('webui_turn_backend_config', default=None)
+)
+# Serializes validate/reuse/create into ONE authoritative acquisition
+# transaction for every guarded path (terminal / file / code-execution).  The
+# preflight-then-acquire shape (validate, release the registry lock, then call
+# the original acquirer) left an empty-slot window where a concurrent guarded
+# acquisition could install an env between the ownership check and the real
+# acquire; holding this guard-owned lock across validate + original makes the
+# decision and the reuse/create atomic with respect to all other guarded
+# acquisitions.  The agent's own non-reentrant _env_lock is never held across
+# the original call, so no deadlock is introduced.
+_backend_acquisition_lock = threading.Lock()
+
+
+def _get_turn_generation() -> int | None:
+    """The calling turn's captured backend generation (ContextVar).
+
+    Propagated into the Agent's concurrent tool workers via
+    ``contextvars.copy_context()``; None for non-WebUI callers and outside a
+    turn.
+    """
+    return _TURN_BACKEND_GENERATION.get()
+
+
+def _get_turn_backend_config() -> types.MappingProxyType | None:
+    """The calling turn's immutable normalized backend config (ContextVar).
+
+    The SAME object the identity fingerprint, the owner publish and every
+    real constructor path consume.  None outside a registered WebUI turn.
+    """
+    return _TURN_BACKEND_CONFIG.get()
+
+
+def _normalize_backend_config(
+    profile_runtime_env: dict | None,
+) -> types.MappingProxyType:
+    """Freeze ONE immutable selected-profile terminal config for this turn.
+
+    Carries only the env keys the agent's terminal construction actually
+    reads (``_BACKEND_IDENTITY_KEYS``), coerced to str.  The returned
+    mapping is the single authority for this turn's identity fingerprint
+    AND its backend construction (via the wrapped ``_get_env_config``), so
+    the object that is fingerprinted is the object that is built — and
+    neither step can be raced by a concurrent profile turn rewriting
+    process-global ``os.environ`` between them.
+    """
+    src = profile_runtime_env or {}
+    normalized: dict[str, str] = {}
+    for key in _BACKEND_IDENTITY_KEYS:
+        if key not in src:
+            continue
+        val = src[key]
+        if isinstance(val, bool):
+            val = 'true' if val else 'false'
+        elif not isinstance(val, str):
+            val = str(val)
+        normalized[key] = val
+    return types.MappingProxyType(normalized)
+
+
+def _is_unusable_container_cwd(cwd: str) -> bool:
+    """True when *cwd* is a host/relative path invalid as a container workdir.
+
+    Mirrors ``tools/terminal_tool.py:_is_unusable_container_cwd``: a
+    container's cwd must be an absolute path that exists inside the sandbox
+    (e.g. ``/workspace`` or ``/root``); host paths (``/home/user``,
+    ``C:\\Users\\me``) and relative paths (``.``, ``src/``) fail ``docker run
+    -w``.
+    """
+    if not cwd:
+        return False
+    if cwd.startswith(('/Users/', '/home/', 'C:\\', 'C:/')):
+        return True
+    if not os.path.isabs(cwd):
+        return True
+    return False
+
+
+def _build_env_config_from_snapshot(
+    snapshot: types.MappingProxyType,
+) -> dict:
+    """Build the agent's terminal config dict from the turn's immutable
+    snapshot — a faithful port of ``terminal_tool._get_env_config()`` that
+    reads ONLY the bound turn config, never process-global ``os.environ``.
+
+    A concurrent profile turn can replace ``os.environ`` between this turn's
+    identity capture and its real constructor read; binding one immutable
+    config and making every real constructor path (``_get_env_config`` →
+    ``_create_environment``) consume that exact object closes the TOCTOU:
+    the backend is built from — and fingerprinted against — the SAME
+    object.  Defaults and parsing semantics mirror the installed agent so the
+    constructed backend matches the identity that was published.
+    """
+    default_image = 'nikolaik/python-nodejs:python3.11-nodejs20'
+    container_backends = frozenset({
+        'docker', 'singularity', 'modal', 'daytona', 'vercel_sandbox',
+    })
+
+    def _parse(name, default, converter=int, label='integer'):
+        raw = snapshot.get(name, default)
+        try:
+            return converter(raw)
+        except (ValueError, json.JSONDecodeError):
+            raise ValueError(
+                f'Invalid value for {name}: {raw!r} (expected {label}). '
+                'Check the profile terminal configuration.'
+            ) from None
+
+    env_type = str(snapshot.get('TERMINAL_ENV', 'local'))
+    mount_docker_cwd = str(snapshot.get(
+        'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE', 'false',
+    )).lower() in {'true', '1', 'yes'}
+    container_backend = env_type in container_backends
+    docker_backend = env_type == 'docker'
+
+    if container_backend:
+        container_cpu = _parse('TERMINAL_CONTAINER_CPU', '1', float, 'number')
+        container_memory = _parse('TERMINAL_CONTAINER_MEMORY', '5120')
+        container_disk = _parse('TERMINAL_CONTAINER_DISK', '51200')
+    else:
+        container_cpu = 1.0
+        container_memory = 5120
+        container_disk = 51200
+
+    if docker_backend:
+        docker_forward_env = _parse(
+            'TERMINAL_DOCKER_FORWARD_ENV', '[]', json.loads, 'valid JSON')
+        docker_volumes = _parse(
+            'TERMINAL_DOCKER_VOLUMES', '[]', json.loads, 'valid JSON')
+        docker_env = _parse(
+            'TERMINAL_DOCKER_ENV', '{}', json.loads, 'valid JSON')
+        docker_extra_args = _parse(
+            'TERMINAL_DOCKER_EXTRA_ARGS', '[]', json.loads, 'valid JSON')
+        docker_shm_size = str(snapshot.get('TERMINAL_DOCKER_SHM_SIZE', '1g'))
+    else:
+        docker_forward_env = []
+        docker_volumes = []
+        docker_env = {}
+        docker_extra_args = []
+        docker_shm_size = '1g'
+
+    if env_type == 'local':
+        try:
+            default_cwd = os.getcwd()
+        except OSError:
+            default_cwd = str(snapshot.get('TERMINAL_CWD') or os.path.expanduser('~'))
+    elif env_type == 'ssh':
+        default_cwd = '~'
+    elif env_type == 'vercel_sandbox':
+        default_cwd = '/vercel/sandbox'
+    else:
+        default_cwd = '/root'
+
+    cwd = str(snapshot.get('TERMINAL_CWD', default_cwd))
+    if cwd and not (env_type == 'ssh' and (cwd == '~' or cwd.startswith('~/'))):
+        cwd = os.path.expanduser(cwd)
+    host_cwd = None
+    if env_type == 'docker' and mount_docker_cwd:
+        docker_cwd_source = str(snapshot.get('TERMINAL_CWD') or os.getcwd())
+        candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
+        if (
+            candidate.startswith(('/Users/', '/home/', 'C:\\', 'C:/'))
+            or (
+                os.path.isabs(candidate)
+                and os.path.isdir(candidate)
+                and not candidate.startswith(('/workspace', '/root'))
+            )
+        ):
+            host_cwd = candidate
+            cwd = '/workspace'
+    elif env_type in container_backends and cwd:
+        if _is_unusable_container_cwd(cwd) and cwd != default_cwd:
+            cwd = default_cwd
+
+    _modal_mode = str(snapshot.get('TERMINAL_MODAL_MODE', 'auto')).strip().lower()
+    if _modal_mode not in {'auto', 'direct', 'managed'}:
+        _modal_mode = 'auto'
+
+    return {
+        'env_type': env_type,
+        'modal_mode': _modal_mode,
+        'docker_image': str(snapshot.get('TERMINAL_DOCKER_IMAGE', default_image)),
+        'docker_forward_env': docker_forward_env,
+        'singularity_image': str(snapshot.get(
+            'TERMINAL_SINGULARITY_IMAGE', f'docker://{default_image}')),
+        'modal_image': str(snapshot.get('TERMINAL_MODAL_IMAGE', default_image)),
+        'daytona_image': str(snapshot.get('TERMINAL_DAYTONA_IMAGE', default_image)),
+        'vercel_runtime': str(snapshot.get('TERMINAL_VERCEL_RUNTIME', '')).strip(),
+        'cwd': cwd,
+        'host_cwd': host_cwd,
+        'docker_mount_cwd_to_workspace': mount_docker_cwd,
+        'timeout': _parse('TERMINAL_TIMEOUT', '180'),
+        'lifetime_seconds': _parse('TERMINAL_LIFETIME_SECONDS', '300'),
+        'ssh_host': str(snapshot.get('TERMINAL_SSH_HOST', '')),
+        'ssh_user': str(snapshot.get('TERMINAL_SSH_USER', '')),
+        'ssh_port': _parse('TERMINAL_SSH_PORT', '22'),
+        'ssh_key': str(snapshot.get('TERMINAL_SSH_KEY', '')),
+        'ssh_persistent': str(snapshot.get(
+            'TERMINAL_SSH_PERSISTENT',
+            snapshot.get('TERMINAL_PERSISTENT_SHELL', 'true'),
+        )).lower() in {'true', '1', 'yes'},
+        'local_persistent': str(snapshot.get(
+            'TERMINAL_LOCAL_PERSISTENT', 'false',
+        )).lower() in {'true', '1', 'yes'},
+        'container_cpu': container_cpu,
+        'container_memory': container_memory,
+        'container_disk': container_disk,
+        'container_persistent': str(snapshot.get(
+            'TERMINAL_CONTAINER_PERSISTENT', 'true',
+        )).lower() in {'true', '1', 'yes'},
+        'docker_volumes': docker_volumes,
+        'docker_env': docker_env,
+        'docker_run_as_host_user': str(snapshot.get(
+            'TERMINAL_DOCKER_RUN_AS_HOST_USER', 'false',
+        )).lower() in {'true', '1', 'yes'},
+        'docker_network': str(snapshot.get(
+            'TERMINAL_DOCKER_NETWORK', 'true',
+        )).lower() in {'true', '1', 'yes'},
+        'docker_extra_args': docker_extra_args,
+        'docker_shm_size': docker_shm_size,
+        'docker_persist_across_processes': str(snapshot.get(
+            'TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES', 'true',
+        )).lower() in {'true', '1', 'yes'},
+        'docker_orphan_reaper': str(snapshot.get(
+            'TERMINAL_DOCKER_ORPHAN_REAPER', 'true',
+        )).lower() in {'true', '1', 'yes'},
+    }
+
+
+def _compute_backend_identity(profile_runtime_env: dict | None) -> str:
+    """Return a collision-resistant fingerprint of the terminal backend config.
+
+    Includes every env var that terminal_tool._get_env_config() reads, so two
+    profiles with the same TERMINAL_ENV but different SSH hosts, Docker images,
+    resource limits, etc. produce distinct fingerprints.
+    """
+    env = profile_runtime_env or {}
+    parts: list[str] = []
+    for key in _BACKEND_IDENTITY_KEYS:
+        val = env.get(key, '')
+        if isinstance(val, bool):
+            val = 'true' if val else 'false'
+        elif not isinstance(val, str):
+            val = str(val)
+        parts.append(f'{key}={val}')
+    raw = '\n'.join(parts)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _get_expected_backend_generation(task_key: str) -> int | None:
+    """Return the expected generation for *task_key*, or None if untracked."""
+    with _backend_generation_lock:
+        return _env_backend_generations.get(task_key)
+
+
+def _mark_env_backend_generation(task_key: str, generation: int) -> None:
+    """Record the generation under which the env task_key was created."""
+    with _backend_generation_lock:
+        _env_backend_generations[task_key] = generation
+
+
+def _get_current_backend_generation() -> int:
+    """Return the current generation under the generation lock."""
+    with _backend_generation_lock:
+        return _current_backend_generation
+
+
+def _unregister_turn_generation() -> None:
+    """Mark the current turn as finished; drain any deferred stale eviction.
+
+    Resets/decrements the SAME captured generation the turn registered under
+    (read from the ContextVar before it is cleared), so an unregister can
+    never touch another generation's active-use count.
+    """
+    gen = _get_turn_generation()
+    if gen is None:
+        return
+    _TURN_BACKEND_GENERATION.set(None)
+    _TURN_BACKEND_CONFIG.set(None)
+    with _backend_generation_lock:
+        remaining = _active_turn_generations.get(gen, 1) - 1
+        if remaining > 0:
+            _active_turn_generations[gen] = remaining
+        else:
+            _active_turn_generations.pop(gen, None)
+        # Wake any acquisition that is blocked waiting for this generation to
+        # drain (see _wait_for_generation_drain) so it can proceed/retire.
+        _backend_generation_cond.notify_all()
+    _drain_pending_evictions()
+
+
+def _drain_pending_evictions() -> None:
+    """Retire every deferred stale generation whose turns have all exited.
+
+    Called when a turn exits.  Safe to call any time: no-ops when nothing is
+    pending or a generation is still in use.  Every pending generation is
+    represented (set, not a lossy scalar), so rapid A→B→C switches each get
+    their stale env retired once their own turns drain.
+    """
+    with _backend_generation_lock:
+        ready = [
+            g for g in _pending_eviction_generations
+            if _active_turn_generations.get(g, 0) == 0
+        ]
+        if not ready:
+            return
+        for g in ready:
+            _pending_eviction_generations.discard(g)
+    for g in ready:
+        try:
+            _retire_generation_env(g, 'default')
+        except Exception:
+            logger.debug(
+                'Failed to retire deferred stale generation %s', g, exc_info=True,
+            )
+
+
+# Task-key → ``threading.Event`` fired when the forced teardown of the
+# previous object COMPLETED, plus a set of task keys whose forced teardown
+# FAILED (timed out / raised).  Replacement construction for the same task
+# key blocks until the prior physical removal finishes — a fresh
+# ``DockerEnvironment`` reattaches by labels, so creating it while the stale
+# container is still being ``docker rm -f``'d lets the stale cleanup thread
+# kill the replacement's live container (and vice versa).  Guarded by
+# ``_in_flight_env_cleanups_lock``.
+_in_flight_env_cleanups: dict[str, threading.Event] = {}
+_in_flight_env_cleanup_failures: set[str] = set()
+_in_flight_env_cleanups_lock = threading.Lock()
+
+
+def _wait_for_in_flight_cleanup(
+    task_key: str, *, allow_wait: bool = True, timeout: float | None = None,
+) -> None:
+    """Block until any forced teardown of *task_key*'s previous object ended.
+
+    Called before a fresh environment is created for *task_key*: the fence
+    guarantees replacement construction never overlaps the physical removal
+    of the retired object (Docker label reattachment).  Fails CLOSED (raises)
+    when the prior teardown failed or did not finish in time — a replacement
+    must not attach to a container in an unknown removal state.
+
+    ``allow_wait=False`` (the in-transaction re-validation) never blocks: the
+    pre-phase already drained any in-flight cleanup, and an event appearing
+    mid-transaction is a concurrent retire we must refuse rather than wait
+    under the acquisition lock.
+    """
+    if timeout is None:
+        timeout = float(os.environ.get('HERMES_WEBUI_BACKEND_CLEANUP_TIMEOUT', '90'))
+    with _in_flight_env_cleanups_lock:
+        ev = _in_flight_env_cleanups.get(task_key)
+        failed = task_key in _in_flight_env_cleanup_failures
+    if ev is None:
+        if failed:
+            raise RuntimeError(
+                f'Forced teardown of the previous backend environment for '
+                f'{task_key!r} failed; refusing to create a replacement '
+                '(fail-closed)'
+            )
+        return
+    if not allow_wait:
+        raise RuntimeError(
+            f'Backend environment for {task_key!r} is still being torn down '
+            'inside the ownership transaction; refusing to create a '
+            'replacement (fail-closed)'
+        )
+    if not ev.wait(timeout=timeout):
+        raise RuntimeError(
+            f'Timed out waiting for the forced teardown of the previous '
+            f'backend environment for {task_key!r} to finish; refusing to '
+            'create a replacement (fail-closed)'
+        )
+    with _in_flight_env_cleanups_lock:
+        if task_key in _in_flight_env_cleanup_failures:
+            raise RuntimeError(
+                f'Forced teardown of the previous backend environment for '
+                f'{task_key!r} failed; refusing to create a replacement '
+                '(fail-closed)'
+            )
+
+
+def _docker_container_exists(docker_exe: str, container_id: str) -> bool:
+    """True when a container with *container_id* still exists (``docker ps -a``).
+
+    Verifies that forced retirement PHYSICALLY removed the container: the
+    installed Docker worker runs ``docker stop`` / ``docker rm -f`` without
+    checking return codes and publishes no outcome, so ``wait_for_cleanup()``
+    alone cannot distinguish a completed removal from a silently failed one.
+    A failed ``rm -f`` leaves the container and its labels in place, and a
+    replacement would reattach by labels — so existence is checked before any
+    replacement is permitted.
+    """
+    try:
+        result = subprocess.run(
+            [docker_exe, 'ps', '-a', '--no-trunc', '--filter',
+             'id={}'.format(container_id), '--format', '{{.ID}}'],
+            capture_output=True, timeout=15, stdin=subprocess.DEVNULL,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(
+            f'Could not verify removal of Docker container '
+            f'{container_id[:12]}: {exc} (fail-closed)'
+        ) from exc
+    return bool((result.stdout or b'').strip())
+
+
+def _cleanup_environment_object(env, task_key: str = 'default') -> None:
+    """Run the teardown the agent's ``cleanup_vm`` would run on one env.
+
+    Called OUTSIDE the registry lock, on the exact object removed by
+    ``_retire_generation_env``, so a replacement installed under the same key
+    is never torn down.
+
+    Stale-generation retirement must PHYSICALLY destroy the sandbox: a
+    persistent Docker env cleaned without ``force_remove=True`` survives and
+    can be reattached under stale labels by a later backend.  Backends whose
+    ``cleanup()`` does not accept the kwarg raise TypeError and fall back to
+    the plain call (same signature probe ``cleanup_vm`` uses).
+
+    The teardown is FENCED: the installed Docker ``cleanup()`` starts a
+    daemon stop/remove thread and returns immediately, so this waits for the
+    forced removal to finish (``wait_for_cleanup``) and FAILS CLOSED when it
+    does not.  Replacement construction for *task_key* is gated on this
+    fence, so a fresh ``DockerEnvironment`` can never reattach by labels to a
+    container that is still being removed — and the stale cleanup thread can
+    never remove the replacement's live container.
+    """
+    timeout = float(os.environ.get('HERMES_WEBUI_BACKEND_CLEANUP_TIMEOUT', '90'))
+    # Capture the physical container identity BEFORE teardown: the installed
+    # Docker cleanup nulls ``_container_id`` before its worker thread starts,
+    # so it is only readable here.
+    container_id = (
+        getattr(env, '_container_id', None)
+        or getattr(env, 'container_id', None)
+    )
+    docker_exe = getattr(env, '_docker_exe', None)
+    done = threading.Event()
+    failed = False
+    with _in_flight_env_cleanups_lock:
+        _in_flight_env_cleanups[task_key] = done
+        _in_flight_env_cleanup_failures.discard(task_key)
+    try:
+        if hasattr(env, 'cleanup'):
+            try:
+                env.cleanup(force_remove=True)
+            except TypeError:
+                env.cleanup()
+        elif hasattr(env, 'stop'):
+            env.stop()
+        elif hasattr(env, 'terminate'):
+            env.terminate()
+        wait_fn = getattr(env, 'wait_for_cleanup', None)
+        if wait_fn is not None:
+            finished = wait_fn(timeout=timeout)
+            if not finished:
+                raise RuntimeError(
+                    f'Forced teardown of retired backend environment did not '
+                    f'finish within {timeout:.0f}s; refusing to proceed '
+                    '(fail-closed — a replacement must not attach to a '
+                    'still-removing container)'
+                )
+        # Physical-removal verification (fail-closed): ``wait_for_cleanup()``
+        # only proves the worker thread ended.  The installed Docker worker
+        # ignores ``docker stop``/``rm -f`` return codes and publishes no
+        # outcome, so a failed ``rm -f`` still reports success while the old
+        # container and its labels remain — and a replacement would reattach
+        # by labels.  Verify the retired container identity is gone before
+        # permitting replacement.
+        if container_id and docker_exe:
+            if _docker_container_exists(docker_exe, container_id):
+                raise RuntimeError(
+                    f'Retired Docker container {container_id[:12]} still '
+                    f'exists after forced teardown; refusing to proceed '
+                    '(fail-closed — a replacement must not reattach to the '
+                    'stale container by labels)'
+                )
+    except Exception:
+        failed = True
+        raise
+    finally:
+        with _in_flight_env_cleanups_lock:
+            if failed:
+                _in_flight_env_cleanup_failures.add(task_key)
+            _in_flight_env_cleanups.pop(task_key, None)
+        done.set()
+
+
+def _retire_generation_env(generation: int | None, task_key: str = 'default') -> None:
+    """Retire the live env tagged with *generation* on *task_key*.
+
+    Compare-and-remove is atomic under the registry lock (``tt._env_lock``),
+    and the exact removed object is cleaned up OUTSIDE the lock — closing the
+    read/retire gap where a replacement installed under the same key could be
+    torn down by a later by-key pop.  The env is only retired when its object
+    tag matches *generation*; a newer replacement is never touched.  An
+    untagged env (``None`` tag) is retired when *generation* is ``None`` —
+    the fail-closed path a registered WebUI turn takes when it finds an env
+    with no provenance it must not reuse.
+    """
+    try:
+        tt = importlib.import_module('tools.terminal_tool')
+    except ImportError:
+        return
+    stale_env = None
+    with tt._env_lock:
+        env = tt._active_environments.get(task_key)
+        if env is None:
+            return
+        env_gen = getattr(env, '_webui_backend_generation', None)
+        if env_gen != generation:
+            # Replaced by a newer env, or tagged with a different generation —
+            # never retire it.
+            return
+        if _env_has_execution_lease(env):
+            # A guarded terminal command is mid-execution against this exact
+            # object.  The installed terminal_tool re-reads the registry by
+            # key before env.execute(), so retiring now would make the
+            # in-flight command run against whatever replaced it.  Defer: the
+            # retirement is re-queued and retried once the last lease releases
+            # (turn-exit drain, or the lease-release drain).
+            if generation is not None:
+                with _backend_generation_lock:
+                    _pending_eviction_generations.add(generation)
+            return
+        # Compare-and-remove: this whole read/pop is one lock hold, so the
+        # registry cannot change underneath us.
+        tt._active_environments.pop(task_key, None)
+        tt._last_activity.pop(task_key, None)
+        stale_env = env
+    if stale_env is None:
+        return
+    _cleanup_environment_object(stale_env, task_key)
+    try:
+        from tools.file_tools import clear_file_ops_cache
+        clear_file_ops_cache(task_key)
+    except Exception:
+        logger.debug(
+            'Failed to clear file ops cache during env retire', exc_info=True,
+        )
+
+
+def _publish_backend_identity(profile_runtime_env: dict | None) -> int | None:
+    """Compare/publish the effective backend identity (generation lock held).
+
+    CALLER MUST HOLD ``_backend_generation_lock``: this is the transition
+    half of the ONE begin transaction.  Returns the stale generation that must
+    be retired once no turn still runs under it, or None when the identity is
+    unchanged.  The identity compare, the generation bump, the owner
+    publication and the pending-eviction record happen in the same lock hold
+    as the turn's generation capture and active-use increment, so no
+    interleaved profile switch can observe a half-transitioned state or
+    retire a generation before the first turn publishes active use.
+    """
+    global _last_backend_identity, _current_backend_generation
+    identity = _compute_backend_identity(profile_runtime_env)
+    if identity == _last_backend_identity:
+        return None  # same config, nothing to do
+    _last_backend_identity = identity
+    stale_generation = _current_backend_generation
+    _current_backend_generation += 1
+    # Publish the new owner in the SAME lock hold as the bump, and record the
+    # stale generation for deferred retire (compare-and-remove, exact object).
+    _env_backend_generations['default'] = _current_backend_generation
+    _file_backend_generations['default'] = _current_backend_generation
+    _pending_eviction_generations.add(stale_generation)
+    return stale_generation
+
+
+def _refresh_env_generation_tag() -> None:
+    """After the agent turn, publish ownership of the environment THIS TURN
+    actually acquired and used.
+
+    Operates ONLY on the exact object the calling turn's guarded acquisitions
+    validated: the live 'default' env is published iff its generation tag is
+    ALREADY the calling turn's captured (ContextVar) generation — the only
+    state a registered turn can legitimately leave behind (creation-time
+    tagging via the ``_create_environment`` wrapper, or same-generation
+    reuse).  It NO-OPs when:
+
+      * begin failed / no generation is bound (the ContextVar is None),
+      * the turn acquired no environment (nothing is tagged with its gen),
+      * the registry object changed (a different object now occupies the
+        slot — detected through its tag, which belongs to another gen),
+      * the object's generation differs.
+
+    In particular it NEVER writes the finishing turn's generation onto an
+    environment created by another turn.  The old global-slot retag admitted
+    this schedule: turn A (gen 0) begins while no env exists, turn B (gen 1)
+    begins after an identity switch and creates a gen-1 env, A finishes
+    without ever acquiring anything, and A's ``finally`` retagged B's live
+    object as gen 0 — so the deferred gen-0 drain then retired B's env while
+    B was still using it.  The tag is the immutable provenance record: only
+    the generation that produced the object may publish it.
+    """
+    turn_gen = _get_turn_generation()
+    if turn_gen is None:
+        return
+    try:
+        tt = importlib.import_module('tools.terminal_tool')
+        with tt._env_lock:
+            env = tt._active_environments.get('default')
+            if env is None:
+                return
+            if getattr(env, '_webui_backend_generation', None) != turn_gen:
+                # Foreign generation (or untagged): never retag or publish.
+                return
+        # Exact-object + exact-generation match: publish the owner record.
+        _mark_env_backend_generation('default', turn_gen)
+    except ImportError:
+        pass
+    except Exception:
+        logger.debug('Failed to refresh env generation tag', exc_info=True)
+
+
+def _wait_for_generation_drain(
+    generation: int, timeout: float | None = None,
+) -> None:
+    """Block until no turn is active under *generation* (bounded).
+
+    Used by the shared acquisition boundary when the live env belongs to a
+    generation that still has executing turns: the new-backend turn must
+    neither reuse nor tear down that env, so it waits for the old turns to
+    exit (their unregister notifies this condition) before retiring the stale
+    env and letting the original acquisition create a fresh one.
+
+    On timeout the acquisition is REFUSED (raises) rather than silently
+    reusing or tearing down an env an active turn may still own.
+    """
+    if timeout is None:
+        timeout = float(os.environ.get('HERMES_WEBUI_BACKEND_DRAIN_TIMEOUT', '300'))
+    deadline = time.monotonic() + timeout
+    with _backend_generation_lock:
+        while _active_turn_generations.get(generation, 0) > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    'Timed out waiting for backend generation %s to drain; '
+                    'refusing acquisition rather than reusing or tearing down '
+                    'an environment an active turn may still own',
+                    generation,
+                )
+                raise RuntimeError(
+                    f'Terminal backend generation {generation} did not drain '
+                    f'within {timeout:.0f}s; refusing cross-backend acquisition'
+                )
+            _backend_generation_cond.wait(min(remaining, 1.0))
+
+
+def _validate_backend_ownership(
+    tt, effective_task_id: str, raw_task_id, *, allow_wait: bool = True,
+) -> None:
+    """ONE shared acquisition boundary for terminal / file / code-execution.
+
+    Guarantees the calling turn never reuses an environment created under a
+    different backend generation, and never tears down an environment an
+    active old-backend turn still owns:
+
+      * The expected owner is the CALLING TURN's captured (ContextVar)
+        generation — carried immutably from turn setup and propagated into the
+        Agent's concurrent tool workers — NOT the process-global current
+        generation (which a concurrent profile switch may already have bumped
+        past the env's tag) and NOT the recorded per-task owner (which a
+        concurrent switch may have moved past this turn's capture).
+      * An env tagged with a different generation is never reused.
+      * An UNTAGGED env is never reused by a registered WebUI turn — and it
+        is never DESTROYED speculatively either: it may be in active use by an
+        untracked/non-WebUI caller, so unknown ownership is ISOLATED
+        (compare-and-remove from the registry without running teardown), not
+        accepted and not torn down as if it were inactive.
+      * If turns still execute under a stale env's generation, the retire is
+        deferred: we wait (bounded) for them to drain instead of tearing the
+        env down mid-use.  The retire itself is a compare-and-remove that
+        cleans up the exact removed object OUTSIDE the registry lock, and the
+        loop re-validates afterwards so a replacement installed while we
+        waited is never reused or torn down either.
+
+    ``allow_wait=False`` (the in-transaction re-validation) never blocks: the
+    pre-phase already drained any active foreign generation, and a foreign
+    generation can only become active again through a NEW identity publish,
+    which makes THIS turn the stale owner — refusing is the fail-closed
+    answer, and waiting here would deadlock the active turn, which needs the
+    same acquisition lock to run its own tool calls.
+    """
+    turn_gen = _get_turn_generation()
+    # Untracked callers (non-WebUI flows) fall back to the recorded per-task
+    # owner; registered WebUI turns always compare against their own captured
+    # generation.
+    expected = (
+        turn_gen if turn_gen is not None
+        else _get_expected_backend_generation(effective_task_id)
+    )
+    while True:
+        with tt._env_lock:
+            env = (
+                tt._active_environments.get(effective_task_id)
+                or tt._active_environments.get(raw_task_id)
+            )
+            if env is None:
+                # Empty slot: before allowing the caller to create a fresh
+                # environment, wait out any forced teardown still removing
+                # the PREVIOUS object for this task key (Docker label
+                # reattachment fence).  The wait runs OUTSIDE the registry
+                # lock; allow_wait=False (in-transaction re-validation)
+                # refuses instead of blocking under the acquisition lock.
+                _slot_empty = True
+            else:
+                _slot_empty = False
+                env_gen = getattr(env, '_webui_backend_generation', None)
+                if env_gen == expected:
+                    return
+                if env_gen is None and turn_gen is None:
+                    # Non-WebUI caller (no captured turn generation): the
+                    # agent's own registry is authoritative — accept untagged
+                    # envs.
+                    return
+                if env_gen is None:
+                    # Registered WebUI turn, untagged env: unknown ownership
+                    # — isolate (never serve it again) without speculative
+                    # teardown.
+                    tt._active_environments.pop(effective_task_id, None)
+                    tt._last_activity.pop(effective_task_id, None)
+                    tt._active_environments.pop(raw_task_id, None)
+                    tt._last_activity.pop(raw_task_id, None)
+                    return
+                if turn_gen is not None and env_gen is not None:
+                    with _backend_generation_lock:
+                        _pending_eviction_generations.add(env_gen)
+                        gen_active = _active_turn_generations.get(env_gen, 0) > 0
+                else:
+                    gen_active = False
+        if _slot_empty:
+            _wait_for_in_flight_cleanup(
+                effective_task_id, allow_wait=allow_wait,
+            )
+            if raw_task_id and raw_task_id != effective_task_id:
+                _wait_for_in_flight_cleanup(
+                    raw_task_id, allow_wait=allow_wait,
+                )
+            return
+        if turn_gen is not None and gen_active:
+            if not allow_wait:
+                # A foreign generation became active mid-transaction: this
+                # turn is now the stale owner — refuse (fail-closed) rather
+                # than block the active turn (which needs this lock) or tear
+                # down / reuse its environment.
+                raise RuntimeError(
+                    f'Backend generation {env_gen} is still active; refusing '
+                    'acquisition inside the ownership transaction (would '
+                    'violate the cross-backend boundary)'
+                )
+            # An old-backend turn still owns this env — never tear it down.
+            # Wait for it to exit, then re-validate (it may have been retired
+            # by the drain, or replaced by a concurrent thread).
+            _wait_for_generation_drain(env_gen)
+        else:
+            _retire_generation_env(env_gen, effective_task_id)
+
+
+def _evict_stale_file_ops_cache_entry(ft, task_key: str, turn_gen: int) -> None:
+    """Drop a cached file_ops object this turn may not use.
+
+    Compare-and-remove under the module's own cache lock so a concurrent
+    replacement installed under the same key is never cleared.  An entry
+    tagged with a DIFFERENT generation OR left UNTAGGED (unknown ownership)
+    is evicted: neither may be served to a registered turn (fail-closed —
+    the old ``cached_gen is None`` early-return accepted unknown ownership).
+    Eviction only drops the wrapper; the underlying env is governed by the
+    registry ownership check.
+    """
+    try:
+        cache = ft._file_ops_cache
+        cache_lock = ft._file_ops_lock
+    except AttributeError:
+        return
+    with cache_lock:
+        cached = cache.get(task_key)
+    if cached is None:
+        return
+    cached_gen = getattr(cached, '_webui_backend_generation', None)
+    if cached_gen == turn_gen:
+        return
+    with cache_lock:
+        if cache.get(task_key) is cached:
+            cache.pop(task_key, None)
+
+
+def _evict_file_ops_wrapping_stale_env(
+    ft, task_key: str, tt, raw_task_id,
+) -> None:
+    """Drop a cached file_ops wrapper whose ``.env`` is NOT the live registry
+    object for *task_key*.
+
+    The installed ``_get_file_ops`` fast path returns a cached wrapper
+    whenever a live env occupies the task slot — it never re-verifies that
+    the wrapper references that env.  A same-key replacement (same
+    generation, e.g. an env retired and recreated without a backend identity
+    change) therefore leaves a cached wrapper around the OLD env X in the
+    cache while the registry holds env Y: a turn could be served X while Y
+    passed the ownership check.  Compare-and-remove under the cache lock,
+    keyed on exact object identity.
+    """
+    try:
+        cache = ft._file_ops_cache
+        cache_lock = ft._file_ops_lock
+    except AttributeError:
+        return
+    with tt._env_lock:
+        live = (
+            tt._active_environments.get(task_key)
+            or (tt._active_environments.get(raw_task_id) if raw_task_id else None)
+        )
+    with cache_lock:
+        cached = cache.get(task_key)
+    if cached is None:
+        return
+    if getattr(cached, 'env', None) is live:
+        return
+    with cache_lock:
+        if cache.get(task_key) is cached:
+            cache.pop(task_key, None)
+
+
+def _mark_file_backend_generation(task_key: str, generation: int) -> None:
+    """Record the generation under which the file_ops cache was created."""
+    with _backend_generation_lock:
+        _file_backend_generations[task_key] = generation
+
+
+# Execution leases: ``id(env)`` -> number of guarded terminal commands
+# currently executing against that exact object.  The installed
+# ``terminal_tool()`` re-reads ``_active_environments`` by key BEFORE calling
+# ``env.execute()``, so an environment retired/replaced between the WebUI's
+# final ownership check and that lookup would make the command execute
+# against a non-validated object.  A leased environment is therefore never
+# removed by any WebUI retirement path; retirement is deferred until the last
+# lease releases.  Guarded by ``_env_execution_leases_lock``.
+_env_execution_leases: dict[int, int] = {}
+_env_execution_leases_lock = threading.Lock()
+
+
+def _env_has_execution_lease(env) -> bool:
+    """True when a guarded terminal command is executing against *env*."""
+    with _env_execution_leases_lock:
+        return _env_execution_leases.get(id(env), 0) > 0
+
+
+def _acquire_env_execution_lease(env) -> None:
+    """Mark one in-flight guarded terminal execution against *env*."""
+    with _env_execution_leases_lock:
+        _env_execution_leases[id(env)] = _env_execution_leases.get(id(env), 0) + 1
+
+
+def _release_env_execution_lease(env) -> None:
+    """Mark one in-flight guarded terminal execution as finished.
+
+    The lease lock is released BEFORE the deferred-eviction drain runs, so
+    the drain (which takes the registry lock) can never deadlock against a
+    retirement path holding the registry lock while checking a lease.
+    """
+    with _env_execution_leases_lock:
+        remaining = _env_execution_leases.get(id(env), 1) - 1
+        if remaining > 0:
+            _env_execution_leases[id(env)] = remaining
+        else:
+            _env_execution_leases.pop(id(env), None)
+    # A retirement deferred while this lease was held may now proceed.
+    try:
+        _drain_pending_evictions()
+    except Exception:
+        logger.debug('Failed to drain deferred evictions after lease release',
+                     exc_info=True)
+
+
+def _begin_turn_generation(profile_runtime_env: dict | None) -> None:
+    """Turn-setup entry: ONE generation-lock transaction, fail-closed.
+
+    Under a single ``_backend_generation_lock`` hold the effective backend
+    identity is compared/published (via :func:`_publish_backend_identity`),
+    that exact generation is captured, bound to the calling turn's ContextVar,
+    and its active-use count is incremented — all BEFORE the lock is released.
+    No interleaved profile switch can therefore retire a generation between
+    the identity publish and the first active-use publication (the
+    split-begin race), and every acquisition inside this turn — including the
+    Agent's concurrent tool workers, which inherit the ContextVar — compares
+    against the exact generation captured here.
+
+    The profile env is first frozen into ONE immutable normalized config
+    (:func:`_normalize_backend_config`) which is bound to the turn's
+    ``_TURN_BACKEND_CONFIG`` ContextVar: the identity fingerprint, the owner
+    publish and every real constructor path (the wrapped ``_get_env_config``)
+    all consume that exact object, so construction can never be raced by a
+    concurrent profile turn rewriting process-global ``os.environ`` between
+    this turn's identity capture and its actual constructor read.
+
+    A failed identity transition is FAIL-CLOSED: the turn is refused (raises)
+    instead of continuing under an ambiguous owner.  The production call site
+    places this as the first statement of the try whose finally calls
+    :func:`_end_turn_generation`, so a raising body never leaks an active-use
+    registration (nothing was bound, so the finally's unregister no-ops).
+    The deferred stale retire is also fail-closed: a forced teardown that
+    does not finish raises, refusing the turn rather than letting a
+    replacement attach to a still-removing container.
+    """
+    turn_config = _normalize_backend_config(profile_runtime_env)
+    try:
+        with _backend_generation_lock:
+            stale_generation = _publish_backend_identity(turn_config)
+            generation = _current_backend_generation
+            _TURN_BACKEND_GENERATION.set(generation)
+            _TURN_BACKEND_CONFIG.set(turn_config)
+            _active_turn_generations[generation] = (
+                _active_turn_generations.get(generation, 0) + 1
+            )
+    except Exception:
+        # Fail-closed security boundary: never run a turn under an
+        # ambiguous/unknown backend owner.
+        logger.error(
+            'Terminal backend identity transition failed; refusing turn '
+            '(fail-closed)',
+            exc_info=True,
+        )
+        raise
+
+    if stale_generation is not None:
+        # Outside the lock: retire the exact stale env if no turn still runs
+        # under it (compare-and-remove; cleanup of the exact removed object).
+        # If an old-backend turn is still active the retire stays deferred in
+        # _pending_eviction_generations and is drained when that turn exits.
+        # A failed forced teardown RAISES (fail-closed): the turn is refused
+        # rather than creating a replacement that could attach to a
+        # still-removing container.
+        if _active_turn_generations.get(stale_generation, 0) == 0:
+            _retire_generation_env(stale_generation, 'default')
+            with _backend_generation_lock:
+                _pending_eviction_generations.discard(stale_generation)
+
+
+def _end_turn_generation() -> None:
+    """Turn-teardown entry: guaranteed unregistration + deferred drain."""
+    try:
+        _unregister_turn_generation()
+    except Exception:
+        logger.debug('Turn generation unregister failed', exc_info=True)
+
+
+def _get_registry_env(tt, effective_task_id: str, raw_task_id):
+    """Read the live env for a task key directly under the registry lock.
+
+    Inline lookup only — never a lock-taking accessor like
+    ``get_active_env()`` while the non-reentrant ``_env_lock`` is held.
+    """
+    with tt._env_lock:
+        return (
+            tt._active_environments.get(effective_task_id)
+            or tt._active_environments.get(raw_task_id)
+        )
+
+
+def _final_ownership_check(
+    tt, effective_task_id: str, raw_task_id, turn_gen: int | None,
+):
+    """Final exact-object/exact-generation check inside the transaction.
+
+    After the original acquirer ran, the live env must belong to the calling
+    turn's generation (or be absent — e.g. an execution that produced no
+    sandbox).  A foreign env means the acquirer produced/reused an object
+    this turn may not use: refuse (fail-closed) rather than execute against
+    it or bless a wrapper that wraps it.  Returns the validated env (or
+    None).  The caller must hold ``_backend_acquisition_lock``.
+    """
+    if turn_gen is None:
+        return None
+    env = _get_registry_env(tt, effective_task_id, raw_task_id)
+    if env is None:
+        return None
+    env_gen = getattr(env, '_webui_backend_generation', None)
+    if env_gen != turn_gen:
+        raise RuntimeError(
+            'Backend ownership changed during acquisition: the live '
+            f'environment is tagged generation {env_gen!r} but the calling '
+            f'turn captured {turn_gen!r}; refusing cross-backend reuse'
+        )
+    return env
+
+
+def _acquire_backend_object(
+    tt, effective_task_id: str, raw_task_id, acquire_fn, on_acquired=None,
+):
+    """ONE authoritative acquisition transaction for every guarded path.
+
+    Serializes expected-generation validation, stale compare-and-remove,
+    reuse/create (the original acquirer), object tagging, owner publication
+    and the final exact-object/exact-generation check under
+    ``_backend_acquisition_lock`` — so a concurrent guarded acquisition can
+    never install an env between the ownership check and the real acquire
+    (the empty-slot TOCTOU where generations A and B both validate an empty
+    slot, A creates and registers its env, and B's original fast path then
+    reuses/executes against A's object), and no wrapper can bless an object
+    whose underlying env came from another generation.
+
+    The potentially-blocking stale-generation drain wait runs OUTSIDE the
+    lock (pre-phase): an active old-generation turn still needs the same
+    acquisition lock to run its own tool calls, so waiting under the lock
+    would deadlock it until the drain timeout.  The in-lock re-validation is
+    therefore non-blocking (``allow_wait=False``) and refuses (fail-closed)
+    if a foreign generation somehow became active mid-transaction.
+
+    ``on_acquired(result, turn_gen, validated_env)`` runs inside the
+    transaction, after the final check, and performs object tagging + owner
+    publication for the exact validated object.
+    """
+    turn_gen = _get_turn_generation()
+    # Pre-phase (no global lock): retire/defuse any env this turn may not
+    # use.  Any drain wait happens here — OUTSIDE _backend_acquisition_lock —
+    # so an active old-generation turn can still run its own guarded tool
+    # call (it needs the same lock) and exit, waking this wait.
+    _validate_backend_ownership(tt, effective_task_id, raw_task_id)
+    with _backend_acquisition_lock:
+        # Re-validate: non-blocking here and atomic with the reuse/create
+        # below — no other guarded acquisition can interleave, so the env
+        # this turn validated (or the fresh one the acquirer creates) is the
+        # exact object the turn executes against.
+        _validate_backend_ownership(
+            tt, effective_task_id, raw_task_id, allow_wait=False,
+        )
+        result = acquire_fn()
+        validated_env = _final_ownership_check(
+            tt, effective_task_id, raw_task_id, turn_gen,
+        )
+        if on_acquired is not None:
+            on_acquired(result, turn_gen, validated_env)
+    return result
+
+
+def _install_terminal_env_generation_guard() -> None:
+    """Monkey-patch ALL terminal/file/code-execution acquisition paths with a
+    single shared backend-ownership boundary.
+
+    The guard wraps:
+      * ``terminal_tool.terminal_tool``
+      * ``file_tools._get_file_ops``            (file tools bypassed the guard)
+      * ``code_execution_tool._get_or_create_env`` (execute_code bypassed it)
+      * ``terminal_tool._create_environment``   (single creation funnel: every
+        env created during a WebUI turn is tagged with the calling turn's
+        generation atomically at creation, so no untagged window exists)
+
+    Each wrapped acquisition runs the WHOLE validate → reuse/create → tag →
+    publish → final-exact-check sequence through
+    :func:`_acquire_backend_object` — ONE ``_backend_acquisition_lock``
+    transaction — so validation and acquisition cannot be separated by a
+    concurrent guarded acquisition (the empty-slot TOCTOU).  Ownership is
+    compared against the calling turn's captured generation, and the
+    registry is read inline (never a lock-taking accessor like
+    ``get_active_env()`` while holding the non-reentrant ``_env_lock``).
+    """
+    global _terminal_env_guard_installed
+    if _terminal_env_guard_installed:
+        return
+
+    try:
+        tt = importlib.import_module('tools.terminal_tool')
+    except ImportError:
+        logger.debug('Could not install terminal env generation guard', exc_info=True)
+        return
+
+    # 0) terminal_tool._get_env_config — the construction authority.  When a
+    #    WebUI turn is bound, the config is built from the turn's immutable
+    #    normalized snapshot (the SAME object that was fingerprinted and
+    #    published as the owner) — never from process-global os.environ,
+    #    which a concurrent profile turn can replace between this turn's
+    #    identity capture and its real constructor read (selected-profile-vs-
+    #    process-global TOCTOU).
+    if hasattr(tt, '_get_env_config'):
+        original_get_env_config = tt._get_env_config
+
+        def _wrapped_get_env_config():
+            turn_config = _TURN_BACKEND_CONFIG.get()
+            if turn_config is None:
+                return original_get_env_config()
+            return _build_env_config_from_snapshot(turn_config)
+
+        tt._get_env_config = _wrapped_get_env_config
+
+    # 0b) terminal_tool._cleanup_inactive_envs — the agent's idle reaper.
+    #     The installed terminal_tool STARTS the cleanup daemon on every call
+    #     (before the by-key env lookup), and the reaper pops idle envs
+    #     DIRECTLY from _active_environments.  A pop between the WebUI's final
+    #     ownership check and the installed lookup would make the command
+    #     execute against a replacement — or against a freshly created,
+    #     never-validated env.  A leased environment (a guarded terminal
+    #     command executing against that exact object) is kept alive instead:
+    #     its activity stamp is refreshed so the sweep skips it, and it is
+    #     only retired after the last lease releases (via the deferred
+    #     eviction drain).
+    if hasattr(tt, '_cleanup_inactive_envs'):
+        original_cleanup_inactive_envs = tt._cleanup_inactive_envs
+
+        def _wrapped_cleanup_inactive_envs(lifetime_seconds: int = 300):
+            with _env_execution_leases_lock:
+                leased_ids = set(_env_execution_leases.keys())
+            if leased_ids:
+                with tt._env_lock:
+                    for task_id, env in list(tt._active_environments.items()):
+                        if id(env) in leased_ids:
+                            tt._last_activity[task_id] = time.time()
+            return original_cleanup_inactive_envs(lifetime_seconds)
+
+        tt._cleanup_inactive_envs = _wrapped_cleanup_inactive_envs
+
+    # 1) terminal_tool.terminal_tool — split into env acquisition (inside the
+    #    shared transaction) and command execution (AFTER the transaction):
+    #    the installed terminal implementation acquires/reuses the
+    #    environment AND calls env.execute() in one call, so passing the
+    #    whole original tool as the acquire fn validated ownership only AFTER
+    #    command side effects had happened, and held the acquisition lock
+    #    across approval/execution/retries/result-processing.  Here the
+    #    transaction acquires and validates the exact environment object
+    #    (validate → reuse/create → tag/publish → final exact-object check),
+    #    the lock is released, and only then does the original tool execute
+    #    the command against that validated object.
+    if hasattr(tt, 'terminal_tool'):
+        original_terminal_tool = tt.terminal_tool
+
+        def _wrapped_terminal_tool(
+            command, background=False, timeout=None, task_id=None,
+            session_id=None, force=False, workdir=None, pty=False,
+            notify_on_complete=False, watch_patterns=None,
+        ):
+            effective_task_id = tt._resolve_container_task_id(task_id)
+
+            def _acquire_env():
+                # Get-or-create the environment ONLY — never executes the
+                # command.  Registry reuse first, then the agent's single
+                # creation funnel (_create_environment, wrapped to tag) with
+                # the turn-bound config — the exact object the fingerprint
+                # was computed from.
+                with tt._env_lock:
+                    env = (
+                        tt._active_environments.get(effective_task_id)
+                        or (tt._active_environments.get(task_id) if task_id else None)
+                    )
+                    if env is not None:
+                        tt._last_activity[effective_task_id] = time.time()
+                        return env
+                config = tt._get_env_config()
+                env_type = config['env_type']
+                if env_type == 'docker':
+                    image = config.get('docker_image', '')
+                elif env_type == 'singularity':
+                    image = config.get('singularity_image', '')
+                elif env_type == 'modal':
+                    image = config.get('modal_image', '')
+                elif env_type == 'daytona':
+                    image = config.get('daytona_image', '')
+                else:
+                    image = ''
+                cwd = config.get('cwd') or '/root'
+                ssh_config = None
+                if env_type == 'ssh':
+                    ssh_config = {
+                        'host': config.get('ssh_host', ''),
+                        'user': config.get('ssh_user', ''),
+                        'port': config.get('ssh_port', 22),
+                        'key': config.get('ssh_key', ''),
+                        'persistent': config.get('ssh_persistent', False),
+                    }
+                container_config = None
+                if env_type in _TERMINAL_CONTAINER_BACKENDS:
+                    container_config = {
+                        'container_cpu': config.get('container_cpu', 1),
+                        'container_memory': config.get('container_memory', 5120),
+                        'container_disk': config.get('container_disk', 51200),
+                        'container_persistent': config.get('container_persistent', True),
+                        'modal_mode': config.get('modal_mode', 'auto'),
+                        'vercel_runtime': config.get('vercel_runtime', ''),
+                        'docker_volumes': config.get('docker_volumes', []),
+                        'docker_mount_cwd_to_workspace': config.get(
+                            'docker_mount_cwd_to_workspace', False),
+                        'docker_forward_env': config.get('docker_forward_env', []),
+                        'docker_env': config.get('docker_env', {}),
+                        'docker_run_as_host_user': config.get(
+                            'docker_run_as_host_user', False),
+                        'docker_extra_args': config.get('docker_extra_args', []),
+                        'docker_shm_size': config.get('docker_shm_size', '1g'),
+                        'docker_network': config.get('docker_network', True),
+                        'docker_persist_across_processes': config.get(
+                            'docker_persist_across_processes', True),
+                        'docker_orphan_reaper': config.get(
+                            'docker_orphan_reaper', True),
+                    }
+                local_config = None
+                if env_type == 'local':
+                    local_config = {
+                        'persistent': config.get('local_persistent', False),
+                    }
+                new_env = tt._create_environment(
+                    env_type=env_type, image=image, cwd=cwd,
+                    timeout=timeout or config.get('timeout', 180),
+                    ssh_config=ssh_config, container_config=container_config,
+                    local_config=local_config, task_id=effective_task_id,
+                    host_cwd=config.get('host_cwd'),
+                )
+                with tt._env_lock:
+                    tt._active_environments[effective_task_id] = new_env
+                    tt._last_activity[effective_task_id] = time.time()
+                return new_env
+
+            def _publish(result, gen, validated_env):
+                # Owner publication inside the transaction: the live env was
+                # validated as THIS turn's generation, so the recorded
+                # per-task owner tracks the exact object.
+                if gen is not None and validated_env is not None:
+                    try:
+                        _mark_env_backend_generation(effective_task_id, gen)
+                    except Exception:
+                        pass
+
+            try:
+                env = _acquire_backend_object(
+                    tt, effective_task_id, task_id, _acquire_env,
+                    on_acquired=_publish,
+                )
+            except ImportError:
+                # Backend disabled — same graceful contract the installed
+                # terminal tool returns when environment creation fails.
+                return json.dumps({
+                    'output': '',
+                    'exit_code': -1,
+                    'error': 'Terminal tool disabled: environment creation failed',
+                    'status': 'disabled',
+                }, ensure_ascii=False)
+            # Fail-closed pre-execution gate: the exact validated object must
+            # still occupy the registry slot the original tool will reuse —
+            # execution must never begin against a replacement.
+            with tt._env_lock:
+                live = (
+                    tt._active_environments.get(effective_task_id)
+                    or (tt._active_environments.get(task_id) if task_id else None)
+                )
+            if live is not env:
+                raise RuntimeError(
+                    'Terminal backend environment changed after ownership '
+                    'validation; refusing to execute against a replacement '
+                    '(fail-closed)'
+                )
+            # Lock released — only now does the command execute, against the
+            # exact validated environment.
+            #
+            # Execution lease: the installed terminal_tool re-reads the
+            # registry by key before env.execute(), so a retirement between
+            # this final check and that lookup would execute the command
+            # against a replacement.  The lease pins the validated object for
+            # the duration of the command: every WebUI retirement path defers
+            # removal while a lease is held, and the registry is re-checked
+            # on release.
+            if env is not None:
+                _acquire_env_execution_lease(env)
+            try:
+                return original_terminal_tool(
+                    command, background=background, timeout=timeout,
+                    task_id=task_id, session_id=session_id, force=force,
+                    workdir=workdir, pty=pty,
+                    notify_on_complete=notify_on_complete,
+                    watch_patterns=watch_patterns,
+                )
+            finally:
+                if env is not None:
+                    _release_env_execution_lease(env)
+
+        tt.terminal_tool = _wrapped_terminal_tool
+
+    # 2) file_tools._get_file_ops — previously bypassed the guard entirely:
+    #    it reused _active_environments directly without any ownership check,
+    #    and its post-hoc tag could bless a wrapper whose underlying env came
+    #    from another generation.  The final exact check now gates the tag,
+    #    and the wrapper must PROVE it references the exact validated registry
+    #    object: the installed fast path returns a cached wrapper whenever a
+    #    live env occupies the task slot, so a cached wrapper around a
+    #    replaced env X can be returned while registry env Y is what passed
+    #    the ownership check.  Stale wrappers are evicted before the original
+    #    runs and the returned wrapper is verified by object identity.
+    try:
+        ft = importlib.import_module('tools.file_tools')
+    except ImportError:
+        ft = None
+    if ft is not None and hasattr(ft, '_get_file_ops'):
+        original_get_file_ops = ft._get_file_ops
+
+        def _wrapped_get_file_ops(task_id="default"):
+            effective_task_id = tt._resolve_container_task_id(task_id)
+            turn_gen = _get_turn_generation()
+
+            def _acquire():
+                if turn_gen is not None:
+                    _evict_stale_file_ops_cache_entry(
+                        ft, effective_task_id, turn_gen,
+                    )
+                    _evict_file_ops_wrapping_stale_env(
+                        ft, effective_task_id, tt, task_id,
+                    )
+                return original_get_file_ops(task_id)
+
+            def _publish(file_ops, gen, validated_env):
+                # Bless the wrapper ONLY when it references the EXACT
+                # validated registry object (object identity, not a tag):
+                # a cached wrapper around a replaced env must never be
+                # blessed just because the registry env passed the check.
+                if (
+                    gen is not None
+                    and file_ops is not None
+                    and validated_env is not None
+                    and getattr(file_ops, 'env', None) is validated_env
+                ):
+                    try:
+                        file_ops._webui_backend_generation = gen
+                        _mark_file_backend_generation(effective_task_id, gen)
+                    except Exception:
+                        pass
+
+            result = _acquire_backend_object(
+                tt, effective_task_id, task_id, _acquire,
+                on_acquired=_publish,
+            )
+            if turn_gen is not None:
+                # Fail-closed exact-identity gate: never serve a wrapper that
+                # does not reference the exact validated registry object.
+                live_env = _get_registry_env(tt, effective_task_id, task_id)
+                if getattr(result, 'env', None) is not live_env:
+                    raise RuntimeError(
+                        'File ops wrapper does not reference the exact '
+                        'validated backend environment; refusing to serve a '
+                        'stale wrapper (fail-closed)'
+                    )
+            return result
+
+        ft._get_file_ops = _wrapped_get_file_ops
+
+    # 3) code_execution_tool._get_or_create_env — previously bypassed the
+    #    guard entirely: it reused _active_environments directly.
+    try:
+        cet = importlib.import_module('tools.code_execution_tool')
+    except ImportError:
+        cet = None
+    if cet is not None and hasattr(cet, '_get_or_create_env'):
+        original_get_or_create_env = cet._get_or_create_env
+
+        def _wrapped_get_or_create_env(task_id):
+            effective_task_id = tt._resolve_container_task_id(task_id)
+            turn_gen = _get_turn_generation()
+
+            def _acquire():
+                return original_get_or_create_env(task_id)
+
+            def _publish(result, gen, validated_env):
+                # Publish ownership ONLY when the returned env IS the exact
+                # validated registry object — a replaced env must never be
+                # blessed or recorded as this turn's owner.
+                if (
+                    gen is not None
+                    and result is not None
+                    and validated_env is not None
+                ):
+                    try:
+                        env = result[0] if isinstance(result, tuple) else result
+                        if env is validated_env:
+                            if (
+                                env is not None
+                                and getattr(env, '_webui_backend_generation', None)
+                                is None
+                            ):
+                                env._webui_backend_generation = gen
+                            _mark_env_backend_generation(effective_task_id, gen)
+                    except Exception:
+                        pass
+
+            result = _acquire_backend_object(
+                tt, effective_task_id, task_id, _acquire,
+                on_acquired=_publish,
+            )
+            if turn_gen is not None:
+                # Fail-closed exact-identity gate: never hand the caller an
+                # env that is not the exact validated registry object.
+                live_env = _get_registry_env(tt, effective_task_id, task_id)
+                env = result[0] if isinstance(result, tuple) else result
+                if env is not live_env:
+                    raise RuntimeError(
+                        'Execute-code environment does not reference the '
+                        'exact validated backend environment; refusing to '
+                        'use a replaced env (fail-closed)'
+                    )
+            return result
+
+        cet._get_or_create_env = _wrapped_get_or_create_env
+
+    # 4) Tag envs at creation — the single creation funnel shared by all three
+    #    paths (terminal_tool, _get_file_ops, _get_or_create_env all call
+    #    _create_environment when no env exists).  Tagging happens before the
+    #    env is stored in the registry, so there is no untagged window.
+    if hasattr(tt, '_create_environment'):
+        original_create_environment = tt._create_environment
+
+        def _wrapped_create_environment(*args, **kwargs):
+            env = original_create_environment(*args, **kwargs)
+            turn_gen = _get_turn_generation()
+            if turn_gen is not None and env is not None:
+                try:
+                    env._webui_backend_generation = turn_gen
+                except Exception:
+                    pass
+            return env
+
+        tt._create_environment = _wrapped_create_environment
+
+    _terminal_env_guard_installed = True
+    logger.debug(
+        'Installed terminal env generation guard '
+        '(terminal/file/code-execution paths)'
+    )
 
 
 # ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
@@ -9369,6 +10911,12 @@ def _run_agent_streaming(
         except Exception:
             pass  # MCP not available or not configured — non-fatal
 
+        # #5937: the terminal backend generation guard + turn registration are
+        # performed INSIDE the guaranteed try/finally below (first statements
+        # of the try), so the finally ALWAYS unregisters this turn — even when
+        # the agent body raises mid-turn.  See _begin_turn_generation /
+        # _end_turn_generation.
+
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
         # detected, without waiting for the next on_tool() poll cycle.
@@ -9458,6 +11006,21 @@ def _run_agent_streaming(
             )
 
         try:
+            # #5937: install the shared terminal/file/code-execution ownership
+            # guard and register THIS turn's active-use generation FIRST, so
+            # the finally below (which calls _end_turn_generation) is the
+            # guaranteed outer try/finally for the registration — even when the
+            # agent body raises, the registration is released and deferred
+            # stale evictions are drained.
+            _install_terminal_env_generation_guard()
+            # #5937/#6586: the turn's immutable backend config snapshot folds
+            # in the effective workspace CWD (the same value written to
+            # os.environ['TERMINAL_CWD'] below) so construction and identity
+            # fingerprinting see the identical object.
+            _begin_turn_generation({
+                **_safe_profile_runtime_env,
+                'TERMINAL_CWD': str(s.workspace),
+            })
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
             # Per-message reasoning: dict maps assistant-message index → accumulated text
@@ -12340,6 +13903,16 @@ def _run_agent_streaming(
                     _unreg_clarify_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
+            # #5937: publish ownership of the env THIS turn acquired and used
+            # (exact-object/exact-generation only — never retag an env
+            # another turn created).  Run before env var restoration so the
+            # registry is still readable.  See _refresh_env_generation_tag.
+            _refresh_env_generation_tag()
+            # Active-use ownership: this turn has finished; release the
+            # registration and drain any stale eviction deferred while it was
+            # still executing (guaranteed outer try/finally — see
+            # _begin_turn_generation above).
+            _end_turn_generation()
             with _ENV_LOCK:
                 for _key, _old_value in old_profile_env.items():
                     if _old_value is None: os.environ.pop(_key, None)
