@@ -881,7 +881,7 @@ const LOCALES = {
     settings_autosave_retry: 'Retry',
     settings_label_language: 'Language',
     settings_label_quota_chip: 'Show provider quota chip in composer',
-    settings_desc_quota_chip: 'Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.',
+    settings_desc_quota_chip: 'Displays an ambient remaining-quota indicator (e.g. OpenRouter credits, Z.AI account limits) in the composer footer. Default off. Shown when the composer footer has room (hidden in its space-saving burger mode on narrow layouts).',
     settings_label_conversation_outline: 'Show conversation outline',
     settings_desc_conversation_outline: 'Show a desktop-only jump list for user questions in the current conversation. Off by default.',
     settings_label_hide_suggestions: 'Hide new-chat suggestions',
