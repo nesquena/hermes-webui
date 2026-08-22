@@ -3990,6 +3990,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
     const finalize=!!(options&&options.finalize);
     const value=String(text||'');
+    const transformedValue=typeof _transformBareSessionReferences==='function'
+      ? _transformBareSessionReferences(value,{allowEndBoundary:finalize}) : value;
     const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
     let st;
     let _rewindPrevRendered='';
@@ -4001,7 +4003,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live prose), the rebuilt node would re-create every word as a new
       // is-new span and replay the fade on ALL visible words at once. Mute the
       // fade renderer for the common prefix so only the post-rewind tail fades.
-      if(st && st.writtenText && !value.startsWith(st.writtenText)){
+      if(st && st.writtenText && !transformedValue.startsWith(st.writtenText)){
         // Snapshot the OLD rendered text BEFORE clearing the node. The silent
         // prefix is later recomputed in RENDERED-text space (old node text vs
         // new node text) — source-space byte counts are wrong here because
@@ -4013,7 +4015,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         st=null;
       }
       if(st && st.fade!==fade) st=null;
-      if(st && st.finalized && st.writtenText!==value){
+      if(st && st.finalized && st.writtenText!==transformedValue){
         const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
         if(typeof _smdMediaTailClear === 'function') _smdMediaTailClear(st.parser);
         if(typeof _smdClearParserIdentity === 'function') _smdClearParserIdentity(body, st.parser);
@@ -4042,10 +4044,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       const body=st.node&&st.node.querySelector&&st.node.querySelector('.msg-body');
       if(body&&body.classList) body.classList.toggle('stream-fade-active',fade);
-      const delta=value.slice(st.writtenText.length);
+      const delta=transformedValue.slice(st.writtenText.length);
       if(delta){
         window.smd.parser_write(st.parser,delta);
-        st.writtenText=value;
+        st.writtenText=transformedValue;
       }
       // Rewind rebuild: mute the rendered common prefix (old node text vs new
       // node text) so already-visible words do not replay their fade; only the
@@ -4473,6 +4475,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdWrite(displayText, fade=false){
     if(!_smdParser||!window.smd) return;
     displayText=String(displayText||'');
+    if(typeof _transformBareSessionReferences==='function') displayText=_transformBareSessionReferences(displayText,{allowEndBoundary:false});
     let _rewindPrevRendered='';
     // Self-heal desyncs: if displayText no longer starts with what we have
     // already written (e.g. due to stream sanitization/tag stripping), incremental slicing
@@ -4529,13 +4532,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdLinkHref(raw){
     const href=String(raw||'');
     if(/^session:\/\//i.test(href)){
-      const sid=href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
+      const parts=typeof _sessionReferenceParts==='function'
+        ? _sessionReferenceParts(href) : null;
+      if(parts&&parts.hasProfile&&!parts.profileValid) return '#';
+      const sid=parts?parts.sid:href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
+      const profile=parts&&parts.hasProfile?parts.profile:null;
       try{
         const decoded=decodeURIComponent(sid);
-        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded);
-        return 'session/'+encodeURIComponent(decoded);
+        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded,profile);
+        return 'session/'+encodeURIComponent(decoded)+(profile!==null?'?profile='+encodeURIComponent(profile):'');
       }catch(_){
-        return 'session/'+encodeURIComponent(sid);
+        return 'session/'+encodeURIComponent(sid)+(profile!==null?'?profile='+encodeURIComponent(profile):'');
       }
     }
     if(/^workspace:\/\//i.test(href)){
@@ -5220,13 +5227,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_streamFadeDomText&&assistantBody.textContent){
       assistantBody.textContent='';
     }
-    if(!String(next.text||'').startsWith(_streamFadeDomText)){
+    const nextText=String(next.text||'');
+    if(!nextText.startsWith(_streamFadeDomText)){
       assistantBody.textContent='';
       _streamFadeDomText='';
     }
-    const delta=String(next.text||'').slice(_streamFadeDomText.length);
+    const transformed=typeof _transformBareSessionReferences==='function'
+      ? _transformBareSessionReferences(nextText,{allowEndBoundary:false}) : nextText;
+    if(transformed!==nextText){
+      assistantBody.innerHTML=renderMd ? renderMd(transformed,{skipBareSessionTransform:true}) : esc(nextText);
+      _sanitizeSmdLinks(assistantBody);
+      _streamFadeDomText=nextText;
+      return next.caughtUp;
+    }
+    const delta=nextText.slice(_streamFadeDomText.length);
     if(delta) assistantBody.appendChild(document.createTextNode(delta));
-    _streamFadeDomText=String(next.text||'');
+    _streamFadeDomText=nextText;
     return next.caughtUp;
   }
   function _streamFadeCurrentDisplayText(){

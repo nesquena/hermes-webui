@@ -12,11 +12,10 @@ asserting the rendered HTML for the most common LLM-output shapes.
 Add a case here whenever the renderer fix targets a class of input the
 Python mirror cannot exercise faithfully.
 """
-import os
+import json
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -32,9 +31,13 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
+const messagesSrc = process.argv[4] ? fs.readFileSync(process.argv[4], 'utf8') : '';
 global.window = {};
 global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), baseURI: 'http://localhost/app/' };
-function _sessionUrlForSid(sid) { return '/app/session/' + encodeURIComponent(String(sid || '')); }
+function _sessionUrlForSid(sid, profile) {
+  const base = '/app/session/' + encodeURIComponent(String(sid || ''));
+  return profile ? base + '?profile=' + encodeURIComponent(String(profile)) : base;
+}
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
@@ -56,26 +59,93 @@ function _inlineMediaHtmlForRef(ref){
   return `<img class="msg-media-img" src="api/media?path=${encodeURIComponent(r)}" alt="image" loading="lazy">`;
 }
 
-function extractFunc(name) {
+function extractFunc(name, source = src) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
-  const start = src.search(re);
+  const start = source.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start);
+  let i = source.indexOf('{', start);
   let depth = 1; i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
+  while (depth > 0 && i < source.length) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') depth--;
     i++;
   }
-  return src.slice(start, i);
+  return source.slice(start, i);
+}
+function extractOptionalFunc(name, source = src) {
+  try { return extractFunc(name, source); } catch (_) { return ''; }
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+const bareSessionTransform = extractOptionalFunc('_transformBareSessionReferences');
+if (bareSessionTransform) eval(bareSessionTransform);
+const sessionReferenceParts = extractOptionalFunc('_sessionReferenceParts');
+if (sessionReferenceParts) eval(sessionReferenceParts);
+const _renderCache = new Map();
+const _renderCacheMax = 300;
+const userFencedRenderer = extractOptionalFunc('_renderUserFencedBlocks');
+if (userFencedRenderer) eval(userFencedRenderer);
+const renderCacheKey = extractOptionalFunc('_renderCacheKey');
+if (renderCacheKey) eval(renderCacheKey);
+const cachedRenderer = extractOptionalFunc('_getCachedRender');
+if (cachedRenderer) eval(cachedRenderer);
 eval(extractFunc('renderMd'));
 
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
-process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
+process.stdin.on('end', () => {
+  if (process.argv[3] === 'transform') {
+    process.stdout.write(typeof _transformBareSessionReferences === 'function'
+      ? _transformBareSessionReferences(buf) : buf);
+    return;
+  }
+  if (process.argv[3] === 'transform-live') {
+    process.stdout.write(typeof _transformBareSessionReferences === 'function'
+      ? _transformBareSessionReferences(buf, {allowEndBoundary:false}) : buf);
+    return;
+  }
+  if (process.argv[3] === 'stream') {
+    const writes = [];
+    let rebuilds = 0;
+    let _smdParser = {};
+    let _smdWrittenLen = 0;
+    let _smdWrittenText = '';
+    let _streamingKatexTimer = null;
+    const assistantBody = null;
+    window.smd = { parser_write: (_parser, delta) => writes.push(delta) };
+    function _smdNewParser() { rebuilds++; _smdParser = {}; }
+    function _scheduleStreamingKatex() {}
+    function _smdMediaTailFlush() {}
+    function _smdMediaTailClear() {}
+    function _smdClearParserIdentity() {}
+    eval(extractFunc('_smdWrite', messagesSrc));
+    const chunks = JSON.parse(buf);
+    let full = '';
+    for (const chunk of chunks) {
+      full += chunk;
+      _smdWrite(full);
+    }
+    process.stdout.write(JSON.stringify({ writes, rebuilds, final: writes.at(-1) || '', html: renderMd(full) }));
+    return;
+  }
+  if (process.argv[3] === 'cache') {
+    window._renderUserMarkdown = false;
+    const off = _getCachedRender(buf, true);
+    window._renderUserMarkdown = true;
+    const on = _getCachedRender(buf, true);
+    window._renderUserMarkdown = false;
+    const offAgain = _getCachedRender(buf, true);
+    process.stdout.write(JSON.stringify({ off, on, offAgain }));
+    return;
+  }
+  if (process.argv[3] === 'smd-href') {
+    eval(extractFunc('_smdLinkHref', messagesSrc));
+    const values = JSON.parse(buf);
+    process.stdout.write(JSON.stringify(values.map(value => _smdLinkHref(value))));
+    return;
+  }
+  process.stdout.write(renderMd(buf));
+});
 """
 
 
@@ -87,10 +157,13 @@ def driver_path(tmp_path_factory):
     return str(p)
 
 
-def _render(driver_path, markdown: str) -> str:
+def _render(driver_path, markdown: str, mode: str | None = None) -> str:
     """Run renderMd against the actual ui.js and return the rendered HTML."""
+    args = [NODE, driver_path, str(UI_JS_PATH)]
+    if mode:
+        args.append(mode)
     result = subprocess.run(
-        [NODE, driver_path, str(UI_JS_PATH)],
+        args,
         input=markdown,
         capture_output=True,
         text=True,
@@ -99,6 +172,19 @@ def _render(driver_path, markdown: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
+
+
+def _stream_write_chunks(driver_path, chunks):
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH), "stream", str(REPO_ROOT / "static" / "messages.js")],
+        input=json.dumps(chunks),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node driver failed: {result.stderr}")
+    return json.loads(result.stdout)
 
 
 
@@ -123,6 +209,210 @@ class TestSessionInternalLinks:
         out = _render(driver_path, '<a class="session-link" href="/anything/foo/session/abc">bad</a>')
         assert 'href="/anything/foo/session/abc"' not in out
         assert '<a>bad</a>' in out
+
+    def test_profile_text_after_fragment_is_not_treated_as_query_intent(self, driver_path):
+        out = _render(driver_path, "[Open](session://abc123#frag?profile=team_1)")
+        assert 'href="/app/session/abc123"' in out
+        assert "profile=team_1" not in out
+
+
+class TestBareSessionReferences:
+    def test_profile_bearing_reference_keeps_explicit_profile_in_href(self, driver_path):
+        out = _render(driver_path, "See @session:team_1-alpha/abc123.")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/abc123?profile=team_1-alpha"' in out
+        assert ">abc123</a>." in out
+        assert "@session:team_1-alpha/abc123" not in out
+
+    def test_profileless_reference_stays_same_origin_and_short_labeled(self, driver_path):
+        out = _render(driver_path, "Open @session:abc123")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/abc123"' in out
+        assert ">abc123</a>" in out
+
+    def test_standard_smd_rebuilds_when_reference_completes_across_chunks(self, driver_path):
+        result = _stream_write_chunks(
+            driver_path,
+            ["Answer: @session:p/", "abc123. "],
+        )
+        assert result["rebuilds"] >= 1
+        assert result["final"] == "Answer: [abc123](session://abc123?profile=p). "
+
+    def test_invalid_explicit_profile_is_inert_in_settled_and_smd_paths(self, driver_path):
+        out = _render(driver_path, "[bad](session://abc123?profile=Bad)")
+        assert 'href="#"' in out
+        assert 'href="/app/session/abc123?profile=Bad"' not in out
+        result = subprocess.run(
+            [
+                NODE,
+                driver_path,
+                str(UI_JS_PATH),
+                "smd-href",
+                str(REPO_ROOT / "static" / "messages.js"),
+            ],
+            input=json.dumps([
+                "session://abc123?profile=Bad",
+                "session://abc123?profile=team_1",
+                "session://abc123",
+                "session://abc123#frag?profile=team_1",
+            ]),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [
+            "#",
+            "/app/session/abc123?profile=team_1",
+            "/app/session/abc123",
+            "/app/session/abc123",
+        ]
+
+    def test_reference_punctuation_and_emphasis_boundaries(self, driver_path):
+        out = _render(
+            driver_path,
+            '"@session:abc123" “@session:def456” **@session:ghi789** '
+            "@session:dash123— @session:ellipsis123…",
+        )
+        assert out.count('class="session-link"') == 5
+        for sid in ("abc123", "def456", "ghi789", "dash123", "ellipsis123"):
+            assert f'href="/app/session/{sid}"' in out
+            assert f">{sid}</a>" in out
+
+    def test_unicode_word_embedded_reference_remains_literal(self, driver_path):
+        src = "café@session:abc123 漢@session:def456 e\u0301@session:ghi789"
+        out = _render(driver_path, src)
+        assert 'class="session-link"' not in out
+        assert src in out
+
+    def test_raw_html_attributes_are_not_rewritten_as_session_links(self, driver_path):
+        src = (
+            '<img alt="@session:image123" src="https://example.test/x.png"> '
+            '&lt;img alt="@session:encoded123" src="x.png"&gt; '
+            "See @session:valid123."
+        )
+        transformed = _render(driver_path, src, "transform")
+        out = _render(driver_path, src)
+        assert out.count('class="session-link"') == 1
+        assert 'href="/app/session/valid123"' in out
+        assert "@session:image123" in out
+        assert "@session:image123" in transformed
+        assert "@session:encoded123" in transformed
+        assert "session://image123" not in out
+        assert "session://encoded123" not in out
+
+    def test_quoted_and_multiline_raw_html_attributes_remain_literal(self, driver_path):
+        src = (
+            '<img data-x="> @session:quoted123 " src="x">\n'
+            '<img\n alt="@session:multiline123"\n src="x">\n'
+            '&lt;img data-x="&gt; @session:encoded123 " src="x"&gt; '
+            '&lt;img data-x=&quot;&gt; @session:entityquote123 &quot; src=&quot;x&quot;&gt; '
+            '&lt;img data-x=&#x22;&gt; @session:hexquote123 &#x22; src=&#x22;x&#x22;&gt; '
+            "See @session:valid123."
+        )
+        transformed = _render(driver_path, src, "transform")
+        for sid in ("quoted123", "multiline123", "encoded123", "entityquote123", "hexquote123"):
+            assert f"@session:{sid}" in transformed
+            assert f"session://{sid}" not in transformed
+        assert "[valid123](session://valid123)" in transformed
+
+    def test_multi_backtick_code_spans_remain_literal(self, driver_path):
+        src = (
+            "``@session:double123`` ```@session:triple123``` "
+            "`line one\n@session:multiline123 \n` See @session:valid123."
+        )
+        transformed = _render(driver_path, src, "transform")
+        assert "``@session:double123``" in transformed
+        assert "```@session:triple123```" in transformed
+        assert "@session:multiline123" in transformed
+        assert "session://multiline123" not in transformed
+        assert "[valid123](session://valid123)" in transformed
+
+    def test_nested_markdown_link_and_image_labels_remain_literal(self, driver_path):
+        src = (
+            "[label [nested @session:link123] text](https://example.test/path_(one)) "
+            "![alt [nested @session:image123] text](https://example.test/x.png) "
+            "See @session:valid123."
+        )
+        transformed = _render(driver_path, src, "transform")
+        assert "@session:link123" in transformed
+        assert "@session:image123" in transformed
+        assert "session://link123" not in transformed
+        assert "session://image123" not in transformed
+        assert "[valid123](session://valid123)" in transformed
+
+    def test_live_transform_defers_end_of_buffer_reference_until_boundary(self, driver_path):
+        assert _render(driver_path, "See @session:abc123", "transform-live") == "See @session:abc123"
+        assert _render(driver_path, "See @session:abc123.", "transform-live") == "See @session:abc123."
+        assert _render(driver_path, "See @session:abc123. ", "transform-live") == "See [abc123](session://abc123). "
+        hostile = _stream_write_chunks(driver_path, ["See @session:abc123", '"tag'])
+        assert hostile["rebuilds"] == 0
+        assert "".join(hostile["writes"]) == 'See @session:abc123"tag'
+        hostile_query = _stream_write_chunks(driver_path, ["See @session:query123", "?", "next=1"])
+        assert hostile_query["rebuilds"] == 0
+        assert "".join(hostile_query["writes"]) == "See @session:query123?next=1"
+        partial_link = _stream_write_chunks(
+            driver_path,
+            ["[label @session:inner123", "](", "https://example.test/x)"],
+        )
+        assert partial_link["rebuilds"] == 0
+        assert "".join(partial_link["writes"]) == "[label @session:inner123](https://example.test/x)"
+
+    def test_hostile_continuations_remain_literal(self, driver_path):
+        src = '@session:abc123"tag @session:def456**tag @session:ghi789?next=1'
+        out = _render(driver_path, src)
+        assert 'class="session-link"' not in out
+        assert src in out
+
+    def test_id_underscores_are_not_consumed_as_emphasis_wrappers(self, driver_path):
+        out = _render(
+            driver_path,
+            "x/@session:path @session:mail@example.test **@session:abc123__**",
+        )
+        assert out.count('class="session-link"') == 1
+        assert ">abc123__</a>" in out
+        assert "x/@session:path" in out
+        assert "@session:mail@example.test" in out
+
+    def test_existing_protected_regions_remain_literal_settled_and_live(self, driver_path):
+        src = (
+            '`@session:inline123` [@session:label123](https://example.test/@session/dest123) '
+            '![image @session:image123](https://example.test/@session/image123.png)\n'
+            '```text\n'
+            '@session:fenced123\n'
+            '```\n'
+            '<a href="/docs">@session:raw123</a> '
+            '&lt;pre&gt;@session:encodedpre123&lt;/pre&gt; '
+            '&lt;code&gt;@session:encodedcode123&lt;/code&gt; '
+            '&lt;a href="/docs"&gt;@session:encodedanchor123&lt;/a&gt; '
+            'https://example.test/?next=@session:url123 See @session:valid123. '
+        )
+        out = _render(driver_path, src)
+        live = _stream_write_chunks(driver_path, [src])
+        assert out.count('class="session-link"') == 1
+        assert 'href="/app/session/valid123"' in out
+        assert '@session:inline123' in out
+        assert '@session:label123' in out
+        assert '@session:image123' in out
+        assert '@session:fenced123' in out
+        assert '@session:raw123' in out
+        assert '@session:encodedpre123' in out
+        assert '@session:encodedcode123' in out
+        assert '@session:encodedanchor123' in out
+        assert '@session:url123' in out
+        assert live['final'] == src.replace(
+            '@session:valid123', '[valid123](session://valid123)', 1)
+
+    def test_user_render_cache_respects_markdown_setting_and_toggle(self, driver_path):
+        src = '**literal** [link](https://example.test) @session:abc123\n```\n@session:fenced123\n```'
+        result = json.loads(_render(driver_path, src, 'cache'))
+        assert 'class="session-link"' in result['off']
+        assert '**literal**' in result['off']
+        assert '[link](https://example.test)' in result['off']
+        assert '@session:fenced123' in result['off']
+        assert '<strong>literal</strong>' in result['on']
+        assert 'target="_blank"' in result['on']
+        assert result['offAgain'] == result['off']
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Blockquote prefix strip — the bug commit 04e7b53 introduced was a one-char

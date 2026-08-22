@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 import tempfile
@@ -232,6 +233,76 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
     assert "animationDelay" not in renderer_block
     assert "_STREAM_FADE_STAGGER_MS" not in MESSAGES_JS
     assert "_streamFadeAppendOffset" not in MESSAGES_JS
+
+
+def test_transparent_stream_fade_promotes_completed_session_reference_to_link():
+    script = (
+        function_block(MESSAGES_JS, "_renderStreamingFadeMarkdown")
+        + "\nconst uiSrc=require('fs').readFileSync("
+        + json.dumps(str(REPO / "static" / "ui.js"))
+        + ", 'utf8');\n"
+        + r"""
+function extractUi(name){
+  const re=new RegExp('function\\s+'+name+'\\s*\\(');
+  const start=uiSrc.search(re);
+  if(start<0) throw new Error(name+' not found');
+  let i=uiSrc.indexOf('{',start),depth=1;i++;
+  while(depth>0&&i<uiSrc.length){
+    if(uiSrc[i]==='{') depth++;
+    else if(uiSrc[i]==='}') depth--;
+    i++;
+  }
+  return uiSrc.slice(start,i);
+}
+eval(extractUi('_matchBacktickFenceLine'));
+eval(extractUi('_isBacktickFenceClose'));
+eval(extractUi('_transformBareSessionReferences'));
+let _smdParser=null;
+let _smdReconnect=false;
+let _streamFadeDomText='';
+let sanitized=0;
+let appended=0;
+const assistantBody={
+  _html:'',
+  textContent:'',
+  classList:{add(){}},
+  set innerHTML(value){ this._html=String(value||''); this.textContent=this._html.replace(/<[^>]+>/g,''); },
+  get innerHTML(){ return this._html; },
+  appendChild(node){ appended++; this.textContent+=String(node&&node.textContent||''); },
+};
+const document={createTextNode:text=>({textContent:String(text||'')})};
+function _streamFadeNextText(text){ return {text:String(text||''),caughtUp:true,changed:true}; }
+function _shouldUseTransparentStreamFade(){ return true; }
+function _smdEndParser(){}
+function _sanitizeSmdLinks(){ sanitized++; }
+function esc(value){ return String(value||''); }
+function renderMd(text, options){
+  const source=options&&options.skipBareSessionTransform?String(text||''):_transformBareSessionReferences(text);
+  return source.replace(
+    /\[([^\]]+)\]\(session:\/\/([^)]+)\)/g,
+    '<a class="session-link" href="/session/$2">$1</a>'
+  );
+}
+const result=_renderStreamingFadeMarkdown('See @session:abc123. ');
+const html=assistantBody.innerHTML;
+_renderStreamingFadeMarkdown('A @session:stable123. B @session:pending123');
+const mixed=assistantBody.innerHTML;
+_renderStreamingFadeMarkdown('A @session:stable123. B @session:pending123?next=1');
+const hostile=assistantBody.innerHTML;
+console.log(JSON.stringify({result,html,mixed,hostile,domText:_streamFadeDomText,sanitized,appended}));
+"""
+    )
+    result = run_node(script)
+    payload = json.loads(result.stdout.strip())
+    assert payload == {
+        "result": True,
+        "html": 'See <a class="session-link" href="/session/abc123">abc123</a>. ',
+        "mixed": 'A <a class="session-link" href="/session/stable123">stable123</a>. B @session:pending123',
+        "hostile": 'A <a class="session-link" href="/session/stable123">stable123</a>. B @session:pending123?next=1',
+        "domText": "A @session:stable123. B @session:pending123?next=1",
+        "sanitized": 3,
+        "appended": 0,
+    }
 
 
 def test_stream_fade_appends_new_spans_without_replacing_existing_nodes():

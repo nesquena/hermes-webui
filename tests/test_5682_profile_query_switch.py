@@ -43,7 +43,17 @@ function extractFunc(src, name) {{
   const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
   const start = src.search(re);
   if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{{', start);
+  const paramsStart = src.indexOf('(', start);
+  let paramsDepth = 0;
+  let paramsEnd = -1;
+  for (let p = paramsStart; p < src.length; p++) {{
+    if (src[p] === '(') paramsDepth++;
+    else if (src[p] === ')' && --paramsDepth === 0) {{
+      paramsEnd = p;
+      break;
+    }}
+  }}
+  let i = src.indexOf('{{', paramsEnd);
   let depth = 1; i++;
   while (depth > 0 && i < src.length) {{
     if (src[i] === '{{') depth++;
@@ -146,8 +156,8 @@ global.switchToProfile = async (name) => {
   const afterPrefill = window.location.pathname + window.location.search + window.location.hash;
   const profilePos = bootSrc.indexOf("const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;");
   const renderPos = bootSrc.indexOf("await renderSessionList();", profilePos);
-  const savedPos = bootSrc.indexOf("const saved=urlSession||savedLocal;", profilePos);
-  const loadPos = bootSrc.indexOf("await loadSession(saved, {preserveActiveInput:true});", profilePos);
+  const savedPos = bootSrc.indexOf("const saved=_profileScopedUrlSession.blocked?null:(urlSession||savedLocal);", profilePos);
+  const loadPos = bootSrc.indexOf("await loadSession(saved, _profileScopedUrlSession.loadOptions);", profilePos);
   const consumePos = bootSrc.indexOf("if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();", profilePos);
   const completedPos = bootSrc.indexOf("_profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;", profilePos);
   const changedPos = bootSrc.indexOf("_profileSwitchChangedProfile=", completedPos);
@@ -181,6 +191,192 @@ global.switchToProfile = async (name) => {
     assert payload["savedLocalAfterReload"] == "fresh-local"
     assert payload["blocksSavedLocal"] is True
     assert payload["keepsExplicitSession"] is False
+
+
+def test_profile_scoped_url_session_boot_state_fails_closed_and_disables_owner_discovery():
+    source = _node_prelude() + """
+global.S = { activeProfile: 'default', activeProfileIsDefault: true };
+evalSession('_profileMatchesActiveProfile');
+evalBoot('_profileScopedUrlSessionState');
+const valid = { hasParam:true, valid:true, name:'team_1' };
+const invalid = { hasParam:true, valid:false, name:'Bad' };
+const cases = {
+  ready: _profileScopedUrlSessionState(valid, 'abc123', true, 'team_1'),
+  failedSwitch: _profileScopedUrlSessionState(valid, 'abc123', false, 'default'),
+  mismatchedActive: _profileScopedUrlSessionState(valid, 'abc123', true, 'other'),
+  invalid: _profileScopedUrlSessionState(invalid, 'abc123', false, 'default'),
+  profileless: _profileScopedUrlSessionState(null, 'abc123', false, 'default'),
+  noUrlSession: _profileScopedUrlSessionState(valid, null, false, 'default'),
+};
+console.log(JSON.stringify(cases));
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["ready"] == {
+        "explicit": True,
+        "blocked": False,
+        "loadOptions": {"preserveActiveInput": True, "skipProfileResolve": True},
+    }
+    for key in ("failedSwitch", "mismatchedActive", "invalid"):
+        assert payload[key]["explicit"] is True
+        assert payload[key]["blocked"] is True
+        assert payload[key]["loadOptions"]["skipProfileResolve"] is True
+    for key in ("profileless", "noUrlSession"):
+        assert payload[key] == {
+            "explicit": False,
+            "blocked": False,
+            "loadOptions": {"preserveActiveInput": True},
+        }
+
+
+def test_duplicate_profile_query_is_invalid_and_profileless_url_clears_stale_intent():
+    assert "if(opts.clearProfileIntent) _setActiveSessionUrl(sid,null);" in SESSIONS_JS
+    assert "_setActiveSessionUrl(S.session.session_id,opts.clearProfileIntent?null:undefined);" in SESSIONS_JS
+    source = _node_prelude() + """
+global.window = {
+  location: new URL('https://example.test/app/?profile=team&profile=other&keep=1#frag'),
+  history: {
+    calls: [],
+    pushState(state, title, url) { this.calls.push({state,title,url}); }
+  }
+};
+global.document = { baseURI: 'https://example.test/app/' };
+evalSession('_profileQueryIntentFromLocation');
+evalSession('_sessionUrlForSid');
+evalSession('_setActiveSessionUrl');
+const intent = _profileQueryIntentFromLocation();
+const profileless = _sessionUrlForSid('abc123', null);
+const inherited = _sessionUrlForSid('abc123');
+_setActiveSessionUrl('abc123', null);
+console.log(JSON.stringify({intent,profileless,inherited,promoted:window.history.calls[0]}));
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["intent"] == {"hasParam": True, "valid": False, "name": "team"}
+    assert payload["profileless"] == "/app/session/abc123?keep=1#frag"
+    assert payload["inherited"] == "/app/session/abc123?profile=team&profile=other&keep=1#frag"
+    assert payload["promoted"] == {
+        "state": {"session_id": "abc123"},
+        "title": "",
+        "url": "/app/session/abc123?keep=1#frag",
+    }
+
+
+def test_session_reference_navigation_switches_before_load_and_fails_closed():
+    source = _node_prelude() + f"""
+const uiSrc = {UI_JS!r};
+function extractUi(name) {{
+  const re = new RegExp('(?:async\\\\s+)?function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = uiSrc.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = uiSrc.indexOf('{{', start), depth = 1; i++;
+  while (depth > 0 && i < uiSrc.length) {{
+    if (uiSrc[i] === '{{') depth++;
+    else if (uiSrc[i] === '}}') depth--;
+    i++;
+  }}
+  return uiSrc.slice(start, i);
+}}
+global.window = {{ location: new URL('https://example.test/app/') }};
+global.document = {{ baseURI: 'https://example.test/app/' }};
+global.S = {{ activeProfile: 'default', activeProfileIsDefault: true }};
+global._showAllProfiles = false;
+global._profileSwitchOpeningExistingSession = false;
+evalSession('_profileMatchesActiveProfile');
+evalSession('_sidebarSessionProfileName');
+evalSession('_isValidProfileName');
+evalSession('_switchToSessionProfile');
+evalSession('_ensureSidebarSessionProfile');
+evalSession('_openSessionReference');
+evalSession('_sessionUrlForSid');
+globalThis._navigateInternalSessionLink = (0, eval)('(' + extractUi('_navigateInternalSessionLink') + ')');
+const events = [];
+let switchResult = true;
+let switchUpdatesProfile = true;
+let switchThrows = false;
+global.switchToProfile = async (name) => {{
+  events.push({{ kind: 'switch', name, existingGuard: _profileSwitchOpeningExistingSession }});
+  if (switchThrows) throw new Error('switch failed');
+  if (switchResult && switchUpdatesProfile) {{
+    S.activeProfile = name;
+    S.activeProfileIsDefault = name === 'default';
+  }}
+  return switchResult;
+}};
+global.loadSession = async (sid, opts) => {{ events.push({{ kind: 'load', sid, skipProfileResolve: !!(opts && opts.skipProfileResolve), clearProfileIntent: !!(opts && opts.clearProfileIntent), force: !!(opts && opts.force) }}); }};
+async function attempt(href, opts={{}}) {{
+  events.length = 0;
+  S.activeProfile = opts.active || 'default';
+  S.activeProfileIsDefault = S.activeProfile === 'default';
+  S.session = opts.session || null;
+  switchResult = opts.switchResult === undefined ? true : opts.switchResult;
+  switchUpdatesProfile = opts.switchUpdatesProfile !== false;
+  switchThrows = opts.switchThrows === true;
+  const result = await _navigateInternalSessionLink(href);
+  return {{ result, events: events.slice() }};
+}}
+(async () => {{
+  const success = await attempt('/app/session/abc123?profile=team_1');
+  const failed = await attempt('/app/session/abc123?profile=team_1', {{ switchResult: false }});
+  const threw = await attempt('/app/session/abc123?profile=team_1', {{ switchThrows: true }});
+  const mismatched = await attempt('/app/session/abc123?profile=team_1', {{ switchUpdatesProfile: false }});
+  const invalid = await attempt('/app/session/abc123?profile=Bad');
+  const duplicate = await attempt('/app/session/abc123?profile=team_1&profile=other');
+  const crossProfileSameSid = await attempt('/app/session/abc123?profile=team_1', {{ active:'alpha', session:{{session_id:'abc123',profile:'alpha'}} }});
+  const same = await attempt('/app/session/abc123?profile=team_1', {{ active: 'team_1' }});
+  const profileless = await attempt('/app/session/plain123');
+  console.log(JSON.stringify({{ success, failed, threw, mismatched, invalid, duplicate, crossProfileSameSid, same, profileless }}));
+}})().catch(err => {{ console.error(err); process.exit(1); }});
+"""
+    payload = json.loads(_run_node(source))
+    assert payload["success"] == {
+        "result": True,
+        "events": [
+            {"kind": "switch", "name": "team_1", "existingGuard": True},
+            {"kind": "load", "sid": "abc123", "skipProfileResolve": True, "clearProfileIntent": False, "force": False},
+        ],
+    }
+    assert payload["failed"] == {"result": False, "events": [{"kind": "switch", "name": "team_1", "existingGuard": True}]}
+    assert payload["threw"] == {"result": False, "events": [{"kind": "switch", "name": "team_1", "existingGuard": True}]}
+    assert payload["mismatched"] == {"result": False, "events": [{"kind": "switch", "name": "team_1", "existingGuard": True}]}
+    assert payload["invalid"] == {"result": False, "events": []}
+    assert payload["duplicate"] == {"result": False, "events": []}
+    assert payload["crossProfileSameSid"] == {
+        "result": True,
+        "events": [
+            {"kind": "switch", "name": "team_1", "existingGuard": True},
+            {"kind": "load", "sid": "abc123", "skipProfileResolve": True, "clearProfileIntent": False, "force": True},
+        ],
+    }
+    assert payload["same"] == {
+        "result": True,
+        "events": [{"kind": "load", "sid": "abc123", "skipProfileResolve": True, "clearProfileIntent": False, "force": False}],
+    }
+    assert payload["profileless"] == {
+        "result": True,
+        "events": [{"kind": "load", "sid": "plain123", "skipProfileResolve": False, "clearProfileIntent": True, "force": False}],
+    }
+
+
+def test_sidebar_open_keeps_ordinary_profile_filtered_navigation():
+    source = _node_prelude() + """
+global._showAllProfiles = false;
+global._profileSwitchOpeningExistingSession = false;
+global.S = { activeProfile: 'default', activeProfileIsDefault: true };
+evalSession('_profileMatchesActiveProfile');
+evalSession('_sidebarSessionProfileName');
+evalSession('_switchToSessionProfile');
+evalSession('_ensureSidebarSessionProfile');
+evalSession('_openSidebarSession');
+const events = [];
+global._isExternalSession = () => false;
+global.switchToProfile = async (name) => { events.push({kind:'switch', name}); return true; };
+global.loadSession = async (sid) => { events.push({kind:'load', sid}); };
+global.renderSessionListFromCache = () => {};
+(async () => {
+  await _openSidebarSession({session_id:'ordinary', profile:'team_1'});
+  console.log(JSON.stringify(events));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    assert json.loads(_run_node(source)) == [{"kind": "load", "sid": "ordinary"}]
 
 
 def test_noop_profile_query_switch_keeps_saved_local_state():

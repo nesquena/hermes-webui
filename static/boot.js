@@ -135,6 +135,21 @@ function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
 function _shouldStartFreshPwaChat(action,urlSession){
   return action==='new-chat'&&!urlSession;
 }
+function _profileScopedUrlSessionState(profileIntent,urlSession,switchCompleted,activeProfile){
+  const explicit=!!(urlSession&&profileIntent&&profileIntent.hasParam);
+  if(!explicit){
+    return {explicit:false,blocked:false,loadOptions:{preserveActiveInput:true}};
+  }
+  const matches=typeof _profileMatchesActiveProfile==='function'
+    ? _profileMatchesActiveProfile(profileIntent.name,activeProfile||'default')
+    : String(profileIntent.name||'')===String(activeProfile||'default');
+  const blocked=!profileIntent.valid||!switchCompleted||!matches;
+  return {
+    explicit:true,
+    blocked,
+    loadOptions:{preserveActiveInput:true,skipProfileResolve:true},
+  };
+}
 async function _applyComposerPrefillOnBoot(prefillIntent){
   if(!prefillIntent||!prefillIntent.hasText) return;
   const msg=(typeof $==='function')?$('msg'):document.getElementById('msg');
@@ -3765,7 +3780,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }catch(_){}
   }
   const savedLocal=localStorage.getItem('hermes-webui-session');
-  const saved=urlSession||savedLocal;
+  const _profileScopedUrlSession=_profileScopedUrlSessionState(
+    profileIntent,urlSession,_profileSwitchCompleted,S.activeProfile||'default'
+  );
+  // A /session/<id>?profile=<name> URL is an explicit ownership assertion.
+  // If that profile could not be activated, stay on the empty state instead
+  // of opening the ID from another profile through loadSession's discovery
+  // fallback. Keep savedLocal intact so an unrelated local restore is not lost.
+  const saved=_profileScopedUrlSession.blocked?null:(urlSession||savedLocal);
   if(saved){
     try{
       const savedSidebarOnlyState=(!urlSession&&savedLocal)
@@ -3794,7 +3816,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
-      await loadSession(saved, {preserveActiveInput:true});
+      await loadSession(saved, _profileScopedUrlSession.loadOptions);
       // Hard refresh starts from the static HTML model list. Hydrate the live
       // catalog after the saved session is known, then re-apply that session's
       // model before S._bootReady lets syncModelChip reveal the composer label.

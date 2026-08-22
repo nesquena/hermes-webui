@@ -1724,6 +1724,7 @@ async function loadSession(sid){
   // cross-session ordering tests rely on. Coalescing at the entry point would
   // drop the superseding fetch and leave a stale first load in charge.
   if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){
+    if(opts.clearProfileIntent) _setActiveSessionUrl(sid,null);
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
     // background completion left on the open, unfocused pane) before returning.
@@ -2063,7 +2064,7 @@ async function loadSession(sid){
     Number(data.session.last_message_at || data.session.updated_at || 0)
   );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-  _setActiveSessionUrl(S.session.session_id);
+  _setActiveSessionUrl(S.session.session_id,opts.clearProfileIntent?null:undefined);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
 
@@ -2482,19 +2483,55 @@ function _sidebarSessionProfileName(session){
   return raw||'';
 }
 
-async function _ensureSidebarSessionProfile(session){
-  const targetProfile=_sidebarSessionProfileName(session);
-  if(!_showAllProfiles||!targetProfile) return false;
+function _isValidProfileName(name){
+  return typeof name==='string'&&/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name);
+}
+
+async function _switchToSessionProfile(targetProfile){
+  const target=typeof targetProfile==='string'?targetProfile.trim():'';
+  if(!_isValidProfileName(target)) return false;
   const activeProfile=S.activeProfile||'default';
-  if(_profileMatchesActiveProfile(targetProfile,activeProfile)) return false;
+  if(_profileMatchesActiveProfile(target,activeProfile)) return true;
   if(typeof switchToProfile!=='function') return false;
   _profileSwitchOpeningExistingSession=true;
+  let switched=false;
   try{
-    await switchToProfile(targetProfile);
+    switched=await switchToProfile(target);
+  }catch(_){
+    return false;
   }finally{
     _profileSwitchOpeningExistingSession=false;
   }
-  return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
+  return switched!==false&&_profileMatchesActiveProfile(target,S.activeProfile||'default');
+}
+
+async function _ensureSidebarSessionProfile(session){
+  const targetProfile=_sidebarSessionProfileName(session);
+  if(!targetProfile) return false;
+  if(!_showAllProfiles) return false;
+  if(_profileMatchesActiveProfile(targetProfile,S.activeProfile||'default')) return false;
+  return _switchToSessionProfile(targetProfile);
+}
+
+async function _openSessionReference(sid, profile){
+  const sessionId=String(sid||'');
+  if(!sessionId) return false;
+  if(profile!==undefined){
+    const targetProfile=String(profile||'');
+    if(!_isValidProfileName(targetProfile)) return false;
+    let ready=false;
+    try{
+      ready=await _switchToSessionProfile(targetProfile);
+    }catch(_){return false;}
+    if(!ready||!_profileMatchesActiveProfile(targetProfile,S.activeProfile||'default')) return false;
+  }
+  if(typeof loadSession!=='function') return false;
+  // The reference named a profile explicitly. Do not let loadSession's
+  // profile-discovery fallback override that intent if the ID belongs to a
+  // different profile; a stale/mistyped reference must fail in place.
+  const force=!!(S.session&&S.session.session_id===sessionId);
+  await loadSession(sessionId,{skipProfileResolve:true,force});
+  return true;
 }
 
 async function _openSidebarSession(session, loadOpts={}){
@@ -4182,10 +4219,11 @@ function _profileQueryIntentFromLocation(){
   try{
     const qs=new URLSearchParams(window.location.search||'');
     if(!qs.has('profile')) return empty;
-    const name=String(qs.get('profile')||'');
+    const values=qs.getAll('profile');
+    const name=String(values[0]||'');
     return {
       hasParam:true,
-      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name),
+      valid:values.length===1&&/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name),
       name
     };
   }catch(_e){return empty;}
@@ -4222,7 +4260,7 @@ function _appRootPath(){
     return base.pathname || '/';
   }catch(_e){return '/';}
 }
-function _sessionUrlForSid(sid){
+function _sessionUrlForSid(sid, profile){
   const encoded=encodeURIComponent(sid);
   let base;
   try{base=new URL(`session/${encoded}`, document.baseURI||window.location.origin+'/');}
@@ -4239,13 +4277,15 @@ function _sessionUrlForSid(sid){
       if(key!=='action'||value!=='new-chat') retained.append(key,value);
     });
     base.search=retained.toString();
+    if(profile===null) base.searchParams.delete('profile');
+    else if(profile!==undefined) base.searchParams.set('profile',String(profile||''));
     base.hash=current.hash;
   }catch(_e){}
   return base.pathname+base.search+base.hash;
 }
-function _setActiveSessionUrl(sid){
+function _setActiveSessionUrl(sid, profile){
   if(typeof window==='undefined'||!window.history||!sid) return;
-  const next=_sessionUrlForSid(sid);
+  const next=_sessionUrlForSid(sid,profile);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
     try{

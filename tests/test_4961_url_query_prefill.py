@@ -157,7 +157,7 @@ console.log(JSON.stringify(result));
         "if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly){",
         saved_state_pos,
     )
-    load_pos = BOOT_JS.find("await loadSession(saved, {preserveActiveInput:true});")
+    load_pos = BOOT_JS.find("await loadSession(saved, _profileScopedUrlSession.loadOptions);")
     assert prefill_guard >= 0
     assert saved_state_pos >= 0
     assert saved_guard > saved_state_pos
@@ -355,8 +355,8 @@ console.log(JSON.stringify({
         first_await_pos,
     )
     new_pos = BOOT_JS.find("await newSession(true);", active_profile_pos)
-    load_pos = BOOT_JS.find("await loadSession(saved, {preserveActiveInput:true});", active_profile_pos)
-    saved_pos = BOOT_JS.find("const saved=urlSession||savedLocal;")
+    load_pos = BOOT_JS.find("await loadSession(saved, _profileScopedUrlSession.loadOptions);", active_profile_pos)
+    saved_pos = BOOT_JS.find("const saved=_profileScopedUrlSession.blocked?null:(urlSession||savedLocal);")
     check_pos = BOOT_JS.find("await checkInflightOnBoot(saved);", load_pos)
     apply_pos = BOOT_JS.find("await _finalizeComposerPrefillOnBoot(prefillIntent);", check_pos)
     assert saved_pos >= 0

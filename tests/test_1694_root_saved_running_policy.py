@@ -35,8 +35,8 @@ def test_root_boot_distinguishes_url_session_from_localstorage_saved_session():
         "root `/` policy can differ from explicit `/session/<sid>` reload"
     )
     compact = block.replace(" ", "")
-    assert "constsaved=urlSession||savedLocal" in compact, (
-        "boot should still prefer explicit URL sessions over saved localStorage sessions"
+    assert "constsaved=_profileScopedUrlSession.blocked?null:(urlSession||savedLocal)" in compact, (
+        "boot should prefer an explicit URL session only when its profile intent is ready"
     )
 
 
@@ -45,7 +45,7 @@ def test_root_saved_running_session_is_checked_before_load_session_projection():
     block = _boot_saved_session_block()
     guard = "!urlSession&&savedLocal"
     guard_pos = block.replace(" ", "").find(guard)
-    load_pos = block.find("await loadSession(saved, {preserveActiveInput:true})")
+    load_pos = block.find("await loadSession(saved, _profileScopedUrlSession.loadOptions)")
     assert guard_pos >= 0, (
         "root `/` boot must have a !urlSession && savedLocal guard for saved "
         "running sessions before projecting them into the active pane"
@@ -107,7 +107,7 @@ def test_root_archived_saved_session_clears_stale_localstorage_pointer():
     guard_pos = block.find(clear_guard, helper_pos)
     clear_pos = block.find("localStorage.removeItem('hermes-webui-session')", guard_pos)
     render_pos = block.find("await renderSessionList()", helper_pos)
-    load_pos = block.find("await loadSession(saved, {preserveActiveInput:true})")
+    load_pos = block.find("await loadSession(saved, _profileScopedUrlSession.loadOptions)")
     assert guard_pos > helper_pos, "archived sidebar-only path must be distinguished"
     assert clear_pos > guard_pos, "archived saved session must clear stale localStorage pointer"
     assert clear_pos < render_pos, "stale pointer should be cleared before the sidebar-only return"

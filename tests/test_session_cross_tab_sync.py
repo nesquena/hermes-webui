@@ -32,7 +32,7 @@ def test_storage_event_does_not_globally_switch_tabs():
 
 def test_session_switch_updates_url_path_for_tab_local_anchor():
     assert "function _sessionIdFromLocation()" in SESSIONS_JS
-    assert "function _setActiveSessionUrl(sid)" in SESSIONS_JS
+    assert "function _setActiveSessionUrl(sid, profile)" in SESSIONS_JS
     assert "'/session/'" in SESSIONS_JS
     assert "_setActiveSessionUrl(S.session.session_id)" in SESSIONS_JS
     assert "_setActiveSessionUrl(S.session.session_id)" in COMMANDS_JS
@@ -42,7 +42,7 @@ def test_session_switch_updates_url_path_for_tab_local_anchor():
 def test_boot_prefers_url_session_over_local_storage_session():
     assert "const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;" in BOOT_JS
     assert "const savedLocal=localStorage.getItem('hermes-webui-session');" in BOOT_JS
-    assert "const saved=urlSession||savedLocal;" in BOOT_JS
+    assert "const saved=_profileScopedUrlSession.blocked?null:(urlSession||savedLocal);" in BOOT_JS
     assert "const savedSidebarOnlyState=(!urlSession&&savedLocal)" in BOOT_JS
     assert "? await _savedSessionSidebarOnlyState(savedLocal)" in BOOT_JS
     assert "if(savedSidebarOnlyState&&savedSidebarOnlyState.sidebarOnly)" in BOOT_JS

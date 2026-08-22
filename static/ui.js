@@ -287,6 +287,198 @@ function _isBacktickFenceClose(line,minLen){
   const m=String(line||'').match(/^[ ]{0,3}(`{3,})[ \t]*$/);
   return !!(m&&m[1].length>=minLen);
 }
+function _transformBareSessionReferences(input, options){
+  let s=String(input??'');
+  if(!s.includes('@session:')) return s;
+  const userLinks=options&&Array.isArray(options.sessionLinks)?options.sessionLinks:null;
+  const allowEndBoundary=!(options&&options.allowEndBoundary===false);
+  const stash=[];
+  const stashToken=value=>{stash.push(value);return '\x00S'+(stash.length-1)+'\x00';};
+  const protect=re=>{s=s.replace(re,m=>stashToken(m));};
+  const stashFences=source=>{
+    const lines=source.split('\n');
+    const out=[];
+    const block=[];
+    const quotePrefix=/^[ ]{0,3}(?:>|&gt;)[ ]?/;
+    let fence=null;
+    for(let i=0;i<lines.length;i++){
+      const raw=lines[i];
+      let line=raw.replace(/\r$/,'');
+      let depth=0, prefix;
+      while((prefix=line.match(quotePrefix))){depth++;line=line.slice(prefix[0].length);}
+      if(fence){
+        if(fence.depth&&depth<fence.depth){
+          stash.push(block.join('\n'));out.push('\x00S'+(stash.length-1)+'\x00');
+          block.length=0;fence=null;
+        } else {
+          block.push(raw);
+          if(depth===fence.depth&&_isBacktickFenceClose(line,fence.len)){
+            stash.push(block.join('\n'));out.push('\x00S'+(stash.length-1)+'\x00');
+            block.length=0;fence=null;
+          }
+          continue;
+        }
+      }
+      const open=_matchBacktickFenceLine(line);
+      if(open&&i<lines.length-1){fence={depth,len:open.len};block.push(raw);}
+      else out.push(raw);
+    }
+    if(block.length){stash.push(block.join('\n'));out.push('\x00S'+(stash.length-1)+'\x00');}
+    return out.join('\n');
+  };
+  const stashInlineCode=source=>{
+    let out='',i=0;
+    while(i<source.length){
+      if(source[i]!=='`'){out+=source[i++];continue;}
+      let run=1;
+      while(source[i+run]==='`') run++;
+      let j=i+run, end=-1;
+      while(j<source.length){
+        if(source[j]!=='`'){j++;continue;}
+        let closeRun=1;
+        while(source[j+closeRun]==='`') closeRun++;
+        if(closeRun===run){end=j+closeRun;break;}
+        j+=closeRun;
+      }
+      if(end<0){
+        const lineBreak=source.indexOf('\n',i+run);
+        end=lineBreak<0?source.length:lineBreak;
+      }
+      out+=stashToken(source.slice(i,end));
+      i=end;
+    }
+    return out;
+  };
+  const stashRawHtmlTags=source=>{
+    const lower=source.toLowerCase();
+    const quoteEntityAt=pos=>['&quot;','&#34;','&#x22;','&apos;','&#39;','&#x27;'].find(token=>lower.startsWith(token,pos))||'';
+    let out='',i=0;
+    while(i<source.length){
+      if(source.startsWith('<!--',i)){
+        const close=source.indexOf('-->',i+4);
+        const end=close<0?source.length:close+3;
+        out+=stashToken(source.slice(i,end));i=end;continue;
+      }
+      if(lower.startsWith('&lt;!--',i)){
+        const close=lower.indexOf('--&gt;',i+7);
+        const end=close<0?source.length:close+7;
+        out+=stashToken(source.slice(i,end));i=end;continue;
+      }
+      const encoded=lower.startsWith('&lt;',i);
+      if(source[i]!=='<'&&!encoded){out+=source[i++];continue;}
+      let nameAt=i+(encoded?4:1);
+      const closing=source[nameAt]==='/';
+      if(closing) nameAt++;
+      if(!/[A-Za-z]/.test(source[nameAt]||'')){out+=source[i++];continue;}
+      let nameEnd=nameAt+1;
+      while(/[\w:-]/.test(source[nameEnd]||'')) nameEnd++;
+      const tagName=lower.slice(nameAt,nameEnd);
+      let j=nameEnd,quote='';
+      while(j<source.length){
+        const ch=source[j];
+        if(quote){
+          if(quote.length>1&&lower.startsWith(quote,j)){j+=quote.length;quote='';continue;}
+          if(ch===quote) quote='';
+          j++;continue;
+        }
+        if(ch==='"'||ch==="'"){quote=ch;j++;continue;}
+        const quoteEntity=encoded?quoteEntityAt(j):'';
+        if(quoteEntity){quote=quoteEntity;j+=quoteEntity.length;continue;}
+        if(encoded&&lower.startsWith('&gt;',j)){j+=4;break;}
+        if(!encoded&&ch==='>'){j++;break;}
+        j++;
+      }
+      if(!closing&&['pre','code','a'].includes(tagName)){
+        const marker=encoded?`&lt;/${tagName}`:`</${tagName}`;
+        const closeAt=lower.indexOf(marker,j);
+        if(closeAt<0) j=source.length;
+        else{
+          const closeEnd=encoded?lower.indexOf('&gt;',closeAt+marker.length):source.indexOf('>',closeAt+marker.length);
+          j=closeEnd<0?source.length:closeEnd+(encoded?4:1);
+        }
+      }
+      out+=stashToken(source.slice(i,j));i=j;
+    }
+    return out;
+  };
+  const stashMarkdownLinks=source=>{
+    let out='',i=0;
+    while(i<source.length){
+      const bracketAt=source[i]==='['?i:(source[i]==='!'&&source[i+1]==='['?i+1:-1);
+      if(bracketAt<0){out+=source[i++];continue;}
+      let j=bracketAt+1,depth=1;
+      while(j<source.length&&depth){
+        if(source[j]==='\\'){j+=2;continue;}
+        if(source[j]==='[') depth++;
+        else if(source[j]===']') depth--;
+        j++;
+      }
+      if(depth){
+        if(!allowEndBoundary){out+=stashToken(source.slice(i));break;}
+        out+=source[i++];continue;
+      }
+      let k=j;
+      while(/\s/.test(source[k]||'')) k++;
+      if(k>=source.length&&!allowEndBoundary){out+=stashToken(source.slice(i));break;}
+      if(source[k]!=='('){out+=source[i++];continue;}
+      let parens=1;k++;
+      while(k<source.length&&parens){
+        if(source[k]==='\\'){k+=2;continue;}
+        if(source[k]==='(') parens++;
+        else if(source[k]===')') parens--;
+        k++;
+      }
+      if(parens){
+        if(!allowEndBoundary){out+=stashToken(source.slice(i));break;}
+        out+=source[i++];continue;
+      }
+      out+=stashToken(source.slice(i,k));i=k;
+    }
+    return out;
+  };
+  s=stashFences(s);
+  s=stashInlineCode(s);
+  s=stashRawHtmlTags(s);
+  s=stashMarkdownLinks(s);
+  protect(/https?:\/\/[^\s<>"'\)\]]+/g);
+  const ref=/(^|[^A-Za-z0-9_@.\/:?#[\]\\+%\-=&])@session:(?:([a-z0-9][a-z0-9_-]{0,63})\/)?([A-Za-z0-9_-]+)(?=$|\s|[.,;:!?()[\]\x7b\x7d"'\u2013\u2014\u2018\u2019\u201c\u201d\u2026\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002*~]+(?=$|\s))/g;
+  const pendingPunctuation=/^[.,;:!?()[\]\x7b\x7d"'\u2013\u2014\u2018\u2019\u201c\u201d\u2026\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002*~]+$/;
+  s=s.replace(ref,(whole,lead,profile,id,offset,source)=>{
+    if(lead&&/[\p{L}\p{N}\p{M}]/u.test(lead)) return whole;
+    const tail=source.slice(offset+whole.length);
+    if(!allowEndBoundary&&(!tail||pendingPunctuation.test(tail))) return whole;
+    if(userLinks){
+      userLinks.push({id,profile:profile||''});
+      return lead+'\x00U'+(userLinks.length-1)+'\x00';
+    }
+    return lead+'['+id+'](session://'+id+(profile?'?profile='+profile:'')+')';
+  });
+  for(let i=stash.length;i--;) s=s.replace('\x00S'+i+'\x00',()=>stash[i]);
+  return s;
+}
+if(typeof window!=='undefined') window._transformBareSessionReferences=_transformBareSessionReferences;
+function _sessionReferenceParts(raw){
+  const value=String(raw||'');
+  if(!/^session:\/\//i.test(value)) return null;
+  const rest=value.replace(/^session:\/\//i,'');
+  const queryAt=rest.indexOf('?');
+  const hashAt=rest.indexOf('#');
+  const end=[queryAt,hashAt].filter(i=>i>=0).sort((a,b)=>a-b)[0];
+  const sid=end===undefined?rest:rest.slice(0,end);
+  const queryBeforeHash=queryAt>=0&&(hashAt<0||queryAt<hashAt);
+  const queryStart=queryBeforeHash?queryAt+1:-1;
+  const queryEnd=queryBeforeHash&&hashAt>=0?hashAt:rest.length;
+  const query=queryStart>=0?rest.slice(queryStart,queryEnd):'';
+  let hasProfile=false, profile='', profileValid=true;
+  try{
+    const params=new URLSearchParams(query);
+    hasProfile=params.has('profile');
+    const values=params.getAll('profile');
+    profile=values[0]||'';
+    profileValid=!hasProfile||(values.length===1&&/^[a-z0-9][a-z0-9_-]{0,63}$/.test(profile));
+  }catch(_){ }
+  return {sid,profile,hasProfile,profileValid};
+}
 /**
  * Render fenced code blocks inside user messages.
  * Extracts ```…``` fences, replaces them with placeholders,
@@ -310,6 +502,7 @@ function _renderUserFencedBlocks(text){
   const stash=[];
   const contextStash=[];
   const mathStash=[];
+  const sessionLinks=[];
   const stashMath=(type,src)=>{mathStash.push({type,src});return '\x00UM'+(mathStash.length-1)+'\x00';};
   const sentContextHtml=(label,quoteText)=>{
     const safeLabel=String(label||'').trim()||'Context';
@@ -374,6 +567,9 @@ function _renderUserFencedBlocks(text){
     }
     return lead+'\x00UF'+(stash.length-1)+'\x00';
   });
+  if(typeof _transformBareSessionReferences==='function'){
+    s=_transformBareSessionReferences(s,{sessionLinks});
+  }
   // Now stash math from the OUTSIDE-of-fence text. Display delimiters must
   // run before inline so $$..$$ isn't mis-parsed as $..$..$..$.
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>stashMath('display',m));
@@ -390,6 +586,14 @@ function _renderUserFencedBlocks(text){
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
   s=s.replace(/\x00UC(\d+)\x00/g,(_,i)=>contextStash[+i]||'');
   s=restoreMath(s);
+  s=s.replace(/\x00U(\d+)\x00/g,(_,i)=>{
+    const link=sessionLinks[+i];
+    if(!link) return '';
+    const href=typeof _sessionUrlForSid==='function'
+      ? _sessionUrlForSid(link.id,link.profile||null)
+      : 'session/'+encodeURIComponent(link.id)+(link.profile?'?profile='+encodeURIComponent(link.profile):'');
+    return `<a class="session-link" href="${esc(href)}">${esc(link.id)}</a>`;
+  });
   return s;
 }
 function _statusCardHtml(card){
@@ -2558,10 +2762,11 @@ document.addEventListener('click', e => {
   const sessionLink=e.target.closest('a.session-link[href]');
   if(sessionLink){
     const href=sessionLink.getAttribute('href')||'';
+    if((e.button!==undefined&&e.button!==0)||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey) return;
     const m=href.match(/(?:^|\/)session\/([^?#]+)/i);
-    if(m&&typeof loadSession==='function'){
+    if(m&&(typeof loadSession==='function'||typeof _openSessionReference==='function')){
       e.preventDefault();
-      try{loadSession(decodeURIComponent(m[1]));}catch(_){loadSession(m[1]);}
+      void _navigateInternalSessionLink(href).catch(()=>{});
     }
     return;
   }
@@ -2590,6 +2795,28 @@ document.addEventListener('click', e => {
     return;
   }
 });
+
+async function _navigateInternalSessionLink(href){
+  let url;
+  try{
+    const base=(typeof document!=='undefined'&&document.baseURI)||window.location.href;
+    url=new URL(String(href||''),base);
+    if(typeof window!=='undefined'&&window.location&&url.origin!==window.location.origin) return false;
+  }catch(_){return false;}
+  const match=url.pathname.match(/(?:^|\/)session\/([^/]+)$/i);
+  if(!match) return false;
+  let sid;
+  try{sid=decodeURIComponent(match[1]);}catch(_){sid=match[1];}
+  const profiles=url.searchParams.getAll('profile');
+  if(profiles.length){
+    if(profiles.length!==1) return false;
+    if(typeof _openSessionReference!=='function') return false;
+    return _openSessionReference(sid,profiles[0]||'');
+  }
+  if(typeof loadSession!=='function') return false;
+  await loadSession(sid,{clearProfileIntent:true});
+  return true;
+}
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 const _PDF_EXTS=/\.pdf$/i;
@@ -7520,7 +7747,9 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
 }
 
 function renderMd(raw){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:null;
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  if(!(options&&options.skipBareSessionTransform)&&typeof _transformBareSessionReferences==='function') s=_transformBareSessionReferences(s);
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
   // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
   // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
@@ -7551,7 +7780,7 @@ function renderMd(raw){
       // Recursive call: full pipeline on stripped content. Handles fenced
       // code, headings, hr, ordered/unordered lists, nested blockquotes
       // (>>) — anything that renderMd handles at the top level.
-      const rendered=renderMd(stripped);
+      const rendered=renderMd(stripped,options);
       _bq_stash.push('<blockquote>'+rendered+'</blockquote>');
       // Surround the token with blank lines so the paragraph splitter
       // isolates it as its own chunk (otherwise the token gets wrapped
@@ -7921,13 +8150,17 @@ function renderMd(raw){
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
     if(/^session:\/\//i.test(href)){
-      const sid=href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
+      const parts=typeof _sessionReferenceParts==='function'
+        ? _sessionReferenceParts(href) : null;
+      if(parts&&parts.hasProfile&&!parts.profileValid) return '#';
+      const sid=parts?parts.sid:href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
+      const profile=parts&&parts.hasProfile?parts.profile:null;
       try{
         const decoded=decodeURIComponent(sid);
-        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded);
-        return 'session/'+encodeURIComponent(decoded);
+        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded,profile);
+        return 'session/'+encodeURIComponent(decoded)+(profile!==null?'?profile='+encodeURIComponent(profile):'');
       }catch(_){
-        return 'session/'+encodeURIComponent(sid);
+        return 'session/'+encodeURIComponent(sid)+(profile!==null?'?profile='+encodeURIComponent(profile):'');
       }
     }
     if(/^workspace:\/\//i.test(href)){
@@ -13838,7 +14071,9 @@ function _appendTransparentFadeText(body, text){
 
 function _refreshTransparentFadeProseRow(existing, node, preservedState){
   let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
-  const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
+  const rawText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
+  const nextText = typeof _transformBareSessionReferences === 'function'
+    ? _transformBareSessionReferences(rawText,{allowEndBoundary:false}) : rawText;
   const currentText = String(existing.getAttribute('data-stream-fade-text') || (body && body.textContent) || '');
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
@@ -13854,6 +14089,12 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.setAttribute(name, value);
   }
   existing.className = node.className || '';
+  if(nextText!==rawText||!!(node.querySelector&&node.querySelector('a.session-link'))){
+    existing.innerHTML = node.innerHTML || '';
+    existing.setAttribute('data-stream-fade-text', String(node.textContent || ''));
+    _rehydrateTransparentLiveRow(existing, node, preservedState);
+    return existing;
+  }
   if(!body){
     body = document.createElement('div');
     body.className = 'msg-body';

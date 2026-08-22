@@ -58,7 +58,7 @@ def test_boot_model_hydration_prefers_active_session_over_persisted_model():
 
 def test_hard_refresh_hydrates_saved_session_model_before_revealing_model_chip():
     boot_js = Path("static/boot.js").read_text(encoding="utf-8")
-    load_marker = "await loadSession(saved, {preserveActiveInput:true});"
+    load_marker = "await loadSession(saved, _profileScopedUrlSession.loadOptions);"
     assert load_marker in boot_js
     restore_end = "await checkInflightOnBoot(saved);"
     saved_restore = boot_js[boot_js.index(load_marker) : boot_js.index(restore_end, boot_js.index(load_marker))]

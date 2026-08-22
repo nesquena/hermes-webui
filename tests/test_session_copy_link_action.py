@@ -121,7 +121,9 @@ def test_rendered_session_reference_is_internal_link():
     assert "function _markdownAnchor" in UI_JS
     assert "class=\"session-link\"" in UI_JS
     assert "const sessionLink=e.target.closest('a.session-link[href]');" in UI_JS
-    assert "loadSession(decodeURIComponent(m[1]))" in UI_JS
+    assert "void _navigateInternalSessionLink(href)" in UI_JS
+    assert "const profiles=url.searchParams.getAll('profile');" in UI_JS
+    assert "return _openSessionReference(sid,profiles[0]||'');" in UI_JS
 
 
 def test_streaming_markdown_keeps_session_refs_internal():
