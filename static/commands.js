@@ -1595,6 +1595,47 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
   return base?`${base}\n\n${note}`:note;
 }
 
+function _steerAttachmentPathsForRequest(ownerSid, filesSnapshot){
+  const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  if(!files.length||!_steerUploadCache)return[];
+  const sig=_steerFilesSignature(files);
+  if(_steerUploadCache.sid!==ownerSid||_steerUploadCache.sig!==sig||!Array.isArray(_steerUploadCache.paths))return[];
+  return _steerUploadCache.paths.slice();
+}
+
+function _recordSteerEventFromResponse(ownerSid, result){
+  const event=result&&result.steer_event;
+  if(!ownerSid||!event||typeof event!=='object'||typeof window==='undefined') return false;
+  const eventSid=String(event.session_id||event.payload&&event.payload.session_id||'');
+  const streamId=String(event.stream_id||event.payload&&event.payload.stream_id||result.stream_id||'');
+  if(eventSid!==String(ownerSid)||!streamId||!event.event_id) return false;
+  const api=window.HermesAssistantTurnAnchors;
+  const registries=window._liveAnchorRegistries;
+  const registry=registries&&typeof registries.get==='function'?registries.get(streamId):null;
+  if(!api||!registry||typeof api.applyAssistantTurnAnchorSourceEvent!=='function') return false;
+  try{
+    const applied=api.applyAssistantTurnAnchorSourceEvent(registry,{
+      ...event,
+      source_event_type:'steer_delivered',
+    },{
+      session_id:String(ownerSid),
+      stream_id:streamId,
+      run_id:event.run_id||streamId,
+    });
+    // HTTP and SSE deliberately carry one event_id. Whichever arrives second is
+    // an idempotent duplicate, while both paths converge on the same row.
+    if(applied&&applied.reason==='mismatched_anchor') return false;
+    if(_steerOwnerStreamIsCurrent(ownerSid,streamId)
+       && typeof window._renderLiveAnchorActivitySceneForStream==='function'){
+      window._renderLiveAnchorActivitySceneForStream(streamId,String(ownerSid));
+    }
+    return true;
+  }catch(err){
+    if(typeof console!=='undefined'&&console.warn) console.warn('steer response event projection failed',err);
+    return false;
+  }
+}
+
 async function _trySteer(msg, explicitSteer){
   let result=null;
   const originalMsg=String(msg||'').trim();
@@ -1639,9 +1680,14 @@ async function _trySteer(msg, explicitSteer){
     return false;
   }
   try{
+    const attachmentPaths=_steerAttachmentPathsForRequest(ownerSid,pendingFilesSnapshot);
     result=await api('/api/chat/steer',{
       method:'POST',
-      body:JSON.stringify({session_id:ownerSid,text:steerText}),
+      body:JSON.stringify({
+        session_id:ownerSid,
+        user_text:originalMsg,
+        attachment_paths:attachmentPaths,
+      }),
     });
   }catch(e){
     // Network or server error — keep the active stream running and restore the draft.
@@ -1653,11 +1699,9 @@ async function _trySteer(msg, explicitSteer){
     // the upload/API await, which is fine: we're clearing the OWNER's draft).
     _steerUploadCache=null; // delivered — invalidate the retry cache
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
-    // Show a transient steer indicator in the chat (NOT in S.messages — it must
-    // survive the done event's S.messages=d.session.messages replacement).
-    // The indicator self-removes when the turn completes (done/cancel/error
-    // all call renderMessages which rebuilds msgInner). Only mutate the visible
-    // tray/DOM if the user is still looking at the owning session.
+    // The durable steer_delivered event owns transcript feedback. Keep the old
+    // transient indicator only when runtime acceptance succeeded but journal
+    // persistence failed, because that degraded path cannot broadcast a row.
     if(_steerOwnerIsCurrent(ownerSid)){
       // Remove ONLY the files we captured+delivered, by object identity, so any
       // files staged during the upload/API await are preserved (#5459 gate).
@@ -1666,9 +1710,16 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
     }
-    showToast(t('cmd_steer_delivered'),2500);
+    const responseRecorded=_recordSteerEventFromResponse(ownerSid,result);
+    const persistenceDegraded=result.durable===false||result.fallback==='persistence_error';
+    const publicationDegraded=result.published===false&&!responseRecorded&&!persistenceDegraded;
+    if(persistenceDegraded){
+      if(_steerOwnerIsCurrent(ownerSid)) _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      showToast(t('steer_delivery_not_durable'),5000,'warning');
+    }
+    else if(publicationDegraded) showToast(t('steer_delivery_live_delayed'),5000,'warning');
+    else showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){

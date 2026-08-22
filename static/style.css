@@ -2292,6 +2292,13 @@
   .steer-indicator{display:flex;align-items:baseline;gap:8px;padding:10px 0;opacity:.65;font-style:italic;color:var(--accent-text);}
   .steer-indicator .steer-body{white-space:pre-wrap;word-break:break-word;}
   .steer-badge{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:4px;padding:1px 6px;vertical-align:middle;line-height:1.6;font-style:normal;flex-shrink:0;}
+  /* Durable user-authored guidance inside an assistant turn's activity timeline. */
+  .steer-delivered-row{align-self:flex-end;max-width:min(82%,680px);padding:9px 0;min-width:0;box-sizing:border-box;}
+  .steer-delivered-row .steer-delivered-label{margin:0 4px 4px;text-align:right;font-size:10px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);opacity:.72;}
+  .steer-delivered-row .msg-body{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0;}
+  .steer-delivered-row .steer-delivered-files{margin:5px 4px 0;text-align:right;font-family:var(--font-mono);font-size:11px;color:var(--muted);overflow-wrap:anywhere;}
+  @media(max-width:600px){.steer-delivered-row{max-width:94%;}}
+  .assistant-turn[data-steer-only="1"] > .msg-role.assistant{display:none;}
   /* Steer recovery bar: dismissible after failure, same lifecycle as steer-indicator */
   .steer-recovery{display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;margin:0.25rem 0;border-radius:var(--radius-md);background:var(--surface-subtle);font-size:0.85rem}
   .steer-recovery-label{flex:1;min-width:0;color:var(--text)}
