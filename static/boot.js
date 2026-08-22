@@ -3933,6 +3933,97 @@ async function shutdownServer() {
   try { await api('/api/shutdown', { method: 'POST' }); } catch (_) {}
 }
 
+async function restartServer() {
+  var statusEl = document.getElementById('restartServerStatus');
+  var btnEl = document.getElementById('btnRestartServer');
+  if (!statusEl || !btnEl) return;
+  var ok = await showConfirmDialog({
+    title: (typeof t === 'function' ? t('settings_restart_confirm_title') : 'Restart Hermes WebUI'),
+    message: (typeof t === 'function' ? t('settings_restart_confirm_message') : 'Restart the Hermes WebUI server via ctl.sh? The page will reconnect automatically.'),
+    confirmLabel: (typeof t === 'function' ? t('settings_restart_confirm_btn') : 'Restart'),
+    danger: true,
+  });
+  if (!ok) return;
+  btnEl.disabled = true;
+  statusEl.style.display = 'block';
+  statusEl.textContent = (typeof t === 'function' ? t('settings_restart_initiating') : 'Restarting server…');
+  statusEl.style.color = 'var(--muted)';
+  try {
+    var resp = await api('/api/server/restart', { method: 'POST' });
+    if (resp && resp.ok) {
+      btnEl.disabled = true;
+      statusEl.textContent = (typeof t === 'function' ? t('settings_restart_reconnecting') : 'Server restarting — reconnecting…');
+      statusEl.style.color = 'var(--accent)';
+      _waitForServerRestart();
+    } else {
+      btnEl.disabled = false;
+      statusEl.style.color = '#e74c3c';
+      statusEl.textContent = resp && resp.error ? resp.error : 'Restart failed';
+    }
+  } catch (err) {
+    // The server may respond with the restart acknowledgment and then go down
+    // before we read the response, producing a network error. Treat any
+    // network error after sending the request as a likely restart in progress.
+    if (err instanceof TypeError || (err && err.message && (
+        err.message.includes('Failed to fetch') ||
+        err.message.includes('NetworkError') ||
+        err.message.includes('load failed')
+    ))) {
+      btnEl.disabled = true;
+      statusEl.textContent = (typeof t === 'function' ? t('settings_restart_reconnecting') : 'Server restarting — reconnecting…');
+      statusEl.style.color = 'var(--accent)';
+      _waitForServerRestart();
+    } else {
+      btnEl.disabled = false;
+      statusEl.style.color = '#e74c3c';
+      statusEl.textContent = 'Request failed: ' + (err.message || err);
+    }
+  }
+}
+
+function _waitForServerRestart() {
+  var statusEl = document.getElementById('restartServerStatus');
+  var btnEl = document.getElementById('btnRestartServer');
+  var maxRetries = 60;  // ~60 seconds of polling
+  var retryDelay = 1000;
+  var attempt = 0;
+  function poll() {
+    attempt++;
+    fetch('/health', { method: 'GET', cache: 'no-store' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data && (data.status === 'ok' || data.ok)) {
+          if (statusEl) {
+            statusEl.textContent = (typeof t === 'function' ? t('settings_restart_reconnected') : 'Server restarted successfully.');
+            statusEl.style.color = '#2ecc71';
+          }
+          if (btnEl) btnEl.disabled = false;
+          location.reload();
+        } else if (attempt < maxRetries) {
+          setTimeout(poll, retryDelay);
+        } else {
+          if (statusEl) {
+            statusEl.textContent = (typeof t === 'function' ? t('settings_restart_timeout') : 'Server did not come back. Check the terminal for errors.');
+            statusEl.style.color = '#e74c3c';
+          }
+          if (btnEl) btnEl.disabled = false;
+        }
+      })
+      .catch(function() {
+        if (attempt < maxRetries) {
+          setTimeout(poll, retryDelay);
+        } else {
+          if (statusEl) {
+            statusEl.textContent = (typeof t === 'function' ? t('settings_restart_timeout') : 'Server did not come back. Check the terminal for errors.');
+            statusEl.style.color = '#e74c3c';
+          }
+          if (btnEl) btnEl.disabled = false;
+        }
+      });
+  }
+  setTimeout(poll, retryDelay);
+}
+
 function _showServerStopped() {
   var stoppedMsg = (typeof t === 'function' ? t('settings_shutdown_stopped_message') : 'Server stopped. You can close this tab.');
   document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:var(--font-ui);font-size:14px"><p>' + stoppedMsg + '</p></div>';

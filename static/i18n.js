@@ -1258,6 +1258,18 @@ const LOCALES = {
     settings_shutdown_confirm_message: 'Stop the Hermes WebUI server?',
     settings_shutdown_confirm_btn: 'Stop',
     settings_shutdown_stopped_message: 'Server stopped. You can close this tab.',
+    // Restart server (issue #6396)
+    settings_label_restart: 'Restart the Hermes WebUI server',
+    settings_desc_restart: 'Gracefully restarts the local WebUI server via ',
+    settings_desc_restart_suffix: '. Available only when ctl.sh owns this instance. The page will reconnect automatically after the restart.',
+    settings_btn_restart: 'Restart server',
+    settings_restart_confirm_title: 'Restart Hermes WebUI',
+    settings_restart_confirm_message: 'Restart the Hermes WebUI server via ctl.sh? The page will reconnect automatically.',
+    settings_restart_confirm_btn: 'Restart',
+    settings_restart_initiating: 'Restarting server…',
+    settings_restart_reconnecting: 'Server restarting — reconnecting…',
+    settings_restart_reconnected: 'Server restarted successfully.',
+    settings_restart_timeout: 'Server did not come back. Check the terminal for errors.',
     // Providers panel
     providers_tab_title: 'Providers',
     providers_section_title: 'Providers',

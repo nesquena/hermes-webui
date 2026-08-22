@@ -12760,6 +12760,162 @@ def _handle_shutdown(handler) -> bool:
     return True
 
 
+_SERVER_RESTART_LOCK = threading.Lock()
+
+
+def _detect_server_mode() -> str:
+    """Detect how the WebUI server was launched (foreground/Docker/systemd/launchd/native-app/ctl)."""
+    # Docker: marker file or .dockerenv
+    if os.path.isfile("/.within_container") or os.path.isfile("/.dockerenv"):
+        return "Docker"
+    # systemd: presence of INVOCATION_ID or JOURNAL_STREAM (set by systemd for services)
+    if os.environ.get("INVOCATION_ID") or os.environ.get("JOURNAL_STREAM"):
+        return "systemd"
+    # launchd: LAUNCHD_JOB_KEY env var set by launchctl
+    if os.environ.get("LAUNCHD_JOB_KEY") or os.environ.get("launchd_uid"):
+        # Also check launchctl for our label
+        try:
+            import subprocess
+            label = os.environ.get(
+                "HERMES_WEBUI_LAUNCHD_LABEL",
+                "com.parantoux.hermes-webui",
+            )
+            result = subprocess.run(
+                ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return "launchd"
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+        return "launchd"
+    # Native app: check if launched via electron/desktop app
+    if os.environ.get("HERMES_WEBUI_NATIVE_APP") or "Electron" in os.environ.get("ELECTRON_RUN_AS_NODE", ""):
+        return "native-app"
+    return "foreground"
+
+
+def _handle_server_restart(handler) -> bool:
+    """Restart the WebUI server process via ctl.sh (POST /api/server/restart).
+
+    Validates ctl ownership via PID file, then delegates to ``./ctl.sh restart``.
+    Concurrent requests are serialized by a threading lock.
+    """
+    hermes_home = os.environ.get(
+        "HERMES_HOME",
+        os.path.join(os.path.expanduser("~"), ".hermes"),
+    )
+    pid_file = os.environ.get(
+        "HERMES_WEBUI_PID_FILE",
+        os.path.join(hermes_home, "webui.pid"),
+    )
+    state_file = os.environ.get(
+        "HERMES_WEBUI_CTL_STATE_FILE",
+        os.path.join(hermes_home, "webui.ctl.env"),
+    )
+
+    # ── Validate ctl ownership ────────────────────────────────────────────
+    pid_from_file = None
+    try:
+        with open(pid_file) as f:
+            content = f.read().strip()
+            if content and content.isdigit():
+                pid_from_file = int(content)
+    except (FileNotFoundError, ValueError, OSError):
+        pid_from_file = None
+
+    state_file_exists = os.path.isfile(state_file)
+
+    ctl_owned = bool(pid_from_file and state_file_exists)
+    if ctl_owned and pid_from_file != os.getpid():
+        # The PID file holds a different PID; double-check it is still alive
+        # so a stale PID file from a past ctl.sh session is not trusted.
+        try:
+            os.kill(pid_from_file, 0)
+        except (OSError, PermissionError):
+            ctl_owned = False
+
+    if not ctl_owned:
+        mode = _detect_server_mode()
+        logger.info(
+            "[server-restart] refused: ctl ownership check failed (mode=%s)",
+            mode,
+        )
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": (
+                    f"Cannot restart: WebUI is running in {mode} mode. "
+                    "Restart it manually using the appropriate method for your setup. "
+                    "For ctl.sh-managed instances, use './ctl.sh restart' from the terminal."
+                ),
+                "mode": mode,
+            },
+            status=400,
+        )
+
+    # ── Concurrent-request guard ──────────────────────────────────────────
+    if not _SERVER_RESTART_LOCK.acquire(blocking=False):
+        logger.info("[server-restart] busy: concurrent restart request rejected")
+        return j(
+            handler,
+            {"ok": False, "error": "Restart already in progress. Please wait."},
+            status=429,
+        )
+
+    # ── Locate ctl.sh ─────────────────────────────────────────────────────
+    from api.config import REPO_ROOT
+
+    ctl_path = REPO_ROOT / "ctl.sh"
+    if not ctl_path.is_file():
+        _SERVER_RESTART_LOCK.release()
+        logger.error("[server-restart] ctl.sh not found at %s", ctl_path)
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": f"ctl.sh not found at {ctl_path}. Cannot restart.",
+            },
+            status=500,
+        )
+
+    # ── Acknowledge, then restart asynchronously ──────────────────────────
+    try:
+        logger.info(
+            "[server-restart] initiating restart for PID %s via %s",
+            pid_from_file,
+            ctl_path,
+        )
+        j(handler, {
+            "ok": True,
+            "status": "restarting",
+            "message": "Server restart initiated via ctl.sh",
+            "pid": pid_from_file,
+        })
+
+        def _do_restart() -> None:
+            try:
+                import subprocess as _subprocess
+
+                _subprocess.Popen(
+                    [str(ctl_path), "restart"],
+                    cwd=str(REPO_ROOT),
+                    stdout=_subprocess.DEVNULL,
+                    stderr=_subprocess.DEVNULL,
+                )
+            except Exception:
+                logger.exception("[server-restart] failed to spawn ctl.sh restart")
+            finally:
+                _SERVER_RESTART_LOCK.release()
+
+        threading.Thread(target=_do_restart, daemon=True).start()
+        return True
+    except Exception:
+        _SERVER_RESTART_LOCK.release()
+        raise
+
+
 def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
     outcome = restart_active_profile_gateway()
@@ -14964,6 +15120,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
+
+    if parsed.path == "/api/server/restart":
+        return _handle_server_restart(handler)
 
     if parsed.path == "/api/health/restart":
         return _handle_health_restart(handler)
