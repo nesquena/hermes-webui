@@ -7965,12 +7965,19 @@ def get_cli_sessions(
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
+    visible_session_limit: int | None = None,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
     Returns empty list if the SQLite DB is missing or any error occurs -- the
     bridge is purely additive and never crashes the WebUI.
+
+    ``visible_session_limit`` bounds how many imported rows the projection
+    returns (defaults to ``CLI_VISIBLE_SESSION_LIMIT``). The sidebar route
+    resolves the user-configurable ``cli_visible_session_limit`` setting and
+    threads it through here so the list and the count badge always agree
+    (#6624).
     """
     source_filter = _normalize_cli_session_source_filter(source_filter)
     if all_profiles:
@@ -7986,6 +7993,7 @@ def get_cli_sessions(
             'all_profiles',
             source_filter or '',
             bool(include_claude_code),
+            visible_session_limit,
             context_cache_key,
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
@@ -8004,6 +8012,7 @@ def get_cli_sessions(
         )
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
+        cache_key = cache_key + (visible_session_limit,)
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
@@ -8016,7 +8025,7 @@ def get_cli_sessions(
             for idx, (ctx_home, ctx_db_path, ctx_profile) in enumerate(contexts):
                 load_kwargs = {
                     'source_filter': source_filter,
-                    'visible_session_limit': None,
+                    'visible_session_limit': visible_session_limit,
                     'cron_project_limit': None,
                     'webhook_project_limit': None,
                     'kanban_project_limit': None,
@@ -8032,7 +8041,7 @@ def get_cli_sessions(
                     )
                 )
             return merged
-        load_kwargs = {'source_filter': source_filter}
+        load_kwargs = {'source_filter': source_filter, 'visible_session_limit': visible_session_limit}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
         return _load_cli_sessions_uncached(

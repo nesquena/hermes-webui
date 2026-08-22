@@ -9641,6 +9641,7 @@ _SETTINGS_DEFAULTS = {
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": True,  # merge CLI/TUI/messaging sessions from state.db into the sidebar by default (#3988); established installs are grandfathered OFF by the load_settings backfill
+    "cli_visible_session_limit": 20,  # #6624: how many imported CLI/TUI/Desktop rows the sidebar list carries (bounded 20-100); the count badge reflects the same window so badge and list never diverge
     "show_claude_code_sessions": True,  # allow filtering Claude Code rows without hiding other imported sources
     "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
     "show_webhook_sessions": False,  # surface webhook sessions in the sidebar (subordinate to show_cli_sessions)
@@ -9960,6 +9961,7 @@ _SETTINGS_ENUM_VALUES = {
 }
 _SETTINGS_INT_RANGES = {
     "pinned_sessions_limit": (1, 99),
+    "cli_visible_session_limit": (20, 100),  # #6624: bounded like the other sidebar budget settings
     "inflight_state_max_sessions": (1, 25),
     "inflight_state_max_messages": (1, 100),
     "inflight_state_max_tool_calls": (1, 200),

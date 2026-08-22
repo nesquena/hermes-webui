@@ -197,6 +197,7 @@ def _session_list_cache_key(
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
+    cli_visible_session_limit: int | None = None,
 ) -> tuple:
     normalized_archived_limit = None
     if archived_limit is not None:
@@ -223,6 +224,7 @@ def _session_list_cache_key(
         sidebar_source,
         normalized_archived_limit,
         normalized_archived_offset,
+        cli_visible_session_limit,
     )
 
 

@@ -1988,6 +1988,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    cli_visible_session_limit: int | None = None,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -2004,6 +2005,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
+        cli_visible_session_limit=cli_visible_session_limit,
     ) + (bool(show_claude_code_sessions),)
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
@@ -2250,6 +2252,7 @@ def _build_session_list_cache_payload(
     sidebar_source: str | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
+    cli_visible_session_limit: int | None = None,
     diag=None,
 ) -> dict:
     diag_stage = diag.stage if diag is not None else lambda *_a, **_k: None
@@ -2306,6 +2309,16 @@ def _build_session_list_cache_payload(
                 source_filter=source_filter,
                 all_profiles=all_profiles,
                 include_claude_code=show_claude_code_sessions,
+                visible_session_limit=cli_visible_session_limit,
+            )
+        elif _callable_accepts_kwarg(get_cli_sessions, "visible_session_limit"):
+            # Focused tests sometimes monkeypatch routes.get_cli_sessions with
+            # a signature that predates include_claude_code but already
+            # accepts the row budget.
+            cli = get_cli_sessions(
+                source_filter=source_filter,
+                all_profiles=all_profiles,
+                visible_session_limit=cli_visible_session_limit,
             )
         else:
             # Focused tests sometimes monkeypatch routes.get_cli_sessions with
@@ -2501,8 +2514,16 @@ def _build_session_list_cache_payload(
     )
     if show_cli_sessions:
         diag_stage("cli_cap")
-        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        # #6624: the route-side CLI cap must agree with the loader-side
+        # visible_session_limit so a configured cli_visible_session_limit is
+        # not silently re-truncated to the old fixed CLI_VISIBLE_SESSION_CAP.
+        _resolved_cli_cap = (
+            cli_visible_session_limit
+            if cli_visible_session_limit is not None
+            else CLI_VISIBLE_SESSION_CAP
+        )
+        archived_scoped = _cap_recent_cli_sessions(archived_scoped, cli_cap=_resolved_cli_cap)
+        visible_scoped = _cap_recent_cli_sessions(visible_scoped, cli_cap=_resolved_cli_cap)
     if visible_only:
         archived_scoped = [
             s for s in archived_scoped if _session_has_server_visible_messages(s)
@@ -10132,6 +10153,25 @@ def _dedupe_cli_sidebar_sessions_for_api(
 CLI_VISIBLE_SESSION_CAP = 20
 
 
+def _resolve_cli_visible_session_limit(settings: dict) -> int | None:
+    """Resolve the user-configurable CLI row budget for the sidebar (#6624).
+
+    Reads ``cli_visible_session_limit`` (default 20) and clamps it to the
+    conservative 20-100 range so an out-of-range stored value cannot shrink
+    or explode the sidebar projection. Returns None only when CLI sessions
+    are disabled (callers use it as the ``visible_session_limit`` passthrough).
+    """
+    try:
+        value = int(settings.get("cli_visible_session_limit", 20))
+    except (TypeError, ValueError):
+        return 20
+    if value < 20:
+        return 20
+    if value > 100:
+        return 100
+    return value
+
+
 def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
     """Keep only the most recent CLI-visible sessions after filtering."""
     if cli_cap <= 0:
@@ -14097,6 +14137,7 @@ def handle_get(handler, parsed) -> bool:
             show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
             show_kanban_sessions = bool(settings.get("show_kanban_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
+            cli_visible_session_limit = _resolve_cli_visible_session_limit(settings)
             active_profile = profiles_api.get_active_profile_name()
             all_profiles = _all_profiles_enabled(parsed)
             include_archived = _query_flag(parsed, "include_archived")
@@ -14124,6 +14165,7 @@ def handle_get(handler, parsed) -> bool:
                 sidebar_source=sidebar_source,
                 archived_limit=archived_limit,
                 archived_offset=archived_offset,
+                cli_visible_session_limit=cli_visible_session_limit,
             )
             # Keep the visible /api/sessions contract unchanged even though the
             # heavy lifting now lives in the cache builder: profile scoping via
@@ -14147,6 +14189,7 @@ def handle_get(handler, parsed) -> bool:
                     sidebar_source=sidebar_source,
                     archived_limit=archived_limit,
                     archived_offset=archived_offset,
+                    cli_visible_session_limit=cli_visible_session_limit,
                     diag=diag,
                 ),
                 diag=diag,
@@ -19301,9 +19344,14 @@ def _handle_gateway_sse_stream(handler, parsed):
 
     q = watcher.subscribe()
     try:
-        # Send initial snapshot immediately
+        # Send initial snapshot immediately. Use the same resolved
+        # cli_visible_session_limit as the sidebar route so the SSE snapshot
+        # and the /api/sessions polling never alternate between different
+        # windows (#6624).
         from api.models import get_cli_sessions
-        initial = get_cli_sessions()
+        initial = get_cli_sessions(
+            visible_session_limit=_resolve_cli_visible_session_limit(settings)
+        )
         _sse(handler, 'sessions_changed', {'sessions': initial})
 
         while True:
