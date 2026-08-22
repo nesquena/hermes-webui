@@ -10316,6 +10316,7 @@ from api.models import (
     _profile_has_user_projects,
     is_cron_session,
     is_safe_session_id,
+    delete_composer_draft_sidecar,
     PROCESS_WAKEUP_PAUSE_ERROR,
     clear_process_wakeup_pause,
     clear_process_wakeup_pause_if_model_changed,
@@ -15782,6 +15783,30 @@ def handle_post(handler, parsed) -> bool:
                 next_draft["text"] = text
             if files is not None:
                 next_draft["files"] = files
+            # Authoritative clear (#6242): when the client empties the composer,
+            # the per-session draft sidecar must be removed BEFORE the emptied
+            # legacy field is persisted. If the unlink fails we fail closed with
+            # a server error (never {"ok": true}) and the recoverable draft is
+            # left untouched both in the sidecar and in the session JSON. This
+            # runs even on the unchanged path so a retry after a failed clear
+            # still removes a leftover sidecar (idempotent retry).
+            _clearing_draft = (
+                text is not None
+                and str(text) == ""
+                and not (files or [])
+            )
+            if _clearing_draft:
+                _draft_mark("before_sidecar_unlink")
+                try:
+                    delete_composer_draft_sidecar(sid)
+                except OSError:
+                    _draft_mark("sidecar_unlink_failed")
+                    return bad(
+                        handler,
+                        "Failed to clear composer draft sidecar; draft retained",
+                        500,
+                    )
+                _draft_mark("after_sidecar_unlink")
             if next_draft == current_draft:
                 unchanged = True
                 saved_draft = current_draft
