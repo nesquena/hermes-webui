@@ -4086,10 +4086,9 @@ async function _pollContextBriefJob(){
     _contextBriefJob = null;
     document.querySelectorAll('.ctx-brief-generating').forEach(n => n.remove());
     if (status && status.status === 'done'){
-      // Reload only when the panel still shows the job's session; refresh both host panels.
+      // Reload only when the panel still shows the job's session.
       if (_contextBriefSid() === job.sid){
         loadContextBrief(true);
-        if (typeof loadWorkspaceContextBrief === 'function') loadWorkspaceContextBrief(true);
       }
     } else if (typeof showToast === 'function'){
       showToast((status && status.error) || t('context_brief_error'));

@@ -9,9 +9,11 @@ duplicate, status polling, fallback when the auxiliary model is absent).
 """
 
 import json
+import sys
+import threading
 import time
 from pathlib import Path  # noqa: F401  (kept for fixture parity with the auto layer)
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -88,6 +90,8 @@ def _make_session(tmp_path, *, messages=None, **overrides):
 def _isolate_jobs():
     with context_brief._JOBS_LOCK:
         context_brief._JOBS.clear()
+        context_brief._SID_GENERATIONS.clear()
+        context_brief._DELETED_WEBUI_SIDS.clear()
     yield
     with context_brief._JOBS_LOCK:
         threads = []
@@ -103,6 +107,8 @@ def _isolate_jobs():
     alive = [thread.name for thread in threads if thread.is_alive()]
     with context_brief._JOBS_LOCK:
         context_brief._JOBS.clear()
+        context_brief._SID_GENERATIONS.clear()
+        context_brief._DELETED_WEBUI_SIDS.clear()
     assert not alive, f"context-brief worker(s) survived test teardown: {alive}"
 
 
@@ -164,7 +170,7 @@ def test_requests_exclude_runtime_injected_user_messages(tmp_path):
     plumbing. Older wakeups predate the `_source` marker, so the text
     prefix must be enough on its own.
     """
-    ws = "[Workspace::v1: /a0/usr/projects/MES]\n"
+    ws = "[Workspace::v1: /home/example/project]\n"
     messages = [
         {"role": "user", "content": ws + "déploie la nouvelle version", "timestamp": 1.0},
         {
@@ -207,7 +213,7 @@ def test_requests_strip_workspace_tag_and_dedupe(tmp_path):
     drifted timestamps, so dedupe is by TEXT alone (user report 2026-08-18):
     identical asks collapse to one entry keeping the first timestamp.
     """
-    ws = "[Workspace::v1: /a0/usr/projects/MES]\n"
+    ws = "[Workspace::v1: /home/example/project]\n"
     messages = [
         {"role": "user", "content": ws + "corrige le brief", "timestamp": 10.0},
         {"role": "user", "content": "corrige le brief", "timestamp": 10.0},
@@ -331,9 +337,18 @@ def test_legacy_brief_without_transcript_digest_is_always_unverifiable(tmp_path)
 
 def test_brief_job_generates_fallback_without_aux_model(tmp_path):
     sess = _make_session(tmp_path)
-    with _patch_resolution(sess), patch(
-        "agent.auxiliary_client.call_llm",
-        side_effect=RuntimeError("auxiliary model unavailable in unit test"),
+    fake_agent = ModuleType("agent")
+    fake_agent.__path__ = []
+    fake_aux = ModuleType("agent.auxiliary_client")
+
+    def _unavailable(*_args, **_kwargs):
+        raise RuntimeError("auxiliary model unavailable in unit test")
+
+    fake_aux.call_llm = _unavailable  # type: ignore[attr-defined]
+    fake_agent.auxiliary_client = fake_aux  # type: ignore[attr-defined]
+    with _patch_resolution(sess), patch.dict(
+        sys.modules,
+        {"agent": fake_agent, "agent.auxiliary_client": fake_aux},
     ):
         job = context_brief.start_brief_job(SID)
         assert job["status"] == "running"
@@ -471,6 +486,183 @@ def test_delete_stored_brief_removes_cache_and_never_raises(tmp_path):
     # Missing file and missing directory are both silent no-ops.
     context_brief.delete_stored_brief(tmp_path, SID)
     context_brief.delete_stored_brief(tmp_path / "absent-root", SID)
+
+
+def test_delete_fences_long_refresh_and_allows_canonical_same_sid_recreation(tmp_path):
+    """A worker returning from the auxiliary call cannot outlive its session.
+
+    The old state.db transcript remains deliberately visible to the fake models
+    layer, reproducing the real delete window. The deletion generation cancels
+    that worker; a genuinely recreated canonical session may then start fresh.
+    """
+    from api import models
+
+    state_root = tmp_path / "webui"
+    old_session = _make_session(tmp_path)
+    canonical = {"session": old_session, "exists": True}
+    old_state_db_messages = list(old_session.messages)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _get_session(sid, **_kwargs):
+        session = canonical.get("session")
+        if sid != SID or not canonical.get("exists"):
+            raise KeyError(sid)
+        return session
+
+    def _paused_generate(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return "x" * 300, "auxiliary-llm"
+
+    with patch.object(models, "get_session", _get_session), patch.object(
+        models,
+        "get_cli_session_messages",
+        return_value=old_state_db_messages,
+    ), patch.object(context_brief, "_generate_llm_brief", _paused_generate):
+        old_job = context_brief.start_brief_job(SID)
+        assert entered.wait(timeout=5)
+        canonical["exists"] = False
+        context_brief.delete_stored_brief(state_root, SID)
+        release.set()
+        thread = context_brief._JOBS[old_job["job_id"]]["_thread"]
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+        old_status = context_brief.brief_job_status(old_job["job_id"])
+        assert old_status is not None
+        assert old_status["status"] == "cancelled"
+        assert old_status["result"] is None
+        assert old_status["error"] == "session deleted"
+        assert not (state_root / "context-briefs" / f"{SID}.json").exists()
+
+        recreated = _make_session(tmp_path, title="recreated")
+        recreated.messages = [
+            {"role": "user", "content": "nouvelle vie", "timestamp": 2000.0},
+            {"role": "assistant", "content": "nouvelle réponse", "timestamp": 2001.0},
+        ]
+        canonical["session"] = recreated
+        canonical["exists"] = True
+        with patch.object(
+            context_brief,
+            "_generate_llm_brief",
+            return_value=("y" * 300, "auxiliary-llm"),
+        ):
+            new_job = context_brief.start_brief_job(SID)
+            new_thread = context_brief._JOBS[new_job["job_id"]]["_thread"]
+            new_thread.join(timeout=5)
+            assert not new_thread.is_alive()
+
+    new_status = context_brief.brief_job_status(new_job["job_id"])
+    assert new_status is not None
+    assert new_status["status"] == "done", new_status["error"]
+    assert new_status["result"]["persisted"] is True
+    assert (state_root / "context-briefs" / f"{SID}.json").exists()
+
+
+def test_deleted_webui_sid_rejects_retained_state_db_transcript(tmp_path):
+    """No payload or new job may resurrect a deleted canonical session."""
+    from api import models
+
+    state_root = tmp_path / "webui"
+    retained = [
+        {"role": "user", "content": "ancien transcript", "timestamp": 1000.0},
+        {"role": "assistant", "content": "ancienne réponse", "timestamp": 1001.0},
+    ]
+
+    context_brief.delete_stored_brief(state_root, SID)
+
+    def _missing(sid, **_kwargs):
+        raise KeyError(sid)
+
+    with patch.object(models, "get_session", _missing), patch.object(
+        models,
+        "get_cli_session_messages",
+        return_value=retained,
+    ) as state_db_read:
+        with pytest.raises(context_brief.BriefError) as payload_error:
+            context_brief.get_brief_payload(SID)
+        with pytest.raises(context_brief.BriefError) as job_error:
+            context_brief.start_brief_job(SID)
+
+    assert payload_error.value.status == 404
+    assert job_error.value.status == 404
+    assert state_db_read.call_count == 0
+    assert not (state_root / "context-briefs" / f"{SID}.json").exists()
+
+
+def test_deleted_messaging_sid_retains_read_only_state_db_fallback(tmp_path):
+    """Messaging deletion cancels jobs but intentionally retains its transcript."""
+    from api import models
+
+    retained = [
+        {"role": "user", "content": "demande telegram", "timestamp": 1000.0},
+        {"role": "assistant", "content": "réponse conservée", "timestamp": 1001.0},
+    ]
+    context_brief.delete_stored_brief(
+        tmp_path / "webui",
+        SID,
+        block_state_db_fallback=False,
+    )
+
+    def _missing(sid, **_kwargs):
+        raise KeyError(sid)
+
+    with patch.object(models, "get_session", _missing), patch.object(
+        models,
+        "get_cli_session_messages",
+        return_value=retained,
+    ):
+        payload = context_brief.get_brief_payload(SID)
+
+    assert payload["meta"]["source"] == "state_db"
+    assert payload["requests"][0]["text"] == "demande telegram"
+
+
+def test_delete_during_job_admission_preserves_tombstone(tmp_path):
+    """A stale canonical lookup cannot clear a concurrent deletion fence."""
+    from api import models
+
+    session = _make_session(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    outcome = {}
+
+    def _paused_get_session(sid, **_kwargs):
+        assert sid == SID
+        entered.set()
+        assert release.wait(timeout=5)
+        return session
+
+    def _admit():
+        try:
+            context_brief.start_brief_job(SID)
+        except context_brief.BriefError as exc:
+            outcome["error"] = exc
+
+    with patch.object(models, "get_session", _paused_get_session), patch.object(
+        models,
+        "get_cli_session_messages",
+        return_value=list(session.messages),
+    ):
+        thread = threading.Thread(target=_admit)
+        thread.start()
+        assert entered.wait(timeout=5)
+        context_brief.delete_stored_brief(tmp_path / "webui", SID)
+        release.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert outcome["error"].status == 409
+    with patch.object(models, "get_session", side_effect=KeyError(SID)), patch.object(
+        models,
+        "get_cli_session_messages",
+        return_value=list(session.messages),
+    ) as state_db_read:
+        with pytest.raises(context_brief.BriefError) as exc_info:
+            context_brief.start_brief_job(SID)
+    assert exc_info.value.status == 404
+    assert state_db_read.call_count == 0
 
 
 def test_start_job_registers_under_lock_after_resolution(tmp_path, monkeypatch):

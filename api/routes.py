@@ -14229,6 +14229,22 @@ def _resolve_new_session_workspace(body, visible_prev_session_id):
     )
     return str(workspace)
 
+
+def _delete_context_brief_state(sid: str, *, block_state_db_fallback: bool) -> None:
+    """Fence context-brief workers while the delete route owns the session lock."""
+    try:
+        from api.context_brief import delete_stored_brief
+
+        delete_stored_brief(
+            SESSION_DIR.parent,
+            sid,
+            block_state_db_fallback=block_state_db_fallback,
+            _session_lock_held=True,
+        )
+    except Exception:
+        logger.debug("context brief cleanup failed for deleted session %s", sid, exc_info=True)
+
+
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
@@ -15233,9 +15249,7 @@ def handle_post(handler, parsed) -> bool:
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
-        # A delegated subagent child (#5307) is view-only and owned by the
-        # delegate runner. Deleting it here would call delete_cli_session() and
-        # erase the child's state.db transcript — refuse it.
+        # Delegated subagent children are view-only and owned by their runner (#5307).
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
@@ -15266,14 +15280,7 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
-            # Remove the derivable context-brief cache with the session it
-            # summarizes (best-effort; never blocks the durable deletion).
-            try:
-                from api.context_brief import delete_stored_brief
-
-                delete_stored_brief(SESSION_DIR.parent, sid)
-            except Exception:
-                logger.debug("context brief cleanup failed for deleted session %s", sid, exc_info=True)
+            _delete_context_brief_state(sid, block_state_db_fallback=not is_messaging_session)
             try:
                 prune_session_from_index(sid)
             except Exception:

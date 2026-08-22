@@ -168,6 +168,8 @@ class BriefError(Exception):
 # ── job registry (LLM narrative refresh) ─────────────────────────────────
 
 _JOBS: dict[str, dict] = {}
+_SID_GENERATIONS: dict[str, int] = {}
+_DELETED_WEBUI_SIDS: set[str] = set()
 _JOBS_LOCK = threading.Lock()
 
 
@@ -191,7 +193,8 @@ def _purge_jobs_locked() -> None:
     cutoff = time.time() - _JOB_TTL_SECONDS
     stale = [
         jid for jid, job in _JOBS.items()
-        if job.get("status") in ("done", "error") and job.get("finished_at", 0) < cutoff
+        if job.get("status") in ("done", "error", "cancelled")
+        and job.get("finished_at", 0) < cutoff
     ]
     for jid in stale:
         _JOBS.pop(jid, None)
@@ -214,11 +217,31 @@ def _resolve_session(sid: str):
     """
     from api.models import get_cli_session_messages, get_session  # late import: tests patch module attrs
 
+    with _JOBS_LOCK:
+        resolution_generation = _SID_GENERATIONS.get(sid, 0)
     try:
-        return get_session(sid), "webui"
+        session = get_session(sid)
     except KeyError:
         pass
+    else:
+        # A canonical WebUI session always wins.  Clearing the process-local
+        # deletion marker here lets a legitimately recreated session reuse the
+        # same SID; the monotonically increasing generation still fences jobs
+        # that belong to the deleted lifecycle.
+        with _JOBS_LOCK:
+            # A lookup that began before deletion may return a now-stale
+            # in-memory object. It must not clear the new lifecycle's fence.
+            if _SID_GENERATIONS.get(sid, 0) == resolution_generation:
+                _DELETED_WEBUI_SIDS.discard(sid)
+        return session, "webui"
+
+    if _state_db_fallback_blocked(sid):
+        raise BriefError("Session not found", 404)
     messages = get_cli_session_messages(sid)
+    # The state.db read can overlap WebUI deletion.  Recheck after I/O so a
+    # retained row cannot be admitted after the canonical session vanished.
+    if _state_db_fallback_blocked(sid):
+        raise BriefError("Session not found", 404)
     if messages:
         return (
             SimpleNamespace(
@@ -242,18 +265,96 @@ def _resolve_session(sid: str):
     raise BriefError("Session not found", 404)
 
 
-def delete_stored_brief(state_root, sid: str) -> None:
-    """Best-effort removal of a stored LLM brief when its session is deleted.
+def _state_db_fallback_blocked(sid: str) -> bool:
+    """Whether a deleted WebUI lifecycle may no longer fall back to state.db."""
+    with _JOBS_LOCK:
+        if sid in _DELETED_WEBUI_SIDS:
+            return True
+    # The models layer owns a durable deletion tombstone.  Honor it so a
+    # process restart cannot make an old state.db transcript eligible again.
+    try:
+        from api.models import _load_webui_deleted_session_tombstone
 
-    Called from POST /api/session/delete: the brief is a derivable display
-    cache (transcript excerpts + LLM narrative) and must not outlive the
-    session it summarizes. Never raises — deletion of the session itself is
-    the authoritative operation.
-    """
+        return sid in _load_webui_deleted_session_tombstone()
+    except Exception:
+        logger.debug(
+            "context brief: durable deletion tombstone unavailable for %s",
+            sid,
+            exc_info=True,
+        )
+        return False
+
+
+def _delete_stored_brief_locked(
+    state_root,
+    sid: str,
+    *,
+    block_state_db_fallback: bool,
+) -> None:
+    """Fence jobs and remove the cache while the session mutation lock is held."""
+    with _JOBS_LOCK:
+        _SID_GENERATIONS[sid] = _SID_GENERATIONS.get(sid, 0) + 1
+        if block_state_db_fallback:
+            _DELETED_WEBUI_SIDS.add(sid)
+        else:
+            # Messaging transcripts intentionally survive WebUI deletion and
+            # remain available as read-only state.db sessions.
+            _DELETED_WEBUI_SIDS.discard(sid)
+        for job in _JOBS.values():
+            if job.get("session_id") == sid and job.get("status") == "running":
+                job.update(
+                    status="cancelled",
+                    result=None,
+                    error="session deleted",
+                    finished_at=time.time(),
+                )
     try:
         (Path(state_root) / "context-briefs" / f"{sid}.json").unlink(missing_ok=True)
     except Exception:
         logger.debug("failed to remove context brief for deleted session %s", sid, exc_info=True)
+
+
+def delete_stored_brief(
+    state_root,
+    sid: str,
+    *,
+    block_state_db_fallback: bool = True,
+    _session_lock_held: bool = False,
+) -> None:
+    """Best-effort removal of a stored LLM brief when its session is deleted.
+
+    Called from POST /api/session/delete: the brief is a derivable display
+    cache (transcript excerpts + LLM narrative) and must not outlive the
+    session it summarizes.  Deletion advances a per-SID generation, cancels
+    running jobs, and blocks state.db fallback for deleted WebUI sessions.
+    A canonical session recreated with the same SID still resolves normally.
+
+    ``block_state_db_fallback`` remains false for messaging sessions because
+    their source transcript intentionally survives WebUI deletion.
+    ``_session_lock_held`` is for the delete route, which already owns the
+    canonical per-session mutation lock.  Direct callers acquire that same
+    lock so cache unlink and worker persistence cannot cross.
+
+    Never raises — deletion of the session itself is authoritative.
+    """
+    try:
+        if _session_lock_held:
+            _delete_stored_brief_locked(
+                state_root,
+                sid,
+                block_state_db_fallback=block_state_db_fallback,
+            )
+            return
+        from api.models import _get_session_agent_lock
+
+        with _get_session_agent_lock(sid):
+            _delete_stored_brief_locked(
+                state_root,
+                sid,
+                block_state_db_fallback=block_state_db_fallback,
+            )
+    except Exception:
+        logger.debug("failed to fence context brief for deleted session %s", sid, exc_info=True)
 
 
 # ── deterministic extraction ─────────────────────────────────────────────
@@ -836,6 +937,7 @@ def _llm_brief_is_current(session, payload: dict | None, message_count: int) -> 
 def _persist_revalidated_llm_brief(
     sid: str,
     *,
+    expected_generation: int,
     expected_source: str,
     expected_revision: dict,
     text: str,
@@ -846,6 +948,9 @@ def _persist_revalidated_llm_brief(
     from api.models import _get_session_agent_lock
 
     with _get_session_agent_lock(sid):
+        with _JOBS_LOCK:
+            if _SID_GENERATIONS.get(sid, 0) != expected_generation:
+                raise BriefError("context brief job cancelled", 409)
         fresh_session, fresh_source = _resolve_session(sid)
         if fresh_source != expected_source:
             raise BriefError("session source changed during brief generation", 409)
@@ -992,6 +1097,11 @@ def start_brief_job(sid: str) -> dict:
     duplicate-running check and the registration form a single critical
     section so two concurrent POSTs cannot both enqueue (409 contract).
     """
+    # Snapshot the lifecycle generation before session resolution.  If delete
+    # overlaps that I/O, registration refuses the stale admission rather than
+    # binding the request to whichever lifecycle happens to reuse the SID.
+    with _JOBS_LOCK:
+        admission_generation = _SID_GENERATIONS.get(sid, 0)
     session, _source = _resolve_session(sid)  # 404 before registering a job
     if not (getattr(session, "messages", None) or []):
         raise BriefError("nothing to brief (session has no messages)")
@@ -1007,9 +1117,12 @@ def start_brief_job(sid: str) -> dict:
     }
     with _JOBS_LOCK:
         _purge_jobs_locked()
+        if _SID_GENERATIONS.get(sid, 0) != admission_generation:
+            raise BriefError("session changed during context brief admission", 409)
         for existing in _JOBS.values():
             if existing.get("session_id") == sid and existing.get("status") == "running":
                 raise BriefError("a context brief job is already running for this session", 409)
+        job["_generation"] = admission_generation
         _JOBS[job_id] = job
 
     thread = threading.Thread(
@@ -1028,6 +1141,10 @@ def start_brief_job(sid: str) -> dict:
 
 def _finish_job(job: dict, *, result: dict | None = None, error: str | None = None) -> None:
     with _JOBS_LOCK:
+        # Deletion owns the terminal cancelled state.  A worker returning from
+        # a long auxiliary call must not overwrite it with done/error.
+        if job.get("status") == "cancelled":
+            return
         job["status"] = "done" if error is None else "error"
         job["result"] = result
         job["error"] = error
@@ -1047,6 +1164,7 @@ def _run_brief_job(job: dict) -> None:
         text, brief_source = _generate_llm_brief(snapshot, sid, deterministic)
         payload, _fresh_session, payload_is_current = _persist_revalidated_llm_brief(
             sid,
+            expected_generation=job["_generation"],
             expected_source=source,
             expected_revision=revision,
             text=text,
