@@ -5339,6 +5339,42 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
+def _anchor_scene_has_worklog_worthy_rows(scene) -> bool:
+    """Server-side mirror of ``_anchorSceneHasWorklogWorthyRows`` (messages.js).
+
+    A worklog (the collapsible activity rail) is only meaningful when the turn
+    actually did worklog-worthy work: a tool call, a thinking/reasoning pass, a
+    compression lifecycle card, or a Steer delivery. A turn that only streamed
+    prose projects an activity scene whose rows are ALL ``prose``/``terminal`` —
+    persisting such a scene wastes storage and can store oversized blobs
+    (#7188 SILENT #5). Returns True if at least one genuinely worklog-worthy row
+    is present.
+    """
+    if not isinstance(scene, dict):
+        return False
+    if scene.get("mode") == "hide_all_activity":
+        return False
+    rows = scene.get("activity_rows")
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "")
+        # Steer is user-authored but still needs a persisted scene even when
+        # the rest of the turn is prose-only.
+        if str(row.get("source_event_type") or "") == "steer_delivered":
+            return True
+        if role in ("tool", "thinking"):
+            return True
+        if role == "lifecycle":
+            source = str(row.get("source_event_type") or "")
+            # Compression cards are worklog-worthy; a bare terminal/done is not.
+            if source in ("compressing", "compressed"):
+                return True
+    return False
+
+
 def _persist_terminal_anchor_scene_from_journal(
     session_id: str,
     stream_id: str,
@@ -5358,6 +5394,13 @@ def _persist_terminal_anchor_scene_from_journal(
 
     Called from the streaming ``finally`` block for completion, cancellation,
     and error paths. Returns True if a scene was persisted, False otherwise.
+
+    Size/worklog gate (#7188 SILENT #5): plain prose-only turns with no Steer,
+    tool, thinking, or compression rows do NOT persist a scene — reusing the
+    established worklog-worthy-row predicate from the browser path. The scene is
+    also passed through ``_sanitize_anchor_activity_scene`` before storing, so
+    an oversized scene is rejected rather than persisted (a 600K-byte
+    prose-flood scene was stored before this gate).
     """
     if not session_id or not stream_id:
         return False
@@ -5374,6 +5417,20 @@ def _persist_terminal_anchor_scene_from_journal(
         return False
     scene = snapshot.get("anchor_activity_scene")
     if not isinstance(scene, dict) or not scene.get("activity_rows"):
+        return False
+    # Worklog-worthy gate (#7188 SILENT #5): skip plain prose-only turns.
+    if not _anchor_scene_has_worklog_worthy_rows(scene):
+        return False
+    # Pass through the existing size/row sanitizer before storing (#7188 #5).
+    # _sanitize_anchor_activity_scene raises ValueError on oversized payloads;
+    # catch and skip rather than crashing the terminal settlement path.
+    try:
+        scene = _sanitize_anchor_activity_scene(scene)
+    except (ValueError, TypeError):
+        logger.debug(
+            "Terminal anchor-scene settlement: scene rejected by sanitizer for stream %s",
+            stream_id,
+        )
         return False
     # Stamp the terminal state so the settled scene reflects the run's outcome.
     if terminal_state:

@@ -221,8 +221,11 @@ def test_terminal_event_via_put_closes_fence(
         "done", {"session": {}}, _publish
     )
 
-    # The fence must be closed.
-    assert run_journal.is_acceptance_fence_closed(sid, stream_id, session_dir=tmp_path)
+    # The fence is evicted after a durable terminal append (#7188 SILENT #4):
+    # the fence is only needed for the pre-terminal / persistence-failure window.
+    # Once the terminal row is durable, no late Steer can land after it — the
+    # journal's own terminal check in accept_and_append_if_nonterminal rejects it.
+    assert not run_journal.is_acceptance_fence_closed(sid, stream_id, session_dir=tmp_path)
 
     # The done event must be journaled and published.
     journal = run_journal.read_run_events(sid, stream_id, session_dir=tmp_path)
@@ -230,7 +233,9 @@ def test_terminal_event_via_put_closes_fence(
     assert len(published_events) == 1
     assert published_events[0]["event"] == "done"
 
-    # A late Steer after the terminal event must be rejected.
+    # A late Steer after the terminal event must be rejected — by the journal's
+    # terminal check, not the fence (the fence is evicted but the journal row
+    # is durable).
     with patch.object(
         streaming,
         "get_session",
@@ -478,3 +483,315 @@ def test_terminal_settlement_no_scene_for_empty_journal(
             sid, stream_id, terminal_state="completed",
         )
     assert result is False
+
+
+# ── #7188 re-gate: deterministic concurrency/lifecycle tests ──────────────────
+
+
+def test_close_fence_lock_ordering_prevents_late_steer_race(
+    isolated_steer_state,
+    tmp_path,
+):
+    """CORE #2: close_acceptance_fence must acquire the per-run lock BEFORE the
+    fence lock, matching accept_and_append_if_nonterminal's lock order.
+
+    This test interleaves close_acceptance_fence with an in-flight
+    accept_and_append_if_nonterminal, proving the per-run lock ordering
+    prevents the race where completion closes the fence and drains while an
+    already-started Steer subsequently commits.
+    """
+    import threading
+
+    sid = "lock_order_sid"
+    stream_id = "lock_order_run"
+
+    writer = run_journal.RunJournalWriter(sid, stream_id, session_dir=tmp_path)
+
+    # Pre-append a non-terminal event so the journal exists.
+    writer.append_and_publish_sse_event(
+        "token", {"text": "hello"}, lambda e: None,
+    )
+
+    acceptance_started = threading.Event()
+    acceptance_can_commit = threading.Event()
+    acceptance_done = threading.Event()
+    close_done = threading.Event()
+
+    # Thread B (late Steer): acquires per-run lock, checks fence (open),
+    # then blocks before committing. This simulates the window the gate-certifier
+    # reproduced: the Steer checks the fence while it's still open, then
+    # completion closes the fence and drains.
+    def _late_steer():
+        # accept_and_append_if_nonterminal holds self._lock while checking
+        # the fence and calling accept(). We intercept the accept callback
+        # to block, forcing the interleaving.
+        def _accept():
+            acceptance_started.set()
+            acceptance_can_commit.wait(timeout=5)
+            return True
+
+        accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+            "steer_delivered",
+            {"text": "late steer", "status": "delivered"},
+            _accept,
+            publish=lambda e: None,
+        )
+        acceptance_done.set()
+        # With the lock-ordering fix, close_acceptance_fence blocks on the
+        # per-run lock until accept_and_append_if_nonterminal releases it.
+        # So the fence is still open when the Steer checks it, and the Steer
+        # commits BEFORE the fence closes. But wait — that means the Steer
+        # succeeds! No — the point is: with correct lock ordering, the Steer
+        # either fully commits (fence was open) or is rejected (fence was
+        # closed). There is NO window where the Steer checks an open fence,
+        # commits, and THEN the fence closes and drains — because
+        # close_acceptance_fence holds the per-run lock, it cannot close the
+        # fence while the Steer is between its check and commit.
+        return accepted, reason
+
+    steer_result = [None]
+
+    def _steer_thread():
+        steer_result[0] = _late_steer()
+
+    # Thread A (completion): waits for the Steer to start (hold the per-run
+    # lock), then tries to close the fence. With the fix, close_acceptance_fence
+    # blocks on the per-run lock until the Steer releases it.
+    def _completion():
+        acceptance_started.wait(timeout=5)
+        # Now the Steer holds the per-run lock. Try to close the fence.
+        # With the fix, this blocks until the Steer releases the lock.
+        writer.close_acceptance_fence()
+        close_done.set()
+
+    t_steer = threading.Thread(target=_steer_thread)
+    t_close = threading.Thread(target=_completion)
+
+    t_steer.start()
+    t_close.start()
+
+    # Give the completion thread a moment to try (it should be blocked).
+    import time as _time
+    _time.sleep(0.1)
+    # The fence must NOT be closed yet — close_acceptance_fence is blocked
+    # on the per-run lock held by the Steer thread.
+    assert not close_done.is_set(), (
+        "close_acceptance_fence returned before the Steer committed — "
+        "lock ordering is wrong (per-run lock not acquired before fence lock)"
+    )
+
+    # Release the Steer to commit.
+    acceptance_can_commit.set()
+    t_steer.join(timeout=5)
+    t_close.join(timeout=5)
+
+    accepted, reason = steer_result[0]
+    # The Steer committed successfully because the fence was still open
+    # when it checked (close_acceptance_fence was blocked on the per-run lock).
+    assert accepted is True, f"Steer should have been accepted (fence was open), got reason={reason}"
+    assert reason is None
+
+    # Now the fence is closed (completion ran after the Steer released the lock).
+    assert close_done.is_set()
+
+
+def test_done_then_stream_end_both_published(
+    isolated_steer_state,
+    tmp_path,
+):
+    """CORE #1: done and stream_end are both terminal, but stream_end must
+    still be published after done. The old code suppressed the second terminal
+    event, leaking the SSE handler forever.
+
+    This test sends done then stream_end and proves both are published.
+    """
+    sid = "terminal_seq_sid"
+    stream_id = "terminal_seq_run"
+
+    writer = run_journal.RunJournalWriter(sid, stream_id, session_dir=tmp_path)
+    published = []
+
+    # Publish 'done' first.
+    writer.close_acceptance_fence_and_publish_terminal(
+        "done", {"session": {}}, published.append,
+    )
+    assert len(published) == 1
+    assert published[0]["event"] == "done"
+    assert published[0].get("terminal") is True
+
+    # Now publish 'stream_end' — the journal is already terminal (done).
+    # The old code returned a synthetic event WITHOUT calling publish(),
+    # so the SSE relay never received stream_end and emitted heartbeats forever.
+    writer.close_acceptance_fence_and_publish_terminal(
+        "stream_end", {"session_id": sid}, published.append,
+    )
+    # stream_end MUST be published (CORE #1 fix).
+    assert len(published) == 2, (
+        f"stream_end was not published after done — SSE leak. "
+        f"Got {len(published)} events: {[e['event'] for e in published]}"
+    )
+    assert published[1]["event"] == "stream_end"
+    assert published[1].get("terminal") is True
+
+
+def test_synthetic_terminal_always_published_on_error_paths(
+    isolated_steer_state,
+    tmp_path,
+):
+    """CORE #1: the synthetic error paths (malformed/already_terminal and
+    persistence failure) must ALWAYS publish the synthetic terminal event,
+    not just return it. The old code returned without publishing, leaving the
+    SSE relay waiting forever.
+    """
+    sid = "synthetic_pub_sid"
+    stream_id = "synthetic_pub_run"
+
+    writer = run_journal.RunJournalWriter(sid, stream_id, session_dir=tmp_path)
+    published = []
+
+    # First, write a 'done' event to make the journal terminal.
+    writer.close_acceptance_fence_and_publish_terminal(
+        "done", {"session": {}}, published.append,
+    )
+    assert len(published) == 1
+
+    # Now send another terminal event — journal is already terminal.
+    # The synthetic path must publish.
+    writer.close_acceptance_fence_and_publish_terminal(
+        "apperror", {"type": "test_error"}, published.append,
+    )
+    assert len(published) == 2, "Synthetic terminal was not published on already_terminal path"
+    assert published[1]["event"] == "apperror"
+    assert published[1].get("_synthetic") is True
+
+    # Test persistence failure path: mock _append_run_event_locked to raise.
+    published.clear()
+    run_journal._ACCEPTANCE_FENCE.clear()  # reset fence for a fresh run
+    writer2 = run_journal.RunJournalWriter("syn_err_sid", "syn_err_run", session_dir=tmp_path)
+
+    with patch.object(
+        run_journal, "_append_run_event_locked", side_effect=OSError("disk full"),
+    ):
+        writer2.close_acceptance_fence_and_publish_terminal(
+            "done", {"session": {}}, published.append,
+        )
+    # The synthetic terminal must be published even on persistence failure.
+    assert len(published) == 1, "Synthetic terminal was not published on persistence failure"
+    assert published[0]["event"] == "done"
+    assert published[0].get("_synthetic") is True
+
+
+def test_symlink_in_archive_rejected(
+    isolated_steer_state,
+    tmp_path,
+):
+    """CORE #3: a symlink inside the archive directory pointing outside
+    session_root must be rejected. The old code checked the unresolved lexical
+    path and followed symlinks, accepting the traversal.
+    """
+    from api import streaming
+    from api.upload import _session_attachment_dir
+
+    sid = "symlink_escape_sid"
+    session_root = _session_attachment_dir(sid).resolve()
+    session_root.mkdir(parents=True, exist_ok=True)
+
+    # Create an archive directory inside the session root.
+    archive_dir = session_root / "extracted"
+    archive_dir.mkdir()
+
+    # Create a real file inside the archive.
+    real_file = archive_dir / "real.txt"
+    real_file.write_text("safe content")
+
+    # Create a symlink inside the archive pointing outside session_root.
+    outside_file = tmp_path / "outside_secret.txt"
+    outside_file.write_text("secret data")
+    symlink = archive_dir / "escape_link"
+    symlink.symlink_to(outside_file)
+
+    # The symlink must cause rejection.
+    with pytest.raises(ValueError, match="symlink|escapes session root"):
+        streaming._verified_steer_attachment_paths(sid, [str(archive_dir)])
+
+
+def test_fence_evicted_after_terminal_completion(
+    isolated_steer_state,
+    tmp_path,
+):
+    """SILENT #4: _ACCEPTANCE_FENCE must not leak one entry per run forever.
+    After 5 completed turns, the fence map must have 0 entries.
+    """
+    published = []
+
+    for i in range(5):
+        sid = f"evict_sid_{i}"
+        stream_id = f"evict_run_{i}"
+        writer = run_journal.RunJournalWriter(sid, stream_id, session_dir=tmp_path)
+        writer.close_acceptance_fence_and_publish_terminal(
+            "done", {"session": {}}, published.append,
+        )
+
+    # All 5 runs completed with durable terminal appends — the fence must be
+    # empty (evicted after each durable terminal).
+    assert len(run_journal._ACCEPTANCE_FENCE) == 0, (
+        f"Fence leaked {len(run_journal._ACCEPTANCE_FENCE)} entries after 5 "
+        f"completed runs — _evict_acceptance_fence is not wired into the "
+        f"terminal path"
+    )
+
+
+def test_no_steer_plain_prose_settlement_skips_scene(
+    isolated_steer_state,
+    tmp_path,
+):
+    """SILENT #5: server settlement must NOT persist a scene for ordinary
+    no-Steer prose-only turns. A scene with only prose/terminal rows bypasses
+    the worklog-worthy predicate and should return False.
+    """
+    from api import routes
+
+    sid = "no_steer_prose_sid"
+    stream_id = "no_steer_prose_run"
+
+    # Build a journal with only prose (token) events and a done event — no
+    # Steer, tool, thinking, or compression rows.
+    run_journal.append_run_event(
+        sid, stream_id, "token",
+        {"text": "just a plain text answer with no tools", "created_at": time.time()},
+        session_dir=tmp_path,
+    )
+    run_journal.append_run_event(
+        sid, stream_id, "done", {"session": {}}, session_dir=tmp_path,
+    )
+
+    mock_session = MagicMock()
+    mock_session.session_id = sid
+    mock_session.anchor_activity_scenes = {}
+    mock_session.messages = [{"role": "assistant", "content": "answer", "timestamp": int(time.time())}]
+    mock_session.save = MagicMock(return_value=True)
+
+    with patch.object(routes, "get_session", return_value=mock_session), \
+         patch.object(routes, "find_run_summary", return_value={
+             "session_id": sid, "run_id": stream_id, "last_seq": 2,
+             "last_event_id": f"{stream_id}:2",
+         }), \
+         patch.object(routes, "read_run_events", return_value={
+             "session_id": sid, "run_id": stream_id,
+             "events": run_journal.read_run_events(sid, stream_id, session_dir=tmp_path)["events"],
+             "malformed": False,
+         }), \
+         patch.object(routes, "_get_session_agent_lock") as _lock_ctx:
+        _lock_ctx.return_value.__enter__ = MagicMock()
+        _lock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = routes._persist_terminal_anchor_scene_from_journal(
+            sid, stream_id, terminal_state="completed",
+        )
+
+    # Plain prose-only turns must NOT persist a scene.
+    assert result is False, (
+        "Server settlement persisted a scene for a plain prose-only turn — "
+        "the worklog-worthy-row predicate is not gating settlement"
+    )
+    mock_session.save.assert_not_called()

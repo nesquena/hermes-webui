@@ -601,13 +601,23 @@ class RunJournalWriter:
         Completion/cancel/error paths call this BEFORE their final Steer drain
         so a racing late Steer is rejected by ``accept_and_append_if_nonterminal``
         in the window between runtime completion and terminal-row append.
+
+        Lock ordering (#7188 CORE #2): the acceptance path
+        (``accept_and_append_if_nonterminal``) acquires ``self._lock`` (the
+        per-run lock) BEFORE ``_ACCEPTANCE_FENCE_LOCK``. This method must
+        follow the SAME order — per-run lock first, then fence lock — so a
+        drain cannot begin while an in-flight acceptance is still between its
+        fence check and its commit. If this method took only the fence lock,
+        completion could close the fence and drain while an already-started
+        Steer subsequently committed and was journaled as delivered.
         """
         fence_key = str(self._path)
-        with _ACCEPTANCE_FENCE_LOCK:
-            if _ACCEPTANCE_FENCE.get(fence_key):
-                return False
-            _ACCEPTANCE_FENCE[fence_key] = True
-            return True
+        with self._lock:
+            with _ACCEPTANCE_FENCE_LOCK:
+                if _ACCEPTANCE_FENCE.get(fence_key):
+                    return False
+                _ACCEPTANCE_FENCE[fence_key] = True
+                return True
 
     def close_acceptance_fence_and_publish_terminal(
         self,
@@ -637,7 +647,21 @@ class RunJournalWriter:
 
         Returns the canonical terminal event dict. If the journal is malformed
         or already terminal, the fence is still closed (defensive) and a
-        synthetic terminal event is returned without persistence.
+        synthetic terminal event is returned — and **always published** via the
+        callback — so the SSE relay receives a terminal frame and can tear down
+        its handler/browser connection (#7188 CORE #1).
+
+        Terminal sequence (#7188 CORE #1): ``done`` and ``stream_end`` are both
+        terminal events, but they appear in the expected sequence
+        ``done → (metering/title) → stream_end``. A preceding semantic terminal
+        (``done``) does NOT suppress ``stream_end`` — transport closure must
+        still be published so the SSE relay stops emitting heartbeats. Only the
+        FIRST semantic terminal (``done``/``cancel``/``apperror``) runs the
+        drain; ``stream_end`` is published without a drain.
+
+        Fence eviction (#7188 SILENT #4): after a durable terminal append the
+        fence entry is evicted so the per-run map does not leak one entry per
+        completed run forever.
         """
         with self._lock:
             fence_key = str(self._path)
@@ -650,6 +674,8 @@ class RunJournalWriter:
             # Run the final Steer drain (if any) with the fence closed. The
             # drain must NOT call accept_and_append_if_nonterminal — it returns
             # leftover text for the next-turn queue, not a durable delivery.
+            # Only the first semantic terminal runs the drain; stream_end after
+            # done is transport closure, not a new lifecycle exit.
             if drain is not None and not already_terminal:
                 try:
                     drain()
@@ -661,24 +687,26 @@ class RunJournalWriter:
                     )
             if malformed or already_terminal:
                 # Defensive: synthesize a terminal envelope so the caller can
-                # still publish. The fence is closed regardless.
-                terminal_state = _terminal_state_for_event(
-                    str(event_name or "").strip(), payload
-                )
-                return {
-                    "version": 1,
-                    "event_id": f"{self.run_id}:terminal",
-                    "seq": None,
-                    "run_id": str(self.run_id),
-                    "session_id": str(self.session_id),
-                    "event": str(event_name or "").strip(),
-                    "type": str(event_name or "").strip(),
-                    "created_at": time.time(),
-                    "terminal": True,
-                    "terminal_state": terminal_state,
-                    "payload": payload or {},
-                    "_synthetic": True,
-                }
+                # still publish. The fence is closed regardless. ALWAYS publish
+                # the synthetic terminal (#7188 CORE #1): the error paths at
+                # the old :662/:690 returned without calling publish(), so a
+                # journal-write failure or a stream_end-after-done left the UI
+                # waiting forever while routes.py:18383 emitted heartbeats.
+                synthetic = self._synthesize_terminal(event_name, payload)
+                try:
+                    publish(synthetic)
+                except Exception:
+                    logger.debug(
+                        "Failed to publish synthetic terminal event %s for stream %s",
+                        event_name,
+                        self.run_id,
+                        exc_info=True,
+                    )
+                # Evict the fence on the already-terminal / malformed path too:
+                # the run is effectively over (SILENT #4).
+                with _ACCEPTANCE_FENCE_LOCK:
+                    _ACCEPTANCE_FENCE.pop(fence_key, None)
+                return synthetic
             try:
                 event = _append_run_event_locked(
                     self._path,
@@ -694,24 +722,24 @@ class RunJournalWriter:
                     self.run_id,
                     exc_info=True,
                 )
-                # Fence is closed; return synthetic so caller can still publish.
-                terminal_state = _terminal_state_for_event(
-                    str(event_name or "").strip(), payload
-                )
-                return {
-                    "version": 1,
-                    "event_id": f"{self.run_id}:terminal",
-                    "seq": None,
-                    "run_id": str(self.run_id),
-                    "session_id": str(self.session_id),
-                    "event": str(event_name or "").strip(),
-                    "type": str(event_name or "").strip(),
-                    "created_at": time.time(),
-                    "terminal": True,
-                    "terminal_state": terminal_state,
-                    "payload": payload or {},
-                    "_synthetic": True,
-                }
+                # Fence is closed; synthesize and ALWAYS publish so the SSE
+                # relay receives a terminal frame (CORE #1).
+                synthetic = self._synthesize_terminal(event_name, payload)
+                try:
+                    publish(synthetic)
+                except Exception:
+                    logger.debug(
+                        "Failed to publish synthetic terminal event %s for stream %s",
+                        event_name,
+                        self.run_id,
+                        exc_info=True,
+                    )
+                # Evict the fence even on persistence failure: the fence's job
+                # (rejecting late Steer) is done; keeping it leaks one entry per
+                # run forever (SILENT #4).
+                with _ACCEPTANCE_FENCE_LOCK:
+                    _ACCEPTANCE_FENCE.pop(fence_key, None)
+                return synthetic
             try:
                 publish(event)
             except Exception:
@@ -721,7 +749,33 @@ class RunJournalWriter:
                     self.run_id,
                     exc_info=True,
                 )
+            # Evict the fence after a durable terminal append (SILENT #4).
+            # The fence is only needed for the pre-terminal /
+            # terminal-persistence-failure window; once the terminal row is
+            # durable, no late Steer can land after it.
+            with _ACCEPTANCE_FENCE_LOCK:
+                _ACCEPTANCE_FENCE.pop(fence_key, None)
             return event
+
+    def _synthesize_terminal(self, event_name: str, payload) -> dict:
+        """Build a synthetic terminal envelope for non-persisted terminal paths."""
+        terminal_state = _terminal_state_for_event(
+            str(event_name or "").strip(), payload
+        )
+        return {
+            "version": 1,
+            "event_id": f"{self.run_id}:terminal",
+            "seq": None,
+            "run_id": str(self.run_id),
+            "session_id": str(self.session_id),
+            "event": str(event_name or "").strip(),
+            "type": str(event_name or "").strip(),
+            "created_at": time.time(),
+            "terminal": True,
+            "terminal_state": terminal_state,
+            "payload": payload or {},
+            "_synthetic": True,
+        }
 
 
 def read_run_events(
@@ -1016,6 +1070,18 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         with _SUMMARY_CACHE_LOCK:
             for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
                 del _SUMMARY_CACHE[cache_key]
+        # Evict acceptance-fence entries for all removed runs (#7188 SILENT #4).
+        # The fence is keyed by the canonical run-path string, whose parent is
+        # ``session_journal_dir``. Without this, deleting a session leaves one
+        # fence entry per run that never reached a durable terminal (or whose
+        # terminal path didn't fire eviction — the old code never called
+        # _evict_acceptance_fence at all).
+        with _ACCEPTANCE_FENCE_LOCK:
+            for fence_key in [
+                fk for fk in _ACCEPTANCE_FENCE
+                if str(Path(fk).parent) == dir_key
+            ]:
+                del _ACCEPTANCE_FENCE[fence_key]
     return removed
 
 

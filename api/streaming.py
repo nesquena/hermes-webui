@@ -12953,6 +12953,13 @@ def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
     contained extracted directory (excluding the inbox root itself) by expanding
     it to its concrete member file paths. Each resolved path must still live
     under the session root.
+
+    Security (#7188 CORE #3): symlinks inside the upload directory pointing
+    outside ``session_root`` were accepted because the old check used the
+    UNRESOLVED lexical path. Every member is now ``resolve(strict=True)``-d and
+    verified to be (a) under ``session_root`` and (b) a regular file. Symlinks
+    are rejected outright — a member whose resolved target escapes the session
+    root raises ``ValueError``.
     """
     from api.upload import _session_attachment_dir
 
@@ -12962,14 +12969,34 @@ def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
         candidate = Path(raw).expanduser().resolve()
         if not candidate.is_relative_to(session_root):
             raise ValueError("Steer attachment path is not a session upload")
-        if candidate.is_file():
+        if candidate.is_file() and not candidate.is_symlink():
             verified.append(str(candidate))
+        elif candidate.is_file() and candidate.is_symlink():
+            # A symlink at the top level: resolve strictly and re-verify.
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_relative_to(session_root) or not resolved.is_file() or resolved.is_symlink():
+                raise ValueError("Steer attachment symlink escapes session root")
+            verified.append(str(resolved))
         elif candidate.is_dir() and candidate != session_root:
             # Archive extraction directory: expand to concrete member files.
             # Bound the walk so a maliciously large tree cannot stall the request.
             for member in sorted(candidate.rglob("*")):
-                if member.is_file() and member.is_relative_to(session_root):
-                    verified.append(str(member))
+                # Reject symlinks outright — a symlink inside the archive
+                # pointing outside session_root is a traversal hole (#7188 #3).
+                if member.is_symlink():
+                    raise ValueError("Steer archive member is a symlink")
+                # resolve(strict=True) every member so the REAL path is checked,
+                # not the lexical one. A member whose resolved target is outside
+                # session_root or not a regular file is rejected.
+                try:
+                    resolved_member = member.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    # Broken symlink or dangling path — skip, don't accept.
+                    continue
+                if not resolved_member.is_relative_to(session_root):
+                    raise ValueError("Steer archive member escapes session root")
+                if resolved_member.is_file():
+                    verified.append(str(resolved_member))
                 if len(verified) >= 200:
                     break
         else:
