@@ -8343,7 +8343,11 @@ async function handleComposerPrimaryAction(){
   const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
   if(action==='disabled') return;
   if(action==='stop'){
-    if(typeof cancelStream==='function' && !await cancelStream('composer-stop')) showToast(t('cancel_failed'),null,'error');
+    if(typeof cancelStream==='function'){
+      const _r = await cancelStream('composer-stop');
+      // Preserve persistence-failure warning (gate-certifier blocker #4).
+      if(!(_r && _r.cancelled)) showToast(t('cancel_failed'),null,'error');
+    }
     return;
   }
   await send();
