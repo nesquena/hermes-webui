@@ -8121,12 +8121,19 @@ def _json_loads_if_string(value):
 _STATE_DB_CONTENT_JSON_PREFIX = "\x00json:"
 
 
+def _reject_non_finite_state_db_json_constant(value):
+    raise ValueError(f"unsupported JSON constant: {value}")
+
+
 def _decode_state_db_content(value):
     """Decode Agent's structured-content storage form without widening it."""
     if not isinstance(value, str) or not value.startswith(_STATE_DB_CONTENT_JSON_PREFIX):
         return value
     try:
-        decoded = json.loads(value[len(_STATE_DB_CONTENT_JSON_PREFIX):])
+        decoded = json.loads(
+            value[len(_STATE_DB_CONTENT_JSON_PREFIX):],
+            parse_constant=_reject_non_finite_state_db_json_constant,
+        )
     except Exception:
         return value
     return decoded if isinstance(decoded, list) else value

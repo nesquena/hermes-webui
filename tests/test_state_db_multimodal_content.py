@@ -82,6 +82,9 @@ def test_decode_state_db_content_accepts_only_json_lists():
         "\x00json:\"string root\"",
         "\x00json:42",
         "\x00json:{malformed",
+        "\x00json:[NaN]",
+        "\x00json:[Infinity]",
+        "\x00json:[-Infinity]",
     ],
 )
 def test_state_db_readers_keep_malformed_and_non_list_roots_as_strings(
