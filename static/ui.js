@@ -8999,6 +8999,33 @@ let _ttsChunkQueue=[];
 let _ttsChunkIndex=0;
 let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
+let _browserTtsPrimeUtterance=null;
+
+// iOS Safari will silently discard speech queued after an async response unless
+// speech synthesis was first used during a trusted user gesture.  Prime the
+// native Web Speech session from Send / Voice Mode while that activation is
+// still live; later auto-read utterances can then speak normally.
+function _primeBrowserTtsFromGesture(force){
+  if(!('speechSynthesis' in window)||typeof SpeechSynthesisUtterance!=='function') return false;
+  if(typeof navigator!=='undefined'&&navigator.userActivation&&navigator.userActivation.isActive!==true) return false;
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  const autoRead=localStorage.getItem('hermes-tts-auto-read')==='true';
+  if(engine!=='browser'||(!force&&!autoRead)) return false;
+  try{
+    const utter=new SpeechSynthesisUtterance('');
+    const clear=()=>{
+      if(_browserTtsPrimeUtterance===utter) _browserTtsPrimeUtterance=null;
+    };
+    utter.onend=clear;
+    utter.onerror=clear;
+    _browserTtsPrimeUtterance=utter;
+    speechSynthesis.speak(utter);
+    return true;
+  }catch(_){
+    _browserTtsPrimeUtterance=null;
+    return false;
+  }
+}
 
 function _buildBrowserUtterance(text, btn){
   const utter=new SpeechSynthesisUtterance(text);
