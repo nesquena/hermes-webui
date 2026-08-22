@@ -1,5 +1,6 @@
 """Regression tests for /api/sessions lineage metadata used by sidebar collapse."""
 
+import json
 import sqlite3
 import time
 
@@ -437,6 +438,49 @@ def test_generic_subagent_title_gets_goal_display_title(_isolate):
 
         assert row["title"] == "Subagent Session"
         assert row["display_title"] == "Find the root cause of the failing sidebar test"
+    finally:
+        conn.close()
+
+
+def test_generic_subagent_title_decodes_structured_state_content(_isolate):
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    content = [
+        {"type": "text", "text": "Describe the neutral test image"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AA=="},
+        },
+    ]
+    try:
+        _save_webui_session(
+            "lineage_api_subagent_structured",
+            title="Subagent Session",
+            updated_at=t0,
+        )
+        _insert_state_row(
+            conn,
+            "lineage_api_subagent_structured",
+            title="Subagent Session",
+            source="subagent",
+            started_at=t0,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_structured",
+            role="user",
+            content="\x00json:" + json.dumps(content),
+            timestamp=t0 + 1,
+        )
+
+        row = {
+            row["session_id"]: row
+            for row in all_sessions(include_lineage_metadata=False)
+        }["lineage_api_subagent_structured"]
+
+        assert row["display_title"] == "Describe the neutral test image"
+        assert "base64" not in row["display_title"]
     finally:
         conn.close()
 

@@ -178,10 +178,12 @@ def test_state_db_rich_sidecar_row_deduplicates_without_flattening(
 
 
 def test_prefixed_state_db_rich_row_matches_bare_sidecar(tmp_path, monkeypatch):
+    from api.streaming import _workspace_context_prefix
+
     db = tmp_path / "state.db"
     bare_content = _rich_content()
     prefixed_content = _rich_content(
-        text="[Workspace::v1: /tmp/synthetic]\ndescribe this image",
+        text=_workspace_context_prefix("/tmp/synthetic]path") + "describe this image",
     )
     _make_state_db(
         db,

@@ -6066,7 +6066,9 @@ def _read_state_db_sidebar_overrides(
                         sid = str(row['session_id'])
                         if sid in seen_user_messages:
                             continue
-                        display_title = title_from([dict(row)], fallback='')
+                        title_message = dict(row)
+                        title_message['content'] = _decode_state_db_content(row['content'])
+                        display_title = title_from([title_message], fallback='')
                         if display_title:
                             seen_user_messages.add(sid)
                             overrides.setdefault(sid, {})['_state_db_display_title'] = display_title
@@ -8959,13 +8961,12 @@ def _message_sidecar_role(message: dict | None):
     return role if role in {"user", "assistant"} else None
 
 
-_WORKSPACE_PREFIX_RE = re.compile(r"^\s*\[Workspace(?:::v1)?:[^\]]+\]\s*")
-
-
 def _normalized_message_content_value(value, *, strip_workspace_prefix=False):
     if isinstance(value, str):
         if strip_workspace_prefix:
-            value = _WORKSPACE_PREFIX_RE.sub("", value, count=1)
+            from api.streaming import _strip_workspace_prefix
+
+            value = _strip_workspace_prefix(value, include_legacy=True)
         return " ".join(value.split())
     if isinstance(value, list):
         return [
