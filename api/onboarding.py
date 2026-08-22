@@ -16,6 +16,8 @@ from api.config import (
     DEFAULT_MODEL,
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
+    _canonical_provider_config,
+    _canonicalise_provider_id,
     _HERMES_FOUND,
     invalidate_models_cache,
     _PROVIDER_DISPLAY,
@@ -168,14 +170,13 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("nvidia", [])),
         "category": "specialized",
     },
-    "mistralai": {
+    "mistral": {
         "label": "Mistral",
         "env_var": "MISTRAL_API_KEY",
         "default_model": "mistral-large-latest",
         "default_base_url": "https://api.mistral.ai/v1",
         "requires_base_url": False,
-        # No catalog entry for mistralai today — wizard shows a free-text input.
-        "models": list(_PROVIDER_MODELS.get("mistralai", [])),
+        "models": list(_PROVIDER_MODELS.get("mistral", [])),
         "category": "specialized",
     },
     "x-ai": {
@@ -529,7 +530,7 @@ def probe_provider_endpoint(
 def _extract_current_provider(cfg: dict) -> str:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        provider = str(model_cfg.get("provider") or "").strip().lower()
+        provider = _canonicalise_provider_id(model_cfg.get("provider"))
         if provider:
             return provider
     return ""
@@ -554,7 +555,7 @@ def _extract_current_base_url(cfg: dict) -> str:
 def _provider_api_key_present(
     provider: str, cfg: dict, env_values: dict[str, str]
 ) -> bool:
-    provider = (provider or "").strip().lower()
+    provider = _canonicalise_provider_id(provider)
     if not provider:
         return False
 
@@ -573,14 +574,16 @@ def _provider_api_key_present(
 
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
-        return True
+        active_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        if active_provider == provider:
+            return True
 
     # ``cfg.get("providers", {})`` only returns the default when the key is
     # absent; an explicit ``providers:`` (null) in config.yaml yields ``None``.
     # ``... or {}`` degrades that null to an empty mapping (salvage of #3967).
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider, {})
+        provider_cfg = _canonical_provider_config(cfg, provider)
         if (
             isinstance(provider_cfg, dict)
             and str(provider_cfg.get("api_key") or "").strip()
@@ -642,7 +645,7 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
     legacy providers[provider_id] singleton state or in credential_pool entries
     used by current Hermes runtime auth resolution.
     """
-    provider = (provider or "").strip().lower()
+    provider = _canonicalise_provider_id(provider)
     provider = {"claude": "anthropic", "claude-code": "anthropic"}.get(provider, provider)
     if not provider:
         return False
@@ -891,10 +894,10 @@ def get_onboarding_status() -> dict:
     # openrouter/anthropic/openai/google/custom.  If such a user has a configured
     # provider + model in config.yaml, showing the wizard would only confuse them
     # (or worse, let them accidentally overwrite their config with gpt-5.4-mini).
-    _current_provider = str(
-        (cfg.get("model", {}) or {}).get("provider", "") if isinstance(cfg.get("model"), dict)
-        else ""
-    ).strip().lower()
+    _current_provider = _canonicalise_provider_id(
+        (cfg.get("model", {}) or {}).get("provider", "")
+        if isinstance(cfg.get("model"), dict) else ""
+    )
     _is_non_wizard_provider = bool(
         _current_provider and _current_provider not in _SUPPORTED_PROVIDER_SETUPS
     )
@@ -961,7 +964,7 @@ def apply_onboarding_setup(body: dict) -> dict:
         save_settings({"onboarding_completed": True})
         return get_onboarding_status()
 
-    provider = str(body.get("provider") or "").strip().lower()
+    provider = _canonicalise_provider_id(body.get("provider"))
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     base_url = _normalize_base_url(str(body.get("base_url") or ""))
