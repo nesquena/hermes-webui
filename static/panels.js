@@ -1232,8 +1232,13 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
-  const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
-  const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
+  // Render Last run / Next run in the server's configured Hermes timezone via
+  // the _formatInServerTz helper from sessions.js (guarded like ui.js; falls
+  // back to browser-local formatting when the helper isn't available).
+  const _fmtCronTz = (typeof _formatInServerTz === 'function') ? _formatInServerTz : null;
+  const _fmtCronTs = (v) => _fmtCronTz ? _fmtCronTz(new Date(v)) : new Date(v).toLocaleString();
+  const nextRun = job.next_run_at ? _fmtCronTs(job.next_run_at) : t('not_available');
+  const lastRun = job.last_run_at ? _fmtCronTs(job.last_run_at) : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';

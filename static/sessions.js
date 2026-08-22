@@ -5441,6 +5441,11 @@ function _applySessionListPayload(sessData, projData, opts){
   if (typeof sessData.server_tz === 'string') {
     _serverTz = sessData.server_tz;
   }
+  if (typeof sessData.server_tz_name === 'string' && sessData.server_tz_name) {
+    _serverTzName = sessData.server_tz_name;
+  } else {
+    _serverTzName = '';
+  }
   const serverSessions=_optimisticallyRemovedSessionIds.size
     ? (sessData.sessions||[]).filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
     : (sessData.sessions||[]);
@@ -6427,6 +6432,7 @@ let _hideSearchPreviewsAfterSelect = false;
 let _archivedSearchPagingQueryActive = false;
 let _serverTimeDelta = 0;       // ms offset: client clock - server clock (for clock-skew compensation)
 let _serverTz = '';              // server timezone offset string (e.g. "+0800", "+0000", "-0500")
+let _serverTzName = '';          // server IANA timezone name (e.g. "America/New_York") — preferred
 
 function _sessionSearchRanges(text, query){
   const source=String(text||'');
@@ -6657,14 +6663,25 @@ function _serverNowMs() {
 }
 
 function _serverTzOptions() {
-  // Build a timeZone option from _serverTz (e.g. "+0800" → "Etc/GMT-8").
-  // Falls back to undefined (uses browser timezone) when:
-  //   - _serverTz is not set or is UTC (no offset to apply)
-  //   - _serverTz is malformed
-  //   - _serverTz has a fractional-hour component (India +0530, Iran +0330,
-  //     Newfoundland -0330, Nepal +0545, etc.) — IANA Etc/GMT zones cannot
-  //     express half/quarter-hour offsets; use _formatInServerTz() instead
-  //     for correct fractional-offset formatting.
+  // Build a timeZone option from the server's IANA name (preferred) or the
+  // numeric offset (e.g. "+0800" → "Etc/GMT-8"). The IANA name lets
+  // Intl.DateTimeFormat resolve the correct offset PER INSTANT, so DST
+  // transitions are handled automatically and a configured-UTC zone renders
+  // as UTC (review #7155). Falls back to undefined (browser timezone) when:
+  //   - neither _serverTzName nor _serverTz is set
+  //   - _serverTz is UTC, malformed, or has a fractional-hour component
+  //     (India +0530, Iran +0330, Newfoundland -0330, Nepal +0545, etc.) —
+  //     IANA Etc/GMT zones cannot express half/quarter-hour offsets; use
+  //     _formatInServerTz() instead for correct fractional-offset formatting.
+  if (_serverTzName) {
+    try {
+      // Validate the IANA name by letting Intl parse it; invalid names throw.
+      new Intl.DateTimeFormat('en-US', { timeZone: _serverTzName });
+      return { timeZone: _serverTzName };
+    } catch (e) {
+      // fall through to the numeric-offset path
+    }
+  }
   if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') return undefined;
   const m = _serverTz.match(/^([+-])(\d{2})(\d{2})$/);
   if (!m) return undefined;
@@ -6675,15 +6692,28 @@ function _serverTzOptions() {
 }
 
 function _formatInServerTz(date, options) {
-  // Format `date` in the server's wall-clock timezone, including correct
-  // handling of fractional-hour offsets that Etc/GMT cannot express.
+  // Format `date` in the server's wall-clock timezone.
   //
-  // Strategy: shift the timestamp by the server's offset, then format with
-  // timeZone:'UTC' so no further conversion is applied — the formatted
-  // output reads as the wall-clock time in the server's timezone.
+  // Preferred path: when the server publishes an IANA timezone name, format
+  // with Intl.DateTimeFormat({ timeZone: name }) — the engine resolves the
+  // correct offset per instant, so timestamps on both sides of a DST
+  // transition are correct and configured-UTC renders as UTC (review #7155).
   //
-  // Falls back to plain `date.toLocaleString(undefined, options)` (browser
-  // timezone) when _serverTz is absent, UTC, or malformed.
+  // Fallback path (no/empty IANA name): shift the timestamp by the server's
+  // numeric offset, then format with timeZone:'UTC' so no further conversion
+  // is applied — the output reads as the wall-clock time in the server's
+  // timezone. Handles fractional-hour offsets that Etc/GMT cannot express.
+  //
+  // Final fallback: plain `date.toLocaleString(undefined, options)` (browser
+  // timezone) when the server tz is absent, UTC, or malformed.
+  if (_serverTzName) {
+    try {
+      return new Intl.DateTimeFormat(undefined, { ...options, timeZone: _serverTzName })
+        .format(date);
+    } catch (e) {
+      // invalid IANA name — fall through to the offset path
+    }
+  }
   if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') {
     return date.toLocaleString(undefined, options);
   }
