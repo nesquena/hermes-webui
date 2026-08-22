@@ -1503,6 +1503,75 @@ function _renderCacheKey(text, isUser){
   if(text.length <= 500) return p + ':' + text;
   return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
 }
+const _automaticMessageDirectionObservers = new Map();
+function _pruneAutomaticMessageDirectionObservers(){
+  for(const [body, observer] of _automaticMessageDirectionObservers){
+    if(body&&body.isConnected) continue;
+    if(observer&&typeof observer.disconnect==='function') observer.disconnect();
+    _automaticMessageDirectionObservers.delete(body);
+  }
+}
+function _disconnectAutomaticMessageDirections(body){
+  const observer=_automaticMessageDirectionObservers.get(body);
+  if(observer&&typeof observer.disconnect==='function') observer.disconnect();
+  _automaticMessageDirectionObservers.delete(body);
+}
+function _applyAutomaticMessageDirections(root){
+  const scope=root||((typeof document!=='undefined')?document:null);
+  if(!scope||typeof scope.querySelectorAll!=='function') return;
+  _pruneAutomaticMessageDirectionObservers();
+  const roots=[];
+  if(scope.matches&&scope.matches('.msg-body')) roots.push(scope);
+  for(const body of scope.querySelectorAll('.msg-body')) roots.push(body);
+  for(const body of roots){
+    if(!body||typeof body.setAttribute!=='function') continue;
+    body.setAttribute('dir','auto');
+    if(body.classList) body.classList.add('message-prose-auto');
+    const bodyObserver=_automaticMessageDirectionObservers.get(body);
+    if(!bodyObserver&&typeof MutationObserver!=='undefined'){
+      const observer=new MutationObserver(records=>{
+        const added=[];
+        for(const record of records){
+          for(const node of record.addedNodes||[]){
+            if(node&&node.nodeType===1) added.push(node);
+          }
+        }
+        for(const node of added){
+          _applyAutomaticMessageDirections(node);
+        }
+      });
+      observer.observe(body,{childList:true,subtree:true});
+      _automaticMessageDirectionObservers.set(body,observer);
+    }
+  }
+  // Ordinary Markdown tables are machine-oriented content (column order is
+  // meaningful and must stay stable), not free-form prose -- they belong in
+  // machineSelector below, not here. Only prose/list/heading blocks get
+  // per-element dir="auto".
+  const blockSelector='p,li,blockquote,h1,h2,h3,h4,h5,h6,ul,ol';
+  const blocks=scope.matches&&scope.matches(blockSelector)?[scope]:scope.querySelectorAll(blockSelector);
+  for(const block of blocks){
+    if(block&&typeof block.setAttribute==='function') block.setAttribute('dir','auto');
+  }
+  const machineSelector=[
+    'pre','code','kbd','samp','tt','.hljs','.code-block',
+    '.katex','.katex-block','.katex-display','.katex-html','.katex-inline',
+    '.diff-block','.csv-table-wrap','.csv-table','.skill-file-path',
+    '.tool-call-group-body','.process-wakeup-body',
+    'table','thead','tbody','tfoot','tr','th','td',
+  ].join(',');
+  const machines=scope.matches&&scope.matches(machineSelector)?[scope]:scope.querySelectorAll(machineSelector);
+  for(const node of machines){
+    if(!node||typeof node.setAttribute!=='function') continue;
+    // The thinking-card <pre> is plain free-form model reasoning (often
+    // Hebrew/Arabic), not machine/code content -- it ships with its own
+    // dir="auto" (see _thinkingCardHtml/_thinkingMarkup) specifically so this
+    // pass must NOT force it back to ltr, which would silently undo that.
+    if(node.closest&&node.closest('.thinking-card-body')) continue;
+    node.setAttribute('dir','ltr');
+    if(node.classList) node.classList.add('message-machine-ltr');
+  }
+}
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
   const hit = _renderCache.get(key);
@@ -11559,7 +11628,7 @@ function _thinkingCardHtml(text, open){
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre dir="auto">${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
@@ -18159,6 +18228,7 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
+  if(typeof _applyAutomaticMessageDirections==='function') _applyAutomaticMessageDirections(inner);
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
@@ -19393,6 +19463,7 @@ function postProcessRenderedMessages(container) {
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
+  if(typeof _applyAutomaticMessageDirections==='function') _applyAutomaticMessageDirections(container);
 }
 
 function highlightCode(container) {
@@ -20090,7 +20161,7 @@ function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre dir="auto">${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function _renderThinkingInto(row,text=''){

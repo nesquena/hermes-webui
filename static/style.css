@@ -7164,6 +7164,28 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .chat-content-rtl .msg-body{
   text-align:start;
 }
+/* Block-level elements get dir="auto" (from _applyAutomaticMessageDirections)
+ * so bidi punctuation/numbers order correctly — but text-align:start on an
+ * auto-resolved LTR block (e.g. a bullet line starting with an English word
+ * or an inline code span) would flip its VISUAL alignment to the left even
+ * though the surrounding chat is RTL. Reading direction and block alignment
+ * are separate concerns: force these blocks to stay right-aligned regardless
+ * of which direction dir="auto" resolved to, so a list of mixed
+ * Hebrew/English lines stays visually flush-right. Machine content (code,
+ * tables, KaTeX, diffs) is force-LTR by the rule below and is excluded here
+ * via specificity order (that rule comes later in the file).
+ */
+.chat-content-rtl .msg-body p,
+.chat-content-rtl .msg-body li,
+.chat-content-rtl .msg-body blockquote,
+.chat-content-rtl .msg-body h1,
+.chat-content-rtl .msg-body h2,
+.chat-content-rtl .msg-body h3,
+.chat-content-rtl .msg-body h4,
+.chat-content-rtl .msg-body h5,
+.chat-content-rtl .msg-body h6{
+  text-align:right;
+}
 .chat-content-rtl .msg-body th,
 .chat-content-rtl .csv-table th,
 .chat-content-rtl .csv-table td{
@@ -7187,10 +7209,41 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .chat-content-rtl .msg-body .hljs,
 .chat-content-rtl .msg-body .code-block,
 .chat-content-rtl .msg-body .code-block *,
-.chat-content-rtl .msg-body pre *{
+.chat-content-rtl .msg-body pre *,
+.chat-content-rtl .pre-header,
+.chat-content-rtl .pre-header *,
+.chat-content-rtl .msg-body table,
+.chat-content-rtl .msg-body table *{
   direction:ltr;
   text-align:left;
   unicode-bidi:isolate;
+}
+/* Thinking-card body uses a plain <pre> for whitespace preservation, not for
+ * machine/code content -- unlike the code-block <pre> above, its text is
+ * free-form model reasoning that is very often Hebrew. It ships with
+ * dir="auto" (see _thinkingCardHtml in ui.js) so the browser resolves
+ * per-paragraph direction correctly; here we only flip the *visual*
+ * alignment to match, since dir="auto" alone leaves text-align inherited. */
+.chat-content-rtl .thinking-card-body pre[dir="auto"]{
+  text-align:right;
+}
+/* Sidebar session list titles/previews are rendered outside .msg-body so the
+ * automatic per-message direction pass never touches them. Give them bidi
+ * resolution and right-aligned-by-default layout to match a predominantly
+ * Hebrew session list. Real rendered classes per static/sessions.js:
+ * .session-title (row title), .session-meta (detailed-density metadata
+ * line), .session-search-preview (matched-content preview line) -- there is
+ * no .session-preview class in the renderer. */
+.chat-content-rtl .session-title,
+.chat-content-rtl .session-meta,
+.chat-content-rtl .session-search-preview{
+  /* CSS has no direction:auto -- unicode-bidi:plaintext alone makes the
+   * browser derive each element's base direction from its first strong
+   * character (the same algorithm dir="auto" uses), so direction here is
+   * just a fallback for empty/neutral-only text. */
+  direction:rtl;
+  unicode-bidi:plaintext;
+  text-align:right;
 }
 /* Force LTR for content classes that render English-by-design even in chat:
    KaTeX equations (math is LTR-only in standard notation), diff hunks
