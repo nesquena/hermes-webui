@@ -46,15 +46,19 @@ def _opencode_go_static_models():
     raise AssertionError("_PROVIDER_MODELS assignment not found")
 
 
-def test_opencode_go_skips_live_models_probe():
-    # The provider-loop must special-case opencode-go to skip the old generic
-    # live probe and fall through to this curated static list.
+def test_opencode_go_uses_live_models_probe():
+    # #7166: OpenCode Go must use the shared live /v1/models discovery path
+    # like every other provider (stale static catalog was the bug). The
+    # curated static _PROVIDER_MODELS list stays as the fallback when the
+    # live probe yields nothing (#8084).
     body = CONFIG[CONFIG.index("def get_available_models"):]
     body = body[: body.index("\ndef ", 1)]
-    assert 'elif pid == "opencode-go":' in body
-    idx = body.index('elif pid == "opencode-go":')
-    branch = body[idx: idx + 400]
-    assert "_models_from_live_provider_ids" not in branch.split("else:")[0]
+    # The opencode-go special-case that skipped the live probe is gone.
+    assert 'elif pid == "opencode-go":' not in body
+    # opencode-go now falls through to the shared live discovery branch.
+    assert "_models_from_live_provider_ids" in body
+    # Static list remains as the fallback for empty live results.
+    assert "_PROVIDER_MODELS.get(pid, [])" in body
 
 
 def test_opencode_go_static_models_match_documented_endpoint_snapshot():
