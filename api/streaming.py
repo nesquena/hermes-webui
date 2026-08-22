@@ -11655,6 +11655,15 @@ def _run_agent_streaming(
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
+                # #6594: after gateway failover, update session.model to the
+                # actual model that processed the turn so downstream consumers
+                # (composer chip, sidebar, export, session recovery) show the
+                # correct model label instead of the stale configured default.
+                if _used_model and _gateway_routing:
+                    _norm_used = str(_used_model).strip().lower()
+                    _norm_current = str(getattr(s, 'model', '') or '').strip().lower()
+                    if _norm_used and _norm_used != _norm_current:
+                        s.model = _used_model
                 if s.messages:
                     for _dm in reversed(s.messages):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
