@@ -174,7 +174,7 @@ def test_success_path_checks_stream_ownership_before_persisting_result():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
     guard = "if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
     guard_pos = src.find(guard)
-    result_merge_pos = src.find("_result_messages = result.get('messages') or _previous_context_messages")
+    result_merge_pos = src.find("_result_messages = result.get('messages')")
     compression_pos = src.find("Handle context compression side effects")
 
     assert guard_pos != -1
@@ -192,7 +192,7 @@ def test_self_heal_retry_success_checks_stream_ownership_before_writeback():
     guard = "if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
 
     assert guard in block
-    assert block.index(guard) < block.index("_result_messages = _heal_result.get('messages') or _previous_context_messages")
+    assert block.index(guard) < block.index("_result_messages = _heal_result.get('messages')")
     assert block.index(guard) < block.index("s.save()")
 
 

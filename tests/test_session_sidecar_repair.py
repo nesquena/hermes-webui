@@ -21,7 +21,7 @@ from api.models import (
 import api.config as config
 import api.streaming as streaming
 import api.profiles as profiles
-from api.run_journal import append_run_event
+from api.run_journal import RunJournalWriter, append_run_event
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -116,6 +116,66 @@ def _register_active_stream(stream_id):
 def _register_active_run(stream_id):
     """Register stream_id as an active worker without an attached SSE stream."""
     config.register_active_run(stream_id, session_id="stale_sid", phase="running")
+
+
+def _journal_gateway_terminal_save_failure(
+    monkeypatch,
+    stale_session,
+    *,
+    live_messages,
+    partial_text="Current partial output.",
+    terminal_error="gateway exploded",
+):
+    """Compose the real gateway producer payload and append it through the real journal."""
+    import api.gateway_chat as gateway_chat
+
+    stream_id = stale_session.active_stream_id
+    live_session = Session(
+        session_id=stale_session.session_id,
+        title=stale_session.title,
+        workspace=stale_session.workspace,
+        model=stale_session.model,
+        model_provider=stale_session.model_provider,
+        messages=[dict(message) for message in live_messages],
+        context_messages=[dict(message) for message in live_messages],
+    )
+    live_session.pending_user_message = stale_session.pending_user_message
+    live_session.pending_started_at = stale_session.pending_started_at
+    live_session.pending_attachments = list(stale_session.pending_attachments)
+    live_session.pending_user_source = stale_session.pending_user_source
+    live_session.active_stream_id = stream_id
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("forced gateway terminal error save failure")
+
+    monkeypatch.setattr(live_session, "save", fail_save)
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _sid: live_session)
+    monkeypatch.setitem(config.STREAM_PARTIAL_TEXT, stream_id, partial_text)
+    monkeypatch.setitem(config.STREAM_REASONING_TEXT, stream_id, "")
+    monkeypatch.setitem(config.STREAM_LIVE_TOOL_CALLS, stream_id, [])
+
+    payload = gateway_chat._settle_gateway_terminal_error(
+        live_session.session_id,
+        stream_id,
+        live_session.workspace,
+        live_session.model,
+        live_session.model_provider,
+        terminal_error,
+    )
+    assert payload["terminal_session_persisted"] is False
+
+    writer = RunJournalWriter(live_session.session_id, stream_id)
+    if partial_text:
+        writer.append_sse_event("token", {"text": partial_text})
+    terminal_event = writer.append_sse_event("apperror", payload)
+    terminal_message = next(
+        message
+        for message in reversed(payload["session"]["messages"])
+        if isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("_error") is True
+    )
+    return payload, terminal_event, terminal_message
 
 
 class TestRepairStalePendingNoDeadlock:
@@ -762,6 +822,265 @@ class TestNonEmptyMessagesPendingCleared:
         assert len(error_msgs) == 1
         assert "partial output above was recovered" in error_msgs[0]["content"]
         assert "no agent output was recovered" not in error_msgs[0]["content"]
+
+    @pytest.mark.parametrize("sidecar_shape", ["non_empty", "core", "empty"])
+    def test_gateway_terminal_error_cold_recovery_keeps_turn_identity_and_order(
+        self, hermes_home, monkeypatch, tmp_path, sidecar_shape,
+    ):
+        """The exact producer payload must cold-recover after partial output in every branch."""
+        sid = f"gateway_terminal_cold_{sidecar_shape}"
+        stream_id = f"{sid}_stream"
+        repeated_error = {
+            "role": "assistant",
+            "content": "**Error:** gateway exploded",
+            "timestamp": int(time.time()) - 300,
+            "_error": True,
+        }
+        history = [
+            {"role": "user", "content": "Earlier gateway request"},
+            repeated_error,
+        ] if sidecar_shape != "empty" else []
+        stale = _make_session(
+            session_id=sid,
+            workspace=str(tmp_path),
+            messages=history if sidecar_shape == "non_empty" else [],
+        )
+        stale.pending_user_message = "Current gateway request"
+        stale.pending_started_at = time.time() - 120
+        stale.active_stream_id = stream_id
+        stale.save()
+        if sidecar_shape == "core":
+            _write_core_transcript(hermes_home, sid, history)
+
+        _payload, terminal_event, terminal_message = _journal_gateway_terminal_save_failure(
+            monkeypatch,
+            stale,
+            live_messages=history,
+        )
+        models.SESSIONS.pop(sid, None)
+
+        recovered = models.get_session(sid)
+        current_errors = [
+            message for message in recovered.messages
+            if message.get("_recovered_event_id") == terminal_event["event_id"]
+        ]
+        assert [message["content"] for message in current_errors] == [
+            terminal_message["content"]
+        ]
+        current_error_idx = recovered.messages.index(current_errors[0])
+        current_user_idx = max(
+            idx for idx, message in enumerate(recovered.messages)
+            if message.get("role") == "user"
+            and message.get("content") == "Current gateway request"
+        )
+        partial_idx = next(
+            idx for idx, message in enumerate(recovered.messages)
+            if message.get("_recovered_stream_id") == stream_id
+            and message.get("content") == "Current partial output."
+        )
+        assert current_user_idx < partial_idx < current_error_idx
+        assert current_error_idx == len(recovered.messages) - 1
+
+        same_text_errors = [
+            message for message in recovered.messages
+            if message.get("_error") is True
+            and message.get("content") == terminal_message["content"]
+        ]
+        expected_count = 1 if sidecar_shape == "empty" else 2
+        assert len(same_text_errors) == expected_count
+
+    @pytest.mark.parametrize(
+        "malformed_field",
+        [
+            "session_id",
+            "run_id",
+            "seq",
+            "event_id",
+            "payload_session_id",
+            "embedded_session_id",
+            "later_done_event_id",
+        ],
+    )
+    def test_gateway_terminal_error_rejects_foreign_or_malformed_identity(
+        self, hermes_home, monkeypatch, tmp_path, malformed_field,
+    ):
+        """A journal path is not proof that the event envelope or payload owns the turn."""
+        sid = f"gateway_terminal_bad_{malformed_field}"
+        stream_id = f"{sid}_stream"
+        stale = _make_session(
+            session_id=sid,
+            workspace=str(tmp_path),
+            messages=[
+                {"role": "user", "content": "Earlier request"},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+        )
+        stale.pending_user_message = "Current gateway request"
+        stale.pending_started_at = time.time() - 120
+        stale.active_stream_id = stream_id
+        stale.save()
+
+        _payload, _terminal_event, terminal_message = _journal_gateway_terminal_save_failure(
+            monkeypatch,
+            stale,
+            live_messages=stale.messages,
+        )
+        if malformed_field == "later_done_event_id":
+            RunJournalWriter(sid, stream_id).append_sse_event(
+                "done", {"session_id": sid},
+            )
+        journal_path = (
+            models.SESSION_DIR
+            / "_run_journal"
+            / sid
+            / f"{stream_id}.jsonl"
+        )
+        events = [
+            json.loads(line)
+            for line in journal_path.read_text(encoding="utf-8").splitlines()
+        ]
+        terminal = events[-1]
+        if malformed_field == "session_id":
+            terminal["session_id"] = "foreign_session"
+        elif malformed_field == "run_id":
+            terminal["run_id"] = "foreign_run"
+        elif malformed_field == "seq":
+            terminal["seq"] = str(terminal["seq"])
+        elif malformed_field == "event_id":
+            terminal["event_id"] = "foreign_run:999"
+        elif malformed_field == "payload_session_id":
+            terminal["payload"].pop("session_id", None)
+        elif malformed_field == "embedded_session_id":
+            terminal["payload"]["session"].pop("session_id", None)
+        else:
+            terminal["event_id"] = "foreign_run:999"
+        journal_path.write_text(
+            "".join(
+                json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for event in events
+            ),
+            encoding="utf-8",
+        )
+        models.SESSIONS.pop(sid, None)
+
+        recovered = models.get_session(sid)
+        assert terminal_message["content"] not in [
+            message.get("content") for message in recovered.messages
+        ]
+        assert any(
+            message.get("type") == "interrupted"
+            for message in recovered.messages
+        )
+
+    @pytest.mark.parametrize(
+        ("later_event_name", "expected_error"),
+        [
+            ("apperror", "**Error:** later gateway failure"),
+            ("done", None),
+            ("cancel", None),
+            ("stream_end", "**Error:** gateway exploded"),
+        ],
+    )
+    def test_gateway_terminal_error_uses_authoritative_latest_terminal_event(
+        self, hermes_home, monkeypatch, tmp_path, later_event_name, expected_error,
+    ):
+        """Later terminal evidence supersedes an older error, except transport-only stream_end."""
+        sid = f"gateway_terminal_latest_{later_event_name}"
+        stream_id = f"{sid}_stream"
+        stale = _make_session(
+            session_id=sid,
+            workspace=str(tmp_path),
+            messages=[
+                {"role": "user", "content": "Earlier request"},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+        )
+        stale.pending_user_message = "Current gateway request"
+        stale.pending_started_at = time.time() - 120
+        stale.active_stream_id = stream_id
+        stale.save()
+        payload, first_terminal, first_message = _journal_gateway_terminal_save_failure(
+            monkeypatch,
+            stale,
+            live_messages=stale.messages,
+        )
+
+        writer = RunJournalWriter(sid, stream_id)
+        later_payload = {"session_id": sid}
+        later_terminal = None
+        if later_event_name == "apperror":
+            later_payload = json.loads(json.dumps(payload))
+            later_message = next(
+                message
+                for message in reversed(later_payload["session"]["messages"])
+                if message.get("_error") is True
+            )
+            later_message["content"] = expected_error
+            later_terminal = writer.append_sse_event("apperror", later_payload)
+        else:
+            writer.append_sse_event(later_event_name, later_payload)
+        models.SESSIONS.pop(sid, None)
+
+        recovered = models.get_session(sid)
+        recovered_error_contents = [
+            message.get("content")
+            for message in recovered.messages
+            if message.get("_error") is True
+            and message.get("type") != "interrupted"
+        ]
+        if expected_error is None:
+            assert first_message["content"] not in recovered_error_contents
+        else:
+            assert recovered_error_contents == [expected_error]
+            expected_event_id = (
+                later_terminal["event_id"]
+                if later_terminal is not None
+                else first_terminal["event_id"]
+            )
+            assert recovered.messages[-1].get("_recovered_event_id") == expected_event_id
+
+    def test_late_gateway_terminal_journal_replaces_pending_retry_marker(
+        self, hermes_home, monkeypatch, tmp_path,
+    ):
+        """A journal that appears after first repair must still recover its specific error."""
+        sid = "gateway_terminal_late_journal"
+        stream_id = f"{sid}_stream"
+        stale = _make_session(
+            session_id=sid,
+            workspace=str(tmp_path),
+            messages=[
+                {"role": "user", "content": "Earlier request"},
+                {"role": "assistant", "content": "Earlier answer"},
+            ],
+        )
+        stale.pending_user_message = "Current gateway request"
+        stale.pending_started_at = time.time() - 120
+        stale.active_stream_id = stream_id
+        stale.save()
+        models.SESSIONS.pop(sid, None)
+
+        first_recovery = models.get_session(sid)
+        assert any(
+            message.get("_pending_journal_recovery") is True
+            for message in first_recovery.messages
+        )
+        _payload, terminal_event, terminal_message = _journal_gateway_terminal_save_failure(
+            monkeypatch,
+            stale,
+            live_messages=stale.messages,
+        )
+
+        recovered = models.get_session(sid)
+        assert all(
+            message.get("_pending_journal_recovery") is not True
+            for message in recovered.messages
+        )
+        assert all(
+            message.get("type") != "interrupted"
+            for message in recovered.messages
+        )
+        assert recovered.messages[-1].get("_recovered_event_id") == terminal_event["event_id"]
+        assert recovered.messages[-1]["content"] == terminal_message["content"]
 
     def test_journal_recovery_restores_reasoning_only_as_display_metadata(
         self, hermes_home, monkeypatch,

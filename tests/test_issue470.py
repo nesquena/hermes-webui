@@ -150,7 +150,7 @@ def test_autolink_no_esc_on_href():
     """Fixed autolink pass must not call esc() on href URL."""
     idx = UI_JS.find('// Autolink: convert plain URLs to clickable links.')
     assert idx != -1, "New autolink comment not found"
-    autolink_section = UI_JS[idx:idx+600]
+    autolink_section = UI_JS[idx:idx+1200]
     # The return line should have href="${clean}" (JS template literal, no esc call)
     assert 'href="${clean}"' in autolink_section, (
         'Autolink should use href="${clean}" not href="${esc(clean)}"'

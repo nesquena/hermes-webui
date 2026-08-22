@@ -595,8 +595,11 @@ def test_gateway_owned_start_run_bypasses_local_runtime_barrier(monkeypatch):
     captured = {}
     monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
     monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
-    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: True)
-    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(
+        routes,
+        "get_config",
+        lambda: (_ for _ in ()).throw(AssertionError("_start_run reread shared config")),
+    )
     monkeypatch.setattr(
         routes,
         "ensure_agent_runtime_current",
@@ -621,6 +624,7 @@ def test_gateway_owned_start_run_bypasses_local_runtime_barrier(monkeypatch):
         normalized_model=False,
         source="webui",
         route="/api/chat/start",
+        gateway_chat_enabled=True,
     )
 
     assert response["stream_id"] == "gateway-stream-1"

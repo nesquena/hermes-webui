@@ -40,6 +40,7 @@ import pytest
 # Import order matters: tools.* will not resolve until api.config has run.
 from api import routes
 from api import models
+from api.gateway_chat import _STREAM_RUN_IDS
 
 try:
     import tools.approval as ta
@@ -182,10 +183,206 @@ def test_local_mirrored_approval_deny_resolves():
         _cleanup(sid)
 
 
-def test_gateway_mirrored_approval_without_run_still_409s():
-    """#4771 behaviour preserved: on the gateway backend, a mirrored approval
-    whose run is gone must still surface the actionable 409 so the card stays
-    visible instead of silently failing."""
+def test_local_mirrored_approval_with_gwrun_prefix_still_resolves():
+    """A local approval id that happens to start with gwrun: stays local."""
+    sid = f"local-approval-prefixed-{uuid.uuid4().hex[:8]}"
+    _register_session(sid)
+    try:
+        entry, _approval_id = _seed_local_pending_approval(sid)
+        with ta._lock:
+            head = ta._pending[sid][0]
+            head["approval_id"] = "gwrun:local-test"
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False):
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": "gwrun:local-test"},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("code") != "gateway_run_unavailable"
+        assert entry.event.is_set()
+        assert entry.result == "once"
+    finally:
+        _cleanup(sid)
+
+
+def test_local_live_head_does_not_inherit_stale_remote_run():
+    """A stale remote mirror cannot seize a live local approval with the same id."""
+    sid = f"local-approval-collision-{uuid.uuid4().hex[:8]}"
+    _register_session(sid)
+    try:
+        entry, approval_id = _seed_local_pending_approval(sid)
+        with ta._lock:
+            local_queue = ta._pending.get(sid)
+            local_entries = list(local_queue) if isinstance(local_queue, list) else [local_queue]
+            ta._pending[sid] = [{
+                ra._GATEWAY_MIRROR_FLAG: True,
+                "run_id": "remote-run",
+                "approval_id": approval_id,
+                "command": "stale-remote",
+            }, *local_entries]
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": approval_id},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("relayed") is not True
+        respond_approval.assert_not_called()
+        assert entry.event.is_set()
+        assert entry.result == "once"
+    finally:
+        _cleanup(sid)
+
+
+def test_local_live_head_beats_active_remote_candidate_run():
+    """A local approval still wins when an active remote run shares its id."""
+    sid = f"local-approval-active-remote-{uuid.uuid4().hex[:8]}"
+    session = _register_session(sid)
+    stream_id = f"remote-stream-{uuid.uuid4().hex[:8]}"
+    session.active_stream_id = stream_id
+    _STREAM_RUN_IDS[stream_id] = "remote-run"
+    try:
+        entry, approval_id = _seed_local_pending_approval(sid)
+        with ta._lock:
+            local_queue = ta._pending.get(sid)
+            local_entries = list(local_queue) if isinstance(local_queue, list) else [local_queue]
+            ta._pending[sid] = [{
+                ra._GATEWAY_MIRROR_FLAG: True,
+                "run_id": "remote-run",
+                "approval_id": approval_id,
+                "command": "remote-collision",
+            }, *local_entries]
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": approval_id},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("relayed") is not True
+        respond_approval.assert_not_called()
+        assert entry.event.is_set()
+        assert entry.result == "once"
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _cleanup(sid)
+
+
+def test_local_plain_pending_exact_id_beats_remote_mirror():
+    sid = f"local-plain-pending-id-{uuid.uuid4().hex[:8]}"
+    session = _register_session(sid)
+    stream_id = f"remote-stream-{uuid.uuid4().hex[:8]}"
+    session.active_stream_id = stream_id
+    _STREAM_RUN_IDS[stream_id] = "remote-run"
+    try:
+        with ta._lock:
+            ta._pending[sid] = [
+                {"approval_id": "shared-id", "command": "local"},
+                {
+                    ra._GATEWAY_MIRROR_FLAG: True,
+                    "run_id": "remote-run",
+                    "approval_id": "shared-id",
+                    "command": "remote",
+                },
+            ]
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval, \
+             patch.object(routes, "_resolve_approval_legacy", return_value=True) as resolve_legacy:
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": "shared-id"},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("relayed") is not True
+        resolve_legacy.assert_called_once_with(sid, "shared-id", "once")
+        respond_approval.assert_not_called()
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _cleanup(sid)
+
+
+def test_local_plain_pending_exact_id_beats_remote_first_queue_order():
+    sid = f"local-plain-pending-remote-first-{uuid.uuid4().hex[:8]}"
+    session = _register_session(sid)
+    stream_id = f"remote-stream-{uuid.uuid4().hex[:8]}"
+    session.active_stream_id = stream_id
+    _STREAM_RUN_IDS[stream_id] = "remote-run"
+    try:
+        with ta._lock:
+            ta._pending[sid] = [
+                {
+                    ra._GATEWAY_MIRROR_FLAG: True,
+                    "run_id": "remote-run",
+                    "approval_id": "shared-id",
+                    "command": "remote",
+                },
+                {"approval_id": "shared-id", "command": "local"},
+            ]
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval:
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once", "approval_id": "shared-id"},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("relayed") is not True
+        respond_approval.assert_not_called()
+        with ta._lock:
+            queue = ta._pending.get(sid) or []
+            assert len(queue) == 1
+            assert queue[0].get("command") == "remote"
+            assert queue[0].get(ra._GATEWAY_MIRROR_FLAG) is True
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _cleanup(sid)
+
+
+def test_local_plain_pending_without_id_beats_active_remote_candidate_run():
+    sid = f"local-plain-pending-no-id-{uuid.uuid4().hex[:8]}"
+    session = _register_session(sid)
+    stream_id = f"remote-stream-{uuid.uuid4().hex[:8]}"
+    session.active_stream_id = stream_id
+    _STREAM_RUN_IDS[stream_id] = "remote-run"
+    try:
+        with ta._lock:
+            ta._pending[sid] = [{"command": "local"}]
+        handler = _FakeHandler()
+        with patch("api.gateway_chat.webui_gateway_chat_enabled", return_value=False), \
+             patch("api.runner_client.HttpRunnerClient.respond_approval") as respond_approval, \
+             patch.object(routes, "_resolve_approval_legacy", return_value=True) as resolve_legacy:
+            routes._handle_approval_respond(
+                handler,
+                {"session_id": sid, "choice": "once"},
+            )
+        resp = handler.json()
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp.get("ok") is True
+        assert resp.get("relayed") is not True
+        resolve_legacy.assert_called_once_with(sid, "", "once")
+        respond_approval.assert_not_called()
+    finally:
+        _STREAM_RUN_IDS.pop(stream_id, None)
+        _cleanup(sid)
+
+
+def test_gateway_mirrored_approval_without_run_retires_locally():
+    """A gateway mirror without a run retires instead of leaving a ghost card."""
     sid = f"gw-approval-{uuid.uuid4().hex[:8]}"
     _register_session(sid)  # no active_stream_id -> no _STREAM_RUN_IDS mapping
     try:
@@ -197,10 +394,13 @@ def test_gateway_mirrored_approval_without_run_still_409s():
                 {"session_id": sid, "choice": "once", "approval_id": approval_id},
             )
         resp = handler.json()
-        assert handler.status == 409, f"expected 409, got {handler.status}: {resp}"
-        assert resp.get("ok") is False
-        assert resp.get("relayed") is False
-        assert resp.get("code") == "gateway_run_unavailable"
+        assert handler.status == 200, f"expected 200, got {handler.status}: {resp}"
+        assert resp == {"ok": True, "choice": "once", "local_retired": True}
+        assert entry.event.is_set()
+        assert entry.result == "once"
+        with ta._lock:
+            assert sid not in ta._pending
+            assert sid not in ta._gateway_queues
     finally:
         _cleanup(sid)
 

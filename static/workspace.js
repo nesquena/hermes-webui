@@ -586,22 +586,39 @@ function renderSessionArtifacts(){
     if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
     return p;
   };
+  const splitArtifactDisplayPath = (path) => {
+    const slash = path.lastIndexOf('/');
+    if(slash < 0) return {name: path, head: '', tail: ''};
+    const directory = path.slice(0, slash + 1);
+    const parentSlash = directory.lastIndexOf('/', directory.length - 2);
+    return {
+      name: path.slice(slash + 1),
+      head: directory.slice(0, parentSlash + 1),
+      tail: directory.slice(parentSlash + 1),
+    };
+  };
   root.innerHTML = items.map(item => {
-    const dPath = displayPath(item.path);
-    const idx = dPath.lastIndexOf('/');
-    const fileName = idx >= 0 ? dPath.slice(idx + 1) : dPath;
-    const dirPath = idx >= 0 ? dPath.slice(0, idx) : '';
-    return `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)">
-      <div class="workspace-artifact-name">${esc(fileName)}</div>
-      ${dirPath ? `<div class="workspace-artifact-dir">${esc(dirPath)}</div>` : ''}
-      <div class="workspace-artifact-meta">${esc(item.source || 'session')}</div>
-    </button>`;
+    const path = displayPath(item.path);
+    const parts = splitArtifactDisplayPath(path);
+    const directory = (parts.head || parts.tail)
+      ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
+      : '';
+    const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
+    const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
+    return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
   }).join('');
+}
+
+function projectSessionArtifactsForOwner(sessionId){
+  if(!sessionId||!S.session||S.session.session_id!==sessionId) return false;
+  if(typeof _isSessionCurrentPane!=='function'||!_isSessionCurrentPane(sessionId)) return false;
+  renderSessionArtifacts();
+  return true;
 }
 
 async function _workspacePathExists(path){
   if(!S.session||!path) return false;
-  const parts=String(path).split('/').filter(Boolean);
+  const parts=String(path).replace(/\\/g,'/').split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
@@ -612,9 +629,12 @@ async function _workspacePathExists(path){
 async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
-  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  // Normalize backslash separators to '/' first — Windows absolute paths
+  // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
+  // /api/list existence check (which splits on '/').
+  let rel = String(path).replace(/\\/g,'/').replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = S.session && S.session.workspace;
+  const ws = (S.session && S.session.workspace || '').replace(/\\/g,'/');
   if(ws){
     const normWs = ws.replace(/\/+$/,'') + '/';
     if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
@@ -719,6 +739,7 @@ async function loadDir(path, opts={}){
                              // rejected here instead of painting the wrong profile's files.
   try{
     if(!path||path==='.'||refreshExpanded){
+      if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
@@ -728,6 +749,14 @@ async function loadDir(path, opts={}){
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
     );
     if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    if(data.workspace_recovered&&data.workspace){
+      S.session.workspace=String(data.workspace);
+      S._dirCache={};
+      _restoreExpandedDirs();
+      if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
+      if(typeof syncTerminalButton==='function')syncTerminalButton();
+      showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
+    }
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -1396,16 +1425,22 @@ async function _collectFilesFromEntry(entry, relPrefix) {
 async function _collectOsDropUploads(dataTransfer) {
   const out = [];
   const items = dataTransfer.items ? [...dataTransfer.items] : [];
-  if (items.length && typeof items[0].webkitGetAsEntry === 'function') {
+  const files = dataTransfer.files ? [...dataTransfer.files] : [];
+  if (items.length) {
+    const entries = [];
     for (const item of items) {
       if (item.kind !== 'file') continue;
-      const entry = item.webkitGetAsEntry();
+      const getAsEntry = item.getAsEntry || item.webkitGetAsEntry;
+      const entry = typeof getAsEntry === 'function' ? getAsEntry.call(item) : null;
       if (!entry) continue;
+      entries.push(entry);
+    }
+    for (const entry of entries) {
       out.push(...await _collectFilesFromEntry(entry, ''));
     }
     if (out.length) return out;
   }
-  for (const file of dataTransfer.files) {
+  for (const file of files) {
     out.push({ file, relDir: '' });
   }
   return out;

@@ -17,7 +17,7 @@
 async function cancelStream(reason){
   const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
-  if(!streamId) return;
+  if(!streamId) return false;
   // Interrupt provenance: log WHY the active run is being cancelled so operators
   // can tell an explicit Stop / interrupt from any other trigger when they see a
   // SIGINT/exit-code-130 in the backend logs. Only explicit user paths reach
@@ -30,8 +30,10 @@ async function cancelStream(reason){
     console.info('[stream] cancel requested', {reason:_reason, streamId, sessionId:sid});
   }
   let respBody=null;
+  let respOk=false;
   try{
     const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
     if(typeof console !== 'undefined' && console.warn){
@@ -50,7 +52,7 @@ async function cancelStream(reason){
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
   // the sidebar. Only clear locally when the backend says there is no active
   // stream left to settle.
-  if(respBody && respBody.cancelled===false && S.activeStreamId===streamId){
+  if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -59,20 +61,24 @@ async function cancelStream(reason){
     // distinguish reasons — keep the toast generic and short.
     if(typeof showToast==='function') showToast('Stream is no longer active',2000);
   }
+  return respOk;
 }
 
 async function cancelSessionStream(session){
   const streamId = session&&session.active_stream_id;
   const sid = session&&session.session_id;
-  if(!streamId||!sid) return;
+  if(!streamId||!sid) return false;
   // Explicit sidebar "Stop response" — log provenance for the same reason as
   // cancelStream(). (#5345)
   if(typeof console !== 'undefined' && console.info){
     console.info('[stream] cancel requested', {reason:'sidebar-stop', streamId, sessionId:sid});
   }
+  let respOk=false;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
+  if(!respOk) return false;
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -94,6 +100,7 @@ async function cancelSessionStream(session){
     hideClarifyCard(true, 'cancelled');
   }
   if(typeof renderSessionList==='function') renderSessionList();
+  return true;
 }
 
 async function _savedSessionShouldStaySidebarOnly(sid){
@@ -124,6 +131,9 @@ function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
 }
 function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
   return !!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!urlSession);
+}
+function _shouldStartFreshPwaChat(action,urlSession){
+  return action==='new-chat'&&!urlSession;
 }
 async function _applyComposerPrefillOnBoot(prefillIntent){
   if(!prefillIntent||!prefillIntent.hasText) return;
@@ -519,6 +529,12 @@ function _isSidebarCollapsed(){
 function _syncSidebarAria(){
   // Mirror the open/collapsed state on the active rail button via aria-expanded
   // so screen readers announce the toggle. Open=true, collapsed=false.
+  // Clear the others first: only one panel owns the sidebar, but this used to set
+  // aria-expanded on the newly-active button without unsetting the previous one,
+  // so chat -> kanban -> skills left three buttons claiming aria-expanded=true
+  // and a screen reader announced three open disclosures.
+  document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel][aria-expanded]')
+    .forEach(function(btn){ btn.setAttribute('aria-expanded','false'); });
   const active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]');
   if(active)active.setAttribute('aria-expanded',!_isSidebarCollapsed());
 }
@@ -1326,6 +1342,47 @@ const _DEFAULT_MESSAGE_MODES=['queue','interrupt','steer'];
 // existing user's persisted busy-input-mode preference survives the rename.
 const _LEGACY_DEFAULT_MESSAGE_MODE_KEY='hermes-busy-input-mode';
 const _DEFAULT_MESSAGE_MODE_KEY='hermes-default-message-mode';
+// ── Auto-follow eager mirror (#6819) ────────────────────────────────────────
+// PERSISTENCE CONTRACT (client-side mirror of the Auto-follow new content
+// setting, `auto_scroll_follow`):
+//
+// * Why: the boot settings-fetch-failure path used to hardcode
+//   `window._autoScrollFollow=true`, silently clobbering an explicit OFF for
+//   the whole session (post-turn scroll yanks until the next refresh).
+// * Storage: ONE global localStorage value (`'1'`/`'0'`) under
+//   `_AUTO_SCROLL_FOLLOW_KEY` — NOT profile-keyed. The backend authority is
+//   global: `SETTINGS_FILE = STATE_DIR / "settings.json"` (api/config.py)
+//   and `/api/settings` calls `load_settings()` with no profile-specific
+//   file, so the mirror must match that single global contract. A
+//   profile-keyed map would leave a freshly-opened profile with no entry and
+//   wrongly fall back to ON despite the global OFF (maintainer review on
+//   #6856).
+// * Write semantics: written ONLY when a settings response (or the boot
+//   settings path) actually resolves the setting; the fallback path never
+//   writes.
+// * Read semantics: `_readPersistedAutoScrollFollow()` returns the stored
+//   value if present, else `true` (the config.py default). The boot-failure
+//   path reads it directly (no profile resolution needed — the mirror is
+//   global, so it can be read synchronously in the fallback). Fresh users
+//   (no mirror) get ON.
+// * Upgrade: there is no legacy key; the mirror is created on first settings
+//   resolve, so older sessions simply default to ON until the next settings
+//   round-trip writes it.
+const _AUTO_SCROLL_FOLLOW_KEY='hermes-auto-scroll-follow';
+function _persistAutoScrollFollow(enabled){
+  try{localStorage.setItem(_AUTO_SCROLL_FOLLOW_KEY,enabled?'1':'0');}catch(_){}
+  return enabled;
+}
+function _readPersistedAutoScrollFollow(){
+  try{
+    const raw=localStorage.getItem(_AUTO_SCROLL_FOLLOW_KEY);
+    if(raw==='1') return true;
+    if(raw==='0') return false;
+  }catch(_){}
+  return true;  // default: follow ON (matches config.py default)
+}
+window._persistAutoScrollFollow=_persistAutoScrollFollow;
+window._readPersistedAutoScrollFollow=_readPersistedAutoScrollFollow;
 function _normalizeDefaultMessageMode(mode){
   return _DEFAULT_MESSAGE_MODES.includes(mode)?mode:'steer';
 }
@@ -2047,9 +2104,17 @@ $('btnDownload').onclick=()=>{
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
 };
+function _buildSessionExportUrl(sessionId,params){
+  const url=new URL('api/session/export',document.baseURI||location.href);
+  url.searchParams.set('session_id',String(sessionId||''));
+  Object.entries(params||{}).forEach(([key,value])=>{
+    if(value!==undefined&&value!==null)url.searchParams.set(key,String(value));
+  });
+  return url.href;
+}
 $('btnExportJSON').onclick=()=>{
   if(!S.session)return;
-  const url=`/api/session/export?session_id=${encodeURIComponent(S.session.session_id)}`;
+  const url=_buildSessionExportUrl(S.session.session_id);
   const a=document.createElement('a');a.href=url;
   a.download=`hermes-${S.session.session_id}.json`;a.click();
 };
@@ -2126,7 +2191,7 @@ function exportSessionHTML(session){
   // Drop empties so the inlined fallback keeps working for anything we couldn't read.
   const clean={};for(const k in palette){if(palette[k])clean[k]=palette[k];}
   const paletteB64=btoa(unescape(encodeURIComponent(JSON.stringify(clean))));
-  const url=`/api/session/export?session_id=${encodeURIComponent(sid)}&format=html&theme=${theme}&palette=${encodeURIComponent(paletteB64)}`;
+  const url=_buildSessionExportUrl(sid,{format:'html',theme,palette:paletteB64});
   const a=document.createElement('a');a.href=url;
   a.download=`hermes-${sid}.html`;a.click();
 }
@@ -2536,6 +2601,11 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 function applyEmptyStateSuggestionPref(){
   if(!$('emptyState')) return;
   $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
+}
+
+function applyEmptyStatePanelPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-welcome',window._hideEmptyStatePanel===true);
 }
 
 window.addEventListener('resize',()=>{
@@ -3224,9 +3294,13 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=s.hide_empty_state_panel===true;
+    applyEmptyStatePanelPref();
     // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
-    // It caused scroll-up flicker on long sessions, so it's off for everyone
-    // unless explicitly opted in; long transcripts render in full by default.
+    // #4346 Phase B (footer-jitter suppression during virtual-scroll
+    // measurement re-renders) resolved the scroll-up flicker root cause,
+    // but virtualization remains opt-in until battle-tested further.
+    // Users can explicitly enable it via Settings → virtualize_transcript.
     window._virtualizeTranscript=s.virtualize_transcript===true;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
@@ -3241,6 +3315,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       ? s.chat_activity_display_mode
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
+    window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -3266,7 +3341,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showBusyPlaceholderHint=!!s.show_busy_placeholder_hint;
     window._newChatOnWorkspaceSwitch=!!s.new_chat_on_workspace_switch;  // #5473 opt-in
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
-    window._autoScrollFollow=s.auto_scroll_follow!==false;
+    // #6819: persist the resolved auto-follow value into the global mirror.
+    // The mirror is NOT profile-keyed (the backend setting is one global
+    // settings.json), so it can be written synchronously here — no deferred
+    // write needed.
+    window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
@@ -3378,6 +3457,8 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     if(typeof applyConversationOutlinePreference==='function') applyConversationOutlinePreference();
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
+    window._hideEmptyStatePanel=false;
+    applyEmptyStatePanelPref();
     window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
     window._showTps=false;
     window._fadeTextEffect=false;
@@ -3389,6 +3470,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
+    window._transparentEventTimestamps=true;
     window._terminalAutoExpandOnOutput=false;
     window._workspaceTodosTab=false;
     if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -3405,7 +3487,12 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._defaultMessageMode=_readPersistedDefaultMessageMode();
     window._showBusyPlaceholderHint=false;
     window._sessionEndlessScrollEnabled=false;
-    window._autoScrollFollow=true;
+    // #6819: honor the persisted auto-follow preference on settings-fetch
+    // failure instead of hardcoding ON (which silently clobbered an explicit
+    // OFF and caused post-turn scroll yanks until the next refresh). The
+    // mirror is global (matches the one global settings.json), so it is read
+    // synchronously here — no profile resolution or deferral needed.
+    window._autoScrollFollow=_readPersistedAutoScrollFollow();
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
@@ -3434,7 +3521,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false})}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';
@@ -3656,7 +3743,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
-  if(pwaLaunchAction==='new-chat'){
+  if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
     try{
       await newSession(true);
       // New-chat PWA launches need the empty conversation visible immediately.
@@ -3848,5 +3935,5 @@ async function shutdownServer() {
 
 function _showServerStopped() {
   var stoppedMsg = (typeof t === 'function' ? t('settings_shutdown_stopped_message') : 'Server stopped. You can close this tab.');
-  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:system-ui,ui-sans-serif;font-size:14px"><p>' + stoppedMsg + '</p></div>';
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:var(--font-ui);font-size:14px"><p>' + stoppedMsg + '</p></div>';
 }

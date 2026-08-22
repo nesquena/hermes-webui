@@ -680,6 +680,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _formatGatewayModelLabel() {{ return ''; }}
         function _gatewayRoutingFailoverText() {{ return ''; }}
         function _gatewayModelWarningText() {{ return ''; }}
+        function _usedModelTurnChipLabel() {{ return ''; }}
         function _formatTurnDuration() {{ return ''; }}
         function _renderSettledAnchorSceneForMessage(message, segment, rawIdx) {{
           const group = new FakeElement('div');
