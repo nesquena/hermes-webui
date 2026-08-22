@@ -1563,13 +1563,24 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        _content_changed = False
+        messages = data.get('messages')
+        if isinstance(messages, list):
+            normalized_messages = []
+            for message in messages:
+                if isinstance(message, dict):
+                    decoded_content = _decode_state_db_content(message.get('content'))
+                    if decoded_content != message.get('content'):
+                        message = {**message, 'content': decoded_content}
+                        _content_changed = True
+                normalized_messages.append(message)
+            data['messages'] = normalized_messages
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
-        if _collapsed_partials:
+        if _collapsed_partials or _content_changed:
             try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
+                # Self-heal repaired content or bloated sessions on first full
+                # load without touching recency/index ordering.
                 session.save(touch_updated_at=False, skip_index=True)
             except Exception:
                 logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)

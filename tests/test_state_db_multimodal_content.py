@@ -267,6 +267,59 @@ def test_state_db_rich_sidecar_row_deduplicates_without_flattening(
     assert merged == sidecar
 
 
+def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
+    tmp_path,
+    monkeypatch,
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    db = tmp_path / "state.db"
+    content = _rich_content()
+    encoded = _encoded_content(content)
+    _make_state_db(
+        db,
+        [{"role": "user", "content": encoded, "timestamp": 1000.0}],
+    )
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    sidecar_path = session_dir / f"{SESSION_ID}.json"
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "session_id": SESSION_ID,
+                "title": "Multimodal",
+                "workspace": str(tmp_path),
+                "model": "test-model",
+                "created_at": 1000.0,
+                "updated_at": 1001.0,
+                "messages": [
+                    {"role": "user", "content": encoded, "timestamp": 1000.0}
+                ],
+                "tool_calls": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = models.Session.load(SESSION_ID)
+    merged = models.reconciled_state_db_messages_for_session(
+        loaded,
+        state_messages=models.get_state_db_session_messages(SESSION_ID),
+    )
+    user_messages = [message for message in merged if message.get("role") == "user"]
+
+    assert len(user_messages) == 1
+    assert user_messages[0]["content"] == content
+    assert isinstance(user_messages[0]["content"], list)
+    assert "\x00json:" not in json.dumps(user_messages[0]["content"])
+
+    persisted = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert persisted["messages"][0]["content"] == content
+
+
 def test_missing_sidecar_recovery_decodes_rich_state_db_content(
     tmp_path,
     monkeypatch,
