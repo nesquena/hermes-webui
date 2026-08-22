@@ -12886,6 +12886,67 @@ def _run_agent_streaming(
 # ============================================================
 
 
+def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text: str):
+    """Accept and journal one steer before a terminal event can win the run."""
+    created_at = time.time()
+    payload = {
+        "session_id": str(session_id),
+        "stream_id": str(stream_id),
+        "text": str(text),
+        "status": "delivered",
+        "created_at": created_at,
+    }
+    writer = RunJournalWriter(str(session_id), str(stream_id))
+    accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        payload,
+        lambda: agent.steer(text),
+    )
+    if reason == "terminal":
+        return False, "stream_dead", False
+    if reason == "journal_malformed":
+        return False, "steer_error", False
+    if error is not None:
+        logger.warning(
+            "Failed to persist accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        return accepted, "persistence_error", False
+    if not accepted or not isinstance(journaled, dict):
+        return False, None, False
+
+    event_id = journaled.get("event_id")
+    payload["created_at"] = journaled.get("created_at", created_at)
+    with STREAMS_LOCK:
+        stream = STREAMS.get(str(stream_id))
+    if event_id:
+        STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
+        if stream is not None and hasattr(stream, "note_last_event_id"):
+            try:
+                stream.note_last_event_id(str(event_id))
+            except Exception:
+                logger.debug("Failed to note steer event id %s", event_id, exc_info=True)
+    if stream is None or not callable(getattr(stream, "put_nowait", None)):
+        return True, None, True
+    try:
+        item = (
+            ("steer_delivered", payload, event_id)
+            if event_id
+            else ("steer_delivered", payload)
+        )
+        stream.put_nowait(item)
+    except Exception:
+        logger.warning(
+            "Failed to broadcast accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=True,
+        )
+    return True, None, True
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
@@ -12909,7 +12970,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     or Stop-and-send.
 
     Returns 200 with {"accepted": bool, "fallback": str|None,
-    "stream_id": str|None}.
+    "stream_id": str|None, "durable": false?}. The optional ``durable`` field
+    is emitted only for accepted runtime delivery whose journal persistence
+    failed, preserving the legacy success response while exposing degradation.
     """
     from api.helpers import j, bad
     from api import config as _cfg
@@ -12992,14 +13055,22 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                            "stream_id": None})
 
     try:
-        accepted = bool(agent.steer(text))
+        accepted, fallback, durable = _accept_and_publish_steer_event(
+            agent,
+            sid,
+            active_stream_id,
+            text,
+        )
     except Exception as exc:
         logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
-    return j(handler, {"accepted": accepted, "fallback": None,
-                       "stream_id": active_stream_id})
+    response = {"accepted": accepted, "fallback": fallback,
+                "stream_id": active_stream_id}
+    if accepted and durable is False:
+        response["durable"] = False
+    return j(handler, response)
 
 
 def cancel_stream(stream_id: str) -> bool:
