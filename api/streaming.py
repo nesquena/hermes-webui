@@ -8426,8 +8426,21 @@ def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     """
     if credential_pool is not None:
         return 'credential-pool'
+    if callable(resolved_api_key):
+        # key_cmd providers intentionally pass a lazy token source into
+        # AIAgent so the bearer can be refreshed per request.  Do not invoke
+        # (or stringify) that source merely to key the agent cache: the
+        # surrounding cache signature already includes provider, command and
+        # args, while resolving here would mint a credential too early.
+        source_type = type(resolved_api_key)
+        return f'callable:{source_type.__module__}.{source_type.__qualname__}'
     import hashlib as _hashlib
-    return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
+    key_bytes = (
+        bytes(resolved_api_key)
+        if isinstance(resolved_api_key, (bytes, bytearray))
+        else str(resolved_api_key or '').encode()
+    )
+    return _hashlib.sha256(key_bytes).hexdigest()[:16]
 
 
 def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False) -> bool:
