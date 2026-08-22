@@ -2203,7 +2203,52 @@ def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
                 )
         _diag("self_heal_webui_zero_message_orphan")
     if missing_webui_orphan_ids:
-        for _sid in missing_webui_orphan_ids:
+        for _sid in missing_webui_orphan_ids.copy():
+            with get_composer_draft_lock(_sid):
+                # Re-read ownership at the destructive boundary. A WebUI
+                # session can intentionally have no transcript yet while its
+                # sidecar holds the user's durable composer draft.
+                try:
+                    owner = Session.load(_sid)
+                    draft, draft_readable = resolve_composer_draft_status(
+                        _sid, getattr(owner, "composer_draft", None) if owner else None
+                    )
+                except Exception:
+                    logger.warning(
+                        "Retaining webui zero-message row %s because durable owner reload failed",
+                        _sid,
+                        exc_info=True,
+                    )
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
+                if not draft_readable:
+                    # The sidecar exists but could not be stat'd/read/parsed, so
+                    # whether this row owns a draft is UNKNOWN. Deleting on a
+                    # transient error destroys a recoverable draft together with
+                    # its only durable owner record.
+                    logger.warning(
+                        "Retaining webui zero-message row %s: draft sidecar unreadable",
+                        _sid,
+                    )
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
+                has_draft = bool(
+                    isinstance(draft, dict)
+                    and (str(draft.get("text") or "") or draft.get("files"))
+                )
+                if owner is not None and has_draft:
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
+                if not delete_composer_draft_sidecar(_sid):
+                    # The sidecar survived the unlink. Pruning the row now would
+                    # report success while leaving an orphan sidecar that wins
+                    # over the legacy in-session draft on the next load.
+                    logger.warning(
+                        "Retaining webui zero-message row %s: draft sidecar unlink failed",
+                        _sid,
+                    )
+                    missing_webui_orphan_ids.discard(_sid)
+                    continue
             try:
                 prune_session_from_index(_sid)
                 _diag("prune_orphaned_webui_zero_message")
@@ -8121,6 +8166,17 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
+def _session_source_marks_subagent(s) -> bool:
+    """True when a session object's source fields tag it as a delegated
+    subagent child. Works on metadata-only stubs (the source fields live in
+    the metadata prefix), so callers on hot paths can avoid a full load."""
+    src = (
+        str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
+            or getattr(s, "session_source", "") or "").strip().lower()
+    )
+    return src == "subagent"
+
+
 def _session_is_subagent_view_only(sid: str) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
@@ -8138,11 +8194,7 @@ def _session_is_subagent_view_only(sid: str) -> bool:
         s = get_session(sid)
     except Exception:
         return False
-    src = (
-        str(getattr(s, "source_tag", "") or getattr(s, "raw_source", "")
-            or getattr(s, "session_source", "") or "").strip().lower()
-    )
-    return src == "subagent"
+    return _session_source_marks_subagent(s)
 
 
 def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple[bool, str]:
@@ -10323,6 +10375,19 @@ from api.models import (
     process_wakeup_credential_state_fingerprint,
     process_wakeup_pause_credential_state_changed,
     suppress_process_wakeup_for_provider_pause,
+    resolve_composer_draft,
+    resolve_composer_draft_status,
+    read_composer_draft_sidecar_status,
+    write_composer_draft_sidecar,
+    delete_composer_draft_sidecar,
+    composer_draft_redirect_target,
+    composer_draft_revision,
+    bump_composer_draft_revision,
+    composer_draft_revision_is_stale,
+    get_composer_draft_lock,
+    update_cached_composer_draft,
+    DRAFT_REDIRECTED,
+    DRAFT_UNREADABLE,
 )
 
 
@@ -15435,8 +15500,11 @@ def handle_post(handler, parsed) -> bool:
                 # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
                 manual_title=getattr(session, "manual_title", False),
-                # Composer draft — preserve per-session draft state.
-                composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
+                # Composer draft — preserve per-session draft state. Resolve
+                # through the sidecar store so the freshest draft is copied.
+                composer_draft=copy.deepcopy(resolve_composer_draft(
+                    session.session_id, getattr(session, "composer_draft", None)
+                ) or {}),
                 # Context engine state — preserve so the duplicate's context engine
                 # starts from the same point as the original.
                 context_engine=getattr(session, "context_engine", None),
@@ -15726,6 +15794,14 @@ def handle_post(handler, parsed) -> bool:
         # GET ?session_id=X  → return current draft
         # POST body          → save draft { session_id, text?, files? }
         # HTTP method is in handler.command (e.g. "POST", "GET"), parsed has no .method
+        #
+        # Big-session save hotpath: drafts persist to a tiny per-session sidecar
+        # file (models.write_composer_draft_sidecar) instead of Session.save().
+        # On a multi-MB session, every 400ms-debounced keystroke autosave used to
+        # rewrite the entire session JSON (~1s CPU each) behind the session lock,
+        # and the queued POSTs made the whole server unresponsive. This route now
+        # only ever does a metadata-prefix load for validation plus a small atomic
+        # file write. The legacy in-file composer_draft remains as a read fallback.
         import time as _draft_time
         _draft_t0 = _draft_time.monotonic()
         _draft_stages = []
@@ -15739,27 +15815,64 @@ def handle_post(handler, parsed) -> bool:
             if not sid:
                 return bad(handler, "session_id is required", 400)
             try:
-                s = get_session(sid)
+                s = get_session(sid, metadata_only=True)
             except KeyError:
                 return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
-            return j(handler, {"draft": draft})
+            draft = resolve_composer_draft(sid, getattr(s, "composer_draft", None))
+            # The revision lets the client fence its own queued autosaves.
+            return j(handler, {"draft": draft, "rev": composer_draft_revision(sid)})
         # POST
         try:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
-            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        clear_requested = body.get("clear") is True
+        clear_expected = body.get("expected")
+        claimed_revision = body.get("rev")
+        # Compression rotates a session id while the composer keeps autosaving
+        # on a debounce, so a request already in flight still names the OLD sid.
+        # The archived parent still exists, so the write used to be accepted and
+        # stranded the newest draft on a session nobody loads any more. Tell the
+        # client which sid is live instead of writing into the void.
+        try:
+            redirect_target = composer_draft_redirect_target(sid)
+        except Exception:
+            redirect_target = None
+        if redirect_target:
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "This conversation continues under a new id",
+                    "session_id": redirect_target,
+                    "draft": resolve_composer_draft(redirect_target),
+                    "rev": composer_draft_revision(redirect_target),
+                },
+                status=409,
+            )
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
         # via the 400ms debounced auto-save.
         _MAX_DRAFT_TEXT = 50_000  # 50 KB cap on textarea content
         _MAX_DRAFT_FILES = 50  # max number of attached file references
+
+        def _canonical_draft(value):
+            value = value if isinstance(value, dict) else {}
+            draft_text = value.get("text")
+            if not isinstance(draft_text, str):
+                draft_text = ""
+            draft_files = value.get("files")
+            if not isinstance(draft_files, list):
+                draft_files = []
+            return {
+                "text": draft_text[:_MAX_DRAFT_TEXT],
+                "files": draft_files[:_MAX_DRAFT_FILES],
+            }
+
         if text is not None and not isinstance(text, str):
             text = ""
         if isinstance(text, str) and len(text) > _MAX_DRAFT_TEXT:
@@ -15769,34 +15882,125 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            s_meta = get_session(sid, metadata_only=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # Same #5307 view-only guard as before, evaluated on the (possibly
+        # metadata-only) session object so the check never forces a full
+        # multi-MB transcript load just to store a draft.
+        if _is_subagent_child_session_id(sid) or _session_source_marks_subagent(s_meta):
+            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         unchanged = False
-        with _get_session_agent_lock(sid):
+        # Dedicated per-session draft lock: drafts must never queue behind the
+        # session/agent lock a running turn may hold.
+        with get_composer_draft_lock(sid):
             _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
+            # Validation before this lock can race delete. Re-resolve ownership
+            # at the point of use so a late POST cannot recreate an orphan.
+            try:
+                s_meta = get_session(sid, metadata_only=True)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            # Generation ordering. A pre-clear autosave that lands after the
+            # clear must be rejected, not applied — otherwise the text the user
+            # just sent comes back as a draft. The clear itself is never stale:
+            # it is the newest intent by construction.
+            if not clear_requested and composer_draft_revision_is_stale(sid, claimed_revision):
+                current_draft, readable = resolve_composer_draft_status(
+                    sid, getattr(s_meta, "composer_draft", None)
+                )
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "stale": True,
+                        "error": "The draft changed since this write was queued",
+                        "draft": _canonical_draft(current_draft) if readable else None,
+                        "rev": composer_draft_revision(sid),
+                    },
+                    status=409,
+                )
+            sidecar_draft, sidecar_status, in_lock_redirect = (
+                read_composer_draft_sidecar_status(sid)
+            )
+            if sidecar_status == DRAFT_UNREADABLE:
+                # Merging into an unknown current state would silently drop the
+                # fields this request does not carry.
+                return j(
+                    handler,
+                    {"ok": False, "error": "Could not read the saved draft"},
+                    status=500,
+                )
+            if sidecar_status == DRAFT_REDIRECTED and in_lock_redirect:
+                # Re-check UNDER the lock. The redirect probe above the lock can
+                # legitimately see no marker and a compression can then win the
+                # same per-session lock and install one before this request gets
+                # it. Falling through here would write a plain draft over the
+                # continuation marker and reopen exactly the stranded-draft bug
+                # the marker exists to close.
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "error": "This conversation continues under a new id",
+                        "session_id": in_lock_redirect,
+                        "draft": resolve_composer_draft(in_lock_redirect),
+                        "rev": composer_draft_revision(in_lock_redirect),
+                    },
+                    status=409,
+                )
+            if sidecar_draft is not None:
+                current_draft = dict(sidecar_draft)
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+                current_draft = dict(getattr(s_meta, "composer_draft", {}) or {})
+            current_clear_draft = _canonical_draft(current_draft)
+            expected_clear_draft = _canonical_draft(clear_expected)
+            if (
+                clear_requested
+                and isinstance(clear_expected, dict)
+                and current_clear_draft != expected_clear_draft
+            ):
+                unchanged = True
+                saved_draft = current_clear_draft
+            elif clear_requested:
+                saved_draft = {"text": "", "files": []}
+                owner = get_session(sid)
+                owner.composer_draft = dict(saved_draft)
+                owner.save(touch_updated_at=False)
+                if not delete_composer_draft_sidecar(sid):
+                    return bad(handler, "Failed to clear the saved draft", status=500)
+                update_cached_composer_draft(sid, saved_draft)
+                # Fence every write that was queued before this point.
+                bump_composer_draft_revision(sid)
+            else:
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft and sidecar_draft is not None:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    # A memory-only new chat needs one durable owner record or
+                    # its sidecar becomes undiscoverable after restart.
+                    if not (SESSION_DIR / f"{sid}.json").exists() and (
+                        str(next_draft.get("text") or "") or next_draft.get("files")
+                    ):
+                        owner = get_session(sid)
+                        owner.composer_draft = dict(next_draft)
+                        owner.save(touch_updated_at=False)
+                    # Draft persistence is not conversation activity: existing
+                    # session JSON and sidebar metadata remain untouched.
+                    _draft_mark("before_save")
+                    saved_draft = write_composer_draft_sidecar(sid, next_draft)
+                    update_cached_composer_draft(sid, saved_draft)
+                    bump_composer_draft_revision(sid)
+                    _draft_mark("after_save")
+            current_revision = composer_draft_revision(sid)
         _draft_mark("released_lock")
-        payload = {"ok": True, "draft": saved_draft}
+        payload = {"ok": True, "draft": saved_draft, "rev": current_revision}
         if unchanged:
             payload["unchanged"] = True
         _draft_mark("before_json")
@@ -15954,6 +16158,64 @@ def handle_post(handler, parsed) -> bool:
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
+        # Delete from WebUI session store and its draft under the same draft
+        # lock used by POST /api/session/draft. Whichever operation wins, the
+        # final state cannot contain a draft without an owning session.
+        sidecar_deleted = False
+        with get_composer_draft_lock(sid):
+            # Draft sidecar FIRST, and abort before touching anything else if it
+            # survives. Deleting the session file first and then bailing out on a
+            # failed unlink would be strictly worse than the orphan sidecar it
+            # was meant to prevent: the conversation is already gone, yet the
+            # index prune, the deletion tombstone, the attachment directory and —
+            # most importantly — the turn/run journal deletion (the #3802 privacy
+            # fix: plaintext transcript and full request/response payloads) all
+            # get skipped, with no way to make progress on a retry. Failing here
+            # leaves everything intact and retryable.
+            try:
+                draft_sidecar_cleared = delete_composer_draft_sidecar(sid)
+            except Exception:
+                logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+                draft_sidecar_cleared = False
+            if not draft_sidecar_cleared:
+                logger.warning("Draft sidecar for %s could not be removed; session kept", sid)
+                return j(
+                    handler,
+                    {
+                        "ok": False,
+                        "error": "The saved draft could not be deleted, so the "
+                                 "conversation was left untouched. Please retry.",
+                    },
+                    status=500,
+                )
+            with LOCK:
+                SESSIONS.pop(sid, None)
+            # Evict cached agent so turn count doesn't leak into a recycled session
+            from api.config import _evict_session_agent
+            _evict_session_agent(sid)
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session file %s", p)
+            sidecar_deleted = not p.exists()
+            try:
+                p.with_suffix('.json.bak').unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+        try:
+            prune_session_from_index(sid)
+        except Exception:
+            logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+        if sidecar_deleted and not is_messaging_session:
+            try:
+                _record_webui_deleted_session_tombstone(sid)
+            except Exception:
+                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 
@@ -22222,17 +22484,44 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            sid = p.stem
+            with get_composer_draft_lock(sid):
+                # The draft sidecar is durable user state.  Check it under the
+                # same lock as POST/delete so cleanup cannot delete its owner
+                # between validation and a draft write.
+                s = Session.load(sid)
+                draft, draft_readable = resolve_composer_draft_status(
+                    sid, getattr(s, "composer_draft", None) if s else None
+                )
+                has_draft = bool(
+                    str(draft.get("text") or "") or draft.get("files")
+                ) if isinstance(draft, dict) else False
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0 and not has_draft
+                else:
+                    should_delete = (
+                        s and s.title == "Untitled" and len(s.messages) == 0
+                        and not has_draft
+                    )
+                # An unreadable sidecar means "unknown", not "no draft".
+                if should_delete and not draft_readable:
+                    logger.warning("Keeping session %s: draft sidecar unreadable", sid)
+                    should_delete = False
+                if should_delete:
+                    # Remove the draft FIRST: if that fails the session must
+                    # stay, otherwise the sweep reports a clean deletion while
+                    # leaving an orphan sidecar behind.
+                    if not delete_composer_draft_sidecar(sid):
+                        logger.warning(
+                            "Keeping session %s: draft sidecar unlink failed", sid
+                        )
+                        continue
+                    with LOCK:
+                        SESSIONS.pop(sid, None)
+                    p.unlink(missing_ok=True)
+                    p.with_suffix('.json.bak').unlink(missing_ok=True)
+                    cleaned += 1
+                    phase1_removed_ids.add(sid)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -22312,6 +22601,39 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     # correct, so keep it (avoids a wasteful rebuild).
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
+
+    # A sidecar with neither a persisted nor in-memory owner is an orphan.
+    # Do this after the owner/index passes and recheck ownership while holding
+    # the draft lock; a draft-only new session writes owner then sidecar under
+    # that lock, so cleanup must never delete an in-flight legitimate draft.
+    drafts_dir = SESSION_DIR / '_drafts'
+    try:
+        for draft_path in drafts_dir.glob('*.json'):
+            sid = draft_path.stem
+            with get_composer_draft_lock(sid):
+                _draft, status, redirect_to = read_composer_draft_sidecar_status(sid)
+                if status == DRAFT_REDIRECTED and redirect_to:
+                    # Not a draft and never an orphan: this slot holds the
+                    # continuation marker that routes a late old-sid write to
+                    # the live session. Deleting it because the archived parent
+                    # happens to be gone reopens the stranded-draft bug.
+                    continue
+                if status == DRAFT_UNREADABLE:
+                    # Unknown contents: could be a recoverable draft.
+                    logger.warning("Keeping unreadable draft sidecar for %s", sid)
+                    continue
+                owner_exists = (SESSION_DIR / f'{sid}.json').exists()
+                with LOCK:
+                    in_memory_owner = sid in SESSIONS
+                if not owner_exists and not in_memory_owner:
+                    if delete_composer_draft_sidecar(sid):
+                        cleaned += 1
+                    else:
+                        logger.warning(
+                            "Orphan draft sidecar for %s could not be removed", sid
+                        )
+    except Exception:
+        logger.debug("Failed to clean up draft-sidecar orphans", exc_info=True)
 
     return j(handler, {"ok": True, "cleaned": cleaned})
 

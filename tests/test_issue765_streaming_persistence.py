@@ -278,30 +278,31 @@ class TestIssue765FollowupHardening:
     """
 
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
-        """Two concurrent saves of the same session must not collide on one tmp path.
+        """Two contending saves must serialize without reusing one tmp path.
 
         The key regression guard here is that each save call should reach os.replace()
         with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        threads could target the same path and the second replace would fail once the
+        first consumed it. The save lock now serializes replacement, so coordinate the
+        callers before save rather than requiring simultaneous replace calls.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
+        start = threading.Barrier(3)
         replace_sources = []
         errors = []
 
-        def _replace_with_barrier(src, dst):
+        def _record_replace(src, dst):
             replace_sources.append(str(src))
-            barrier.wait(timeout=5)
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _record_replace)
 
         def _save_worker():
             try:
+                start.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)
@@ -310,6 +311,7 @@ class TestIssue765FollowupHardening:
         t2 = threading.Thread(target=_save_worker)
         t1.start()
         t2.start()
+        start.wait(timeout=5)
         t1.join(timeout=5)
         t2.join(timeout=5)
 

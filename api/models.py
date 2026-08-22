@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import stat
 import threading
 import time
 import uuid
@@ -26,6 +27,11 @@ try:  # pragma: no cover - platform-specific imports.
     import msvcrt as _msvcrt
 except ImportError:  # pragma: no cover
     _msvcrt = None
+
+try:  # optional fast JSON codec for the session-save hotpath (big sessions)
+    import orjson as _orjson
+except ImportError:  # pragma: no cover - environment without orjson
+    _orjson = None
 
 import api.config as _cfg
 from api.compression_anchor import is_context_compression_marker
@@ -185,6 +191,10 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+# Serialize each session's complete check/backup/replace sequence without an
+# unbounded per-session lock cache. A rare stripe collision only delays an
+# unrelated save and cannot affect correctness.
+_SESSION_SAVE_LOCK_STRIPES = tuple(threading.RLock() for _ in range(64))
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
@@ -1084,6 +1094,106 @@ def _read_file_head(path: Path, max_prefix_bytes: int = 4096) -> str:
         return fp.read(max_prefix_bytes).decode('utf-8', errors='ignore')
 
 
+def _read_top_level_json_value_from_head(text: str, key: str):
+    """Decode one top-level value from a bounded, possibly incomplete JSON prefix."""
+    key_pos = _find_top_level_json_key(text, key)
+    if key_pos is None:
+        return None
+    colon_pos = text.find(':', key_pos + len(json.dumps(key)))
+    if colon_pos < 0:
+        return None
+    value_pos = colon_pos + 1
+    while value_pos < len(text) and text[value_pos] in ' \t\r\n':
+        value_pos += 1
+    try:
+        value, _end = json.JSONDecoder().raw_decode(text, value_pos)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return value
+
+
+def _json_dumps_session(obj) -> str:
+    """Serialize a session payload compactly (big-session hotpath, 2026-07-13).
+
+    Session files used to be written with ``indent=2``; on multi-MB sessions
+    the pretty-printing alone costs hundreds of milliseconds per save and
+    inflates the file (and every subsequent parse) by ~30-40%. Compact output
+    is byte-for-byte JSON-compatible with every reader (json.loads and the
+    metadata-prefix scanner are both whitespace-agnostic).
+
+    orjson is used when available and silently falls back to the stdlib for
+    payloads it cannot encode. Legacy session files may contain the stdlib's
+    non-standard NaN/Infinity literals; keep those float values stable instead
+    of letting orjson silently rewrite them to ``null``.
+    """
+    if _orjson is not None and not _contains_nonfinite_float(obj):
+        try:
+            return _orjson.dumps(obj, option=_orjson.OPT_NON_STR_KEYS).decode('utf-8')
+        except Exception:
+            pass
+    return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+
+
+def _contains_nonfinite_float(value) -> bool:
+    """Return whether a JSON-shaped value contains NaN or either infinity."""
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(
+            _contains_nonfinite_float(key) or _contains_nonfinite_float(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_nonfinite_float(item) for item in value)
+    return False
+
+
+def _json_loads_session(text):
+    """Parse session JSON, preferring orjson with a stdlib fallback.
+
+    The fallback also covers legacy files containing the non-standard ``NaN``
+    literal, which the stdlib accepts but orjson rejects.
+    """
+    if _orjson is not None:
+        try:
+            return _orjson.loads(text)
+        except Exception:
+            pass
+    return json.loads(text)
+
+
+def _stream_file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Hash one stable regular-file generation without buffering it in memory."""
+    def identity(file_stat):
+        return (
+            file_stat.st_dev,
+            file_stat.st_ino,
+            stat.S_IFMT(file_stat.st_mode),
+            file_stat.st_size,
+            file_stat.st_mtime_ns,
+            file_stat.st_ctime_ns,
+        )
+
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError(f'refusing to hash non-regular session file: {path}')
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+        if identity(before) != identity(after):
+            raise OSError(f'session file changed while hashing: {path}')
+        current = os.stat(path, follow_symlinks=False)
+        if identity(after) != identity(current):
+            raise OSError(f'session file identity changed while hashing: {path}')
+    return digest.hexdigest()
+
+
+def _session_save_lock(session_id):
+    return _SESSION_SAVE_LOCK_STRIPES[hash(str(session_id)) % len(_SESSION_SAVE_LOCK_STRIPES)]
+
+
 def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     """Read only the metadata portion before the large arrays.
 
@@ -1117,10 +1227,352 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     return None
 
 
+# ── Composer-draft sidecar store (big-session hotpath, 2026-07-13) ─────────
+# Keystroke autosaves used to persist the draft by rewriting the entire
+# session JSON via Session.save(); on a multi-MB session that turns every
+# debounced draft POST into a multi-second full-file parse+serialize and
+# starves the whole server. Drafts now live in a tiny per-session sidecar
+# file under SESSION_DIR/_drafts/ (mirroring the _turn_journal convention so
+# top-level '*.json' session scans never see it). The legacy composer_draft
+# field inside the session JSON remains as a read fallback for drafts saved
+# before the sidecar existed, and keeps being persisted opportunistically
+# with regular session saves.
+
+_DRAFT_SIDECAR_DIRNAME = '_drafts'
+_DRAFT_SIDECAR_CACHE: dict = {}
+_DRAFT_SIDECAR_LOCK = threading.Lock()
+_COMPOSER_DRAFT_LOCKS: dict = {}
+# Per-session draft revision. The composer autosaves on a debounce, so a write
+# can already be in flight when the user hits send and the client clears the
+# draft. Without an ordering token the clear completes, the older write lands
+# afterwards, and the sent message's text is resurrected as a draft. Every
+# mutating response carries the revision it produced; a request that quotes an
+# older one is rejected instead of applied.
+#
+# SCOPE — this counter is monotonic only WITHIN ONE PROCESS. It is an in-memory
+# dict, so a WebUI restart (or a second worker process) resets it to 0, and
+# `composer_draft_revision_is_stale()` only rejects `claimed < current` — after
+# a reset every pre-restart revision compares as fresh again, so a request that
+# was queued across the restart is accepted. The fence therefore closes the
+# common case (an autosave racing a clear inside one process lifetime) and does
+# NOT survive a restart. Making it durable means persisting the counter (or a
+# process-epoch stamp) alongside the sidecar; that is a deliberate follow-up,
+# not something this comment should pretend is already handled.
+_COMPOSER_DRAFT_REVISIONS: dict = {}
+
+
+def get_composer_draft_lock(sid) -> threading.Lock:
+    """Per-session lock for draft read-merge-write; deliberately decoupled
+    from the session/agent locks so drafts never queue behind turn machinery."""
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        lock = _COMPOSER_DRAFT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _COMPOSER_DRAFT_LOCKS[key] = lock
+        return lock
+
+
+def composer_draft_sidecar_path(sid):
+    if not is_safe_session_id(str(sid or '')):
+        return None
+    return SESSION_DIR / _DRAFT_SIDECAR_DIRNAME / f'{sid}.json'
+
+
+def composer_draft_revision(sid) -> int:
+    """Current draft revision for *sid* (0 before the first mutation)."""
+    with _DRAFT_SIDECAR_LOCK:
+        return int(_COMPOSER_DRAFT_REVISIONS.get(str(sid), 0))
+
+
+def bump_composer_draft_revision(sid) -> int:
+    """Advance and return *sid*'s draft revision. Call under the session's
+    draft lock, immediately after a successful mutation."""
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        nxt = int(_COMPOSER_DRAFT_REVISIONS.get(key, 0)) + 1
+        _COMPOSER_DRAFT_REVISIONS[key] = nxt
+        return nxt
+
+
+def composer_draft_revision_is_stale(sid, claimed_revision) -> bool:
+    """True when *claimed_revision* is older than what the server has applied.
+
+    A request that carries no revision is not stale — old clients and the
+    first write of a session both legitimately omit it.
+    """
+    if claimed_revision is None:
+        return False
+    try:
+        claimed = int(claimed_revision)
+    except (TypeError, ValueError):
+        return False
+    return claimed < composer_draft_revision(sid)
+
+
+# Read outcomes. `None` used to mean three different things — "no sidecar",
+# "I could not stat/read/parse it", and "a redirect record lives here" — and a
+# destructive caller that reads the first meaning out of the second deletes a
+# recoverable draft (and its zero-message owner) because of a transient error.
+DRAFT_ABSENT = 'absent'
+DRAFT_PRESENT = 'present'
+DRAFT_UNREADABLE = 'unreadable'
+DRAFT_REDIRECTED = 'redirected'
+
+
+def read_composer_draft_sidecar_status(sid):
+    """Return ``(draft, status, redirect_to)`` for *sid*'s sidecar.
+
+    ``status`` is one of ``DRAFT_ABSENT`` / ``DRAFT_PRESENT`` /
+    ``DRAFT_UNREADABLE`` / ``DRAFT_REDIRECTED``. Only ``DRAFT_ABSENT`` means
+    "there is no durable draft here"; ``DRAFT_UNREADABLE`` means the answer is
+    unknown and every destructive caller must fail closed on it.
+    """
+    p = composer_draft_sidecar_path(sid)
+    if p is None:
+        return None, DRAFT_ABSENT, None
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        return None, DRAFT_ABSENT, None
+    except OSError:
+        # Permission denied, EIO, a vanished parent directory: we do not know
+        # whether a draft exists.
+        logger.debug("Draft sidecar stat failed for %s", sid, exc_info=True)
+        return None, DRAFT_UNREADABLE, None
+    stat_key = (st.st_mtime_ns, st.st_size)
+    key = str(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        cached = _DRAFT_SIDECAR_CACHE.get(key)
+        if cached is not None and cached[0] == stat_key:
+            return copy.deepcopy(cached[1]), DRAFT_PRESENT, None
+    try:
+        raw = p.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return None, DRAFT_ABSENT, None
+    except OSError:
+        logger.debug("Draft sidecar read failed for %s", sid, exc_info=True)
+        return None, DRAFT_UNREADABLE, None
+    try:
+        data = _json_loads_session(raw)
+    except Exception:
+        # A truncated or corrupt sidecar is NOT an absent one. Deleting the
+        # owner here throws away a draft that a later repair could recover.
+        logger.debug("Draft sidecar parse failed for %s", sid, exc_info=True)
+        return None, DRAFT_UNREADABLE, None
+    if not isinstance(data, dict):
+        return None, DRAFT_UNREADABLE, None
+    redirect_to = str(data.get('redirect_to') or '').strip()
+    if redirect_to:
+        return None, DRAFT_REDIRECTED, redirect_to
+    draft = data.get('draft')
+    if not isinstance(draft, dict):
+        return None, DRAFT_UNREADABLE, None
+    with _DRAFT_SIDECAR_LOCK:
+        _DRAFT_SIDECAR_CACHE[key] = (stat_key, copy.deepcopy(draft))
+    return draft, DRAFT_PRESENT, None
+
+
+def read_composer_draft_sidecar(sid):
+    """Return the sidecar draft dict for *sid*, or None when there is none.
+
+    Convenience wrapper for the many NON-destructive readers. A caller that
+    deletes anything on the strength of the answer must use
+    ``read_composer_draft_sidecar_status()`` instead and fail closed on
+    ``DRAFT_UNREADABLE``.
+    """
+    draft, _status, _redirect = read_composer_draft_sidecar_status(sid)
+    return draft
+
+
+def composer_draft_redirect_target(sid):
+    """The SID that owns *sid*'s draft after a session-id rotation, if any."""
+    _draft, status, redirect_to = read_composer_draft_sidecar_status(sid)
+    return redirect_to if status == DRAFT_REDIRECTED else None
+
+
+def write_composer_draft_sidecar(sid, draft) -> dict:
+    """Atomically persist *draft* to the sidecar and return the stored dict."""
+    p = composer_draft_sidecar_path(sid)
+    if p is None:
+        raise ValueError(f'Unsafe session_id {sid!r}; refusing to write draft sidecar')
+    draft = dict(draft) if isinstance(draft, dict) else {}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = _json_dumps_session({'draft': draft, 'updated_at': time.time()})
+    tmp = p.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        _safe_replace(tmp, p)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    try:
+        st = p.stat()
+        with _DRAFT_SIDECAR_LOCK:
+            _DRAFT_SIDECAR_CACHE[str(sid)] = ((st.st_mtime_ns, st.st_size), copy.deepcopy(draft))
+    except OSError:
+        pass
+    return draft
+
+
+def delete_composer_draft_sidecar(sid) -> bool:
+    """Remove a draft sidecar and report whether no authoritative copy remains.
+
+    Callers that tell the browser a draft was cleared must fail closed when an
+    unlink error leaves the sidecar in place: sidecars override the legacy
+    in-session draft on the next load.
+    """
+    p = composer_draft_sidecar_path(sid)
+    with _DRAFT_SIDECAR_LOCK:
+        _DRAFT_SIDECAR_CACHE.pop(str(sid), None)
+    if p is None:
+        return True
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Failed to unlink draft sidecar for %s", sid, exc_info=True)
+        return False
+    return not p.exists()
+
+
+def write_composer_draft_redirect(old_sid, new_sid) -> bool:
+    """Leave a durable ``old_sid -> new_sid`` marker in the old sidecar slot.
+
+    Copying the draft once is not enough. Compression rotates the session id
+    while the composer keeps autosaving on a debounce, so a request that was
+    already in flight still names the OLD sid — and because the archived parent
+    session still exists, the old-sid write was accepted and stranded the
+    newest draft on a session nobody loads any more. The marker makes the
+    rotation discoverable across restarts, so a late request can be routed to
+    the live sid (or told which sid is live) instead of silently writing into
+    the void.
+    """
+    p = composer_draft_sidecar_path(old_sid)
+    if p is None:
+        return False
+    payload = _json_dumps_session({
+        'redirect_to': str(new_sid),
+        'updated_at': time.time(),
+    })
+    tmp = p.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        _safe_replace(tmp, p)
+    except Exception:
+        logger.warning("Failed to record draft redirect %s -> %s", old_sid, new_sid, exc_info=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    with _DRAFT_SIDECAR_LOCK:
+        # The old slot no longer holds a draft; drop any cached copy so a
+        # reader cannot serve pre-rotation content.
+        _DRAFT_SIDECAR_CACHE.pop(str(old_sid), None)
+    return True
+
+
+def migrate_composer_draft_sidecar(old_sid, new_sid) -> None:
+    """Move draft ownership across a session-id rotation.
+
+    Installs a durable continuation marker on the old sid whether or not there
+    was a draft to copy: the point of the marker is to catch requests that are
+    still in flight for the old sid, and those exist regardless.
+    """
+    old_sid = str(old_sid or '')
+    new_sid = str(new_sid or '')
+    if old_sid == new_sid or not is_safe_session_id(old_sid) or not is_safe_session_id(new_sid):
+        return
+    locks = sorted(
+        ((old_sid, get_composer_draft_lock(old_sid)), (new_sid, get_composer_draft_lock(new_sid))),
+        key=lambda item: item[0],
+    )
+    with locks[0][1]:
+        with locks[1][1]:
+            old_draft, old_status, _redirect = read_composer_draft_sidecar_status(old_sid)
+            if old_status == DRAFT_UNREADABLE:
+                # Do not overwrite a sidecar we could not read: it may still
+                # hold a recoverable draft.
+                logger.warning(
+                    "Skipping draft migration %s -> %s: old sidecar unreadable",
+                    old_sid, new_sid,
+                )
+                return
+            if old_status == DRAFT_REDIRECTED:
+                return
+            if old_draft is not None:
+                _new_draft, new_status, _r = read_composer_draft_sidecar_status(new_sid)
+                if new_status == DRAFT_UNREADABLE:
+                    logger.warning(
+                        "Skipping draft migration %s -> %s: new sidecar unreadable",
+                        old_sid, new_sid,
+                    )
+                    return
+                if new_status == DRAFT_ABSENT:
+                    write_composer_draft_sidecar(new_sid, old_draft)
+                    update_cached_composer_draft(new_sid, old_draft)
+                    bump_composer_draft_revision(new_sid)
+            # Replace the old slot with the continuation marker rather than
+            # deleting it, so a late old-sid request is routable.
+            if not write_composer_draft_redirect(old_sid, new_sid):
+                # Could not install the marker; at least do not leave the old
+                # draft where a late write would compete with the new sid.
+                delete_composer_draft_sidecar(old_sid)
+            bump_composer_draft_revision(old_sid)
+
+
+def resolve_composer_draft_status(sid, legacy=None):
+    """Return ``(draft, readable)`` for *sid*.
+
+    ``readable`` is False when the sidecar exists but could not be read or
+    parsed — the draft is then UNKNOWN, not empty. Destructive callers must
+    treat that as "keep everything".
+    """
+    sidecar, status, redirect_to = read_composer_draft_sidecar_status(sid)
+    if status == DRAFT_UNREADABLE:
+        return {}, False
+    if status == DRAFT_REDIRECTED:
+        # Ownership moved: this sid holds no draft of its own, but the rotation
+        # target may. Deliberately report NOT readable so a destructive caller
+        # treats it as "unknown, keep everything" rather than "no draft, safe to
+        # delete" — the draft did not disappear, it lives under another sid, and
+        # deleting this row would also take the continuation marker with it.
+        del redirect_to  # only the status matters here
+        return {}, False
+    if sidecar is not None:
+        return sidecar, True
+    return (legacy if isinstance(legacy, dict) else {}), True
+
+
+def resolve_composer_draft(sid, legacy=None) -> dict:
+    """Sidecar draft when present, else the legacy in-file composer_draft."""
+    draft, _readable = resolve_composer_draft_status(sid, legacy)
+    return draft
+
+
+def update_cached_composer_draft(sid, draft) -> None:
+    """Keep an already-cached full Session object's composer_draft in sync so
+    code paths that still read the attribute directly see the sidecar value."""
+    with LOCK:
+        cached = SESSIONS.get(sid)
+    if cached is not None and str(getattr(cached, 'session_id', '') or '') == str(sid):
+        cached.composer_draft = dict(draft) if isinstance(draft, dict) else {}
+
+
 def _load_session_from_path(path: Path) -> "Session | None":
     """Load a session from an explicit JSON path without consulting SESSION_DIR."""
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        data = _json_loads_session(path.read_text(encoding='utf-8'))
     except Exception:
         return None
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
@@ -1368,6 +1820,10 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        with _session_save_lock(self.session_id):
+            self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1443,7 +1899,47 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
+        payload = _json_dumps_session({**meta, **extra})
+
+        # ── No-op save skip (big-session hotpath, 2026-07-13) ───────────
+        # Several periodic callers re-save byte-identical content (observed
+        # as full 23 MB rewrites every ~15-30s on an idle large session).
+        # If this object produced the exact same payload it last wrote, verify
+        # the real on-disk bytes before skipping. The stat tuple is only a cache
+        # hint: same-size replacements can preserve/coarsen mtime, including an
+        # in-place overwrite. A freshly-loaded object has no digest cache, so it
+        # also verifies once and can retain the no-op optimization after restart.
+        # touch_updated_at=True saves always differ (updated_at changed),
+        # so recency semantics are unaffected.
+        payload_bytes = payload.encode('utf-8')
+        payload_digest = hashlib.sha256(payload_bytes).hexdigest()
+        last_saved_digest = getattr(self, '_last_saved_digest', None)
+        if last_saved_digest is None or payload_digest == last_saved_digest:
+            verified_stat = None
+            try:
+                verified_stat = os.stat(self.path)
+                disk_unchanged = (
+                    verified_stat.st_size == len(payload_bytes)
+                    and _stream_file_sha256(self.path) == payload_digest
+                )
+            except OSError:
+                disk_unchanged = False
+            if disk_unchanged and verified_stat is not None:
+                self._last_saved_digest = payload_digest
+                self._last_saved_stat = (verified_stat.st_mtime_ns, verified_stat.st_size)
+                if not skip_index:
+                    _write_session_index(updates=[self])
+                if self.messages:
+                    try:
+                        _clear_webui_zero_message_orphan_tombstone(self.session_id)
+                        _clear_webui_deleted_session_tombstone(self.session_id)
+                    except Exception:
+                        logger.debug(
+                            "Failed to clear webui tombstone for %s",
+                            self.session_id,
+                            exc_info=True,
+                        )
+                return
 
         # ── #1558 backup safeguard ──────────────────────────────────────
         # Before overwriting the session file, copy the previous version to
@@ -1459,13 +1955,19 @@ class Session:
         # their .bak get restored automatically.
         try:
             if self.path.exists():
+                incoming_msg_count = len(self.messages or [])
+                # ``message_count`` is an accelerator written by this class,
+                # not a generation/integrity proof for legacy or external
+                # writers.  A stale low count must never make a real shrink
+                # overwrite history without a parseable recovery backup.
+                # Therefore read and verify the existing payload before every
+                # overwrite; grow still avoids making a backup.
                 existing_text = self.path.read_text(encoding='utf-8')
                 try:
-                    existing = json.loads(existing_text)
+                    existing = _json_loads_session(existing_text)
                     existing_msg_count = len(existing.get('messages') or [])
-                except (json.JSONDecodeError, ValueError):
-                    existing_msg_count = -1  # corrupt → always back up
-                incoming_msg_count = len(self.messages or [])
+                except Exception:
+                    existing_msg_count = -1  # corrupt → never infer a safe shrink
                 if (
                     existing_msg_count > 0
                     and incoming_msg_count == 0
@@ -1521,6 +2023,14 @@ class Session:
             except Exception:
                 pass
             raise
+        # Record what this object wrote so the no-op skip above can prove
+        # "same payload, file untouched since" on the next save.
+        self._last_saved_digest = payload_digest
+        try:
+            st = os.stat(self.path)
+            self._last_saved_stat = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            self._last_saved_stat = None
         if not skip_index:
             _write_session_index(updates=[self])
 
@@ -1562,7 +2072,7 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        data = _json_loads_session(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials:
@@ -1801,7 +2311,13 @@ class Session:
             'source_label': self.source_label,
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
-            'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            # Sidecar draft wins over the in-file field (big-session save
+            # hotpath): draft autosaves no longer rewrite the session JSON,
+            # so the sidecar is the authoritative, freshest copy.
+            'composer_draft': resolve_composer_draft(
+                self.session_id,
+                self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            ),
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
@@ -3643,7 +4159,6 @@ def _has_compression_continuation(session) -> bool:
     # shallow JSON metadata scan; session files write parent_session_id before
     # the messages array, so this avoids loading multi-MB transcripts.
     try:
-        needle = f'"parent_session_id": "{sid}"'
         for path in SESSION_DIR.glob('*.json'):
             if path.name.startswith('_') or path.stem == sid:
                 continue
@@ -3657,7 +4172,7 @@ def _has_compression_continuation(session) -> bool:
                 head = _read_file_head(path, max_prefix_bytes=16384)[:4096]
             except OSError:
                 continue
-            if needle in head:
+            if _read_top_level_json_value_from_head(head, 'parent_session_id') == sid:
                 return True
     except Exception:
         logger.debug("Failed to scan session files for compression continuation", exc_info=True)
