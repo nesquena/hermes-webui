@@ -13298,6 +13298,11 @@ def handle_get(handler, parsed) -> bool:
         with profile_env_for_active_request_readonly("/api/providers", logger_override=logger):
             return j(handler, get_providers())
 
+    if parsed.path in ("/api/custom-endpoints", "/api/providers/custom-endpoints"):
+        from api.custom_endpoints import list_custom_endpoints
+
+        return j(handler, list_custom_endpoints())
+
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
@@ -15533,6 +15538,37 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), 400)
 
+    # ── Custom endpoints (arbitrary OpenAI-compatible endpoints) ──
+    if parsed.path in (
+        "/api/custom-endpoints/validate",
+        "/api/providers/custom-endpoints/validate",
+    ):
+        from api.custom_endpoints import validate_custom_endpoint
+
+        return j(handler, validate_custom_endpoint(body))
+
+    if parsed.path in ("/api/custom-endpoints", "/api/providers/custom-endpoints"):
+        from api.custom_endpoints import upsert_custom_endpoint
+
+        try:
+            return j(handler, upsert_custom_endpoint(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        except LookupError as exc:
+            return bad(handler, str(exc), 404)
+
+    for _root in ("/api/custom-endpoints/", "/api/providers/custom-endpoints/"):
+        if parsed.path.startswith(_root) and parsed.path.endswith("/activate"):
+            endpoint_id = parsed.path[len(_root):-len("/activate")]
+            from api.custom_endpoints import activate_custom_endpoint
+
+            try:
+                return j(handler, activate_custom_endpoint(endpoint_id))
+            except LookupError as exc:
+                return bad(handler, str(exc), 404)
+            except ValueError as exc:
+                return bad(handler, str(exc), 400)
+
     if parsed.path == "/api/models/refresh":
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:
@@ -17678,6 +17714,17 @@ def handle_delete(handler, parsed) -> bool:
         prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
         _save_saved_prompts(prompts)
         return j(handler, {"ok": True})
+
+    for _root in ("/api/custom-endpoints/", "/api/providers/custom-endpoints/"):
+        if parsed.path.startswith(_root) and not parsed.path[len(_root):].startswith("validate"):
+            endpoint_id = parsed.path[len(_root):]
+            if endpoint_id and "/" not in endpoint_id:
+                from api.custom_endpoints import delete_custom_endpoint
+
+                try:
+                    return j(handler, delete_custom_endpoint(endpoint_id))
+                except LookupError as exc:
+                    return bad(handler, str(exc), 404)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete

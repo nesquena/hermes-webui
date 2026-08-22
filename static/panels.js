@@ -10988,9 +10988,209 @@ async function loadProvidersPanel(){
     for(const p of providers){
       list.appendChild(_buildProviderCard(p));
     }
+    loadCustomEndpointsPanel();
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+esc(e.message||String(e))+'</div>';
   }
+}
+
+// ── Custom endpoints (Providers pane) ────────────────────────────────────
+let _ceEditId=null;
+let _ceDiscoveredModels=[];
+let _ceWired=false;
+
+async function loadCustomEndpointsPanel(){
+  const list=$('customEndpointsList');
+  const empty=$('customEndpointsEmpty');
+  if(!list) return;
+  try{
+    const data=await api('/api/custom-endpoints');
+    const endpoints=(data&&data.endpoints)||[];
+    list.innerHTML='';
+    if(endpoints.length===0){
+      list.style.display='none';
+      if(empty) empty.style.display='';
+    }else{
+      if(empty) empty.style.display='none';
+      list.style.display='';
+      for(const e of endpoints) list.appendChild(_buildCustomEndpointRow(e));
+    }
+  }catch(e){
+    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load custom endpoints: '+esc(e.message||String(e))+'</div>';
+  }
+}
+
+function _buildCustomEndpointRow(e){
+  const row=document.createElement('div');
+  row.className='provider-card';
+  row.dataset.endpoint=e.id;
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  header.innerHTML=`
+    <div class="provider-card-info">
+      <div class="provider-card-name">${esc(e.name)}${e.is_current?' <span class="provider-card-badge">'+esc(t('custom_endpoints_active')||'Active')+'</span>':''}</div>
+      <div class="provider-card-meta">${esc(e.base_url)}${e.model?' · '+esc(e.model):''}${e.has_api_key&&e.api_key_preview?' · '+esc(e.api_key_preview):''}</div>
+    </div>
+    <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
+  `;
+  row.appendChild(header);
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+  const actions=document.createElement('div');
+  actions.className='provider-card-row';
+  const editBtn=document.createElement('button');
+  editBtn.type='button'; editBtn.className='provider-card-btn';
+  editBtn.textContent=t('custom_endpoints_edit')||'Edit';
+  editBtn.onclick=()=>_openCustomEndpointForm(e);
+  actions.appendChild(editBtn);
+  if(!e.is_current){
+    const useBtn=document.createElement('button');
+    useBtn.type='button'; useBtn.className='provider-card-btn provider-card-btn-primary';
+    useBtn.textContent=t('custom_endpoints_use')||'Use';
+    useBtn.onclick=async()=>{
+      useBtn.disabled=true;
+      try{
+        await api('/api/custom-endpoints/'+encodeURIComponent(e.id)+'/activate',{method:'POST'});
+        await Promise.all([loadCustomEndpointsPanel(),loadProvidersPanel()]);
+        if(typeof showToast==='function') showToast(t('custom_endpoints_activated')||'Custom endpoint activated.');
+      }catch(err){
+        if(typeof showToast==='function') showToast((err&&err.message)||String(err));
+        useBtn.disabled=false;
+      }
+    };
+    actions.appendChild(useBtn);
+  }
+  const delBtn=document.createElement('button');
+  delBtn.type='button'; delBtn.className='provider-card-btn provider-card-btn-danger';
+  delBtn.textContent=t('custom_endpoints_delete')||'Delete';
+  delBtn.onclick=async()=>{
+    if(!window.confirm((t('custom_endpoints_delete_confirm')||'Delete custom endpoint ')+e.name+'?')) return;
+    try{
+      await api('/api/custom-endpoints/'+encodeURIComponent(e.id),{method:'DELETE'});
+      await Promise.all([loadCustomEndpointsPanel(),loadProvidersPanel()]);
+      if(typeof showToast==='function') showToast(t('custom_endpoints_deleted')||'Custom endpoint deleted.');
+    }catch(err){
+      if(typeof showToast==='function') showToast((err&&err.message)||String(err));
+    }
+  };
+  actions.appendChild(delBtn);
+  body.appendChild(actions);
+  row.appendChild(body);
+  header.addEventListener('click',()=>row.classList.toggle('open'));
+  return row;
+}
+
+function _cePayload(){
+  const key=($('ceApiKey').value||'').trim();
+  const payload={
+    id:_ceEditId||'',
+    name:($('ceName').value||'').trim(),
+    base_url:($('ceUrl').value||'').trim(),
+    model:($('ceModel').value||'').trim(),
+    discover_models:$('ceDiscover').checked,
+    make_default:$('ceMakeDefault').checked
+  };
+  if(key) payload.api_key=key;
+  if(_ceDiscoveredModels&&_ceDiscoveredModels.length) payload.models=_ceDiscoveredModels.slice();
+  return payload;
+}
+
+function _ceSetResult(text,isError){
+  const box=$('ceResult');
+  if(!box) return;
+  box.textContent=text;
+  box.style.display='';
+  box.style.color=isError?'var(--error)':'var(--accent)';
+}
+
+function _openCustomEndpointForm(e){
+  if(!_ceWired){ _ceWireForm(); _ceWired=true; }
+  _ceEditId=e?e.id:null;
+  _ceDiscoveredModels=(e&&Array.isArray(e.models))?e.models.slice():[];
+  const container=$('customEndpointsFormContainer');
+  if(container) container.style.display='';
+  const title=$('customEndpointsFormTitle');
+  if(title) title.textContent=e?((t('custom_endpoints_edit_title')||'Edit endpoint')+' — '+e.name):(t('custom_endpoints_new_title')||'New endpoint');
+  $('ceName').value=e?e.name:'';
+  $('ceId').value=e?e.id:'';
+  $('ceUrl').value=e?e.base_url:'';
+  $('ceModel').value=e?(e.model||''):'';
+  $('ceApiKey').value='';
+  $('ceDiscover').checked=e?(e.discover_models!==false):true;
+  $('ceMakeDefault').checked=false;
+  _ceRenderModelDatalist();
+  const box=$('ceResult'); if(box) box.style.display='none';
+  if(container) container.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+function _ceRenderModelDatalist(){
+  const dl=$('customEndpointsModels');
+  if(!dl) return;
+  dl.innerHTML='';
+  const seen=new Set();
+  const ids=_ceDiscoveredModels.slice();
+  const cur=($('ceModel').value||'').trim();
+  if(cur) ids.unshift(cur);
+  for(const id of ids){
+    if(!id||seen.has(id)) continue;
+    seen.add(id);
+    const opt=document.createElement('option');
+    opt.value=id;
+    dl.appendChild(opt);
+  }
+}
+
+async function _ceTest(){
+  const testBtn=$('ceTestBtn'); if(!testBtn) return;
+  testBtn.disabled=true;
+  const orig=testBtn.textContent;
+  testBtn.textContent=t('custom_endpoints_testing')||'Testing…';
+  try{
+    const res=await api('/api/custom-endpoints/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_cePayload())});
+    if(res&&res.ok){
+      _ceDiscoveredModels=Array.isArray(res.models)?res.models.slice():[];
+      _ceRenderModelDatalist();
+      const modelInput=$('ceModel');
+      if(!(modelInput.value||'').trim()&&_ceDiscoveredModels.length) modelInput.value=_ceDiscoveredModels[0];
+      _ceSetResult((t('custom_endpoints_test_ok')||'Endpoint is reachable. Found ')+_ceDiscoveredModels.length+(t('custom_endpoints_test_models')||' models.'),false);
+    }else{
+      _ceSetResult((res&&res.message)||(t('custom_endpoints_test_fail')||'Endpoint is unreachable.'),true);
+    }
+  }catch(err){
+    _ceSetResult((err&&err.message)||String(err),true);
+  }finally{
+    testBtn.disabled=false;
+    testBtn.textContent=orig;
+  }
+}
+
+async function _ceSave(){
+  const saveBtn=$('ceSaveBtn'); if(!saveBtn) return;
+  saveBtn.disabled=true;
+  const orig=saveBtn.textContent;
+  saveBtn.textContent=t('custom_endpoints_saving')||'Saving…';
+  try{
+    await api('/api/custom-endpoints',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_cePayload())});
+    _ceEditId=null;
+    const container=$('customEndpointsFormContainer');
+    if(container) container.style.display='none';
+    await Promise.all([loadCustomEndpointsPanel(),loadProvidersPanel()]);
+    if(typeof showToast==='function') showToast(t('custom_endpoints_saved')||'Custom endpoint saved.');
+  }catch(err){
+    _ceSetResult((err&&err.message)||String(err),true);
+  }finally{
+    saveBtn.disabled=false;
+    saveBtn.textContent=orig;
+  }
+}
+
+function _ceWireForm(){
+  const testBtn=$('ceTestBtn'); if(testBtn) testBtn.addEventListener('click',_ceTest);
+  const saveBtn=$('ceSaveBtn'); if(saveBtn) saveBtn.addEventListener('click',_ceSave);
+  const newBtn=$('ceNewBtn'); if(newBtn) newBtn.addEventListener('click',()=>_openCustomEndpointForm(null));
+  const modelInput=$('ceModel');
+  if(modelInput) modelInput.addEventListener('input',_ceRenderModelDatalist);
 }
 
 async function _refreshProviderQuota(card,button){
