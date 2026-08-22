@@ -3949,6 +3949,25 @@ let _sessionAttentionSoundPrimed = false;
 const _sessionAttentionSoundState = new Map();
 let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
 let _showArchived = false;  // toggle to show archived sessions
+const UNREAD_ONLY_STORAGE_KEY = 'hermes-show-unread-only';
+let _showUnreadOnly = false;  // toggle to show only unread sessions
+
+function _restoreUnreadOnly(){
+  try{
+    const raw = localStorage.getItem(UNREAD_ONLY_STORAGE_KEY);
+    _showUnreadOnly = raw === '1' || raw === 'true';
+  }catch(_e){ _showUnreadOnly = false; }
+}
+
+function _setUnreadOnly(enabled){
+  _showUnreadOnly = !!enabled;
+  try{ localStorage.setItem(UNREAD_ONLY_STORAGE_KEY, _showUnreadOnly ? '1' : '0'); }catch(_e){}
+  if(typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+}
+
+_restoreUnreadOnly();
+// Sync checkbox state on load
+(function(){ try{ var cb=document.getElementById('sessionUnreadToggle'); if(cb) cb.checked=_showUnreadOnly; }catch(_){}})();
 let _sessionSelectMode = false;  // batch select mode
 const _selectedSessions = new Set();  // selected session IDs
 let _allProjects = [];  // cached project list
@@ -7925,7 +7944,24 @@ function renderSessionListFromCache(){
     empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
     list.appendChild(empty);
   }
-  const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
+  // Unread-only filter: when active, hide sessions that have no unread state.
+  // Always keep the active session visible so the user never loses track of it.
+  let filteredSessions = sessions;
+  if(_showUnreadOnly){
+    const activeSidForFilter = _activeSessionIdForSidebar();
+    filteredSessions = sessions.filter(s => {
+      if(activeSidForFilter && _sessionLineageContainsSession(s, activeSidForFilter)) return true;
+      return _hasUnreadForSession(s) || !!s._child_session_has_unread;
+    });
+  }
+  const orderedSessions=[...filteredSessions].sort(_sessionSidebarSortCompare);
+  // Empty state when unread-only filter hides everything
+  if(_showUnreadOnly && orderedSessions.length === 0 && !(_activeProject && sessions.length === 0)){
+    const empty=document.createElement('div');
+    empty.className='session-empty-note';
+    empty.textContent='No unread conversations.';
+    list.appendChild(empty);
+  }
   // Separate pinned from unpinned
   const pinned=orderedSessions.filter(s=>s.pinned);
   const unpinned=orderedSessions.filter(s=>!s.pinned);

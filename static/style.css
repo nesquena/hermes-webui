@@ -6750,6 +6750,9 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-filter-stack{display:flex;flex-direction:column;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);}
 .kanban-filter-stack select{width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px;}
 .kanban-check{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;}
+.session-unread-toggle{display:flex;align-items:center;gap:6px;padding:4px 12px 8px;color:var(--muted);font-size:12px;cursor:pointer;flex-shrink:0;}
+.session-unread-toggle input[type=checkbox]{accent-color:var(--accent);cursor:pointer;}
+.session-unread-toggle:hover{color:var(--text);}
 .kanban-summary{padding:8px 12px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--border);}
 .kanban-list{flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:6px;}
 .kanban-list-item{display:flex;flex-direction:column;align-items:flex-start;gap:3px;width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--panel);color:var(--text);text-align:left;cursor:pointer;}
