@@ -83,6 +83,40 @@ def test_atomic_write_preserves_existing_permissions(tmp_path: Path) -> None:
     _atomic_write_text(target, "model:\n  default: newest\n")
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
 
+    # setuid is dropped by ``write()`` on Linux *and* macOS, unlike setgid
+    # which Linux keeps for a writer in the file's group. Assert it explicitly
+    # so this stays covered on the Linux runners CI actually uses.
+    os.chmod(target, 0o4664)
+    _atomic_write_text(target, "model:\n  default: setuid\n")
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o4664
+
+    # Sticky survives a write everywhere; it must not be disturbed either.
+    os.chmod(target, 0o1664)
+    _atomic_write_text(target, "model:\n  default: sticky\n")
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o1664
+
+
+def test_in_place_fallback_preserves_special_mode_bits(tmp_path: Path) -> None:
+    """The hard-link fallback writes the live inode, so it must restore bits too.
+
+    ``write()`` clears setuid/setgid for a non-superuser writer. On the atomic
+    path the casualty is a temp file, but the in-place fallback truncates and
+    rewrites the *real* config, so an unrestored bit is stripped from the
+    administrator's actual file. A second hard link forces that branch.
+    """
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.link(target, tmp_path / "config.hardlink")
+    assert os.stat(target).st_nlink > 1
+
+    for mode in (0o2664, 0o4664, 0o664):
+        os.chmod(target, mode)
+        _atomic_write_text(target, f"model:\n  default: {mode:o}\n")
+        assert target.read_text(encoding="utf-8") == f"model:\n  default: {mode:o}\n"
+        assert stat.S_IMODE(os.stat(target).st_mode) == mode
+        # Still the same inode — the fallback must not have severed the link.
+        assert os.stat(target).st_nlink > 1
+
 
 @pytest.mark.skipif(
     not all(hasattr(os, name) for name in ("getxattr", "listxattr", "setxattr")),
