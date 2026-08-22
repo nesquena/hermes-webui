@@ -96,15 +96,19 @@ def test_claude_code_detail_load_survives_named_active_profile(monkeypatch):
     synth = _synth_for(row)
 
     handler = MagicMock()
-    parsed = urlparse("/api/session?session_id=%s&messages=0&resolve_model=0" % CLAUDE_SID)
+    parsed = urlparse(
+        "/api/session?session_id=%s&messages=0&resolve_model=0" % CLAUDE_SID
+    )
 
-    with patch("api.routes.get_session", side_effect=KeyError(CLAUDE_SID)), \
-         patch("api.routes._get_active_profile_name", return_value="feng-family"), \
-         patch("api.routes._lookup_cli_session_metadata", return_value=row), \
-         patch(
-             "api.routes._claim_or_synthesize_cli_session",
-             return_value=(synth, "not_claimable"),
-         ):
+    with (
+        patch("api.routes.get_session", side_effect=KeyError(CLAUDE_SID)),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch(
+            "api.routes._claim_or_synthesize_cli_session",
+            return_value=(synth, "not_claimable"),
+        ),
+    ):
         assert routes.handle_get(handler, parsed) is True
 
     assert cap.get("error") is None, (
@@ -134,11 +138,15 @@ def test_profile_tagged_foreign_session_still_scoped(monkeypatch):
     cap = _capture(monkeypatch)
 
     handler = MagicMock()
-    parsed = urlparse("/api/session?session_id=%s&messages=0&resolve_model=0" % row["session_id"])
+    parsed = urlparse(
+        "/api/session?session_id=%s&messages=0&resolve_model=0" % row["session_id"]
+    )
 
-    with patch("api.routes.get_session", side_effect=KeyError(row["session_id"])), \
-         patch("api.routes._get_active_profile_name", return_value="feng-family"), \
-         patch("api.routes._lookup_cli_session_metadata", return_value=row):
+    with (
+        patch("api.routes.get_session", side_effect=KeyError(row["session_id"])),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+    ):
         assert routes.handle_get(handler, parsed) is True
 
     assert cap["status"] == 409
@@ -153,6 +161,74 @@ def test_profile_agnostic_predicate_is_narrow():
     # A profile-less row from any other source stays scoped.
     other = dict(_claude_code_row(), source_tag="cli", raw_source="cli")
     assert routes._is_profile_agnostic_foreign_session(other) is False
+    # A Claude Code row that is not read-only stays scoped.
+    writable = dict(_claude_code_row(), read_only=False)
+    assert routes._is_profile_agnostic_foreign_session(writable) is False
+    # A Claude Code row that is not from external-agent provenance stays scoped.
+    non_external = dict(_claude_code_row(), session_source="webui")
+    assert routes._is_profile_agnostic_foreign_session(non_external) is False
     # Missing / empty metadata is never exempt.
     assert routes._is_profile_agnostic_foreign_session({}) is False
     assert routes._is_profile_agnostic_foreign_session(None) is False
+
+
+def test_isolated_profile_mode_blocks_claude_code_detail_load(monkeypatch):
+    row = _claude_code_row()
+    cap = _capture(monkeypatch)
+
+    handler = MagicMock()
+    parsed = urlparse(
+        "/api/session?session_id=%s&messages=0&resolve_model=0" % CLAUDE_SID
+    )
+
+    with (
+        patch("api.routes.get_session", side_effect=KeyError(CLAUDE_SID)),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=True),
+    ):
+        assert routes.handle_get(handler, parsed) is True
+
+    # Under isolated profile mode, detail load must fail with 404
+    assert cap["status"] == 404
+    assert cap.get("error") == "Session not found"
+
+
+def test_isolated_profile_mode_blocks_claude_code_sharing(monkeypatch):
+    row = _claude_code_row()
+    handler = MagicMock()
+
+    with (
+        patch("api.routes.get_session", side_effect=KeyError(CLAUDE_SID)),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=True),
+    ):
+        import pytest
+
+        with pytest.raises(KeyError):
+            routes._resolve_share_session_pair(CLAUDE_SID, handler)
+
+
+def test_isolated_profile_mode_blocks_claude_code_import(monkeypatch):
+    row = _claude_code_row()
+    cap = _capture(monkeypatch)
+    body = {"session_id": CLAUDE_SID, "profile": "feng-family"}
+
+    handler = MagicMock()
+    mock_get_msgs = MagicMock(
+        return_value=[{"role": "user", "content": "secret isolated content"}]
+    )
+
+    with (
+        patch("api.routes.Session.load", return_value=None),
+        patch("api.routes._resolve_cli_import_metadata", return_value=row),
+        patch("api.routes.get_cli_session_messages", mock_get_msgs),
+        patch("api.routes._is_isolated_profile_mode", return_value=True),
+    ):
+        assert routes._handle_session_import_cli(handler, body) is True
+
+    # Under isolated profile mode, import must fail with 404
+    assert cap["status"] == 404
+    assert cap.get("error") == "Session not found in CLI store"
+    # Ensure that get_cli_session_messages was never called (the reader was blocked)
+    assert mock_get_msgs.call_count == 0

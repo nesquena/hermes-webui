@@ -486,3 +486,239 @@ def test_locale_keys_exist_in_every_locale_block():
 
     assert i18n.count("settings_label_claude_code_sessions:") == i18n.count("settings_label_api_redact:")
     assert i18n.count("settings_desc_claude_code_sessions:") == i18n.count("settings_desc_previous_messaging_sessions:")
+
+
+def test_profile_agnostic_claude_code_row_survives_named_profile_scope(monkeypatch):
+    """Profile-less Claude Code imports are visible for every active profile."""
+    webui_row = _rows_webui()[0]
+    webui_row["profile"] = "ops"
+    claude_row = _row(
+        "external-claude",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    claude_row["profile"] = None
+    claude_row["read_only"] = True
+    claude_row["session_source"] = "external_agent"
+    untagged_cli_row = _row("external-cli-untagged", "cli", "cli")
+    untagged_cli_row["profile"] = None
+    other_profile_row = _row("external-cli-other-profile", "cli", "cli")
+    other_profile_row["profile"] = "fintech"
+    tagged_claude_row = _row(
+        "external-claude-other-profile",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    tagged_claude_row["profile"] = "fintech"
+    tagged_claude_row["read_only"] = True
+    tagged_claude_row["session_source"] = "external_agent"
+    _common_monkeypatches(
+        monkeypatch,
+        [webui_row],
+        [claude_row, untagged_cli_row, other_profile_row, tagged_claude_row],
+    )
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "ops")
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="ops",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_claude_code_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    assert {row["session_id"] for row in payload["sessions"]} == {
+        "webui-1",
+        "external-claude",
+    }
+    assert payload["other_profile_count"] == 3
+
+
+def test_isolated_profile_mode_blocks_profile_agnostic_claude_code(monkeypatch):
+    """Isolated profile mode enforces confidentiality: profile-less Claude Code must be blocked."""
+    webui_row = _rows_webui()[0]
+    webui_row["profile"] = "ops"
+    claude_row = _row(
+        "external-claude",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    claude_row["profile"] = None
+    claude_row["read_only"] = True
+    claude_row["session_source"] = "external_agent"
+    _common_monkeypatches(monkeypatch, [webui_row], [claude_row])
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "ops")
+    # Enable isolated profile mode inside both profiles and routes modules
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: True)
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="ops",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_claude_code_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    # Claude Code row must NOT be visible because isolated profile mode is True
+    assert {row["session_id"] for row in payload["sessions"]} == {"webui-1"}
+
+
+def test_isolated_profile_mode_blocks_profile_agnostic_claude_code_on_default_profile(monkeypatch):
+    """Isolated default profile must block profile-less Claude Code sessions too."""
+    webui_row = _rows_webui()[0]
+    webui_row["profile"] = "default"
+    claude_row = _row(
+        "external-claude",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    claude_row["profile"] = None
+    claude_row["read_only"] = True
+    claude_row["session_source"] = "external_agent"
+    _common_monkeypatches(monkeypatch, [webui_row], [claude_row])
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: True)
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_claude_code_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    # In isolated mode, even under default profile, the agnostic Claude Code row must be blocked
+    assert {row["session_id"] for row in payload["sessions"]} == {"webui-1"}
+
+
+def test_profile_agnostic_claude_code_row_without_profile_key(monkeypatch):
+    """Rows that entirely omit the profile key should be treated as profile-less and fallback safely."""
+    webui_row = _rows_webui()[0]
+    webui_row["profile"] = "ops"
+    claude_row = _row(
+        "external-claude",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    claude_row["read_only"] = True
+    claude_row["session_source"] = "external_agent"
+    if "profile" in claude_row:
+        del claude_row["profile"]  # entirely omit key
+    _common_monkeypatches(monkeypatch, [webui_row], [claude_row])
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="ops",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_claude_code_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    assert {row["session_id"] for row in payload["sessions"]} == {
+        "webui-1",
+        "external-claude",
+    }
+
+
+def test_profile_agnostic_claude_code_respects_visibility_toggles(monkeypatch):
+    """Profile-less Claude Code sessions must respect show_claude_code_sessions toggle."""
+    webui_row = _rows_webui()[0]
+    webui_row["profile"] = "ops"
+    claude_row = _row(
+        "external-claude",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    claude_row["profile"] = None
+    claude_row["read_only"] = True
+    claude_row["session_source"] = "external_agent"
+    _common_monkeypatches(monkeypatch, [webui_row], [claude_row])
+    # Force get_cli_sessions monkeypatch to respect include_claude_code
+    monkeypatch.setattr(
+        routes,
+        "get_cli_sessions",
+        lambda source_filter=None, all_profiles=False, include_claude_code=True: (
+            [claude_row] if include_claude_code else []
+        )
+    )
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+
+    # show_claude_code_sessions is False
+    payload = routes._build_session_list_cache_payload(
+        active_profile="ops",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_claude_code_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    assert {row["session_id"] for row in payload["sessions"]} == {"webui-1"}
+
+
+def test_writable_or_non_external_claude_code_row_does_not_leak_into_named_profile(monkeypatch):
+    """Claude Code rows that are not read-only or not external-agent must not bypass profile scoping."""
+    webui_row = _rows_webui()[0]
+    webui_row["profile"] = "ops"
+
+    # 1. Non-read-only Claude Code row
+    writable_row = _row(
+        "claude-writable",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    writable_row["profile"] = None
+    writable_row["read_only"] = False
+    writable_row["session_source"] = "external_agent"
+
+    # 2. Non-external-agent Claude Code row
+    non_external_row = _row(
+        "claude-non-external",
+        "cli",
+        "claude_code",
+        source_tag="claude_code",
+    )
+    non_external_row["profile"] = None
+    non_external_row["read_only"] = True
+    non_external_row["session_source"] = "webui"
+
+    _common_monkeypatches(
+        monkeypatch,
+        [webui_row],
+        [writable_row, non_external_row],
+    )
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "ops")
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    monkeypatch.setattr(routes, "_is_isolated_profile_mode", lambda: False)
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="ops",
+        all_profiles=False,
+        show_cli_sessions=True,
+        show_claude_code_sessions=True,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+
+    # Neither of the invalid rows should bypass the named profile scope
+    assert {row["session_id"] for row in payload["sessions"]} == {"webui-1"}
+    assert payload["other_profile_count"] == 2
