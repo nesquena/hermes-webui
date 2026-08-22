@@ -12476,6 +12476,33 @@ def _handle_health(handler, parsed):
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
         "accept_loop": _accept_loop_health(handler),
     }
+    # Server identity for companion/mobile clients (#6647): expose the
+    # canonical URL, display name, and version the client is actually talking
+    # to, so a native app (e.g. HerMex on iOS) can surface the active server
+    # at a glance and validate a one-tap server switch without a second
+    # round-trip. All fields derive from the request itself (Host header) or
+    # cheap local reads; any failure degrades to omitting the block rather
+    # than failing the health check.
+    try:
+        from api.updates import WEBUI_VERSION as _health_server_version
+
+        _health_server_url = _request_base_url(handler)
+        _health_server_block = {
+            "url": _health_server_url,
+            "name": _health_server_url.split("://", 1)[-1].split("/", 1)[0],
+            "version": _health_server_version or "",
+        }
+        try:
+            from api.agent_health import get_active_profile_gateway_running_pid
+
+            _health_server_block["gateway_running"] = (
+                get_active_profile_gateway_running_pid() is not None
+            )
+        except Exception:
+            pass
+        payload["server"] = _health_server_block
+    except Exception:
+        pass
     if "oldest_run_age_seconds" in run_check:
         payload["oldest_run_age_seconds"] = run_check["oldest_run_age_seconds"]
     if "idle_seconds_since_last_run" in run_check:
