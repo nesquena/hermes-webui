@@ -29,6 +29,7 @@ Two fixes, two tests:
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -176,15 +177,22 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
     cfg.invalidate_models_cache()
     monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.4, raising=True)
 
-    started = {"n": 0}
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    real_thread = threading.Thread
+    rebuild_workers = []
+
+    def _record_thread(*args, **kwargs):
+        worker = real_thread(*args, **kwargs)
+        if kwargs.get("name") == "models-catalog-rebuild":
+            rebuild_workers.append(worker)
+        return worker
 
     def _slow_rebuild(_builder):
-        started["n"] += 1
-        # >> budget — models the hung Copilot HTTPS call. 0.8s is 2× the
-        # monkeypatched 0.4s budget, which is the smallest gap that still
-        # robustly proves the contract while keeping suite wall-clock low
-        # (was 3.0s; suite-latency cleanup per Copilot review).
-        time.sleep(0.8)
+        probe_started.set()
+        # Hold the probe past the foreground budget without assuming how
+        # quickly a loaded CI worker schedules or sleeps.
+        assert release_probe.wait(timeout=5.0), "test did not release slow probe"
         return {
             "active_provider": "anthropic",
             "default_model": "anthropic/claude-sonnet-4",
@@ -197,21 +205,35 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
     monkeypatch.setattr(cfg, "_invoke_models_rebuild", _slow_rebuild, raising=True)
     # Ensure no disk cache short-circuits the cold path.
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None, raising=True)
+    monkeypatch.setattr(cfg.threading, "Thread", _record_thread, raising=True)
 
-    t0 = time.monotonic()
-    result = cfg.get_available_models()
-    elapsed = time.monotonic() - t0
+    try:
+        result = cfg.get_available_models()
 
-    assert started["n"] == 1, "the rebuild worker should have been started"
-    assert elapsed < 2.0, (
-        f"get_available_models() blocked {elapsed:.2f}s on a hung probe — "
-        f"the {cfg._LIVE_REBUILD_BUDGET_SECONDS}s budget did not bound it"
-    )
-    # The fallback must be a structurally valid, usable catalog.
-    assert isinstance(result, dict)
-    for k in ("active_provider", "default_model", "configured_model_badges", "groups"):
-        assert k in result, f"fallback catalog missing {k!r}"
-    assert isinstance(result["groups"], list)
+        assert probe_started.wait(timeout=5.0), (
+            "the rebuild worker should have started"
+        )
+        assert len(rebuild_workers) == 1
+        # The foreground returned while the probe was deliberately blocked, so
+        # the result can only be the bounded-path fallback. Assert that contract
+        # directly instead of comparing wall-clock time on a contended runner.
+        assert rebuild_workers[0].is_alive()
+        assert isinstance(result, dict)
+        for k in (
+            "active_provider",
+            "default_model",
+            "configured_model_badges",
+            "groups",
+        ):
+            assert k in result, f"fallback catalog missing {k!r}"
+        assert isinstance(result["groups"], list)
+    finally:
+        release_probe.set()
+        for worker in rebuild_workers:
+            worker.join(timeout=5.0)
+
+    assert not rebuild_workers[0].is_alive(), "slow rebuild worker did not finish"
+    assert cfg._cache_build_in_progress is False
 
 
 def test_minimal_static_catalog_is_network_free(monkeypatch):
