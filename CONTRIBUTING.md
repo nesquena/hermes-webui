@@ -82,7 +82,10 @@ unsupported system interpreters during collection:
 ./scripts/test.sh
 ```
 
-CI also runs this suite on Python `3.11`, `3.12`, and `3.13`.
+CI runs the full suite on Python `3.12` for every pull request, keeps a fast
+`3.11`/`3.13` dependency + compile + collection compatibility gate before
+merge, and runs the full `3.11`/`3.12`/`3.13` execution matrix on pushes to
+`master`.
 
 If your change affects browser behavior, also run the relevant manual checks from [TESTING.md](TESTING.md).
 
