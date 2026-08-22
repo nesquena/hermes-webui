@@ -11666,8 +11666,7 @@ def _run_agent_streaming(
                             _ttft_ms = meter().get_ttft_ms(stream_id)
                             if _ttft_ms is not None:
                                 _dm['_firstTokenMs'] = _ttft_ms
-                            if _used_model:
-                                _dm['_usedModel'] = _used_model
+                            _dm['model'] = _turn_route_model or resolved_model or model or ''
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -12055,8 +12054,7 @@ def _run_agent_streaming(
             _ttft_ms = meter().get_ttft_ms(stream_id)
             if _ttft_ms is not None:
                 usage['ttft_ms'] = _ttft_ms
-            if _used_model:
-                usage['used_model'] = _used_model
+            usage['model_name'] = _turn_route_model or resolved_model or model or ''
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
