@@ -7973,7 +7973,7 @@ function switchSettingsSection(name,opts){
     _settingsSection = name;
     return;
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='extensions'||name==='system'||name==='help')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='environment'||name==='providers'||name==='plugins'||name==='extensions'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -7985,13 +7985,13 @@ function switchSettingsSection(name,opts){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',extensions:'Extensions',system:'System',help:'Help'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',environment:'Environment',providers:'Providers',plugins:'Plugins',extensions:'Extensions',system:'System',help:'Help'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','extensions','system','help'].forEach(key=>{
+  ['conversation','appearance','preferences','environment','providers','plugins','extensions','system','help'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -8005,6 +8005,7 @@ function switchSettingsSection(name,opts){
     if(section==='providers') loadProvidersPanel();
     if(section==='plugins') loadPluginsPanel();
     if(section==='extensions') loadExtensionsPanel();
+    if(section==='environment') loadEnvironmentPanel();
   }
   if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
 }
@@ -8066,6 +8067,7 @@ async function _buildSettingsIndex() {
       settingsPaneConversation: 'conversation',
       settingsPaneAppearance: 'appearance',
       settingsPanePreferences: 'preferences',
+      settingsPaneEnvironment: 'environment',
       settingsPaneProviders: 'providers',
       settingsPanePlugins: 'plugins',
       settingsPaneExtensions: 'extensions',
@@ -8199,6 +8201,7 @@ async function filterSettings(query) {
     conversation: t('settings_tab_conversation') || 'Conversation',
     appearance: t('settings_tab_appearance') || 'Appearance',
     preferences: t('settings_tab_preferences') || 'Preferences',
+    environment: t('settings_tab_environment') || 'Environment',
     providers: t('providers_tab_title') || 'Providers',
     plugins: t('settings_tab_plugins') || 'Plugins',
     extensions: t('settings_tab_extensions') || 'Extensions',
@@ -8286,6 +8289,7 @@ function _resolveSettingsField(entry) {
     conversation: 'settingsPaneConversation',
     appearance: 'settingsPaneAppearance',
     preferences: 'settingsPanePreferences',
+    environment: 'settingsPaneEnvironment',
     providers: 'settingsPaneProviders',
     plugins: 'settingsPanePlugins',
     extensions: 'settingsPaneExtensions',
@@ -9036,6 +9040,127 @@ function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
   field.placeholder=(typeof t==='function')
     ? t('settings_placeholder_max_tokens_none')
     : 'No override';
+}
+
+/* ── Environment pane (safe arbitrary .env entries) ─────────────────────────── */
+function _setEnvironmentStatus(message, kind){
+  const status=$('settingsEnvStatus');
+  if(!status) return;
+  status.textContent=message||'';
+  status.classList.remove('is-saving','is-saved','is-failed');
+  if(kind) status.classList.add('is-'+kind);
+}
+
+function _renderEnvironmentKeys(keys){
+  const list=$('settingsEnvKeys');
+  const empty=$('settingsEnvKeysEmpty');
+  if(!list||!empty) return;
+  while(list.firstChild) list.removeChild(list.firstChild);
+  // Surface the same names back from the server so a stale-form value can
+  // be cross-checked, but never the value itself.
+  const names=Array.isArray(keys)
+    ? keys.filter(entry=>{
+        if(typeof entry==='string') return entry.length>0;
+        return entry && typeof entry.name==='string' && entry.name.length>0;
+      }).map(entry=>typeof entry==='string'?entry:entry.name)
+    : [];
+  if(!names.length){
+    empty.style.display='';
+    return;
+  }
+  empty.style.display='none';
+  names.forEach(key=>{
+    const pill=document.createElement('span');
+    pill.className='settings-env-pill';
+    const name=document.createElement('span');
+    name.textContent=key;
+    pill.appendChild(name);
+    const remove=document.createElement('button');
+    remove.type='button';
+    remove.textContent='×';
+    remove.title=t('settings_env_delete_title')||'Delete environment key';
+    remove.setAttribute('aria-label',(t('settings_env_delete_title')||'Delete environment key')+' '+key);
+    remove.addEventListener('click',()=>deleteEnvironmentKey(key,remove));
+    pill.appendChild(remove);
+    list.appendChild(pill);
+  });
+}
+
+async function loadEnvironmentPanel(){
+  const list=$('settingsEnvKeys');
+  if(!list) return;
+  // Bind the form submit handler the first time we visit the pane so the
+  // Enter key in the value field saves the entry (browser password fields
+  // don't fire implicit form submissions on Enter reliably across engines).
+  const form=$('settingsEnvForm');
+  if(form && !form._envSaveBound){
+    form._envSaveBound=true;
+    form.addEventListener('submit',(event)=>{
+      if(event&&typeof event.preventDefault==='function') event.preventDefault();
+      saveEnvironmentKey(event);
+    });
+  }
+  try{
+    const result=await api('/api/env/settings');
+    _renderEnvironmentKeys(result&&result.keys);
+    // Clear any stale status from a prior save attempt when re-entering the pane.
+    _setEnvironmentStatus('');
+  }catch(_err){
+    _renderEnvironmentKeys([]);
+    const empty=$('settingsEnvKeysEmpty');
+    if(empty) empty.style.display='none';
+    _setEnvironmentStatus(t('settings_env_load_failed')||'Failed to load environment keys.','failed');
+  }
+}
+
+async function saveEnvironmentKey(event){
+  if(event&&typeof event.preventDefault==='function') event.preventDefault();
+  const keyField=$('settingsEnvKey');
+  const valueField=$('settingsEnvValue');
+  const button=$('settingsEnvSave');
+  if(!keyField||!valueField) return;
+  const key=String(keyField.value||'').trim();
+  const value=valueField.value;
+  if(!/^[A-Z_][A-Z0-9_]*$/.test(key) || key.length>128){
+    _setEnvironmentStatus(t('settings_env_validation_failed')||'Enter a valid uppercase key and a non-empty value.','failed');
+    keyField.focus();
+    return;
+  }
+  if(!value){
+    _setEnvironmentStatus(t('settings_env_validation_failed')||'Enter a valid uppercase key and a non-empty value.','failed');
+    valueField.focus();
+    return;
+  }
+  if(button) button.disabled=true;
+  _setEnvironmentStatus(t('settings_env_saving')||'Saving…','saving');
+  try{
+    await api('/api/env/settings',{method:'POST',body:JSON.stringify({key,value})});
+    // Clear only the value input — leave the key in place so the user can
+    // quickly update it again. The GET response repopulates the key list.
+    valueField.value='';
+    _setEnvironmentStatus(t('settings_env_saved')||'Saved. Restart Hermes WebUI to apply the change.','saved');
+    await loadEnvironmentPanel();
+  }catch(err){
+    const message=(err&&err.message)||t('settings_env_save_failed')||'Failed to save environment key.';
+    _setEnvironmentStatus(message,'failed');
+  }finally{
+    if(button) button.disabled=false;
+  }
+}
+
+async function deleteEnvironmentKey(key,button){
+  if(button) button.disabled=true;
+  _setEnvironmentStatus(t('settings_env_deleting')||'Removing…','saving');
+  try{
+    await api('/api/env/settings',{method:'POST',body:JSON.stringify({key,delete:true})});
+    _setEnvironmentStatus(t('settings_env_deleted')||'Removed. Restart Hermes WebUI to apply the change.','saved');
+    await loadEnvironmentPanel();
+  }catch(err){
+    const message=(err&&err.message)||t('settings_env_delete_failed')||'Failed to remove environment key.';
+    _setEnvironmentStatus(message,'failed');
+  }finally{
+    if(button) button.disabled=false;
+  }
 }
 
 async function loadSettingsPanel(){
@@ -13333,6 +13458,7 @@ switchSettingsSection=function(name, opts){
   _origSwitchSettings(name, opts);
   if(name==='preferences') updateNotificationPermissionStatus();
   if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
+  if(name==='environment') loadEnvironmentPanel();
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────

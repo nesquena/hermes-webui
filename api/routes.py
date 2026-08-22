@@ -13287,6 +13287,21 @@ def handle_get(handler, parsed) -> bool:
             bad(handler, str(exc), status=400)
         return True
 
+    if parsed.path == "/api/env/settings":
+        # server.py runs check_auth() before dispatching every /api request, so
+        # this Settings-family endpoint inherits the existing authenticated-
+        # session gate without treating an arbitrary value like a password
+        # change. The response carries names + set flags only — never the
+        # stored values — so a settings GET can never echo a secret back to
+        # the caller (#safe-env-settings).
+        try:
+            from api.env_settings import list_env_keys_with_state
+
+            return j(handler, {"keys": list_env_keys_with_state()})
+        except Exception:
+            logger.exception("environment key listing failed")
+            return bad(handler, "Failed to read environment settings", status=500)
+
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         # Apply the active per-request profile's env so provider auth probes
@@ -15126,6 +15141,54 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("dashboard config save failed")
             bad(handler, str(exc), status=500)
         return True
+
+    if parsed.path == "/api/env/settings":
+        # server.py runs check_auth() before dispatching every /api request, so
+        # this Settings-family endpoint inherits the existing authenticated-
+        # session gate. The body must contain {key, value}; we never echo the
+        # value back, never log it, and the response carries the validated
+        # key name plus a restart flag so the UI can tell the user the next
+        # process start is needed before the value is loaded into os.environ.
+        if not isinstance(body, dict):
+            return bad(handler, "JSON object is required", status=400)
+        key = body.get("key")
+        try:
+            from api import env_settings
+        except Exception:
+            logger.exception("env settings module failed to import")
+            return bad(handler, "Failed to update environment settings", status=500)
+
+        if "delete" in body and not isinstance(body.get("delete"), bool):
+            return bad(handler, "delete must be a boolean", status=400)
+        delete_requested = body.get("delete") is True
+
+        try:
+            if delete_requested:
+                result = env_settings.delete_env_entry(env_settings.env_path(), key)
+            else:
+                if "value" not in body:
+                    return bad(
+                        handler,
+                        "value is required unless delete is true",
+                        status=400,
+                    )
+                result = env_settings.upsert_env_entry(
+                    env_settings.env_path(), key, body.get("value")
+                )
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception:
+            logger.exception("environment key update failed")
+            return bad(handler, "Failed to update environment settings", status=500)
+
+        return j(
+            handler,
+            {
+                "status": result.get("status", "saved"),
+                "requires_restart": bool(result.get("requires_restart", True)),
+                "key": result.get("key"),
+            },
+        )
 
     if parsed.path == "/api/prompts":
         text = str(body.get("text") or "").strip()

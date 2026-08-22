@@ -5168,6 +5168,19 @@ main.main > #mainPlugin{display:none;}
 /* Secondary sm-btn fallback (Sign out / Disable auth) — neutral outline. */
 #mainSettings .sm-btn{border-radius:8px;padding:9px 16px;font-weight:600;font-size:13px;background:var(--surface);border:1px solid var(--border);color:var(--text);cursor:pointer;transition:background .15s,border-color .15s;}
 #mainSettings .sm-btn:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+
+/* Environment pane (#safe-env-settings). */
+#mainSettings .settings-env-keys{display:flex;flex-wrap:wrap;gap:6px;min-height:24px;align-items:center;margin-bottom:6px}
+#mainSettings .settings-env-keys .settings-env-pill{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;background:var(--code-bg);border:1px solid var(--border2);border-radius:999px;font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text)}
+#mainSettings .settings-env-keys .settings-env-pill button{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:0 2px;border-radius:999px}
+#mainSettings .settings-env-keys .settings-env-pill button:hover{color:var(--error)}
+#mainSettings .settings-env-empty{font-size:11px;color:var(--muted);margin-top:2px}
+#mainSettings .settings-env-help{font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.45}
+#mainSettings .settings-env-input-label{font-size:11px;color:var(--muted);display:block;margin:8px 0 4px}
+#mainSettings .settings-env-input{width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+#mainSettings .settings-env-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 30%,transparent)}
+#mainSettings .settings-env-save{margin-top:12px;width:100%;padding:8px;font-weight:600}
+#mainSettings .settings-env-save:disabled{opacity:.6;cursor:not-allowed}
 /* Neutralise legacy inline accent tints so secondary buttons stay theme-safe */
 #mainSettings #btnDisableAuth[style],
 #mainSettings #btnSignOut[style]{color:var(--text)!important;border-color:var(--border)!important;}
