@@ -8930,6 +8930,13 @@ async function _autosavePreferencesSettings(payload){
     if(payload&&payload.new_chat_on_workspace_switch!==undefined){
       window._newChatOnWorkspaceSwitch=!!(saved&&saved.new_chat_on_workspace_switch);  // #5473
     }
+    // #6542: synchronise window._showCliSessions with the persisted preference
+    // so the sidebar source tabs (and the API sidebar_source param) update
+    // immediately instead of waiting for a hard reload.
+    if(payload&&payload.show_cli_sessions!==undefined){
+      window._showCliSessions=!!(saved&&saved.show_cli_sessions);
+      if(typeof renderSessionList==='function') renderSessionList();
+    }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
     // Only clear the global dirty flag and hide the unsaved-changes bar when

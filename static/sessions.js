@@ -2564,7 +2564,15 @@ function _clearSessionSourceTabCounts() {
 }
 
 function _requestedSessionSidebarSource() {
-  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+  // When the source filter is 'cli' AND showCliSessions is enabled, do NOT
+  // send sidebar_source=cli — the server would then filter out all non-CLI
+  // sessions (Telegram, Discord, etc.) from the response.  Instead leave
+  // sidebar_source off so the server returns ALL sessions; the frontend's
+  // _partitionSidebarSessionRows handles tab-level filtering client-side.
+  // When showCliSessions is disabled, always return 'webui' (no tabs).
+  if (!window._showCliSessions) return 'webui';
+  if (_sessionSourceFilter === 'cli') return null;
+  return 'webui';
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -2582,7 +2590,8 @@ function _sessionArchivePagingFilterActive() {
 
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
-  qs.set('sidebar_source', _requestedSessionSidebarSource());
+  const sidebarSource = _requestedSessionSidebarSource();
+  if (sidebarSource) qs.set('sidebar_source', sidebarSource);
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){
@@ -7571,7 +7580,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+  if(_sessionSourceFilter==='cli' && cliSessionCount===0){
     _sessionSourceFilter='webui';
   }
   const showCliOnly=_sessionSourceFilter==='cli';
