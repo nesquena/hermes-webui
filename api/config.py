@@ -504,6 +504,65 @@ def get_config_snapshot() -> dict:
         return copy.deepcopy(active_cfg)
 
 
+def _capture_profile_config_snapshot() -> dict:
+    """Return a request-owned, deep-copied config snapshot captured while the
+    calling thread's profile scope is authoritative (#5619).
+
+    Must be called INSIDE the request profile's env scope — i.e. with the
+    profile TLS / thread-local env active (``profile_env_for_active_request``
+    on the request thread, ``profile_scope_for_detached_worker`` on the
+    models-catalog rebuild worker) — so the captured values resolve the
+    request profile, not the ambient process.
+
+    Two properties the plain ``get_config()`` / ``get_config_snapshot()``
+    reads lack:
+
+      * The deep copy itself runs under ``_cfg_lock``, so a concurrent
+        ``_refresh_config_cache()`` (which clears and re-updates ``_cfg_cache``
+        in place) can never tear it.
+      * ``${VAR}`` references are re-expanded from the RAW YAML against the
+        CURRENT thread's profile env. The shared cache is deliberately pinned
+        to the unscoped process-env view at reload time (#798), so copying it
+        — even inside the profile scope — would freeze values expanded for the
+        wrong (ambient) environment. Re-expanding here gives a named profile
+        whose ``.env`` differs from the server process its own values.
+
+    In-memory overrides (a test / runtime caller that rebound or mutated
+    ``cfg``) are preserved verbatim, matching ``get_config()`` semantics, so
+    callers that rely on them keep working unchanged. Staleness/path refresh
+    goes through ``reload_config_if_stale()`` so harnesses that stub it keep
+    their isolation, exactly like ``get_config()``.
+    """
+    reload_config_if_stale()
+    with _cfg_lock:
+        try:
+            if _cfg_has_in_memory_overrides():
+                active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
+                return copy.deepcopy(active_cfg)
+        except NameError:
+            pass
+        # No in-memory overrides: expand the raw YAML against THIS thread's
+        # profile env (the shared cache is process-env-pinned, #798), then
+        # apply the same documented defaults get_config() applies.
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+        if isinstance(raw, dict) and raw:
+            expanded = _expand_env_vars(raw)
+            if isinstance(expanded, dict):
+                _apply_config_defaults(expanded)
+                return expanded
+        # Raw YAML unavailable (missing/empty/invalid/non-mapping). Never copy
+        # the shared cache here: it may hold ANOTHER profile's data (populated
+        # by a concurrent reload between our staleness check and this branch),
+        # which would leak that profile's providers/models/aliases/endpoints
+        # into this request (greptile P1). Produce THIS profile's
+        # empty/default configuration instead — the same shape
+        # _refresh_config_cache() leaves for a missing file, and exactly what
+        # get_config() returns for it.
+        empty_defaults: dict = {}
+        _apply_config_defaults(empty_defaults)
+        return empty_defaults
+
+
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
     """Return the validated first-turn session persistence mode.
 
@@ -2579,7 +2638,7 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     return bare_model, provider_hint
 
 
-def _get_provider_base_url(provider_id):
+def _get_provider_base_url(provider_id, config_obj: dict | None = None):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
     Checks two locations, in order:
@@ -2590,13 +2649,18 @@ def _get_provider_base_url(provider_id):
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
 
+    ``config_obj`` optionally pins the read to an explicit config snapshot
+    (e.g. a request-owned profile snapshot captured by the models-catalog
+    rebuild, #5619); when omitted the module-global ``cfg`` is used.
+
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    prov_cfg = _get_provider_cfg(provider_id, config_obj)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    model_cfg = source.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -2606,13 +2670,14 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+def _get_providers_cfg(config_obj: dict | None = None) -> dict:
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    providers_cfg = source.get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
-def _get_provider_cfg(provider_id) -> dict:
-    provider_cfg = _get_providers_cfg().get(provider_id, {})
+def _get_provider_cfg(provider_id, config_obj: dict | None = None) -> dict:
+    provider_cfg = _get_providers_cfg(config_obj).get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
@@ -6804,7 +6869,20 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
-    def _build_available_models_uncached() -> dict:
+    def _build_available_models_uncached(cfg_snapshot: dict) -> dict:
+        # Request-owned config snapshot (#5619): the cold rebuild may run on a
+        # detached worker thread that does not inherit the request profile TLS,
+        # and the module-global ``cfg`` can be repointed by a concurrent profile
+        # reload between capture and build. The snapshot is REQUIRED — there is
+        # no ambient fallback, so every ``cfg`` read below (direct or via
+        # helpers) resolves against the captured profile's config, never a
+        # foreign one or a stale module global.
+        if not isinstance(cfg_snapshot, dict):
+            raise TypeError(
+                "get_available_models() must pass a captured config snapshot "
+                "(#5619); refusing to read the ambient module-global cfg"
+            )
+        cfg = cfg_snapshot
         active_provider = None
         default_model = get_effective_default_model(cfg)
         groups = []
@@ -7176,7 +7254,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # and a phantom ``Opencode_Go`` group for the config-key form (#1568).
         # The same applies to mixed-case ids like ``OpenCode-Go`` and to
         # legitimate aliases like ``z-ai`` → ``zai``.
-        _cfg_providers = _get_providers_cfg()
+        _cfg_providers = _get_providers_cfg(cfg)
         # Map canonical provider IDs back to raw config keys so the
         # generic-provider branch can preserve mixed-case/underscore
         # provider_cfg values (#2245).
@@ -8009,8 +8087,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # `cfg["providers"]["lmstudio"]["base_url"]` or
                         # `cfg["model"]["base_url"]` (via _get_provider_base_url),
                         # so the historical model-block config shape still works.
-                        lm_cfg = _get_provider_cfg("lmstudio")
-                        lm_base_url = _get_provider_base_url("lmstudio") or ""
+                        lm_cfg = _get_provider_cfg("lmstudio", cfg)
+                        lm_base_url = _get_provider_base_url("lmstudio", cfg) or ""
                         lm_api_key = str(lm_cfg.get("api_key") or "").strip()
                         if lm_base_url:
                             headers = {"User-Agent": "OpenAI/Python 1.0"}
@@ -8044,7 +8122,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # (#2245).  Fall back to the canonical pid for providers
                     # that appear in _PROVIDER_MODELS but not in cfg.
                     _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
-                    provider_cfg = _get_provider_cfg(_raw_key)
+                    provider_cfg = _get_provider_cfg(_raw_key, cfg)
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -8443,6 +8521,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _prof_env_request = None
             _prof_scope_worker = None
 
+        # The request-owned config snapshot (#5619) is captured INSIDE the
+        # profile env scopes below — on the request thread for the synchronous
+        # path, on the rebuild worker for the bounded path — while the request
+        # profile is authoritative and under _cfg_lock (see
+        # _capture_profile_config_snapshot). Capturing here, outside the
+        # scope, would both race the shared-cache reload and freeze ${VAR}
+        # values expanded against the ambient process environment, which
+        # entering the profile scope afterwards cannot repair.
+
         # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
             try:
@@ -8456,7 +8543,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     else _nullcontext()
                 )
                 with _sync_scope:
-                    result = _invoke_models_rebuild(_build_available_models_uncached)
+                    _cfg_snapshot = _capture_profile_config_snapshot()
+                    result = _invoke_models_rebuild(
+                        lambda: _build_available_models_uncached(_cfg_snapshot)
+                    )
             except BaseException:
                 # Always reset the flag so waiting threads don't block for 60s
                 with _cache_build_cv:
@@ -8556,7 +8646,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             )
             with _worker_scope:
                 try:
-                    box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    # Capture the snapshot on the worker INSIDE the rebound
+                    # profile scope (#3957/#5619) so ${VAR} expansion resolves
+                    # the captured profile's env, not the ambient process env.
+                    _cfg_snapshot = _capture_profile_config_snapshot()
+                    box["result"] = _invoke_models_rebuild(
+                        lambda: _build_available_models_uncached(_cfg_snapshot)
+                    )
                 except Exception as exc:  # noqa: BLE001 — propagated to caller
                     box["error"] = exc
                 finally:
