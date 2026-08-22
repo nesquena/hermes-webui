@@ -12223,10 +12223,19 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
+      // Release-tag context for the status line (display-only; update
+      // decisions are made by the per-target checks above).  WebUI-first so
+      // the suffix matches the panel's own version line order; falls back to
+      // the release-path field names (latest_version) when the branch-path
+      // fields (latest_tag) are absent — the stable channel never reaches
+      // the branch path (suppress_stable_fallthrough).
+      const tagInfo=(data.webui&&(data.webui.latest_tag||data.webui.latest_version))
+        ||(data.agent&&(data.agent.latest_tag||data.agent.latest_version))||'';
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
+        if(tagInfo) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
@@ -12235,7 +12244,9 @@ async function checkUpdatesNow(channelOverride){
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
-        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+        let txt=t('settings_up_to_date');
+        if(tagInfo) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
+        if(status){status.textContent=txt;status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
       }
     }

@@ -4989,7 +4989,7 @@ main.main > #mainPlugin{display:none;}
 #checkUpdatesBlock .btn-tiny:hover{border-color:var(--accent);color:var(--accent);}
 #checkUpdatesBlock .btn-tiny:disabled{opacity:.5;cursor:default;}
 #checkUpdatesBlock .btn-tiny .spinner-xs{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--text);border-radius:50%;animation:spin .6s linear infinite;display:none;}
-#checkUpdatesStatus{font-size:11px;font-weight:500;white-space:nowrap;flex-basis:100%;margin-top:0.25em;}
+#checkUpdatesStatus{font-size:11px;font-weight:500;white-space:normal;overflow-wrap:anywhere;min-width:0;flex-basis:100%;margin-top:0.25em;}
 
 /* Each logical form row is a card surface. Stack with comfortable gap. */
 #mainSettings .settings-field{margin-bottom:12px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);}
@@ -5236,6 +5236,7 @@ main.main > #mainPlugin{display:none;}
   .settings-section-head{flex-direction:column;align-items:flex-start;gap:8px;}
   .settings-section-title{font-size:16px;}
   #checkUpdatesBlock{flex-wrap:wrap;row-gap:6px;width:100%;}
+  #checkUpdatesStatus{white-space:normal;overflow-wrap:anywhere;min-width:0;}
   .settings-version-badge{white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;display:block;}
   .hermes-action-grid{grid-template-columns:1fr;}
   #mainSettings .settings-field{padding:14px;}

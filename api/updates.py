@@ -1271,11 +1271,27 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         release_info['dirty'] = _is_dirty(path)
         return release_info
 
+    # When the release check found no update gap (HEAD already contains the
+    # latest tag), we fall through to the branch check below.  Before doing
+    # that, probe for tag info so the frontend can show "Latest tag: vX.Y.Z"
+    # even when the user is on main ahead of the latest release.  The tag
+    # data is purely informational — the branch check determines whether an
+    # update is actionable.  (_run_git never raises; guard on falsy returns.)
+    _tags = _release_tags(path, channel)
+    _tag_info = None
+    if _tags:
+        _latest = _tags[0]
+        _current = _current_release_tag(path, channel)
+        _tag_info = {'latest_tag': _latest, 'current_tag': _current}
+
     branch_info = _check_repo_branch(path, name, fetch=False)
     if branch_info is not None:
         branch_info = dict(branch_info)
         branch_info['dirty'] = _is_dirty(path)
         branch_info['channel'] = channel
+        if _tag_info is not None:
+            branch_info['latest_tag'] = _tag_info['latest_tag']
+            branch_info['current_tag'] = _tag_info['current_tag']
         return branch_info
     return None
 
