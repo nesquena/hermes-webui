@@ -1887,6 +1887,23 @@
       <input type="number" id="kanbanTaskModalMaxRuntimeSeconds" min="1" step="1" autocomplete="off">
       <div class="kanban-modal-hint" data-i18n="kanban_max_runtime_hint">Leave empty for unlimited.</div>
     </div>
+    <div class="kanban-modal-row-inline">
+      <div class="kanban-modal-row">
+        <label for="kanbanTaskModalModel" data-i18n="kanban_model">Model</label>
+        <div class="kanban-model-picker-wrap">
+          <button type="button" id="kanbanTaskModalModelChip" class="settings-model-chip kanban-model-chip" aria-haspopup="listbox" aria-expanded="false" data-i18n="kanban_no_model_override">Profile default</button>
+          <!-- Hidden full-catalog select driven by the shared renderModelDropdown()
+               picker (same /api/models catalog + provider grouping + overflow as the
+               composer and settings). Provider is carried on each option. -->
+          <select id="kanbanTaskModalModel" style="display:none" aria-hidden="true" tabindex="-1"></select>
+          <div class="model-dropdown settings-model-dropdown" id="kanbanTaskModalModelDropdown"></div>
+        </div>
+        <!-- No per-row hint: the same kanban_model_hint string is the picker's
+             sticky scope note (see _kanbanOpenModelDropdown), and repeating it
+             here pushed the modal past its calc(100vh - 48px) cap at 1080p in
+             the longer locales (#6906). -->
+      </div>
+    </div>
     <div class="kanban-modal-row">
       <label for="kanbanTaskModalParents" data-i18n="kanban_parents_modal">Parent dependencies</label>
       <input type="text" id="kanbanTaskModalParents" list="kanbanTaskModalParentsList" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_parents_placeholder" placeholder="Parent task ID">

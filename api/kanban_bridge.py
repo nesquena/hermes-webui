@@ -332,6 +332,24 @@ def _set_status_direct(conn, task_id: str, new_status: str) -> bool:
     return True
 
 
+def _normalise_model_override(model, provider):
+    """Normalise an incoming model/provider override pair into ``(model, provider)``.
+
+    Mirrors ``kanban_db.set_model_override`` semantics: empty/whitespace model
+    clears both, and a provider without a model is rejected (a bare provider
+    would re-resolve the profile's model against a different backend — the
+    exact mismatch class this feature exists to prevent). Returns a 2-tuple;
+    both elements may be None (meaning "no override, use profile default").
+    """
+    model = (str(model or "").strip()) or None
+    provider = (str(provider or "").strip()) or None
+    if provider and not model:
+        raise ValueError("provider_override requires a model_override")
+    if not model:
+        provider = None
+    return (model, provider)
+
+
 def _create_task_payload(body: dict, *, board=None):
     """Create a new task from a parsed request body and return the task dict in a read_only envelope."""
     title = str(body.get("title") or "").strip()
@@ -341,6 +359,7 @@ def _create_task_payload(body: dict, *, board=None):
         priority = int(body.get("priority") or 0)
     except (TypeError, ValueError):
         raise ValueError("priority must be an integer")
+    model_override = _normalise_model_override(body.get("model_override"), body.get("provider_override"))
     kb = _kb()
     requested_status = body.get("status")
     with _conn(board=board) as conn:
@@ -359,6 +378,8 @@ def _create_task_payload(body: dict, *, board=None):
             idempotency_key=body.get("idempotency_key") or None,
             max_runtime_seconds=body.get("max_runtime_seconds") or None,
             skills=body.get("skills") or None,
+            model_override=model_override[0],
+            provider_override=model_override[1],
         )
         if requested_status:
             _patch_task(conn, task_id, {"status": requested_status})
@@ -402,6 +423,18 @@ def _patch_task(conn, task_id: str, body: dict):
 
     if "assignee" in body:
         if not kb.assign_task(conn, task_id, body.get("assignee") or None):
+            raise LookupError("task not found")
+
+    # Model / provider override. Edit mode sends the fields explicitly (even
+    # empty) so users can clear an override back to the profile default;
+    # _normalise_model_override collapses empty model → (None, None), which
+    # set_model_override treats as "clear both". A provider without a model is
+    # rejected (mirrors the worker spawn contract).
+    if "model_override" in body or "provider_override" in body:
+        model_override, provider_override = _normalise_model_override(
+            body.get("model_override"), body.get("provider_override")
+        )
+        if not kb.set_model_override(conn, task_id, model_override, provider=provider_override):
             raise LookupError("task not found")
 
     if "status" not in body or body.get("status") in (None, ""):

@@ -7062,6 +7062,12 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-badge{border:1px solid var(--border);border-radius:999px;padding:1px 6px;font-size:10px;color:var(--muted)}
 .kanban-badge.priority{color:var(--accent)}
 .kanban-badge.tenant{color:var(--text)}
+.kanban-badge.model{color:var(--accent)}
+.kanban-model-picker-wrap{position:relative;width:100%;}
+.kanban-model-picker-wrap .settings-model-chip{width:100%;text-align:left;padding:6px 10px;}
+.kanban-model-picker-wrap .settings-model-dropdown{z-index:260;}
+.kanban-detail-model{margin:2px 0 8px;font-size:12px;color:var(--muted)}
+.kanban-detail-model strong{color:var(--text);font-weight:600}
 .kanban-card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:6px}
 .kanban-card-assignee{color:var(--accent)}
 .kanban-card-unassigned{opacity:.75}
