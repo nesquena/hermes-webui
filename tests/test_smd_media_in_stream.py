@@ -60,16 +60,72 @@ def _extract_js_function(src: str, name: str) -> str:
     return src[start:pos]
 
 
+def _run_tail_flush_partition_cases() -> dict:
+    """Execute the real stream-end partitioner with only its leaf sinks stubbed."""
+    helpers = "\n".join(
+        [
+            _extract_js_function(UI_JS, "_mediaPathSrc"),
+            _extract_js_function(UI_JS, "_mediaTokenRe"),
+            _extract_js_function(UI_JS, "_unquoteMediaRef"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
+        ]
+    )
+    script = f"""
+{helpers}
+function run(raw, failRef=''){{
+  const media=[];
+  const text=[];
+  const parent={{}};
+  globalThis._smdAppendMediaNode=(_parent,ref)=>{{
+    if(ref===failRef) return false;
+    media.push(ref);
+    return true;
+  }};
+  _smdMediaTailFlushEntry({{
+    chunk:raw,
+    parent,
+    data:{{}},
+    baseAddText:null,
+    writeText:(_parent,_data,value)=>text.push(String(value)),
+  }});
+  return {{media,text:text.join('')}};
+}}
+console.log(JSON.stringify({{
+  malformedThenValid:run('MEDIA:"/tmp/bad.png and MEDIA:/tmp/good.png'),
+  noMatch:run('no media here'),
+  appendFailureThenValid:run('MEDIA:/tmp/bad.png then MEDIA:/tmp/good.png','/tmp/bad.png'),
+}}));
+"""
+    completed = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    return json.loads(completed.stdout)
+
+
 def _run_real_smd_media_cases() -> dict:
     helpers = "\n".join(
         [
+            # MEDIA: token matchers live in ui.js and are shared with the settled
+            # renderMd path, so the streaming functions below depend on them.
+            _extract_js_function(UI_JS, "_mediaPathSrc"),
+            _extract_js_function(UI_JS, "_mediaTokenRe"),
+            _extract_js_function(UI_JS, "_unquoteMediaRef"),
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
             _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSet"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
-            _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTokenIsSettled"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTailCouldExtend"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaHasOpenQuote"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
@@ -191,6 +247,22 @@ def _run_real_smd_media_cases() -> dict:
         "  return { html: root.outerHTML, text: root.textContent, liTexts: collectTagTexts(root, 'li'), fadeWords: collectClassTexts(root, 'stream-fade-word'), postProcessCalls, playbackCalls };\n"
         "}\n"
         "function renderModes(chunks){ return { safe: renderChunks(chunks, 'safe'), fade: renderChunks(chunks, 'fade') }; }\n"
+        "function renderCodePolicyModes(chunks){\n"
+        "  const safe=renderChunks(chunks, 'safe');\n"
+        "  _streamFadeReduceMotion=false;\n"
+        "  const fade=renderChunks(chunks, 'fade');\n"
+        "  _streamFadeReduceMotion=true;\n"
+        "  const fadeReduced=renderChunks(chunks, 'fade');\n"
+        "  _streamFadeReduceMotion=false;\n"
+        "  return { safe, fade, fadeReduced };\n"
+        "}\n"
+        "const codePolicy={\n"
+        "  fencedWhole: renderCodePolicyModes(['```\\nMEDIA:/tmp/a.png\\n```\\n']),\n"
+        "  fencedSplit: renderCodePolicyModes(['```\\nMEDIA:/tmp/li', 've.png\\n```\\n']),\n"
+        "  inlineWhole: renderCodePolicyModes(['see `MEDIA:/tmp/a.png` ok\\n']),\n"
+        "  inlineSplit: renderCodePolicyModes(['see `MEDIA:/tmp/li', 've.png` ok\\n']),\n"
+        "  plainControl: renderCodePolicyModes(['look MEDIA:/tmp/a.png ok\\n']),\n"
+        "};\n"
         "const marker='MEDIA:';\n"
         "const prefixSplits={};\n"
         "for(let i=1;i<marker.length;i++) prefixSplits[i]=renderModes(['\\n\\n'+marker.slice(0,i), marker.slice(i)+'C:/tmp/live.png ']);\n"
@@ -199,7 +271,7 @@ def _run_real_smd_media_cases() -> dict:
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, codePolicy}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -210,6 +282,130 @@ def _run_real_smd_media_cases() -> dict:
         timeout=30,
     )
     return json.loads(completed.stdout)
+
+
+class TestSmdMediaCodeFencePolicy(unittest.TestCase):
+    """MEDIA stays active inside fenced/inline code in EVERY streaming mode.
+
+    Settled ``renderMd()`` stashes MEDIA before its fence pass, so a MEDIA token
+    inside code renders as media. ``_safeSmdRenderer`` matched that, but
+    ``_streamFadeRenderer.add_text`` returned early through
+    ``_streamFadeSkipNode(parent)`` (which includes ``pre``/``code``) BEFORE its
+    MEDIA check, so fade streaming was the only mode that showed the raw path.
+
+    These cases drive the real vendored parser (``static/vendor/smd.min.js``) in
+    safe, fade, and reduced-motion fade, and compare against each other rather
+    than against a re-implementation.
+    """
+
+    @classmethod
+    @unittest.skipIf(NODE is None, "node not on PATH")
+    def setUpClass(cls):
+        cls.policy = _run_real_smd_media_cases()["codePolicy"]
+
+    def _assert_all_modes_agree(self, case_name):
+        case = self.policy[case_name]
+        safe, fade, reduced = case["safe"], case["fade"], case["fadeReduced"]
+        for mode_name, mode in (("fade", fade), ("fadeReduced", reduced)):
+            self.assertEqual(
+                mode["text"], safe["text"],
+                f"{case_name}: {mode_name} surrounding text must match safe exactly",
+            )
+            self.assertNotIn(
+                "MEDIA:", mode["text"],
+                f"{case_name}: {mode_name} must not leave a raw MEDIA: path visible",
+            )
+        return case
+
+    def test_fenced_whole_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("fencedWhole")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn(
+                "/tmp/a.png", case[mode_name]["html"],
+                f"fencedWhole: {mode_name} must render the MEDIA token as a node",
+            )
+
+    def test_fenced_split_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("fencedSplit")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn(
+                "/tmp/live.png", case[mode_name]["html"],
+                f"fencedSplit: {mode_name} must complete the split token across chunks",
+            )
+
+    def test_inline_code_whole_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("inlineWhole")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn("/tmp/a.png", case[mode_name]["html"])
+            self.assertIn(
+                "see", case[mode_name]["text"],
+                "surrounding prose must be conserved exactly",
+            )
+            self.assertIn("ok", case[mode_name]["text"])
+
+    def test_inline_code_split_token_renders_media_in_all_modes(self):
+        case = self._assert_all_modes_agree("inlineSplit")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn("/tmp/live.png", case[mode_name]["html"])
+
+    def test_plain_prose_control_is_unchanged(self):
+        """The reorder must not alter the ordinary (non-code) MEDIA path."""
+        case = self._assert_all_modes_agree("plainControl")
+        for mode_name in ("safe", "fade", "fadeReduced"):
+            self.assertIn("/tmp/a.png", case[mode_name]["html"])
+            self.assertIn("look", case[mode_name]["text"])
+            self.assertIn("ok", case[mode_name]["text"])
+
+
+class TestSmdMediaTailFlushPartition(unittest.TestCase):
+    """Stream-end flush must partition the WHOLE buffered candidate.
+
+    The old flush ran the shared matcher once and required the match at offset 0,
+    then wrote the entire remaining suffix as prose. Any later valid token in the
+    same buffered candidate was emitted as literal ``MEDIA:`` text, while settled
+    ``renderMd()`` scans globally and rendered it — so stream and settled token
+    counts diverged.
+    """
+
+    @unittest.skipIf(NODE is None, "node not on PATH")
+    def setUp(self):
+        self.cases = _run_tail_flush_partition_cases()
+
+    def test_malformed_open_quote_then_later_valid_token(self):
+        """An unterminated quoted ref must not swallow a later valid token."""
+        case = self.cases["malformedThenValid"]
+        self.assertEqual(
+            case["media"], ['"/tmp/bad.png', "/tmp/good.png"],
+            "the later valid MEDIA token must still become a media node",
+        )
+        self.assertEqual(
+            case["text"], " and ",
+            "only the exact prose between tokens may be written as text",
+        )
+        self.assertNotIn(
+            "MEDIA:", case["text"],
+            "no raw MEDIA: keyword may leak into the bubble as prose",
+        )
+
+    def test_no_match_writes_candidate_verbatim(self):
+        case = self.cases["noMatch"]
+        self.assertEqual(case["media"], [])
+        self.assertEqual(
+            case["text"], "no media here",
+            "a candidate with no token must be preserved byte-for-byte",
+        )
+
+    def test_append_failure_preserves_token_and_continues(self):
+        """A failed media append preserves that token's raw span, then continues."""
+        case = self.cases["appendFailureThenValid"]
+        self.assertEqual(
+            case["media"], ["/tmp/good.png"],
+            "the second token must still be appended after the first fails",
+        )
+        self.assertEqual(
+            case["text"], "MEDIA:/tmp/bad.png then ",
+            "the failed token keeps its exact raw span; no bytes are dropped",
+        )
 
 
 class TestSmdMediaInStream(unittest.TestCase):
@@ -381,28 +577,78 @@ class TestSmdMediaInStream(unittest.TestCase):
         # Greptile re-review: /MEDIA:([^\s)\]]+)/g will happily match
         # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
         # The interceptor must not emit a media node for that partial ref;
-        # it should keep the candidate in unmatchedTail unless a delimiter or
-        # reliable filename suffix proves the ref is complete.
+        # it should keep the candidate in unmatchedTail unless a REAL lexical
+        # delimiter (or stream end) proves the ref is complete.
+        #
+        # Completeness is decided by _smdMediaTokenIsSettled, not by an
+        # extension guess: an extension at the end of the current chunk proves
+        # nothing, because `MEDIA:/tmp/archive.png` split after `.png` continues
+        # `.bak`. The buffer also has to cover a token that ended EARLY at a
+        # space with same-line text still following, which is what
+        # _smdMediaTailCouldExtend detects.
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
+        self.assertIn("function _smdMediaTokenIsSettled", MESSAGES_JS)
+        self.assertIn("function _smdMediaTailCouldExtend", MESSAGES_JS)
+        self.assertIn("function _smdMediaHasOpenQuote", MESSAGES_JS)
         self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
+        self.assertIn("!_smdMediaTokenIsSettled(m[1], false)", block)
+        self.assertIn("_smdMediaTailCouldExtend(trailing)", block)
         self.assertIn("unmatchedTail = candidate", block)
 
     def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
-        # Keep the streaming boundary whitelist aligned with ui.js media
-        # renderer extension families. Otherwise complete refs at chunk end
-        # (e.g. MEDIA:clip.aac) can be buffered and then dropped on stream end.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        for ext in [
-            "png", "jpe?g", "gif", "webp", "bmp", "ico", "svg", "avif",
+        # This used to pin an extension whitelist inside
+        # _smdMediaRefHasReliableBoundary, which decided whether a token at a
+        # chunk end was "complete". That heuristic is gone: an extension at the
+        # end of the ARRIVED text proves nothing about completeness (splitting
+        # `MEDIA:/tmp/a.png.bak` after `.png` looked complete but wasn't), so the
+        # decision is now a real lexical delimiter or stream end, and the function
+        # itself was deleted as dead code.
+        #
+        # What still matters is the property the old assertion was protecting:
+        # a complete ref ending in any renderable extension must survive streaming
+        # and reach the DOM. That is now asserted behaviourally rather than by
+        # grepping a list — every extension family is driven through the real
+        # grammar and must round-trip.
+        self.assertNotIn("_smdMediaRefHasReliableBoundary", MESSAGES_JS,
+                         "dead heuristic reintroduced; completeness must be a "
+                         "lexical delimiter, not an extension guess")
+        exts = [
+            "png", "jpeg", "jpg", "gif", "webp", "bmp", "ico", "svg", "avif",
             "mp4", "webm", "mov", "m4v", "mkv", "avi", "ogv",
             "mp3", "wav", "ogg", "m4a", "aac", "wma", "opus", "flac", "oga",
-            "pdf", "html?", "csv", "diff", "patch", "excalidraw",
-        ]:
-            self.assertIn(ext, block)
+            "pdf", "html", "htm", "csv", "diff", "patch", "excalidraw",
+            # Non-media extensions must work too: the grammar is deliberately
+            # extension-agnostic, which an allow-list version of it broke.
+            "md", "json", "xlsx", "docx",
+        ]
+        import json as _json
+        import shutil as _shutil
+        import subprocess as _subprocess
+        node = _shutil.which("node")
+        if not node:
+            self.skipTest("node not on PATH")
+        script = "\n".join([
+            _extract_js_function(UI_JS, "_mediaPathSrc"),
+            _extract_js_function(UI_JS, "_mediaTokenRe"),
+            _extract_js_function(UI_JS, "_unquoteMediaRef"),
+            "const exts = JSON.parse(process.argv[1]);",
+            "const out = {};",
+            "for (const e of exts){",
+            "  const input = 'MEDIA:/tmp/file.' + e;",
+            "  const m = _mediaTokenRe().exec(input);",
+            "  out[e] = m ? _unquoteMediaRef(m[1]) : null;",
+            "}",
+            "console.log(JSON.stringify(out));",
+        ])
+        proc = _subprocess.run(
+            [node, "--input-type=module", "-e", script, _json.dumps(exts)],
+            capture_output=True, text=True, timeout=60, check=True,
+        )
+        got = _json.loads(proc.stdout)
+        for e in exts:
+            self.assertEqual(got[e], f"/tmp/file.{e}",
+                             f"extension {e!r} did not round-trip: {got[e]!r}")
 
     def test_extensionless_https_media_ref_is_a_reliable_boundary(self):
         # _inlineMediaHtmlForRef renders any http(s) ref as an image, including
@@ -410,16 +656,21 @@ class TestSmdMediaInStream(unittest.TestCase):
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        # The stream-end flush PARTITIONS the buffered candidate with the shared
+        # global matcher. The behavioral contract is covered by
+        # TestSmdMediaTailFlushPartition, which executes the real function; keep
+        # only the wiring assertions here so this test cannot pass on a source
+        # string while production behavior regresses.
+        self.assertIn("_mediaTokenRe()", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_extensionless_https_tail_waits_until_stream_end(self):
         # A chunk ending at MEDIA:https://fal.med may still be mid-URL. Do not
         # treat http(s) scheme alone as a reliable boundary; the stream-end
         # flush is responsible for rendering a final extensionless URL.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        self.assertNotIn("/^https?:", block)
+        # The old extension-heuristic function is gone; what must remain true is
+        # that the stream-end flush renders a final extensionless http(s) ref.
+        self.assertNotIn("_smdMediaRefHasReliableBoundary", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush", MESSAGES_JS)
 
     def test_tail_buffer_size_cap(self):

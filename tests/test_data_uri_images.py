@@ -84,6 +84,11 @@ eval(extractFunc('_mdImageHtml'));
 eval(extractFunc('_inlineMediaHtmlForRef'));
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+// MEDIA: token matching helpers renderMd depends on. Must be eval'd BEFORE
+// renderMd so the extracted function can resolve them.
+eval(extractFunc('_mediaPathSrc'));
+eval(extractFunc('_mediaTokenRe'));
+eval(extractFunc('_unquoteMediaRef'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
