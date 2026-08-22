@@ -37,6 +37,7 @@ from contextlib import closing
 from pathlib import Path
 
 from api.turn_journal import (
+    _turn_journal_timestamp,
     derive_turn_journal_states,
     is_terminal_turn_event,
     iter_turn_journal_session_ids,
@@ -996,12 +997,9 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
             content = _message_content_text({'content': event.get('content')}).strip()
             if not content:
                 continue
-            event_timestamp, event_timestamp_valid = _message_exact_timestamp_details({
-                'timestamp': event.get('created_at'),
-            })
+            event_timestamp = _turn_journal_timestamp(event.get('created_at'))
             if (
                 content
-                and event_timestamp_valid
                 and event_timestamp is not None
                 and (content, event_timestamp) in existing_user_messages
             ):

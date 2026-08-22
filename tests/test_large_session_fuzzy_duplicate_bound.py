@@ -179,9 +179,9 @@ def test_large_mixed_shape_reconciliation_preserves_image_identity():
         }],
     )
     users = [message for message in merged if message.get("role") == "user"]
-    assert len(users) == 1
-    assert users[0]["content"] == bare_text
-    assert "[Workspace::v1:" not in str(users[0]["content"])
+    assert len(users) == 2
+    assert any(message["content"] == bare_text for message in users)
+    assert any(message["content"] == rich(image_a, prefixed_text) for message in users)
 
     structured = models.merge_session_messages_append_only(
         [{"role": "user", "content": rich(image_a, bare_text), "timestamp": 1000.0}],

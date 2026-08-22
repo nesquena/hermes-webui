@@ -180,13 +180,10 @@ class TestVisibleKeyToolCalls:
             assert key_fn(scalar) == key_fn(scalar_mirror)
             assert key_fn(structured) == key_fn(structured_mirror)
 
-    def test_mixed_shape_fuzzy_match_requires_equal_visible_text(self):
+    def test_text_only_structured_fuzzy_match_requires_equal_visible_text(self):
         structured = {
             "role": "user",
-            "content": [
-                {"type": "text", "text": "describe"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
-            ],
+            "content": [{"type": "text", "text": "describe"}],
         }
         structured_key = _session_message_visible_key(structured)
         equal_scalar_key = _session_message_visible_key(
@@ -205,6 +202,32 @@ class TestVisibleKeyToolCalls:
             _session_message_visible_key({"role": "user", "content": "describe with details"}),
             {scalar_key},
         ) == scalar_key
+
+    def test_unknown_structured_part_survives_alongside_scalar_text(self):
+        structured = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "document", "document": {"id": "d"}},
+            ],
+        }
+        scalar = {"role": "user", "content": "hello"}
+
+        assert merge_session_messages_append_only([structured], [scalar]) == [structured, scalar]
+
+    def test_supported_text_only_structured_forms_match_scalar_text(self):
+        scalar = {"role": "user", "content": "hello"}
+        for content in (
+            ["hello"],
+            [{"type": "text", "text": "hello"}],
+            [{"type": "input_text", "input_text": "hello"}],
+            [{"type": "output_text", "output_text": "hello"}],
+        ):
+            structured = {"role": "user", "content": content}
+            assert _matching_visible_duplicate(
+                _session_message_visible_key(scalar),
+                {_session_message_visible_key(structured)},
+            ) == _session_message_visible_key(structured)
 
 
 # ── merge_session_messages_append_only end-to-end ───────────────────────────

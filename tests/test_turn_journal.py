@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 import api.turn_journal as turn_journal
 from api.session_recovery import audit_session_recovery
 from api.turn_journal import (
@@ -185,11 +187,57 @@ def test_audit_ignores_completed_or_already_materialized_turn_journal_entry(tmp_
         {"event": "completed", "turn_id": "turn-terminal"},
         session_dir=tmp_path,
     )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-terminal",
+            "role": "user",
+            "content": "terminal turn",
+            "created_at": "malformed",
+        },
+        session_dir=tmp_path,
+    )
 
     report = audit_session_recovery(tmp_path)
 
     assert report["status"] == "ok"
     assert report["items"] == []
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    ["not-a-timestamp", True, float("nan"), float("inf"), None],
+    ids=["malformed-string", "boolean", "nan", "infinity", "missing"],
+)
+def test_audit_keeps_invalid_created_at_turn_pending(tmp_path, created_at):
+    _write_session(
+        tmp_path,
+        "sid-1",
+        messages=[{"role": "user", "content": "already there", "timestamp": 1}],
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {"event": "worker_started", "turn_id": "turn-1", "created_at": 1},
+        session_dir=tmp_path,
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "already there",
+            "created_at": created_at,
+        },
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "warn"
+    assert report["summary"]["repairable"] == 1
+    assert report["items"][0]["turn_id"] == "turn-1"
 
 
 def test_audit_reports_repeated_prompt_when_turn_timestamp_differs(tmp_path):

@@ -9671,6 +9671,24 @@ def _visible_duplicate_key_shape(key: tuple) -> bool | None:
     return None
 
 
+def _visible_duplicate_text_part(part) -> str | None:
+    if not isinstance(part, dict):
+        return None
+    part_type = part.get("type")
+    if part_type is not None and not isinstance(part_type, str):
+        return None
+    if str(part_type or "").lower() not in _SESSION_MESSAGE_TEXT_PART_TYPES:
+        return None
+    text_keys = [key for key in _SESSION_MESSAGE_TEXT_PART_KEYS if key in part]
+    if (
+        len(text_keys) != 1
+        or not isinstance(part[text_keys[0]], str)
+        or set(part) - {"type", *text_keys}
+    ):
+        return None
+    return part[text_keys[0]]
+
+
 def _visible_duplicate_shape_and_text(
     content: str,
     *,
@@ -9685,12 +9703,18 @@ def _visible_duplicate_shape_and_text(
     if not isinstance(parsed, (list, dict)):
         return False, content
     if isinstance(parsed, list):
-        return True, _message_content_text({"content": parsed})
-    return True, "".join(
-        parsed[key]
-        for key in ("text", "content", "input_text", "output_text")
-        if isinstance(parsed.get(key), str)
-    )
+        parts = []
+        for part in parsed:
+            if isinstance(part, str):
+                parts.append(part)
+                continue
+            text = _visible_duplicate_text_part(part)
+            if text is None:
+                return True, ""
+            parts.append(text)
+        return True, "".join(parts)
+    text = _visible_duplicate_text_part(parsed)
+    return True, text if text is not None else ""
 
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
