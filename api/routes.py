@@ -2567,9 +2567,8 @@ def _build_session_list_cache_payload(
     diag_stage("visible_lineage_metadata")
     _enrich_sidebar_lineage_metadata(scoped)
     # Delegated subagent children (#5307) are view-only, owned by the delegate
-    # runner. Coerce their sidebar rows to read_only=True + is_cli_session=False
-    # so the UI never offers delete / edit / truncate / pin affordances on them
-    # (defense-in-depth is also enforced server-side on the mutation routes).
+    # runner. The model-layer batch overlay above has already applied the
+    # authoritative source and view-only flags before this route runs.
     def _coerce_subagent_rows(_rows):
         for _r in _rows:
             if not isinstance(_r, dict):
@@ -2578,16 +2577,7 @@ def _build_session_list_cache_payload(
                 str(_r.get("source_tag") or _r.get("raw_source")
                     or _r.get("session_source") or _r.get("source") or "").strip().lower()
             )
-            _is_sa = _src == "subagent"
-            # A stale index row can say webui/fork while state.db records the
-            # row as source='subagent' (the child shares the parent's lineage).
-            # For rows not already read-only, confirm via the state.db source so
-            # a delegated child can't surface as a writable/CLI sidebar row.
-            if not _is_sa and not _r.get("read_only"):
-                _sid = str(_r.get("session_id") or "").strip()
-                if _sid and _is_subagent_child_session_id(_sid):
-                    _is_sa = True
-            if _is_sa:
+            if _src == "subagent":
                 _r["read_only"] = True
                 _r["is_cli_session"] = False
     _coerce_subagent_rows(scoped)
