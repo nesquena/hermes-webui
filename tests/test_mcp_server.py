@@ -289,6 +289,23 @@ async def _call(mod, tool_name, **kwargs):
     return json.loads(result[0].text)
 
 
+async def test_recent_project_messages_rejects_non_boolean_include_archived():
+    state_dir = _fresh_state_dir()
+    try:
+        mod, _profiles = _reimport_mcp()
+
+        result = await _call(
+            mod,
+            "recent_project_messages",
+            project_id="project00001",
+            include_archived="false",
+        )
+
+        assert result == {"error": "include_archived must be a boolean"}
+    finally:
+        _cleanup_state_dir(state_dir)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Project CRUD
 # ═══════════════════════════════════════════════════════════════════════════
@@ -566,6 +583,72 @@ class TestListSessions:
     async def test_list_unassigned(self):
         result = await _call(self.mod, "list_sessions", unassigned=True)
         assert isinstance(result, list)
+
+
+class TestRecentProjectMessages:
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.state_dir = _fresh_state_dir()
+        self.mod, self.profiles = _reimport_mcp()
+        yield
+        _cleanup_state_dir(self.state_dir)
+
+    async def test_tool_schema_pins_bounds_and_profile_scope(self):
+        tool = next(tool for tool in self.mod.TOOLS if tool.name == "recent_project_messages")
+        schema = tool.inputSchema
+        assert schema["required"] == ["project_id"]
+        assert schema["properties"]["limit"]["maximum"] == 20
+        assert schema["properties"]["roles"]["items"]["enum"] == ["user", "assistant"]
+        assert "include_archived" in schema["properties"]
+        assert "before" in schema["properties"]
+
+    async def test_handler_delegates_to_read_contract_without_api_mutation(self, monkeypatch):
+        seen = {}
+
+        def fake_recent_project_messages(**kwargs):
+            seen.update(kwargs)
+            return {"messages": [{"content": "safe"}], "profile": kwargs["profile"]}
+
+        monkeypatch.setattr(self.mod, "recent_project_messages", fake_recent_project_messages)
+        monkeypatch.setattr(self.mod, "_active_state_db_path", lambda: Path("/tmp/read-only-state.db"))
+
+        result = await _call(
+            self.mod,
+            "recent_project_messages",
+            project_id="project00001",
+            profile="default",
+            roles=["user", "assistant"],
+            limit=7,
+            before="opaque",
+            include_archived=True,
+        )
+
+        assert result["messages"] == [{"content": "safe"}]
+        assert seen["project_id"] == "project00001"
+        assert seen["profile"] == "default"
+        assert seen["roles"] == ["user", "assistant"]
+        assert seen["limit"] == 7
+        assert seen["before"] == "opaque"
+        assert seen["include_archived"] is True
+
+    async def test_explicit_foreign_profile_fails_closed(self, monkeypatch):
+        called = False
+
+        def fake_recent_project_messages(**_kwargs):
+            nonlocal called
+            called = True
+            return {}
+
+        monkeypatch.setattr(self.mod, "recent_project_messages", fake_recent_project_messages)
+        result = await _call(
+            self.mod,
+            "recent_project_messages",
+            project_id="foreign-project",
+            profile="other",
+        )
+
+        assert result == {"error": "Project not found"}
+        assert called is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
