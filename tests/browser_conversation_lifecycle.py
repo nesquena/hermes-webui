@@ -37,9 +37,68 @@ SCENARIO = os.environ.get("LIFECYCLE_SCENARIO", "normal").strip() or "normal"
 TOOL_NAME = "read_file"
 TOOL_ID = "lifecycle-tool-1"
 TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
+NEGATIVE_BITE = os.environ.get("LIFECYCLE_NEGATIVE_BITE", "").strip()
+HEALTH_GUARD_KNOCKOUT = os.environ.get("LIFECYCLE_HEALTH_GUARD_KNOCKOUT", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
+EXPECTED_MUTATION_FAILURE_MARKERS = {
+    "drop-anchor-persistence": (
+        "MUTATION CANARY EXPECTED FAILURE: drop-anchor-persistence removed "
+        "the transcript-backed Anchor scene before hard reload"
+    ),
+    "drop-terminal-anchor-row": (
+        "MUTATION CANARY EXPECTED FAILURE: drop-terminal-anchor-row removed "
+        "the terminal row from the hard-reloaded Anchor scene"
+    ),
+    "blank-terminal-anchor-status": (
+        "MUTATION CANARY EXPECTED FAILURE: blank-terminal-anchor-status changed "
+        "the canonical terminal row status before hard reload"
+    ),
+}
+NEGATIVE_MUTATION_FAILURE_MARKERS = {
+    "fail-reload-final-text": (
+        "NEGATIVE CANARY EXPECTED UNMARKED FAILURE: hard-reload final-text "
+        "prerequisite failed before Anchor-scene classification"
+    ),
+    "throw-reloaded-worklog-expand": (
+        "NEGATIVE CANARY EXPECTED UNMARKED FAILURE: Worklog expansion failed "
+        "after the reloaded Anchor group was present"
+    ),
+}
+FORCED_WORKLOG_EXPANSION_FAILURE = (
+    "hermes lifecycle negative canary: forced Worklog expansion failure"
+)
+UNRELATED_WORKLOG_EXPANSION_FAILURE = (
+    "hermes lifecycle negative canary: unrelated Worklog expansion timeout"
+)
+DISCRIMINATOR_FAILURE_MARKERS = {
+    "close-reload-final-text": (
+        "NEGATIVE CANARY DISCRIMINATOR: page closed before hard-reload final-text prerequisite"
+    ),
+    "server-death-reload-final-text": (
+        "NEGATIVE CANARY DISCRIMINATOR: server died before hard-reload final-text prerequisite"
+    ),
+    "close-reloaded-anchor-group": (
+        "NEGATIVE CANARY DISCRIMINATOR: page closed before reloaded Anchor-group classification"
+    ),
+    "server-death-reloaded-anchor-group": (
+        "NEGATIVE CANARY DISCRIMINATOR: server died before reloaded Anchor-group classification"
+    ),
+}
+
+
+class _InjectedWorklogFailure(RuntimeError):
+    """Failure injected after the reloaded Worklog group is proven present."""
+
+
+class _CanaryHealthRejection(AssertionError):
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
+
+
+PLAYWRIGHT_TIMEOUT_ERROR = None
 
 
 def _latest_anchor_scene_from_disk(state_root: Path, session_id: str) -> dict | None:
@@ -478,6 +537,15 @@ def _capture_anchor_scene_requests(page):
     return events
 
 
+def _mutation_event_observed(events: list[dict], bite: str) -> bool:
+    return any(
+        isinstance(event, dict)
+        and event.get("type") == "mutation"
+        and event.get("bite") == bite
+        for event in events
+    )
+
+
 def _activity_snapshot(page) -> dict:
     return page.evaluate(
         """() => {
@@ -489,10 +557,19 @@ def _activity_snapshot(page) -> dict:
           const groups = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-owner="1"]')) : [];
           const rows = turn ? Array.from(turn.querySelectorAll('[data-anchor-scene-row="1"]')) : [];
           const sceneRows = assistants.flatMap(message =>
-            message && message._anchor_activity_scene && Array.isArray(message._anchor_activity_scene.activity_rows)
+            message && message._anchor_activity_scene &&
+              message._anchor_activity_scene.version === 'activity_scene_v1' &&
+              Array.isArray(message._anchor_activity_scene.activity_rows)
               ? message._anchor_activity_scene.activity_rows
               : []
           );
+          const sceneRowForDomRow = row => {
+            const rowId = String(row.getAttribute('data-anchor-row-id') || '');
+            if (!rowId) return null;
+            return sceneRows.find(sceneRow =>
+              String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') === rowId
+            ) || null;
+          };
           const visibleFinal = turn ? Array.from(turn.querySelectorAll('.assistant-segment .msg-body'))
             .filter(el => {
               const segment = el.closest('.assistant-segment');
@@ -521,19 +598,21 @@ def _activity_snapshot(page) -> dict:
               expanded: (group.querySelector('.tool-worklog-summary,.tool-call-group-summary') || {})
                 .getAttribute?.('aria-expanded') || '',
             })),
-            rows: rows.map(row => ({
-              role: row.getAttribute('data-anchor-row-role'),
-              rowId: row.getAttribute('data-anchor-row-id') || '',
-              toolCallId: (sceneRows.find(sceneRow =>
-                String(sceneRow && (sceneRow.row_id || sceneRow.local_id) || '') ===
-                String(row.getAttribute('data-anchor-row-id') || '')
-              ) || {}).tool_call_id || '',
-              source: row.getAttribute('data-anchor-source-event-type'),
-              status: row.getAttribute('data-anchor-row-status'),
-              tool: row.getAttribute('data-tool-name'),
-              text: row.innerText.trim(),
-              classes: row.className,
-            })),
+            rows: rows.map(row => {
+              const sceneRow = sceneRowForDomRow(row);
+              return {
+                role: row.getAttribute('data-anchor-row-role'),
+                rowId: row.getAttribute('data-anchor-row-id') || '',
+                toolCallId: sceneRow ? (sceneRow.tool_call_id || '') : '',
+                source: row.getAttribute('data-anchor-source-event-type'),
+                status: sceneRow ? (sceneRow.status ?? '') : null,
+                tool: row.getAttribute('data-tool-name'),
+                label: ((row.querySelector('.agent-activity-status-label') || {}).textContent || '').trim(),
+                detail: ((row.querySelector('.agent-activity-status-detail') || {}).textContent || '').trim(),
+                text: row.innerText.trim(),
+                classes: row.className,
+              };
+            }),
             visibleFinal,
             assistantMessage: lastAssistant ? {
               turnDuration: lastAssistant._turnDuration,
@@ -549,7 +628,14 @@ def _activity_snapshot(page) -> dict:
     )
 
 
-def _expand_settled_worklog(page) -> None:
+def _expand_settled_worklog(
+    page,
+    *,
+    force_failure: bool = False,
+    failure_message: str = FORCED_WORKLOG_EXPANSION_FAILURE,
+) -> None:
+    if force_failure:
+        raise _InjectedWorklogFailure(failure_message)
     page.wait_for_function(
         """() => {
           const group = Array.from(document.querySelectorAll(
@@ -575,6 +661,24 @@ def _expand_settled_worklog(page) -> None:
 
 def _terminal_rows(snapshot: dict) -> list[dict]:
     return [row for row in snapshot["rows"] if row["role"] == "terminal"]
+
+
+def _terminal_row_semantics(row: dict) -> dict:
+    """Exclude only the renderer-owned clock from terminal-row parity."""
+    return {
+        key: row.get(key)
+        for key in (
+            "role",
+            "rowId",
+            "toolCallId",
+            "source",
+            "status",
+            "tool",
+            "label",
+            "detail",
+            "classes",
+        )
+    }
 
 
 def _process_rows(snapshot: dict) -> list[dict]:
@@ -652,6 +756,7 @@ def _assert_settled(snapshot: dict, scenario: str) -> None:
         assert "terminal" in roles, snapshot
         terminal_rows = _terminal_rows(snapshot)
         assert terminal_rows, snapshot
+        assert all(str(row.get("status") or "").strip() for row in terminal_rows), snapshot
         assert all(_is_terminal_row_error(row) for row in terminal_rows), snapshot
         assert snapshot["assistantMessage"] is not None, snapshot
         turn_duration = snapshot["assistantMessage"].get("turnDuration")
@@ -690,6 +795,117 @@ def _assert_process_row_present(snapshot: dict) -> list[dict]:
     return rows
 
 
+def _raise_expected_mutation_failure(
+    marker: str,
+    *,
+    errors: list,
+    proc: subprocess.Popen | None,
+    cause: Exception,
+) -> None:
+    if errors:
+        raise AssertionError(
+            "unexpected browser errors before expected mutation failure: "
+            f"{errors!r}"
+        ) from cause
+    if proc is not None and proc.poll() is not None:
+        raise AssertionError(
+            "WebUI server exited before expected mutation failure: "
+            f"{proc.returncode}"
+        ) from cause
+    raise AssertionError(marker) from cause
+
+
+def _is_playwright_timeout(error: Exception) -> bool:
+    error_type = type(error)
+    return (
+        PLAYWRIGHT_TIMEOUT_ERROR is not None
+        and isinstance(error, PLAYWRIGHT_TIMEOUT_ERROR)
+    ) or (
+        error_type.__name__ == "TimeoutError"
+        and error_type.__module__ == "playwright._impl._errors"
+    )
+
+
+def _assert_canary_health(page, errors: list, proc, *, cause: Exception, boundary: str) -> None:
+    if (
+        page is not None
+        and page.is_closed()
+        and HEALTH_GUARD_KNOCKOUT
+        not in {"page-closed", "page-closed-with-browser-error"}
+    ):
+        raise _CanaryHealthRejection(
+            "page-closed",
+            f"page closed before expected {boundary} failure",
+        ) from cause
+    if (
+        proc is not None
+        and proc.poll() is not None
+        and HEALTH_GUARD_KNOCKOUT != "server-exited"
+    ):
+        raise _CanaryHealthRejection(
+            "server-exited",
+            f"WebUI server exited before expected {boundary} failure: {proc.returncode}",
+        ) from cause
+    if errors:
+        raise _CanaryHealthRejection(
+            "browser-errors",
+            f"unexpected browser errors before expected {boundary} failure: {errors!r}",
+        ) from cause
+
+
+def _raise_rejected_crash_discriminator(
+    page,
+    errors: list,
+    proc,
+    *,
+    cause: Exception,
+    bite: str,
+    boundary: str,
+) -> None:
+    try:
+        _assert_canary_health(page, errors, proc, cause=cause, boundary=boundary)
+    except _CanaryHealthRejection as health_error:
+        expected_kind = "page-closed" if bite.startswith("close-") else "server-exited"
+        if health_error.kind != expected_kind:
+            raise AssertionError(
+                f"{bite} did not trigger the shared canary health rejection: kind "
+                f"{health_error.kind!r} did not match expected {expected_kind!r}"
+            ) from health_error
+        if bite.startswith("close-") and page is not None and page.is_closed():
+            raise AssertionError(DISCRIMINATOR_FAILURE_MARKERS[bite]) from health_error
+        if bite.startswith("server-death-") and proc is not None and proc.poll() is not None:
+            raise AssertionError(DISCRIMINATOR_FAILURE_MARKERS[bite]) from health_error
+        raise
+    raise AssertionError(
+        f"{bite} did not trigger the shared canary health rejection"
+    ) from cause
+
+
+def _close_page_for_negative_canary(page) -> None:
+    """Close the injected page deterministically before testing the guard.
+
+    Hosted Chromium can acknowledge ``page.close()`` before Playwright's page
+    object observes the closed state.  Falling back to this test's isolated
+    browser context keeps the injected fault exact without weakening the
+    subsequent shared-health assertion.
+    """
+    close_error = None
+    try:
+        page.close()
+    except Exception as exc:
+        close_error = exc
+    if not page.is_closed():
+        try:
+            page.context.close()
+        except Exception as exc:
+            if close_error is None:
+                close_error = exc
+    if not page.is_closed():
+        raise AssertionError(
+            "page-close negative canary could not establish a closed page"
+        ) from close_error
+
+
 def _semantic_activity(snapshot: dict) -> list[dict]:
     """Canonical user-visible activity, independent of renderer row ordering."""
     semantic = []
@@ -706,10 +922,13 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
 
 def main() -> int:
     try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("SETUP FAIL: playwright is not installed", file=sys.stderr)
         return 2
+    global PLAYWRIGHT_TIMEOUT_ERROR
+    PLAYWRIGHT_TIMEOUT_ERROR = PlaywrightTimeoutError
 
     repo_root = Path(__file__).resolve().parent.parent
     state_tmp = tempfile.TemporaryDirectory(prefix="hermes-lifecycle-gate-")
@@ -730,16 +949,52 @@ def main() -> int:
         "",
         "drop-anchor-persistence",
         "drop-terminal-anchor-row",
+        "blank-terminal-anchor-status",
         "settle-worklog-frame-proof",
     }:
         raise ValueError(
             f"Unsupported LIFECYCLE_TEST_BITE {TEST_BITE!r}; "
             "expected one of '', 'drop-anchor-persistence', "
-            "'drop-terminal-anchor-row', 'settle-worklog-frame-proof'"
+            "'drop-terminal-anchor-row', 'blank-terminal-anchor-status', "
+            "'settle-worklog-frame-proof'"
         )
-    if TEST_BITE == "drop-terminal-anchor-row" and scenario != "terminal-error":
+    if NEGATIVE_BITE not in {
+        "",
+        "fail-reload-final-text",
+        "throw-reloaded-worklog-expand",
+        "timeout-reloaded-worklog-expand",
+        "close-reload-final-text",
+        "server-death-reload-final-text",
+        "close-reloaded-anchor-group",
+        "server-death-reloaded-anchor-group",
+    }:
         raise ValueError(
-            "drop-terminal-anchor-row is only valid for "
+            f"Unsupported LIFECYCLE_NEGATIVE_BITE {NEGATIVE_BITE!r}; "
+            "expected one of '', 'fail-reload-final-text', "
+            "'throw-reloaded-worklog-expand', 'timeout-reloaded-worklog-expand', "
+            "'close-reload-final-text', 'server-death-reload-final-text', "
+            "'close-reloaded-anchor-group', 'server-death-reloaded-anchor-group'"
+        )
+    if NEGATIVE_BITE and TEST_BITE != "drop-anchor-persistence":
+        raise ValueError(
+            "LIFECYCLE_NEGATIVE_BITE is only valid with "
+            "LIFECYCLE_TEST_BITE=drop-anchor-persistence"
+        )
+    if HEALTH_GUARD_KNOCKOUT not in {
+        "",
+        "page-closed",
+        "page-closed-with-browser-error",
+        "server-exited",
+    }:
+        raise ValueError(
+            f"Unsupported LIFECYCLE_HEALTH_GUARD_KNOCKOUT {HEALTH_GUARD_KNOCKOUT!r}"
+        )
+    if (
+        TEST_BITE in {"drop-terminal-anchor-row", "blank-terminal-anchor-status"}
+        and scenario != "terminal-error"
+    ):
+        raise ValueError(
+            f"{TEST_BITE} is only valid for "
             "LIFECYCLE_SCENARIO=terminal-error"
         )
 
@@ -801,12 +1056,24 @@ def main() -> int:
         anchor_scene_requests = _capture_anchor_scene_requests(page)
         if TEST_BITE:
             def _route_anchor_scene(route):
-                if TEST_BITE == "drop-anchor-persistence":
+                if (
+                    TEST_BITE == "drop-anchor-persistence"
+                    and NEGATIVE_BITE
+                    not in {
+                        "throw-reloaded-worklog-expand",
+                        "timeout-reloaded-worklog-expand",
+                    }
+                ):
                     route.fulfill(
                         status=200,
                         content_type="application/json",
                         body='{"ok":true}',
                     )
+                    anchor_scene_requests.append({
+                        "type": "mutation",
+                        "bite": "drop-anchor-persistence",
+                        "action": "dropped-anchor-scene-persistence",
+                    })
                     return
                 if TEST_BITE == "drop-terminal-anchor-row":
                     raw_payload = _safe_request_post_data(route.request)
@@ -827,6 +1094,45 @@ def main() -> int:
                                     mutated["scene"] = updated_scene
                                     response = route.fetch(post_data=json.dumps(mutated))
                                     route.fulfill(response=response)
+                                    anchor_scene_requests.append({
+                                        "type": "mutation",
+                                        "bite": "drop-terminal-anchor-row",
+                                        "action": "removed-terminal-row",
+                                    })
+                                    return
+                    response = route.fetch()
+                    route.fulfill(response=response)
+                    return
+                if TEST_BITE == "blank-terminal-anchor-status":
+                    raw_payload = _safe_request_post_data(route.request)
+                    payload = _parse_json_payload(raw_payload)
+                    if isinstance(payload, dict):
+                        scene = payload.get("scene")
+                        if isinstance(scene, dict):
+                            rows = scene.get("activity_rows")
+                            if isinstance(rows, list):
+                                mutated_rows = []
+                                mutated = False
+                                for row in rows:
+                                    if isinstance(row, dict) and row.get("role") == "terminal":
+                                        next_row = dict(row)
+                                        next_row["status"] = ""
+                                        mutated_rows.append(next_row)
+                                        mutated = True
+                                    else:
+                                        mutated_rows.append(row)
+                                if mutated:
+                                    mutated_payload = dict(payload)
+                                    updated_scene = dict(scene)
+                                    updated_scene["activity_rows"] = mutated_rows
+                                    mutated_payload["scene"] = updated_scene
+                                    response = route.fetch(post_data=json.dumps(mutated_payload))
+                                    route.fulfill(response=response)
+                                    anchor_scene_requests.append({
+                                        "type": "mutation",
+                                        "bite": "blank-terminal-anchor-status",
+                                        "action": "blanked-terminal-status",
+                                    })
                                     return
                     response = route.fetch()
                     route.fulfill(response=response)
@@ -1101,17 +1407,214 @@ def main() -> int:
             print("OK  settled: final prose and the same semantic activity coexist without duplication")
 
         page.reload(wait_until="domcontentloaded")
-        page.wait_for_function(
-            "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
-            arg=TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT,
-            timeout=15000,
+        reload_text = TERMINAL_ERROR_TEXT if scenario == "terminal-error" else FINAL_TEXT
+        if NEGATIVE_BITE in {
+            "fail-reload-final-text",
+            "server-death-reload-final-text",
+        }:
+            reload_text = "missing lifecycle final-text negative canary"
+        if NEGATIVE_BITE == "close-reload-final-text":
+            if HEALTH_GUARD_KNOCKOUT == "page-closed-with-browser-error":
+                errors.append(("console", "synthetic competing browser error"))
+            _close_page_for_negative_canary(page)
+        elif NEGATIVE_BITE == "server-death-reload-final-text":
+            _terminate_process(proc)
+        try:
+            page.wait_for_function(
+                "text => (document.querySelector('#msgInner') || {}).innerText?.includes(text)",
+                arg=reload_text,
+                timeout=15000,
+            )
+        except Exception as exc:
+            if NEGATIVE_BITE in {
+                "close-reload-final-text",
+                "server-death-reload-final-text",
+            }:
+                _raise_rejected_crash_discriminator(
+                    page,
+                    errors,
+                    proc,
+                    cause=exc,
+                    bite=NEGATIVE_BITE,
+                    boundary="hard-reload final-text prerequisite",
+                )
+            if NEGATIVE_BITE == "fail-reload-final-text":
+                if not _is_playwright_timeout(exc):
+                    raise
+                _assert_canary_health(
+                    page,
+                    errors,
+                    proc,
+                    cause=exc,
+                    boundary="hard-reload final-text prerequisite",
+                )
+                raise AssertionError(
+                    NEGATIVE_MUTATION_FAILURE_MARKERS["fail-reload-final-text"]
+                ) from exc
+            raise
+        settled_anchor_group_selector = (
+            '.assistant-turn [data-anchor-settled-scene-owner="1"]'
         )
+        settled_anchor_selector = (
+            '.assistant-turn [data-anchor-settled-scene-owner="1"] '
+            '[data-anchor-scene-row="1"]'
+        )
+        if TEST_BITE == "drop-anchor-persistence":
+            if NEGATIVE_BITE == "close-reloaded-anchor-group":
+                if HEALTH_GUARD_KNOCKOUT == "page-closed-with-browser-error":
+                    errors.append(("console", "synthetic competing browser error"))
+                _close_page_for_negative_canary(page)
+            elif NEGATIVE_BITE == "server-death-reloaded-anchor-group":
+                _terminate_process(proc)
+                page.evaluate(
+                    "selector => document.querySelector(selector)?.remove()",
+                    settled_anchor_group_selector,
+                )
+            try:
+                page.wait_for_selector(settled_anchor_group_selector, timeout=2000)
+            except Exception as exc:
+                if NEGATIVE_BITE in {
+                    "close-reloaded-anchor-group",
+                    "server-death-reloaded-anchor-group",
+                }:
+                    _raise_rejected_crash_discriminator(
+                        page,
+                        errors,
+                        proc,
+                        cause=exc,
+                        bite=NEGATIVE_BITE,
+                        boundary="reloaded Anchor-group classification",
+                    )
+                if not _is_playwright_timeout(exc):
+                    raise
+                if not _mutation_event_observed(
+                    anchor_scene_requests,
+                    "drop-anchor-persistence",
+                ):
+                    raise AssertionError(
+                        "drop-anchor-persistence mutation was not observed before "
+                        "the reloaded Anchor group went missing"
+                    ) from exc
+                _assert_canary_health(
+                    page,
+                    errors,
+                    proc,
+                    cause=exc,
+                    boundary="drop-anchor-persistence",
+                )
+                _raise_expected_mutation_failure(
+                    EXPECTED_MUTATION_FAILURE_MARKERS["drop-anchor-persistence"],
+                    errors=errors,
+                    proc=proc,
+                    cause=exc,
+                )
+            try:
+                _expand_settled_worklog(
+                    page,
+                    force_failure=NEGATIVE_BITE
+                    in {
+                        "throw-reloaded-worklog-expand",
+                        "timeout-reloaded-worklog-expand",
+                    },
+                    failure_message=(
+                        UNRELATED_WORKLOG_EXPANSION_FAILURE
+                        if NEGATIVE_BITE == "timeout-reloaded-worklog-expand"
+                        else FORCED_WORKLOG_EXPANSION_FAILURE
+                    ),
+                )
+            except Exception as exc:
+                if NEGATIVE_BITE in {
+                    "throw-reloaded-worklog-expand",
+                    "timeout-reloaded-worklog-expand",
+                }:
+                    if not (
+                        isinstance(exc, _InjectedWorklogFailure)
+                        and str(exc) == FORCED_WORKLOG_EXPANSION_FAILURE
+                    ):
+                        raise
+                    _assert_canary_health(
+                        page,
+                        errors,
+                        proc,
+                        cause=exc,
+                        boundary="unmarked Worklog expansion",
+                    )
+                    raise AssertionError(
+                        NEGATIVE_MUTATION_FAILURE_MARKERS[
+                            "throw-reloaded-worklog-expand"
+                        ]
+                    ) from exc
+                raise
+            raise AssertionError(
+                "Mutation survived: drop-anchor-persistence still rendered a "
+                "transcript-backed Anchor scene after hard reload"
+            )
         _expand_settled_worklog(page)
         page.wait_for_selector(
-            '.assistant-turn [data-anchor-settled-scene-owner="1"] [data-anchor-scene-row="1"]',
+            settled_anchor_selector,
             timeout=2000 if TEST_BITE else 10000,
         )
         reloaded_snapshot = _activity_snapshot(page)
+        if TEST_BITE == "drop-terminal-anchor-row":
+            if errors:
+                raise AssertionError(
+                    "unexpected browser errors before expected mutation failure: "
+                    f"{errors!r}"
+                )
+            if proc is not None and proc.poll() is not None:
+                raise AssertionError(
+                    "WebUI server exited before expected mutation failure: "
+                    f"{proc.returncode}"
+                )
+            if _terminal_rows(reloaded_snapshot):
+                raise AssertionError(
+                    "Mutation survived: drop-terminal-anchor-row still rendered "
+                    "a terminal row after hard reload"
+                )
+            if not _mutation_event_observed(
+                anchor_scene_requests,
+                "drop-terminal-anchor-row",
+            ):
+                raise AssertionError(
+                    "drop-terminal-anchor-row mutation was not observed before "
+                    "the reloaded terminal row went missing"
+                )
+            raise AssertionError(
+                EXPECTED_MUTATION_FAILURE_MARKERS["drop-terminal-anchor-row"]
+            )
+        if TEST_BITE == "blank-terminal-anchor-status":
+            if errors:
+                raise AssertionError(
+                    "unexpected browser errors before expected mutation failure: "
+                    f"{errors!r}"
+                )
+            if proc is not None and proc.poll() is not None:
+                raise AssertionError(
+                    "WebUI server exited before expected mutation failure: "
+                    f"{proc.returncode}"
+                )
+            terminal_rows = _terminal_rows(reloaded_snapshot)
+            if not terminal_rows:
+                raise AssertionError(
+                    "blank-terminal-anchor-status mutation removed the terminal row "
+                    "instead of only changing its canonical status"
+                )
+            if all(str(row.get("status") or "").strip() for row in terminal_rows):
+                raise AssertionError(
+                    "Mutation survived: blank-terminal-anchor-status still rendered "
+                    "a non-empty canonical terminal status after hard reload"
+                )
+            if not _mutation_event_observed(
+                anchor_scene_requests,
+                "blank-terminal-anchor-status",
+            ):
+                raise AssertionError(
+                    "blank-terminal-anchor-status mutation was not observed before "
+                    "the reloaded terminal status went missing"
+                )
+            raise AssertionError(
+                EXPECTED_MUTATION_FAILURE_MARKERS["blank-terminal-anchor-status"]
+            )
         _assert_settled(reloaded_snapshot, scenario)
         if scenario == "terminal-error":
             _assert_process_row_present(reloaded_snapshot)
@@ -1136,7 +1639,9 @@ def main() -> int:
                 "settled_terminal": settled_terminal,
                 "reloaded_terminal": reloaded_terminal,
             }
-            assert settled_terminal[0]["text"] == reloaded_terminal[0]["text"], {
+            assert _terminal_row_semantics(settled_terminal[0]) == _terminal_row_semantics(
+                reloaded_terminal[0]
+            ), {
                 "settled_terminal": settled_terminal[0],
                 "reloaded_terminal": reloaded_terminal[0],
             }
@@ -1160,6 +1665,7 @@ def main() -> int:
                     json.dumps({
                         "scenario": scenario,
                         "test_bite": TEST_BITE or None,
+                        "negative_bite": NEGATIVE_BITE or None,
                         "browser_errors": errors,
                         "anchor_scene_requests": anchor_scene_requests,
                         "anchor_projection": _anchor_projection_snapshot(page),
