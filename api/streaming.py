@@ -672,8 +672,29 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
             or 'falling back' in m
             or 'fallback activated' in m
             or 'trying fallback' in m
+            or 'switched to fallback' in m
         )
     )
+
+
+def _is_effective_fallback_lifecycle_message(kind: str, message: str) -> bool:
+    """Return True only after Hermes has durably installed a fallback runtime.
+
+    Retry notices such as ``trying fallback`` and ``switching to fallback`` are
+    emitted before activation and may still recover on the primary.  Hermes
+    emits one of two post-activation success wordings after it has replaced
+    ``agent.model``, ``agent.provider`` and ``agent.reasoning_config``:
+
+    - ``Switched to fallback model: X via P1 → Y via P2`` (pending notice)
+    - ``↻ Switched to fallback: Y (P2)`` (empty-content path)
+
+    Only those post-activation notices are safe to use as the trigger for
+    replacing live effective-run metadata.  ``switching`` does not contain
+    ``switched``, so pre-activation retry chatter stays excluded.
+    """
+    k = str(kind or '').strip().lower()
+    m = str(message or '').strip().lower()
+    return k == 'lifecycle' and 'switched to fallback' in m
 
 
 def _is_agent_compression_start_status(kind: str, message: str) -> bool:
@@ -2603,6 +2624,63 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
     normalized['model_changed'] = model_changed
     normalized['has_failover'] = has_failover
     return normalized
+
+
+def _effective_reasoning_effort_label(agent, fallback_config=None):
+    """Effective reasoning effort for footer display: level str, 'off', or None.
+
+    Reads the frozen per-agent reasoning_config (the same dict the run actually
+    used) so the footer reflects the effective effort — after per-model
+    overrides and capability clamping — rather than the raw configured value.
+    Returns None when no explicit reasoning config exists (provider default is
+    unknown; the UI renders no chip instead of guessing).
+    """
+    cfg = getattr(agent, 'reasoning_config', None)
+    if not isinstance(cfg, dict) or 'enabled' not in cfg:
+        cfg = fallback_config
+    if not isinstance(cfg, dict) or 'enabled' not in cfg:
+        return None
+    if cfg.get('enabled') is False:
+        return 'off'
+    effort = str(cfg.get('effort') or '').strip().lower()
+    return effort or None
+
+
+def _effective_run_meta_payload(agent, session_id):
+    """Build the live metadata payload from the runtime currently on *agent*."""
+    return {
+        'session_id': session_id,
+        'model': getattr(agent, 'model', None),
+        'provider': getattr(agent, 'provider', None),
+        'reasoning_effort': _effective_reasoning_effort_label(agent),
+    }
+
+
+def _bridge_fallback_lifecycle_status(
+    kind,
+    message,
+    *,
+    agent,
+    session_id,
+    put,
+    emit_effective_run_meta=None,
+):
+    """Bridge fallback lifecycle status to warning and effective live metadata.
+
+    All recognized retry/fallback lifecycle lines remain user-visible warnings.
+    A replacement ``run_meta`` is emitted only for Hermes' post-activation
+    success notice, never for speculative retry chatter.
+    """
+    text = str(message or '').strip()
+    if not text or not _is_fallback_lifecycle_message(kind, text):
+        return False
+    put('warning', {'type': 'fallback', 'message': text})
+    if _is_effective_fallback_lifecycle_message(kind, text):
+        if emit_effective_run_meta is not None:
+            emit_effective_run_meta()
+        else:
+            put('run_meta', _effective_run_meta_payload(agent, session_id))
+    return True
 
 
 def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None):
@@ -9085,6 +9163,16 @@ def _run_agent_streaming(
     # surface the real, actionable cause (model_not_found / auth_mismatch).
     _captured_terminal_error = [None]
 
+    def _emit_effective_run_meta():
+        """Announce the model and reasoning config currently owned by the agent.
+
+        Hermes mutates these values when it activates a fallback, so this must
+        be callable both at run start and from the fallback lifecycle callback.
+        Missing values stay missing; consumers must not infer an effective
+        value from the originally requested session settings.
+        """
+        put('run_meta', _effective_run_meta_payload(agent, session_id))
+
     def _agent_status_callback(kind, message):
         """Bridge Agent lifecycle status into WebUI SSE.
 
@@ -9116,9 +9204,14 @@ def _run_agent_streaming(
             return
         # Pass through rate-limit and fallback messages so the frontend can
         # show them as warnings via the existing messages.js 'warning' listener.
-        _is_fallback_notice = _is_fallback_lifecycle_message(_kind, _message)
-        if _is_fallback_notice:
-            put('warning', {'type': 'fallback', 'message': _message})
+        _bridge_fallback_lifecycle_status(
+            _kind,
+            _message,
+            agent=agent,
+            session_id=session_id,
+            put=put,
+            emit_effective_run_meta=_emit_effective_run_meta,
+        )
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
     # finally can always reset even if an exception fires before the bind.
@@ -10482,6 +10575,12 @@ def _run_agent_streaming(
                     put('cancel', _cancel_event_payload('Cancelled by user'))
                     return
 
+            # Announce the run's effective model + reasoning effort up front so
+            # the live footer can display them during streaming, not only after
+            # the turn settles. The effort label reads the frozen agent config —
+            # the value actually used for this run (overrides + clamp applied).
+            _emit_effective_run_meta()
+
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
@@ -11668,6 +11767,9 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                            _effort_label = _effective_reasoning_effort_label(agent, _reasoning_config)
+                            if _effort_label:
+                                _dm['_reasoningEffort'] = _effort_label
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -12057,6 +12159,9 @@ def _run_agent_streaming(
                 usage['ttft_ms'] = _ttft_ms
             if _used_model:
                 usage['used_model'] = _used_model
+            _effort_label_done = _effective_reasoning_effort_label(agent, _reasoning_config)
+            if _effort_label_done:
+                usage['reasoning_effort'] = _effort_label_done
             # Include context window data from the agent's compressor for the UI indicator.
             # The session-level persistence happens above (before s.save()) so the values
             # survive a page reload; this block only populates the live SSE usage payload.
