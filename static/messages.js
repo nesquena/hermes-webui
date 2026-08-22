@@ -1,7 +1,7 @@
-function _markSessionViewed(sid, messageCount) {
+function _markSessionViewed(sid, messageCount, consumeManualOnVisit = true) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  _setSessionViewedCount(sid, next);
+  _setSessionViewedCount(sid, next, consumeManualOnVisit);
 }
 
 function _apiUrl(path) {
@@ -91,7 +91,6 @@ function _isSessionActivelyViewed(sid) {
 function _markActiveSessionViewedOnReturn() {
   if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;
   _markSessionViewed(S.session.session_id, S.session.message_count || (S.messages&&S.messages.length) || 0);
-  if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(S.session.session_id);
   if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
@@ -6582,6 +6581,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));
       if(eventMatchesCurrent){
+        const completionSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||eventSid||currentSid;
+        if (typeof _migrateSessionCompletionUnreadToFinalSession === 'function') {
+          _migrateSessionCompletionUnreadToFinalSession(currentSid, completionSid);
+        }
         _flushReasoningToAnchor();
         _applyToAnchor('apperror',{
           type:d.type||'error',
@@ -7001,6 +7004,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
       const completedSid=session.session_id||activeSid;
+      if (typeof _migrateSessionCompletionUnreadToFinalSession === 'function') {
+        _migrateSessionCompletionUnreadToFinalSession(activeSid, completedSid);
+      }
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(completedSid, session.message_count);
       }
@@ -8371,8 +8377,15 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     const pid = String(d.task_id || '');
     const _viewed = typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid);
     if (_viewed) {
-      try { _markSessionViewed(sid, (S&&S.session&&S.session.session_id===sid)?(S.session.message_count??(S.messages&&S.messages.length)??0):0); } catch(_){}
-      try { if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid); } catch(_){}
+      try {
+        _markSessionViewed(
+          sid,
+          (S && S.session && S.session.session_id === sid)
+            ? (S.session.message_count ?? (S.messages && S.messages.length) ?? 0)
+            : 0,
+          false,
+        );
+      } catch(_){}
     } else {
       // T4 drop-when-focused: suppress toast only; ack below still fires.
       try {
