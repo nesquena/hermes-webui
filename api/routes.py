@@ -10130,19 +10130,60 @@ def _dedupe_cli_sidebar_sessions_for_api(
 
 
 CLI_VISIBLE_SESSION_CAP = 20
+# Per-project bound on project-assigned CLI rows in the FINAL MERGED payload.
+# This is the only place that sees every source of assigned rows at once —
+# state.db's own bounded passes plus imported WebUI sidecars from all_sessions(),
+# which no model-side cap applies to — so it is the only place that can actually
+# bound the assigned set (#6659 review finding 1).
+CLI_PROJECT_ASSIGNED_CAP = 200
 
 
-def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
-    """Keep only the most recent CLI-visible sessions after filtering."""
+def _cap_recent_cli_sessions(
+    sessions: list[dict],
+    cli_cap: int = CLI_VISIBLE_SESSION_CAP,
+    project_cap: int = CLI_PROJECT_ASSIGNED_CAP,
+) -> list[dict]:
+    """Cap the default CLI list while retaining project-addressable rows.
+
+    ``sessions`` is newest-first and already deduplicated (WebUI sidecars merged,
+    lineages collapsed, messaging sources folded), so every row counted here is
+    one logical conversation.
+
+    Two independent budgets, because they answer to different users (#6659):
+
+    * ``cli_cap`` unassigned conversations own the default sidebar window. An
+      assigned row must not spend one of those slots, or assigning three sessions
+      to a project silently shortens everyone's sidebar to 17 rows.
+    * ``project_cap`` assigned conversations PER PROJECT stay in the payload so
+      the project chip can reveal them, marked ``default_hidden`` once the recent
+      window is full. Past that bound they are dropped: keeping assigned rows past
+      the *recent* cap is the fix, keeping them past *all* bounds just trades a
+      vanishing session for a stalled sidebar.
+    """
     if cli_cap <= 0:
         return sessions
     kept = []
-    cli_seen = 0
+    recent_seen = 0
+    unassigned_seen = 0
+    assigned_seen: dict[str, int] = {}
     for session in sessions:
         if _is_cli_session_for_settings(session):
-            cli_seen += 1
-            if cli_seen > cli_cap:
-                continue
+            project_id = str(session.get("project_id") or "").strip()
+            if not project_id:
+                unassigned_seen += 1
+                if unassigned_seen > cli_cap:
+                    continue
+                recent_seen += 1
+            else:
+                seen = assigned_seen.get(project_id, 0) + 1
+                assigned_seen[project_id] = seen
+                if project_cap > 0 and seen > project_cap:
+                    continue
+                if recent_seen >= cli_cap:
+                    session = dict(session)
+                    session["default_hidden"] = True
+                else:
+                    recent_seen += 1
         kept.append(session)
     return kept
 
