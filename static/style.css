@@ -2306,6 +2306,17 @@
   .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .role-icon.assistant{background:var(--accent-bg-strong);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .msg-body{font-family:var(--font-conversation);font-size:var(--message-body-font-size);line-height:var(--message-body-line-height);color:var(--text);padding-left:30px;max-width:680px;overflow-wrap:anywhere;}
+  /* Tables and code blocks are not prose — the 680px reading measure that keeps
+     paragraphs legible also crushes wide tabular/code content into a narrow strip
+     while the rest of the column sits empty. Let a message that CONTAINS a table or
+     code block use the content width; prose-only messages keep 680px. :has() ships
+     in all current evergreen browsers and degrades to the prose measure otherwise. */
+  .msg-body:has(table),
+  .msg-body:has(pre),
+  .msg-body:has(.csv-table-wrap){max-width:min(1100px,100%);}
+  /* Keep column headers on one line ("Rate", not "Ra te"); .csv-table-wrap already
+     scrolls (overflow-x:auto) if a row needs more than the widened column. */
+  .msg-body .csv-table th,.msg-body table th{white-space:nowrap;}
   .msg-body p{margin-bottom:10px;}.msg-body p:last-child{margin-bottom:0;}
   .msg-body td p,.msg-body th p{margin:0;}
   .msg-body ul,.msg-body ol{margin:6px 0 10px 20px;}.msg-body li{margin-bottom:3px;}
@@ -2416,6 +2427,17 @@
   .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
+  /* Horizontal-scroll wrapper for bare Markdown tables (enhanceMarkdownTables adds it).
+     The wrapper is its OWN scroll container, so a wide table stays reachable even though
+     the transcript ancestors clip overflow-x — the header nowrap above then keeps
+     "Rate" on one line without clipping. Must follow `.msg-body table` so the width/
+     margin overrides win by source order (equal specificity). */
+  .markdown-table-scroll{margin:8px 0;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+  .markdown-table-scroll>table{width:auto;min-width:100%;margin:0;}
+  /* Undo .msg-body's overflow-wrap:anywhere for cells: wrap at word boundaries so a
+     column forces the wrapper to scroll only when its widest token truly can't fit,
+     instead of being letter-crushed to ~1 char wide. */
+  .markdown-table-scroll th,.markdown-table-scroll td{overflow-wrap:normal;word-break:normal;}
   .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-family:var(--font-ui);font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
   .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
