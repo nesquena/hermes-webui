@@ -78,7 +78,7 @@ def test_list_command_bundles_returns_bundle_metadata(monkeypatch):
             },
         ],
     )
-    monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
+    monkeypatch.setattr(commands, "_active_profile_context", _profile_scope)
 
     assert commands.list_command_bundles() == [
         {
@@ -108,7 +108,7 @@ def test_resolve_bundle_command_uses_bundle_runtime(monkeypatch):
         return ("$incident review the primary alerts", ["triage", "report"], [])
 
     _install_fake_skill_bundles(monkeypatch, resolver=_resolve, builder=_build)
-    monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
+    monkeypatch.setattr(commands, "_active_profile_context", _profile_scope)
 
     assert commands.resolve_bundle_command("/incident-review the primary alerts") == {
         "name": "incident-review",
@@ -126,7 +126,7 @@ def test_resolve_bundle_command_uses_bundle_runtime(monkeypatch):
 
 def test_resolve_bundle_command_raises_for_unknown_bundle(monkeypatch):
     _install_fake_skill_bundles(monkeypatch)
-    monkeypatch.setattr(commands, "_bundle_profile_context", lambda purpose: nullcontext())
+    monkeypatch.setattr(commands, "_active_profile_context", lambda purpose: nullcontext())
 
     with pytest.raises(KeyError):
         commands.resolve_bundle_command("/does-not-exist investigate this")
@@ -137,7 +137,7 @@ def test_resolve_bundle_command_wraps_unexpected_runtime_errors(monkeypatch):
         raise AttributeError("bundle runtime broke")
 
     _install_fake_skill_bundles(monkeypatch, resolver=_explode)
-    monkeypatch.setattr(commands, "_bundle_profile_context", lambda purpose: nullcontext())
+    monkeypatch.setattr(commands, "_active_profile_context", lambda purpose: nullcontext())
 
     with pytest.raises(RuntimeError, match="Skill bundle command unavailable"):
         commands.resolve_bundle_command("/incident-review investigate this")
