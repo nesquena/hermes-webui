@@ -960,11 +960,16 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
         live_messages = _msg_count(live_path)
         existing_user_messages: set[str] = set()
         try:
+            from api.models import _decode_state_db_content, _message_content_text
+
             payload = json.loads(live_path.read_text(encoding='utf-8'))
             if isinstance(payload, dict):
                 for message in payload.get('messages') or []:
                     if isinstance(message, dict) and message.get('role') == 'user':
-                        existing_user_messages.add(str(message.get('content') or '').strip())
+                        content = _decode_state_db_content(message.get('content'))
+                        existing_user_messages.add(
+                            _message_content_text({'content': content}).strip()
+                        )
         except (OSError, json.JSONDecodeError, ValueError):
             pass
         for turn_id, event in sorted(states.items()):

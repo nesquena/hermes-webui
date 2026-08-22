@@ -3751,12 +3751,15 @@ def _message_text(value) -> str:
     if isinstance(value, list):
         parts = []
         for p in value:
+            if isinstance(p, str):
+                parts.append(p)
+                continue
             if not isinstance(p, dict):
                 continue
             ptype = str(p.get('type') or '').lower()
             if ptype in ('', 'text', 'input_text', 'output_text'):
                 parts.append(_message_content_part_text(p))
-        return _strip_thinking_markup('\n'.join(parts).strip())
+        return _strip_thinking_markup(''.join(parts).strip())
     return _strip_thinking_markup(str(value or '').strip())
 
 
@@ -6002,6 +6005,8 @@ def _message_replay_content_is_text_only(content):
         return False
     text_keys = {"text", "content", "input_text", "output_text"}
     for part in content:
+        if isinstance(part, str):
+            continue
         if not isinstance(part, dict):
             return False
         if str(part.get("type") or "").lower() not in {

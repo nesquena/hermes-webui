@@ -589,3 +589,52 @@ def test_replay_key_treats_empty_structured_content_as_scalar_mirror():
 
     assert _message_replay_key(scalar) == _message_replay_key(empty_structured)
     assert _strip_replayed_prefix([scalar], [empty_structured]) == []
+
+
+@pytest.mark.parametrize(
+    ("structured_content", "scalar_content"),
+    [
+        ([], ""),
+        (["hello"], "hello"),
+        ([{"type": "text", "text": "hello"}], "hello"),
+        (
+            ["[Workspace::v1: /workspace]\nhello", {"type": "text", "text": "world"}],
+            "helloworld",
+        ),
+    ],
+)
+def test_replay_key_matches_text_only_list_mirrors(
+    structured_content,
+    scalar_content,
+):
+    from api.streaming import (
+        _dedupe_replayed_context_messages,
+        _message_replay_key,
+        _strip_replayed_prefix,
+    )
+
+    scalar = {"role": "user", "content": scalar_content}
+    structured = {"role": "user", "content": structured_content}
+
+    assert _message_replay_key(scalar) == _message_replay_key(structured)
+    assert _strip_replayed_prefix([scalar], [structured]) == []
+    assert _dedupe_replayed_context_messages([scalar], [structured]) == [scalar]
+
+
+@pytest.mark.parametrize(
+    "structured_content",
+    [
+        ["hello", 42],
+        [{"type": "image_url", "image_url": {"url": IMAGE_A}}],
+        [{"type": "file", "file": {"file_id": "file-1"}}],
+        [{"type": "text", "text": "hello", "cache_control": {}}],
+    ],
+)
+def test_replay_key_keeps_non_text_list_content_structured(structured_content):
+    from api.streaming import _message_replay_key, _strip_replayed_prefix
+
+    scalar = {"role": "user", "content": "hello"}
+    structured = {"role": "user", "content": structured_content}
+
+    assert _message_replay_key(scalar) != _message_replay_key(structured)
+    assert _strip_replayed_prefix([scalar], [structured]) == [structured]

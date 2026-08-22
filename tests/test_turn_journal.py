@@ -176,6 +176,30 @@ def test_audit_ignores_completed_or_already_materialized_turn_journal_entry(tmp_
     assert report["items"] == []
 
 
+def test_audit_decodes_encoded_sidecar_user_turn_before_pending_check(tmp_path):
+    _write_session(
+        tmp_path,
+        "sid-1",
+        messages=[{"role": "user", "content": '\x00json:["recover me"]'}],
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "recover me",
+        },
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "ok"
+    assert report["summary"]["repairable"] == 0
+    assert report["items"] == []
+
+
 def test_derive_turn_journal_states_reports_terminal_collision_when_both_completed_and_interrupted():
     # A turn that recorded both completed and interrupted terminal events should
     # not silently collapse to one winner — the collision must be reported.
