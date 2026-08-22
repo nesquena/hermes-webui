@@ -16,9 +16,15 @@ IMAGE_A = "data:image/png;base64,AA=="
 IMAGE_B = "data:image/png;base64,AQ=="
 
 
-def _rich_content(image_url=IMAGE_A, text="describe this image"):
+def _rich_content(
+    image_url=IMAGE_A,
+    text="describe this image",
+    *,
+    part_type="text",
+    text_key="text",
+):
     return [
-        {"type": "text", "text": text},
+        {"type": part_type, text_key: text},
         {"type": "image_url", "image_url": {"url": image_url}},
     ]
 
@@ -177,13 +183,29 @@ def test_state_db_rich_sidecar_row_deduplicates_without_flattening(
     assert merged == sidecar
 
 
-def test_prefixed_state_db_rich_row_matches_bare_sidecar(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("part_type", "text_key"),
+    [
+        ("text", "text"),
+        ("text", "content"),
+        ("input_text", "input_text"),
+        ("output_text", "output_text"),
+    ],
+)
+def test_prefixed_state_db_rich_row_matches_bare_sidecar(
+    tmp_path,
+    monkeypatch,
+    part_type,
+    text_key,
+):
     from api.streaming import _workspace_context_prefix
 
     db = tmp_path / "state.db"
-    bare_content = _rich_content()
+    bare_content = _rich_content(part_type=part_type, text_key=text_key)
     prefixed_content = _rich_content(
         text=_workspace_context_prefix("/tmp/synthetic]path") + "describe this image",
+        part_type=part_type,
+        text_key=text_key,
     )
     _make_state_db(
         db,

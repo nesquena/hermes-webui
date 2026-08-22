@@ -447,7 +447,7 @@ def test_generic_subagent_title_decodes_structured_state_content(_isolate):
     _ensure_messages_table(conn)
     t0 = time.time() - 100
     content = [
-        {"type": "text", "text": "Describe the neutral test image"},
+        {"type": "input_text", "input_text": "Describe the neutral test image"},
         {
             "type": "image_url",
             "image_url": {"url": "data:image/png;base64,AA=="},
@@ -470,8 +470,15 @@ def test_generic_subagent_title_decodes_structured_state_content(_isolate):
             conn,
             "lineage_api_subagent_structured",
             role="user",
-            content="\x00json:" + json.dumps(content),
+            content="\x00json:" + json.dumps([{"type": "text", "text": 123}]),
             timestamp=t0 + 1,
+        )
+        _insert_state_message(
+            conn,
+            "lineage_api_subagent_structured",
+            role="user",
+            content="\x00json:" + json.dumps(content),
+            timestamp=t0 + 2,
         )
 
         row = {

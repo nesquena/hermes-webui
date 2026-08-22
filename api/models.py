@@ -3981,8 +3981,15 @@ def _message_content_text(message) -> str:
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get('text'), str):
-                parts.append(item['text'])
+            elif isinstance(item, dict):
+                part_type = str(item.get('type') or '').lower()
+                if part_type not in ('', 'text', 'input_text', 'output_text'):
+                    continue
+                for key in ('text', 'content', 'input_text', 'output_text'):
+                    value = item.get(key)
+                    if isinstance(value, str):
+                        parts.append(value)
+                        break
         return ''.join(parts)
     return ''
 
@@ -6466,7 +6473,7 @@ def title_from(messages, fallback: str='Untitled'):
             if c is None:
                 continue
             if isinstance(c, list):
-                c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
+                c = _message_content_text(m)
             text = _strip_attached_files_marker(str(c))
             if text:
                 return text[:64]
@@ -8980,7 +8987,10 @@ def _normalized_message_content_value(value, *, strip_workspace_prefix=False):
         return {
             key: _normalized_message_content_value(
                 child,
-                strip_workspace_prefix=strip_workspace_prefix and key == "text",
+                strip_workspace_prefix=(
+                    strip_workspace_prefix
+                    and key in {"text", "content", "input_text", "output_text"}
+                ),
             )
             for key, child in value.items()
             if key not in {"api_content", "_state_db_row_id", "_db_row_id", "state_db_row_id"}
