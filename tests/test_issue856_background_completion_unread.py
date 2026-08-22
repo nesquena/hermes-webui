@@ -63,7 +63,11 @@ def test_background_completion_unread_uses_explicit_marker_not_message_delta():
 
 def test_background_done_sets_marker_when_session_not_actively_viewed():
     done_block = _done_block()
-    assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in done_block
+    # Viewed-state must resolve completedSid and treat EITHER the original
+    # activeSid or the rotated completedSid as viewed (finding #2 of #6689
+    # re-gate) — the line is split across two lines, so check both halves.
+    assert "const isSessionViewed=_isSessionActivelyViewed(activeSid)" in done_block
+    assert "|| (!!completedSid && _isSessionActivelyViewed(completedSid));" in done_block
     assert "const completedSession=d.session||{session_id:activeSid};" in done_block
     assert "const completedSid=completedSession.session_id||activeSid;" in done_block
     assert "const completedMessageCount=completedSession.message_count != null" in done_block
@@ -434,8 +438,8 @@ def test_active_done_marks_viewed_without_setting_unread_marker():
 def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     done_block = _done_block()
 
-    active_const_idx = done_block.find("const isActiveSession=_isSessionCurrentPane(activeSid);")
-    viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
+    active_const_idx = done_block.find("const isActiveSession=(_isSessionCurrentPane(activeSid)")
+    viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid)")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
     session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
     render_idx = done_block.find("renderMessages(", active_guard_idx)
@@ -445,6 +449,14 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     assert active_const_idx != -1, "done handler must compute active/current pane separately"
     assert viewed_const_idx != -1, "done handler must still compute visible/focused read state"
     assert active_const_idx < viewed_const_idx
+    # #6689 re-gate finding #1: the done settle must re-assert current-stream
+    # ownership (canonical-pane AND current-stream) before mutating S.session.
+    assert "S.activeStreamId===streamId" in done_block, (
+        "done handler must re-assert stream ownership before settling (stale-stream race)"
+    )
+    assert "&& (!S.activeStreamId || S.activeStreamId===streamId);" in done_block, (
+        "isActiveSession must require current-stream ownership"
+    )
     assert session_update_idx != -1, "active hidden completion must still refresh S.session"
     assert render_idx != -1, "active hidden completion must still render the final assistant response"
     assert load_dir_idx != -1, "active hidden completion must keep normal active-session finalization"
@@ -492,8 +504,20 @@ def test_restore_settled_background_stream_marks_completion_unread():
     assert restore_idx != -1, "_restoreSettledSession(source) not found"
     restore_block = MESSAGES_JS[restore_idx:MESSAGES_JS.find("function _handleStreamError", restore_idx)]
 
-    assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in restore_block
+    # #6689 re-gate finding #2: restore must resolve completedSid first and
+    # treat either the original activeSid or the rotated completedSid as viewed
+    # (line is split across two lines — check both halves).
+    assert "const isSessionViewed=_isSessionActivelyViewed(activeSid)" in restore_block
+    assert "|| (!!completedSid && _isSessionActivelyViewed(completedSid));" in restore_block
     assert "const completedSid=session.session_id||activeSid;" in restore_block
+    # #6689 re-gate finding #1: restore must re-assert canonical-pane AND
+    # current-stream ownership before mutating S.session/S.messages/S.activeStreamId.
+    assert "S.activeStreamId && S.activeStreamId!==streamId" in restore_block, (
+        "restore must bail out as stale when a newer stream owns the turn"
+    )
+    assert "&& (!S.activeStreamId || S.activeStreamId===streamId);" in restore_block, (
+        "restore isActiveSession must require current-stream ownership"
+    )
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in restore_block
     assert "_markSessionCompletionUnread(completedSid, session.message_count);" in restore_block
     assert "if(isSessionViewed) _markSessionViewed(completedSid" in restore_block, (
