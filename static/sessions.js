@@ -927,11 +927,9 @@ function _purgeStaleInflightEntries() {
     && typeof _sessionListSourceById.get === 'function'
     ? _sessionListSourceById
     : null;
-  const currentSidebarSource = typeof _allSessionsScope !== 'undefined'
-    && _allSessionsScope
-    && typeof _allSessionsScope.sidebarSource === 'string'
-    ? _allSessionsScope.sidebarSource
-    : null;
+  const currentSidebarSources = typeof _allSessionsScope !== 'undefined'&&_allSessionsScope
+    ? new Set(String(_allSessionsScope.sidebarSourcesKey||_allSessionsScope.sidebarSource||'').split(',').filter(Boolean))
+    : new Set();
   for (const sid of Object.keys(INFLIGHT)) {
     // #4354: purge stale INFLIGHT even for a hung/idle session, BUT skip the one
     // session actively mid-send (#2689 start-race) — during /api/chat/start the
@@ -942,7 +940,7 @@ function _purgeStaleInflightEntries() {
     }
     if (!sessionsById.has(sid)) {
       const knownSource = sourceById ? sourceById.get(sid) : null;
-      if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) {
+      if (currentSidebarSources.size && (!knownSource || !currentSidebarSources.has(knownSource))) {
         continue;
       }
       // Session is absent from _allSessions — it was deleted / archived /
@@ -1206,11 +1204,9 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     && typeof _sessionListSourceById.delete === 'function'
     ? _sessionListSourceById
     : new Map();
-  const currentSidebarSource = typeof _allSessionsScope !== 'undefined'
-    && _allSessionsScope
-    && typeof _allSessionsScope.sidebarSource === 'string'
-    ? _allSessionsScope.sidebarSource
-    : null;
+  const currentSidebarSources = typeof _allSessionsScope !== 'undefined'&&_allSessionsScope
+    ? new Set(String(_allSessionsScope.sidebarSourcesKey||_allSessionsScope.sidebarSource||'').split(',').filter(Boolean))
+    : new Set();
   for (const s of sessions) {
     if (!s || !s.session_id) continue;
     const sid = s.session_id;
@@ -1284,7 +1280,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
   for (const sid of staleRuntimeStateSids) {
     if (seen.has(sid)) continue;
     const knownSource = sourceById.get(sid);
-    if (currentSidebarSource && (!knownSource || knownSource !== currentSidebarSource)) continue;
+    if (currentSidebarSources.size && (!knownSource || !currentSidebarSources.has(knownSource))) continue;
     _sessionStreamingById.delete(sid);
     _sessionListSnapshotById.delete(sid);
     sourceById.delete(sid);
@@ -1507,7 +1503,14 @@ async function newSession(flash, options={}){
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
-    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
+    const hasNonWebuiSource=typeof _sessionSourceFilters!=='undefined'&&Array.isArray(_sessionSourceFilters)
+      ? _sessionSourceFilters.some(source=>source!=='webui')
+      : _sessionSourceFilter!=='webui';
+    if(hasNonWebuiSource){
+      if(typeof _sessionSourceFilters!=='undefined') _sessionSourceFilters=['webui'];
+      _sessionSourceFilter='webui';
+      try{localStorage.setItem('hermes-session-source-filters-v2',JSON.stringify(['webui']));}catch(_e){}
+    }
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
@@ -2515,10 +2518,33 @@ async function _openSidebarSession(session, loadOpts={}){
   // Tell loadSession to skip its pre-hook — we already ran it above.
   await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
+  _focusComposerAfterSidebarOpen();
+}
+
+function _focusComposerAfterSidebarOpen(){
+  // Touch-primary phones: auto-focus pops the virtual keyboard and covers the
+  // transcript. Desktop / fine-pointer (including the macOS WKWebView shell)
+  // should land the caret in the composer so a sidebar click is ready to type.
+  if(typeof _isTouchKeyboardViewport==='function' && _isTouchKeyboardViewport()) return;
+  const composer=(typeof $==='function')?$('msg'):(typeof document!=='undefined'?document.getElementById('msg'):null);
+  if(!composer||typeof composer.focus!=='function') return;
+  try{composer.focus({preventScroll:true});}
+  catch(_){composer.focus();}
 }
 
 function _isReadOnlySession(session) {
   return !!(session && (session.read_only || session.is_read_only));
+}
+
+function _isMatrixSession(session) {
+  if (!session) return false;
+  const sources = [session.source, session.source_tag, session.raw_source, session.platform]
+    .map(value => String(value || '').trim().toLowerCase());
+  return sources.includes('matrix');
+}
+
+function _isOrganizableReadOnlySession(session) {
+  return _isReadOnlySession(session) && _isMatrixSession(session);
 }
 
 function _isBranchableReadOnlySession(session) {
@@ -2553,18 +2579,187 @@ function _isCliSession(session) {
   return session.is_cli_session === true;
 }
 
+const _SESSION_ORIGIN_ORDER=['webui','cli','tui','acp','matrix','telegram','slack','discord','email','wecom','wecom_callback','weixin','cron','webhook','kanban','api','claude_code','tool','subagent','other'];
+const _SESSION_ORIGIN_LABELS={
+  webui:'WebUI sessions',cli:'CLI sessions',tui:'TUI sessions',acp:'ACP sessions',
+  matrix:'Matrix sessions',telegram:'Telegram sessions',slack:'Slack sessions',
+  discord:'Discord sessions',email:'Email sessions',wecom:'WeCom sessions',
+  wecom_callback:'WeCom Callback sessions',weixin:'Weixin sessions',cron:'Cron sessions',
+  webhook:'Webhook sessions',kanban:'Kanban sessions',api:'API sessions',
+  claude_code:'Claude Code sessions',tool:'Tool sessions',subagent:'Subagent sessions',
+  other:'Other sessions',
+};
+function _sessionOrigin(session){
+  if(!session) return 'other';
+  const explicit=String(session.session_origin||'').trim().toLowerCase();
+  if(explicit) return explicit.replace(/[- ]/g,'_');
+  const raw=[session.source_tag,session.raw_source,session.source,session.platform,session.source_label]
+    .map(value=>String(value||'').trim().toLowerCase().replace(/[- ]/g,'_'));
+  const known=_SESSION_ORIGIN_ORDER.filter(origin=>origin!=='webui');
+  for(const marker of raw){
+    if(marker==='webui') return 'webui';
+    if(marker==='api_server') return 'api';
+    if(known.includes(marker)) return marker;
+  }
+  if(session.session_source==='cli'||_isCliSession(session)) return 'cli';
+  if(!raw.some(Boolean)&&!session.session_source) return 'webui';
+  return 'other';
+}
+function _sessionOriginKeys(){
+  const counts=(_serverSessionOriginCounts&&typeof _serverSessionOriginCounts==='object')?_serverSessionOriginCounts:{};
+  const keys=new Set(['webui']);
+  if(window._showCliSessions) keys.add('cli');
+  Object.keys(counts).forEach(key=>{if(Number(counts[key])>0)keys.add(key);});
+  for(const source of _sessionSourceFilters)keys.add(source);
+  return [...keys].sort((a,b)=>{
+    const ai=_SESSION_ORIGIN_ORDER.indexOf(a),bi=_SESSION_ORIGIN_ORDER.indexOf(b);
+    return (ai<0?999:ai)-(bi<0?999:bi)||a.localeCompare(b);
+  });
+}
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  const serverLabel=_serverSessionOriginLabels&&_serverSessionOriginLabels[filter];
+  const label=serverLabel||_SESSION_ORIGIN_LABELS[filter]||`${String(filter||'Other').replace(/_/g,' ').replace(/\b\w/g,m=>m.toUpperCase())} sessions`;
+  return `${label} (${n})`;
+}
+function _sessionOriginLabel(filter) {
+  return _sessionSourceLabel(filter, 0).replace(/ \(0\)$/,'');
+}
+
+function _sessionSourceFilterModel(renderedWebuiSessionCount, renderedCliSessionCount){
+  const selectedOrigins=_normalizeSessionSourceFilters(_sessionSourceFilters);
+  const selectedSet=new Set(selectedOrigins);
+  const items=_sessionOriginKeys().map(origin=>{
+    const count=_sessionSourceTabCount(origin,renderedWebuiSessionCount,renderedCliSessionCount);
+    return {origin,label:_sessionOriginLabel(origin),count:Number(count)||0,selected:selectedSet.has(origin)};
+  });
+  return {
+    selectedOrigins,
+    visibleChips:selectedOrigins.slice(0,2).map(origin=>({origin,label:_sessionOriginLabel(origin)})),
+    overflowCount:Math.max(0,selectedOrigins.length-2),
+    originCount:items.length,
+    items,
+  };
+}
+
+function _renderSessionSourceMenuItem(item,onToggle){
+  const row=document.createElement('label');
+  row.className='session-source-menu-item'+(item.selected?' active':'');
+  row.setAttribute('role','menuitemcheckbox');row.setAttribute('aria-checked',item.selected?'true':'false');
+  const checkbox=document.createElement('input');
+  checkbox.type='checkbox';checkbox.className='session-source-menu-checkbox';checkbox.checked=item.selected;
+  checkbox.dataset.origin=item.origin;
+  checkbox.setAttribute('aria-label',item.label);
+  checkbox.onchange=(event)=>{event.stopPropagation();onToggle(item.origin,checkbox.checked);};
+  const label=document.createElement('span');label.className='session-source-menu-label';label.textContent=item.label;
+  const count=document.createElement('span');count.className='session-source-menu-count';count.textContent=String(item.count);
+  row.appendChild(checkbox);row.appendChild(label);row.appendChild(count);
+  return row;
+}
+
+function _renderSessionSourceFilterControl(renderedWebuiSessionCount, renderedCliSessionCount){
+  const model=_sessionSourceFilterModel(renderedWebuiSessionCount,renderedCliSessionCount);
+  if(model.originCount<2) return null;
+  const control=document.createElement('div');
+  control.className='session-source-filter';
+  const selectedBar=document.createElement('div');selectedBar.className='session-source-selected-bar';
+  control.appendChild(selectedBar);
+  const trigger=document.createElement('button');
+  trigger.type='button';trigger.className='session-source-menu-trigger';
+  trigger.setAttribute('aria-haspopup','menu');trigger.setAttribute('aria-expanded','false');
+  trigger.textContent=`Sources ${model.originCount}`;
+  control.appendChild(trigger);
+  const menu=document.createElement('div');
+  menu.className='session-source-menu';menu.setAttribute('role','menu');menu.hidden=true;
+  let outsideHandler=null;
+  let outsideTimer=0;
+  const releaseOutsideHandler=()=>{
+    if(outsideTimer){clearTimeout(outsideTimer);outsideTimer=0;}
+    if(outsideHandler){document.removeEventListener('pointerdown',outsideHandler);outsideHandler=null;}
+    if(_sessionSourceMenuCleanup===releaseOutsideHandler)_sessionSourceMenuCleanup=null;
+  };
+  const close=(restoreFocus=false)=>{
+    releaseOutsideHandler();
+    if(menu.hidden)return;
+    menu.hidden=true;trigger.setAttribute('aria-expanded','false');
+    if(restoreFocus)trigger.focus();
+  };
+  const openMenu=(event)=>{
+    event.stopPropagation();
+    if(menu.hidden){
+      menu.hidden=false;trigger.setAttribute('aria-expanded','true');
+      if(_sessionSourceMenuCleanup)_sessionSourceMenuCleanup();
+      _sessionSourceMenuCleanup=releaseOutsideHandler;
+      outsideHandler=(outsideEvent)=>{if(!control.contains(outsideEvent.target))close(false);};
+      outsideTimer=setTimeout(()=>{outsideTimer=0;if(!menu.hidden)document.addEventListener('pointerdown',outsideHandler);},0);
+      const selected=menu.querySelector('.session-source-menu-checkbox:checked');
+      if(selected)selected.focus();
+    }else close(false);
+  };
+  const refreshSelectedState=()=>{
+    const nextModel=_sessionSourceFilterModel(renderedWebuiSessionCount,renderedCliSessionCount);
+    selectedBar.innerHTML='';
+    for(const chip of nextModel.visibleChips){
+      const node=document.createElement('div');node.className='session-source-filter-chip';node.title=chip.label;
+      const text=document.createElement('span');text.textContent=chip.label;node.appendChild(text);
+      const remove=document.createElement('button');remove.type='button';remove.className='session-source-chip-remove';
+      remove.textContent='\u00d7';remove.setAttribute('aria-label',`Remove ${chip.label}`);
+      remove.onclick=(event)=>{event.stopPropagation();_toggleSessionSourceFilter(chip.origin,false,{renderCache:false});refreshSelectedState();};
+      node.appendChild(remove);selectedBar.appendChild(node);
+    }
+    if(nextModel.overflowCount){
+      const overflow=document.createElement('button');overflow.type='button';overflow.className='session-source-overflow';
+      overflow.textContent=`+${nextModel.overflowCount}`;overflow.setAttribute('aria-label',`${nextModel.overflowCount} more selected sources`);
+      overflow.onclick=openMenu;selectedBar.appendChild(overflow);
+    }
+    const selectedSet=new Set(nextModel.selectedOrigins);
+    menu.querySelectorAll('.session-source-menu-item').forEach(row=>{
+      const checkbox=row.querySelector('.session-source-menu-checkbox');
+      const selected=checkbox&&selectedSet.has(checkbox.dataset.origin);
+      if(checkbox)checkbox.checked=selected;
+      row.classList.toggle('active',selected);row.setAttribute('aria-checked',selected?'true':'false');
+    });
+  };
+  for(const item of model.items){
+    const row=_renderSessionSourceMenuItem(item,(origin,selected)=>{
+      _toggleSessionSourceFilter(origin,selected,{renderCache:false});
+      refreshSelectedState();
+    });
+    const checkbox=row.querySelector('.session-source-menu-checkbox');
+    if(checkbox)checkbox.dataset.origin=item.origin;
+    menu.appendChild(row);
+  }
+  trigger.onclick=openMenu;
+  control.onkeydown=(event)=>{if(event.key==='Escape'&&!menu.hidden){event.preventDefault();event.stopPropagation();close(true);}};
+  control.appendChild(menu);
+  refreshSelectedState();
+  return control;
 }
 
 function _clearSessionSourceTabCounts() {
   _serverWebuiSessionCount = null;
   _serverCliSessionCount = null;
+  _serverSessionOriginCounts = null;
+  _serverSessionOriginLabels = null;
 }
 
-function _requestedSessionSidebarSource() {
-  return window._showCliSessions ? _sessionSourceFilter : 'webui';
+function _normalizeSessionSourceFilters(values){
+  const normalized=[];
+  const seen=new Set();
+  for(const value of (Array.isArray(values)?values:[])){
+    const source=String(value||'').trim().toLowerCase().replace(/[- ]/g,'_');
+    if(!source||!/^[a-z0-9_]+$/.test(source)||seen.has(source))continue;
+    seen.add(source);normalized.push(source);
+  }
+  return normalized.length?normalized:['webui'];
+}
+
+function _requestedSessionSidebarSources() {
+  return window._showCliSessions ? _normalizeSessionSourceFilters(_sessionSourceFilters) : ['webui'];
+}
+
+function _sessionSourceSelectionKey(values){
+  return _normalizeSessionSourceFilters(values).slice().sort().join(',');
 }
 
 function _sessionListExcludeHiddenEnabled() {
@@ -2582,7 +2777,7 @@ function _sessionArchivePagingFilterActive() {
 
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
-  qs.set('sidebar_source', _requestedSessionSidebarSource());
+  for(const source of _requestedSessionSidebarSources())qs.append('sidebar_source',source);
   if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived){
@@ -2599,6 +2794,9 @@ function _sessionListQueryString() {
 }
 
 function _sessionSourceTabCount(filter, renderedWebuiSessionCount, renderedCliSessionCount) {
+  if(_serverSessionOriginCounts&&Object.prototype.hasOwnProperty.call(_serverSessionOriginCounts,filter)){
+    return Number(_serverSessionOriginCounts[filter])||0;
+  }
   const serverCount = filter === 'cli' ? _serverCliSessionCount : _serverWebuiSessionCount;
   if (Number.isFinite(serverCount)) return serverCount;
   return filter === 'cli' ? renderedCliSessionCount : renderedWebuiSessionCount;
@@ -2612,24 +2810,51 @@ function _setActiveProjectFilter(projectId) {
   void renderSessionList({deferWhileInteracting:false});
 }
 
-function _setSessionSourceFilter(filter) {
-  const next = filter === 'cli' ? 'cli' : 'webui';
-  if (_sessionSourceFilter === next) return;
-  _sessionSourceFilter = next;
+function _setSessionSourceFilters(filters,options) {
+  options=options&&typeof options==='object'?options:{};
+  const next=_normalizeSessionSourceFilters(filters);
+  if(next.length===_sessionSourceFilters.length&&next.every((source,index)=>source===_sessionSourceFilters[index]))return;
+  _sessionSourceFilters=next;
+  _sessionSourceFilter=next[0];
   _activeProject = null;
   _selectedSessions.clear();
   _sessionSelectMode = false;
-  try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
-  renderSessionListFromCache();
+  try { localStorage.setItem('hermes-session-source-filters-v2', JSON.stringify(next)); } catch (_e) {}
+  if(options.renderCache!==false)renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
 
-function _restoreSessionSourceFilter() {
+function _toggleSessionSourceFilter(origin, selected, options){
+  options=options&&typeof options==='object'?options:{};
+  const source=_normalizeSessionSourceFilters([origin])[0];
+  const next=selected
+    ? _sessionSourceFilters.concat(source)
+    : _sessionSourceFilters.filter(item=>item!==source);
+  _setSessionSourceFilters(next,options);
+}
+
+function _setSessionSourceFilter(filter) {
+  _setSessionSourceFilters([filter]);
+}
+
+function _restoreSessionSourceFilters() {
   try {
-    const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    const stored=localStorage.getItem('hermes-session-source-filters-v2');
+    let restored=null;
+    if(stored){
+      try{const parsed=JSON.parse(stored);if(Array.isArray(parsed))restored=_normalizeSessionSourceFilters(parsed);}catch(_e){}
+    }
+    if(!restored){
+      const legacy=localStorage.getItem('hermes-session-source-filter');
+      restored=_normalizeSessionSourceFilters(legacy?[legacy]:[]);
+      localStorage.setItem('hermes-session-source-filters-v2',JSON.stringify(restored));
+    }
+    _sessionSourceFilters=restored;
+    _sessionSourceFilter=restored[0];
   } catch (_e) {}
 }
+
+function _restoreSessionSourceFilter(){_restoreSessionSourceFilters();}
 
 function _normalizeMessageForCliImportComparison(message) {
   if (!message || typeof message !== 'object') return message;
@@ -3969,7 +4194,11 @@ let _archivedCliCount = 0;        // archived non-WebUI sessions not fetched unt
 let _archivedRowsLoadedLimit = SESSION_ARCHIVED_PAGE_SIZE;
 let _serverWebuiSessionCount = null;  // explicit server count for WebUI sessions
 let _serverCliSessionCount = null;    // explicit server count for CLI sessions
-let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+let _serverSessionOriginCounts = null;
+let _serverSessionOriginLabels = null;
+let _sessionSourceMenuCleanup = null;
+let _sessionSourceFilters = ['webui'];  // ordered, non-empty high-level origins
+let _sessionSourceFilter = 'webui';  // first-origin compatibility alias
 
 function _restoreShowAllProfiles(){
   try{
@@ -4259,18 +4488,54 @@ function _setActiveSessionUrl(sid){
 
 // ── Batch select mode ──
 function toggleSessionSelectMode(){
-  _sessionSelectMode=!_sessionSelectMode;
+  if(_sessionSelectMode) exitSessionSelectMode();
+  else _enableSessionSelectMode();
+}
+function _enableSessionSelectMode(){
+  if(_sessionSelectMode) return;
+  _sessionSelectMode=true;
   _selectedSessions.clear();
   renderSessionListFromCache();
+}
+function _renderSessionGroupSelectTrigger(){
+  const trigger=document.createElement('button');
+  trigger.type='button';trigger.className='session-group-select-trigger';trigger.textContent='Select';
+  trigger.title='Select conversations';trigger.setAttribute('aria-label','Select conversations');
+  trigger.onclick=(event)=>{event.stopPropagation();_enableSessionSelectMode();};
+  trigger.onpointerup=(event)=>{event.stopPropagation();};
+  return trigger;
 }
 function exitSessionSelectMode(){
   _sessionSelectMode=false;
   _selectedSessions.clear();
-  const bar=$('batchActionBar');
-  if(bar) bar.style.display='none';
   renderSessionListFromCache();
 }
+function _isSessionSelectable(session){
+  return !!session && (!_isReadOnlySession(session) || _isOrganizableReadOnlySession(session));
+}
+function _sessionForSelectionId(sid){
+  if(!sid) return null;
+  const direct=_sessionSnapshotById(sid);
+  if(direct) return direct;
+  for(const session of (_allSessions||[])){
+    const child=(session&&Array.isArray(session._child_sessions))
+      ? session._child_sessions.find(item=>item&&item.session_id===sid)
+      : null;
+    if(child) return child;
+  }
+  return null;
+}
+function _sessionSelectionIds(){
+  return (_sessionVisibleSidebarIds||[]).filter(sid=>_isSessionSelectable(_sessionForSelectionId(sid)));
+}
+function _pruneSelectedSessions(){
+  const allowed=new Set(_sessionSelectionIds());
+  for(const sid of [..._selectedSessions]){
+    if(!allowed.has(sid)) _selectedSessions.delete(sid);
+  }
+}
 function toggleSessionSelect(sid){
+  if(!_isSessionSelectable(_sessionForSelectionId(sid))) return;
   if(_selectedSessions.has(sid)) _selectedSessions.delete(sid);
   else _selectedSessions.add(sid);
   _updateBatchActionBar();
@@ -4279,6 +4544,7 @@ function toggleSessionSelect(sid){
   if(item){item.classList.toggle('selected',_selectedSessions.has(sid));if(cb)cb.checked=_selectedSessions.has(sid);}
 }
 function setSessionSelected(sid, selected){
+  if(!_isSessionSelectable(_sessionForSelectionId(sid))) return;
   if(selected) _selectedSessions.add(sid);
   else _selectedSessions.delete(sid);
   _updateBatchActionBar();
@@ -4289,7 +4555,7 @@ function setSessionSelected(sid, selected){
 function selectAllSessions(){
   _selectedSessions.clear();
   const ids=Array.isArray(_sessionVisibleSidebarIds)&&_sessionVisibleSidebarIds.length
-    ? _sessionVisibleSidebarIds
+    ? _sessionSelectionIds()
     : Array.from(document.querySelectorAll('.session-select-cb')).map(cb=>cb.dataset.sid).filter(Boolean);
   ids.forEach(sid=>_selectedSessions.add(sid));
   document.querySelectorAll('.session-select-cb').forEach(cb=>{
@@ -4304,18 +4570,28 @@ function deselectAllSessions(){
   _updateBatchActionBar();
 }
 function _updateBatchActionBar(){
-  const bar=$('batchActionBar');if(!bar)return;
-  const count=_selectedSessions.size;
-  if(count>0){_renderBatchActionBar();}
-  else{bar.style.display='none';}
+  if(!_sessionSelectMode) return;
+  _renderSessionBatchDock();
 }
 function _renderBatchActionBar(){
   const bar=$('batchActionBar');if(!bar)return;
-  bar.innerHTML='';bar.style.display=_selectedSessions.size>0?'flex':'none';
+  const count=_selectedSessions.size;
+  const writableSelectionIds=[..._selectedSessions].filter(sid=>!_isOrganizableReadOnlySession(_sessionForSelectionId(sid)));
+  bar.innerHTML='';bar.style.display='flex';
+  const toolbar=document.createElement('div');toolbar.className='batch-toolbar';
+  const exitBtn=document.createElement('button');exitBtn.type='button';exitBtn.className='batch-exit-btn';
+  exitBtn.textContent='\u2715';exitBtn.title='Exit select mode';exitBtn.setAttribute('aria-label','Exit select mode');
+  exitBtn.onclick=(e)=>{e.stopPropagation();exitSessionSelectMode();};toolbar.appendChild(exitBtn);
   const countBadge=document.createElement('span');countBadge.className='batch-count';
-  countBadge.textContent=t('session_selected_count',_selectedSessions.size);bar.appendChild(countBadge);
+  countBadge.textContent=count?t('session_selected_count',count):t('session_no_selection');toolbar.appendChild(countBadge);
+  const selectAllBtn=document.createElement('button');selectAllBtn.type='button';selectAllBtn.className='batch-select-all-btn';
+  selectAllBtn.textContent=t('session_select_all');selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};toolbar.appendChild(selectAllBtn);
+  const deselectBtn=document.createElement('button');deselectBtn.type='button';deselectBtn.className='batch-deselect-all-btn';
+  deselectBtn.textContent=t('session_deselect_all');deselectBtn.onclick=(e)=>{e.stopPropagation();deselectAllSessions();};toolbar.appendChild(deselectBtn);
+  bar.appendChild(toolbar);
   // Archive
   const archiveBtn=document.createElement('button');archiveBtn.className='batch-action-btn';
+  archiveBtn.disabled=!count;
   archiveBtn.textContent=t('session_batch_archive');
   archiveBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
@@ -4338,13 +4614,16 @@ function _renderBatchActionBar(){
   };bar.appendChild(archiveBtn);
   // Move
   const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
+  moveBtn.disabled=!count;
   moveBtn.textContent=t('session_batch_move');
   moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker();};bar.appendChild(moveBtn);
   // Delete
   const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
+  deleteBtn.disabled=!writableSelectionIds.length;
   deleteBtn.textContent=t('session_batch_delete');
   deleteBtn.onclick=async()=>{
-    const ids=[..._selectedSessions];
+    const ids=[...writableSelectionIds];
+    if(!ids.length){showToast('Imported Matrix sessions can only be archived or moved.',3000);return;}
     const wtCount=_worktreeSessionCount(ids);
     const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
     const ok=await showConfirmDialog({
@@ -4373,6 +4652,18 @@ function _renderBatchActionBar(){
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
+}
+function _renderSessionBatchDock(){
+  const dock=$('sessionBatchDock');if(!dock)return;
+  dock.innerHTML='';
+  if(!_sessionSelectMode){
+    dock.style.display='none';
+    return;
+  }
+  dock.style.display='block';
+  const batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';
+  dock.appendChild(batchBar);
+  _renderBatchActionBar();
 }
 function _showBatchProjectPicker(){
   const ids=[..._selectedSessions];if(!ids.length)return;
@@ -4858,7 +5149,7 @@ function _playSessionActionMenuEntrance(menu){
 }
 
 async function _archiveSession(session, archived=true, beforeListRender=null){
-  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
+  if(_isReadOnlySession(session) && !_isOrganizableReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
@@ -4888,12 +5179,36 @@ function _openSessionActionMenu(session, anchorEl){
   const isMessagingSession = _isMessagingSession(session);
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
+  const canOrganizeReadOnly = _isOrganizableReadOnlySession(session);
   const menu=document.createElement('div');
   menu.className='session-action-menu';
   menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
   _appendSessionCopyLinkAction(menu, session);
+  if(canOrganizeReadOnly){
+    menu.appendChild(_buildSessionAction(
+      t('session_move_project'),
+      session.project_id?t('session_move_project_desc_has'):t('session_move_project_desc_none'),
+      ICONS.folder,
+      ()=>{
+        closeSessionActionMenu();
+        _showProjectPicker(session, anchorEl);
+      }
+    ));
+    menu.appendChild(_buildSessionAction(
+      session.archived?t('session_restore'):t('session_archive'),
+      session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),
+      session.archived?ICONS.unarchive:ICONS.archive,
+      async()=>{
+        closeSessionActionMenu();
+        await _archiveSession(session,!session.archived);
+      }
+    ));
+    _appendSessionExportHtmlAction(menu, session);
+    _mountSessionActionMenu(menu, session, anchorEl);
+    return;
+  }
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
     _mountSessionActionMenu(menu, session, anchorEl);
@@ -5192,7 +5507,7 @@ function showSessionListSkeleton(targetProfile){
       && typeof _knownSessionProfileCount === 'function')
     ? _knownSessionProfileCount(targetProfile) : null;
   const filterActive = (typeof _activeProject !== 'undefined' && _activeProject)
-    || (typeof _sessionSourceFilter !== 'undefined' && _sessionSourceFilter === 'cli');
+    || (typeof _sessionSourceFilters !== 'undefined' && _sessionSourceFilters.some(source=>source!=='webui'));
   const wrap = document.createElement('div');
   wrap.setAttribute('aria-hidden', 'true');
   if(knownCount === 0 && !filterActive){
@@ -5406,7 +5721,7 @@ function _sessionListRenderSignature(){
       _allProjects,
       _activeSessionIdForSidebar(),
       search,
-      _sessionSourceFilter,
+      _sessionSourceFilters,
       !!_sessionSelectMode,
       (window._sidebarDensity==='detailed'?'d':'c'),
       !!_showAllProfiles,
@@ -5429,6 +5744,10 @@ function _applySessionListPayload(sessData, projData, opts){
   _serverCliSessionCount = Object.prototype.hasOwnProperty.call(sessData, 'cli_session_count')
     ? Number(sessData.cli_session_count)
     : null;
+  _serverSessionOriginCounts = sessData.session_origin_counts && typeof sessData.session_origin_counts === 'object'
+    ? sessData.session_origin_counts : null;
+  _serverSessionOriginLabels = sessData.session_origin_labels && typeof sessData.session_origin_labels === 'object'
+    ? sessData.session_origin_labels : null;
   if (!Number.isFinite(_serverWebuiSessionCount)) _serverWebuiSessionCount = null;
   if (!Number.isFinite(_serverCliSessionCount)) _serverCliSessionCount = null;
   // Capture server clock for clock-skew compensation (issue #1144).
@@ -5453,12 +5772,19 @@ function _applySessionListPayload(sessData, projData, opts){
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
   // profile's rows as if they were current (#4167 review item 3).
+  const requestedSidebarSources=typeof _requestedSessionSidebarSources==='function'
+    ? _requestedSessionSidebarSources()
+    : [typeof _requestedSessionSidebarSource==='function'?_requestedSessionSidebarSource():'webui'];
+  const requestedSidebarSourcesKey=typeof _sessionSourceSelectionKey==='function'
+    ? _sessionSourceSelectionKey(requestedSidebarSources)
+    : requestedSidebarSources.slice().sort().join(',');
   _allSessionsScope = {
     profile: (typeof sessData.active_profile === 'string' && sessData.active_profile)
       ? sessData.active_profile
       : (S.activeProfile || 'default'),
     allProfiles: !!_showAllProfiles,
-    sidebarSource: _requestedSessionSidebarSource(),
+    sidebarSource: requestedSidebarSources[0],
+    sidebarSourcesKey: requestedSidebarSourcesKey,
     excludeHidden: _sessionListExcludeHiddenEnabled(),
   };
   // Record this profile's session count so the NEXT switch into it can pick an
@@ -5469,7 +5795,7 @@ function _applySessionListPayload(sessData, projData, opts){
   // a different filter). This mirrors the read-side `filterActive` gate in
   // showSessionListSkeleton so the write and read agree on what the count means.
   const _recordFilterActive = (typeof _activeProject !== 'undefined' && _activeProject)
-    || (typeof _sessionSourceFilter !== 'undefined' && _sessionSourceFilter === 'cli');
+    || (typeof _sessionSourceFilters !== 'undefined' && _sessionSourceFilters.some(source=>source!=='webui'));
   if (!_showAllProfiles && !_recordFilterActive) {
     _recordSessionProfileCount(_allSessionsScope.profile, _allSessions.length);
   }
@@ -5681,16 +6007,23 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // PRIOR profile's sessions; re-rendering them would falsely show another
     // profile's conversations, so render the error state with no rows instead
     // (#4167 review item 3).
+    const _currentRequestedSources=typeof _requestedSessionSidebarSources==='function'
+      ? _requestedSessionSidebarSources()
+      : [typeof _requestedSessionSidebarSource==='function'?_requestedSessionSidebarSource():'webui'];
+    const _currentRequestedSourcesKey=typeof _sessionSourceSelectionKey==='function'
+      ? _sessionSourceSelectionKey(_currentRequestedSources)
+      : _currentRequestedSources.slice().sort().join(',');
     const _curScope = {
       profile: S.activeProfile || 'default',
       allProfiles: !!_showAllProfiles,
-      sidebarSource: _requestedSessionSidebarSource(),
+      sidebarSource: _currentRequestedSources[0],
+      sidebarSourcesKey: _currentRequestedSourcesKey,
       excludeHidden: _sessionListExcludeHiddenEnabled(),
     };
     const _scopeMatches = _allSessionsScope
       && _allSessionsScope.profile === _curScope.profile
       && _allSessionsScope.allProfiles === _curScope.allProfiles
-      && _allSessionsScope.sidebarSource === _curScope.sidebarSource
+      && _allSessionsScope.sidebarSourcesKey === _curScope.sidebarSourcesKey
       && _allSessionsScope.excludeHidden === _curScope.excludeHidden;
     // #4671: the /api/sessions fetch failed — clear the skeleton flag so this error
     // render (matched cache, or empty rows for a mismatched scope) replaces the
@@ -7571,16 +7904,33 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+  let activeSourceFilters=typeof _sessionSourceFilters!=='undefined'&&Array.isArray(_sessionSourceFilters)
+    ? _sessionSourceFilters.slice()
+    : [typeof _sessionSourceFilter==='string'?_sessionSourceFilter:'webui'];
+  if(activeSourceFilters.some(source=>source!=='webui') && !window._showCliSessions && cliSessionCount===0){
+    activeSourceFilters=['webui'];
+    if(typeof _sessionSourceFilters!=='undefined') _sessionSourceFilters=activeSourceFilters.slice();
     _sessionSourceFilter='webui';
   }
-  const showCliOnly=_sessionSourceFilter==='cli';
-  const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;
+  const selectedOrigins=new Set(activeSourceFilters);
+  const sourceRowsById=new Map(allMatched.filter(Boolean).map(s=>[s.session_id,s]));
+  const effectiveOrigin=s=>{
+    const parent=s&&s.parent_session_id?sourceRowsById.get(s.parent_session_id):null;
+    return parent&&_isChildSession(s)?_sessionOrigin(parent):_sessionOrigin(s);
+  };
+  const selectedProfileFiltered=webuiProfileFiltered.concat(cliProfileFiltered).filter(s=>selectedOrigins.has(effectiveOrigin(s)));
+  const selectedSessionsRaw=webuiSessionsRaw.concat(cliSessionsRaw).filter(s=>selectedOrigins.has(effectiveOrigin(s)));
+  const selectedReferenceRaw=webuiReferenceRaw.concat(cliReferenceRaw).filter(s=>selectedOrigins.has(effectiveOrigin(s)));
+  const showCliOnly=selectedOrigins.size===1&&selectedOrigins.has('cli');
+  const serverArchivedCount=(selectedOrigins.has('webui')?_archivedWebuiCount:0)+([...selectedOrigins].some(origin=>origin!=='webui')?_archivedCliCount:0);
+  const selectedArchivedCount=selectedSessionsRaw.filter(s=>s.archived).length;
   return {
     cliSessionCount,
-    profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered,
-    sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw,
+    profileFiltered: selectedProfileFiltered,
+    sessionsRaw: selectedSessionsRaw,
+    referenceRaw: selectedReferenceRaw,
     archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0)),
+    originArchivedCount: Math.max(selectedArchivedCount, Number(serverArchivedCount||0)),
     webuiReferenceRaw,
     cliReferenceRaw,
     webuiSessionsRaw,
@@ -7596,12 +7946,17 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 // suppression context — silently hiding a visible child/fork whose archived
 // ancestor lives outside the current view. Scope the references to the same
 // project + source bucket as the render they feed before using them.
-function _scopedSidebarReferenceRows(isCli){
+function _scopedSidebarReferenceRows(isCli=null){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
+  const activeSourceFilters=typeof _sessionSourceFilters!=='undefined'&&Array.isArray(_sessionSourceFilters)
+    ? _sessionSourceFilters
+    : [typeof _sessionSourceFilter==='string'?_sessionSourceFilter:'webui'];
+  const selectedOrigins=new Set(activeSourceFilters.map(source=>String(source||'').trim().toLowerCase().replace(/[- ]/g,'_')).filter(Boolean));
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
+    if(!selectedOrigins.has(_sessionOrigin(s))) return false;
     // Source scope: only references in the same webui/cli bucket as this render.
-    if(_isCliSession(s)!==!!isCli) return false;
+    if(typeof isCli==='boolean'&&_isCliSession(s)!==isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
     if(_activeProject===NO_PROJECT_FILTER){ if(s.project_id) return false; }
     else if(_activeProject){ if(s.project_id!==_activeProject) return false; }
@@ -7701,19 +8056,22 @@ function renderSessionListFromCache(){
   // session id into another conversation, that content hit should still appear.
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
+  const sidebarPartition = {
+    ..._partitionSidebarSessionRows(allMatched, activeSidForSidebar),
+  };
   const {
     cliSessionCount,
     profileFiltered,
     sessionsRaw,
     archivedCount,
+    originArchivedCount,
     webuiReferenceRaw,
     cliReferenceRaw,
     webuiSessionsRaw,
     cliSessionsRaw,
-  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
-  const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)]);
+  }=sidebarPartition;
+  const referenceRaw=sidebarPartition.referenceRaw;
+  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows()]);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
@@ -7736,7 +8094,9 @@ function renderSessionListFromCache(){
   const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
+  if(_sessionSourceMenuCleanup)_sessionSourceMenuCleanup();
   list.innerHTML='';
+  list.classList.toggle('session-select-mode',_sessionSelectMode);
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
   // reached, and the guard at the top of renderSessionListFromCache bails while the
@@ -7744,43 +8104,13 @@ function renderSessionListFromCache(){
   // this assignment as a defensive backstop for any future non-switch caller that
   // reaches a real paint with the flag somehow still set.
   _sessionListSkeletonActive=false;
-  // Batch select bar (when in select mode)
-  if(_sessionSelectMode){
-    const selectBar=document.createElement('div');selectBar.className='session-select-bar';
-    const exitBtn=document.createElement('button');exitBtn.className='batch-exit-btn';
-    exitBtn.textContent='\u2715';exitBtn.title='Exit select mode';
-    exitBtn.onclick=(e)=>{e.stopPropagation();exitSessionSelectMode();};
-    selectBar.appendChild(exitBtn);
-    const selectAllBtn=document.createElement('button');selectAllBtn.className='batch-select-all-btn';
-    selectAllBtn.textContent=t('session_select_all');
-    selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};
-    selectBar.appendChild(selectAllBtn);
-    list.appendChild(selectBar);
-  }
-  // Ensure batch action bar exists in DOM
-  let batchBar=$('batchActionBar');
-  if(!batchBar){batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';}
-  list.appendChild(batchBar);
-  if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
-  else{batchBar.style.display='none';}
   if(_sessionListLoadError){
     const note=_renderSessionListLoadErrorNote();
     if(note) list.appendChild(note);
   }
-  if(window._showCliSessions || cliSessionCount>0){
-    const sourceTabs=document.createElement('div');
-    sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;
-      const btn=document.createElement('button');
-      btn.type='button';
-      btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
-      btn.textContent=_sessionSourceLabel(filter,count);
-      btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
-      btn.onclick=()=>_setSessionSourceFilter(filter);
-      sourceTabs.appendChild(btn);
-    }
-    list.appendChild(sourceTabs);
+  if(window._showCliSessions || cliSessionCount>0 || _sessionOriginKeys().length>1){
+    const sourceControl=_renderSessionSourceFilterControl(renderedWebuiSessionCount,renderedCliSessionCount);
+    if(sourceControl)list.appendChild(sourceControl);
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
@@ -7902,10 +8232,10 @@ function renderSessionListFromCache(){
   }
   // Show/hide archived toggle if there are archived sessions. Archived rows
   // are fetched on demand so large histories do not bloat every sidebar poll.
-  if(archivedCount>0||_showArchived){
+  if((originArchivedCount??archivedCount)>0||_showArchived){
     const toggle=document.createElement('div');
     toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
+    toggle.textContent=_showArchived?'Hide archived':'Show '+(originArchivedCount??archivedCount)+' archived';
     toggle.onclick=()=>{
       _showArchived=!_showArchived;
       if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;
@@ -7914,10 +8244,13 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(_sessionSourceFilter==='cli'&&sessions.length===0){
+  if(sessions.length===0&&!(_sessionSourceFilters.length===1&&_sessionSourceFilters[0]==='webui')){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
+    const selectedLabels=_sessionSourceFilters.map(source=>_sessionOriginLabel(source));
+    empty.textContent=window._showCliSessions||!_sessionSourceFilters.includes('cli')
+      ? `No sessions found for ${selectedLabels.join(', ')}.`
+      : 'Enable Show agent sessions in Settings to list CLI sessions here.';
     list.appendChild(empty);
   } else if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
@@ -7960,11 +8293,13 @@ function renderSessionListFromCache(){
     const key=_sidebarLineageKeyForRow(s);
     if(!_expandedChildSessionKeys.has(key)&&!searchQueryRaw) continue;
     for(const child of s._child_sessions){
-      if(child&&child.session_source==='fork'&&child.session_id&&!_isReadOnlySession(child)){
+      if(child&&child.session_source==='fork'&&child.session_id&&_isSessionSelectable(child)){
         _sessionVisibleSidebarIds.push(child.session_id);
       }
     }
   }
+  _pruneSelectedSessions();
+  _renderSessionBatchDock();
   _ensureSessionVirtualScrollHandler(list);
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
@@ -8019,6 +8354,9 @@ function renderSessionListFromCache(){
     const label=document.createElement('span');
     label.textContent=g.label;
     hdr.appendChild(caret);hdr.appendChild(label);
+    if(!g.isPinned){
+      hdr.appendChild(_renderSessionGroupSelectTrigger());
+    }
     const body=document.createElement('div');
     body.className='session-date-body';
     const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
@@ -8061,8 +8399,9 @@ function renderSessionListFromCache(){
   }
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
-    const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
-    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&(_sessionSourceFilter==='cli'?_isCliSession(s):!_isCliSession(s))).length;
+    const selectedOrigins=new Set(_sessionSourceFilters);
+    const activeArchivedTotal=(selectedOrigins.has('webui')?_archivedWebuiCount:0)+([...selectedOrigins].some(origin=>origin!=='webui')?_archivedCliCount:0);
+    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&selectedOrigins.has(_sessionOrigin(s))).length;
     const archiveLoadCapReached=Number(_archivedRowsLoadedLimit||0)>=SESSION_ARCHIVED_MAX_LOADED_LIMIT;
     const remainingArchived=archiveLoadCapReached?0:Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);
     if(remainingArchived>0){
@@ -8079,13 +8418,6 @@ function renderSessionListFromCache(){
       };
       list.appendChild(more);
     }
-  }
-  // Select mode toggle button (only when NOT in select mode)
-  if(!_sessionSelectMode){
-    const toggleBtn=document.createElement('div');toggleBtn.className='session-select-toggle';
-    toggleBtn.textContent=t('session_select_mode');
-    toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
-    list.appendChild(toggleBtn);
   }
   // Refresh FLIP and queued archive/delete reflow both drive
   // --session-reflow-offset. Refresh wins so one render has one transform writer.
@@ -8134,7 +8466,7 @@ function renderSessionListFromCache(){
       cleanTitle='Session';
     }
     // Checkbox for batch select mode
-    if(_sessionSelectMode&&!readOnly){
+    if(_sessionSelectMode&&_isSessionSelectable(s)){
       const cbWrapper=document.createElement('label');cbWrapper.className='session-select-cb-wrapper';
       const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
       cb.dataset.sid=s.session_id;cb.checked=_selectedSessions.has(s.session_id);
@@ -8530,7 +8862,7 @@ function renderSessionListFromCache(){
             +(childAttention?' needs-attention':'')
             +childAttentionClass;
           row.dataset.sid=child.session_id;
-          if(_sessionSelectMode&&!_isReadOnlySession(child)){
+          if(_sessionSelectMode&&_isSessionSelectable(child)){
             const cbW=document.createElement('label');cbW.className='session-select-cb-wrapper';
             const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
             cb.dataset.sid=child.session_id;cb.checked=_selectedSessions.has(child.session_id);
@@ -8923,7 +9255,7 @@ function renderSessionListFromCache(){
         return true;
       }
       if(target&&target.closest&&target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return false;
-      if(_sessionSelectMode){if(!readOnly)toggleSessionSelect(s.session_id);return true;}
+      if(_sessionSelectMode){if(_isSessionSelectable(s))toggleSessionSelect(s.session_id);return true;}
       if(wasDragging){
         clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
         _gestureState='idle';
@@ -8990,7 +9322,7 @@ function renderSessionListFromCache(){
       if(e.pointerType==='mouse' && e.button!==0) return;
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
-      if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
+      if(_sessionSelectMode){e.stopPropagation();if(_isSessionSelectable(s))toggleSessionSelect(s.session_id);return;}
       // Guard: prevent renaming if session is currently being loaded
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
       startRename();

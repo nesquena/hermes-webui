@@ -385,6 +385,11 @@ def _read_active_profile_file() -> str:
 # control.
 _root_profile_name_cache: set[str] = {'default'}
 _root_profile_name_cache_lock = threading.Lock()
+# A profile-list build can walk every profile's skill tree.  Keep that cold
+# build single-flight: session-list requests commonly call _profiles_match for
+# hundreds of rows concurrently, and without this guard each caller can start
+# its own expensive list_profiles_api() build.
+_root_profile_name_cache_populate_lock = threading.Lock()
 _root_profile_name_cache_loaded = False
 
 
@@ -417,24 +422,29 @@ def _is_root_profile(name: str) -> bool:
     with _root_profile_name_cache_lock:
         if _root_profile_name_cache_loaded:
             return name in _root_profile_name_cache
-    # Cache miss — populate from list_profiles_api(). Done outside the lock to
-    # avoid holding it across a hermes_cli subprocess call.
-    try:
-        infos = list_profiles_api()
-    except Exception:
-        logger.debug("Failed to list profiles for root-profile lookup", exc_info=True)
-        return False
-    with _root_profile_name_cache_lock:
-        _root_profile_name_cache.clear()
-        _root_profile_name_cache.add('default')
-        for p in infos:
-            try:
-                if p.get('is_default') and p.get('name'):
-                    _root_profile_name_cache.add(p['name'])
-            except (AttributeError, TypeError):
-                continue
-        _root_profile_name_cache_loaded = True
-        return name in _root_profile_name_cache
+    # Cache miss — populate from list_profiles_api(). Serialize only cache
+    # population, not normal lookups. The second check matters because another
+    # request may have completed the build while this caller was waiting.
+    with _root_profile_name_cache_populate_lock:
+        with _root_profile_name_cache_lock:
+            if _root_profile_name_cache_loaded:
+                return name in _root_profile_name_cache
+        try:
+            infos = list_profiles_api()
+        except Exception:
+            logger.debug("Failed to list profiles for root-profile lookup", exc_info=True)
+            return False
+        with _root_profile_name_cache_lock:
+            _root_profile_name_cache.clear()
+            _root_profile_name_cache.add('default')
+            for p in infos:
+                try:
+                    if p.get('is_default') and p.get('name'):
+                        _root_profile_name_cache.add(p['name'])
+                except (AttributeError, TypeError):
+                    continue
+            _root_profile_name_cache_loaded = True
+            return name in _root_profile_name_cache
 
 
 def _profiles_match(row_profile, active_profile) -> bool:

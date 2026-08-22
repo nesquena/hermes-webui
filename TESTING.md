@@ -288,6 +288,36 @@ EXPECT:
   - No session is auto-created
 FAIL: New session created, error thrown, or UI breaks.
 
+### T2.8: Filter and Batch-Organize Imported Sessions
+SETUP: Enable "Show non-WebUI sessions" in Settings. Have at least one imported
+Matrix session plus sessions from another origin (for example TUI, Telegram, or
+Slack), and at least two ordinary WebUI sessions.
+STEPS:
+  1. Confirm the sidebar source controls identify origins separately (for example
+     "WebUI sessions", "Matrix sessions", and "TUI sessions") and show counts.
+  2. Select "Matrix sessions" and verify only Matrix rows appear.
+  3. Click the checkbox beside a date heading (for example TODAY) to reveal
+     selection checkboxes across the session list.
+  4. Verify Matrix rows have checkboxes; generic read-only foreign rows remain
+     unselectable.
+  5. Select multiple Matrix rows, scroll the history, and confirm the selection
+     toolbar remains visible at the bottom of the sidebar.
+  6. Use Move to assign the selected Matrix rows to a same-profile project, then
+     reload and confirm the project filter still finds them.
+  7. Archive one Matrix row, reload, enable Show archived, and confirm it can be
+     restored. Confirm the Agent/TUI/Matrix state database was not modified by
+     these WebUI organization actions.
+  8. Repeat at a narrow/mobile viewport and confirm the dock remains usable above
+     the safe-area inset without covering the final sidebar row.
+EXPECT:
+  - Origin controls are independently filterable and the counts are stable.
+  - The empty sidebar has no grey batch-action box; the action bar appears only
+    after one or more rows are selected and persists while scrolling.
+  - Move and archive succeed for Matrix imports; delete remains disabled for them.
+  - Ordinary read-only imported sessions still expose export-only actions.
+FAIL: Matrix rows cannot be selected, the dock scrolls away, another origin is
+mutated, a cross-profile move creates metadata, or the mobile dock overlaps content.
+
 ---
 
 ## Section 3: Model Selection

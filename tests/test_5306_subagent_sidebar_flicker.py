@@ -80,6 +80,7 @@ global.window = {{}};
 global._archivedCliCount = 0; global._archivedWebuiCount = 0;
 global._serverWebuiSessionCount = null; global._serverCliSessionCount = null;
 global._sidebarReferenceSessions = [];
+const _SESSION_ORIGIN_ORDER = ['webui','cli','subagent','other'];
 // Default idle state; tests that exercise an active/streaming parent override it.
 global.S = {{ session: null, busy: false, activeStreamId: null }};
 eval(extractFunc('_isSessionLocallyStreaming'));
@@ -92,6 +93,7 @@ eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 eval(extractFunc('_sessionAttentionState'));
+eval(extractFunc('_sessionOrigin'));
 eval(extractFunc('_sidebarRowHasVisibleMessages'));
 eval(extractFunc('_partitionSidebarSessionRows'));
 eval(extractFunc('_scopedSidebarReferenceRows'));

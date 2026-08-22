@@ -226,6 +226,68 @@ def test_sidebar_source_omitted_returns_all_rows(monkeypatch):
     assert len([r for r in body["sessions"] if r["session_id"].startswith("cli-")]) == 20
 
 
+def test_repeated_sidebar_sources_return_one_deduplicated_union(monkeypatch):
+    rows = _session_rows(webui_count=1, cli_count=1)
+    rows.extend(
+        [
+            {
+                "session_id": "matrix-1",
+                "title": "Matrix room",
+                "profile": "default",
+                "archived": False,
+                "message_count": 2,
+                "updated_at": 3001,
+                "last_message_at": 3001,
+                "source": "matrix",
+                "raw_source": "matrix",
+                "session_source": "messaging",
+                "source_tag": "matrix",
+            },
+            {
+                "session_id": "telegram-1",
+                "title": "Telegram room",
+                "profile": "default",
+                "archived": False,
+                "message_count": 2,
+                "updated_at": 3002,
+                "last_message_at": 3002,
+                "source": "telegram",
+                "raw_source": "telegram",
+                "session_source": "messaging",
+                "source_tag": "telegram",
+            },
+        ]
+    )
+    _install_common_monkeypatches(monkeypatch, rows)
+
+    handler = _handle_sessions(
+        "http://example.com/api/sessions?sidebar_source=webui"
+        "&sidebar_source=matrix&sidebar_source=matrix"
+    )
+
+    body = handler.json_body()
+    assert handler.status == 200
+    assert {row["session_id"] for row in body["sessions"]} == {"webui-0", "matrix-1"}
+    assert body["session_origin_counts"] == {
+        "webui": 1,
+        "cli": 1,
+        "matrix": 1,
+        "telegram": 1,
+    }
+
+
+def test_any_malformed_repeated_sidebar_source_fails_closed(monkeypatch):
+    rows = _session_rows(webui_count=1, cli_count=1)
+    _install_common_monkeypatches(monkeypatch, rows)
+
+    handler = _handle_sessions(
+        "http://example.com/api/sessions?sidebar_source=webui&sidebar_source=../matrix"
+    )
+
+    assert handler.status == 400
+    assert handler.json_body()["error"] == "Invalid sidebar_source"
+
+
 def test_sidebar_source_returns_cross_bucket_counts(monkeypatch):
     rows = _session_rows(webui_count=30, cli_count=20, archived_webui_count=2, archived_cli_count=3)
     _install_common_monkeypatches(monkeypatch, rows)
@@ -288,28 +350,166 @@ def test_sidebar_source_varies_cache_key():
     assert key_cli != key_omitted
 
 
+def test_sidebar_source_cache_key_canonicalizes_complete_source_set():
+    common = {
+        "active_profile": "default",
+        "all_profiles": False,
+        "show_cli_sessions": True,
+        "show_previous_messaging_sessions": False,
+        "show_cron_sessions": False,
+        "include_archived": False,
+    }
+
+    first = routes._session_list_cache_key(
+        **common,
+        sidebar_sources=("matrix", "webui", "matrix"),
+    )
+    reordered = routes._session_list_cache_key(
+        **common,
+        sidebar_sources=("webui", "matrix"),
+    )
+    matrix_only = routes._session_list_cache_key(
+        **common,
+        sidebar_sources=("matrix",),
+    )
+
+    assert first == reordered
+    assert first != matrix_only
+
+
 def test_frontend_sends_sidebar_source_param():
     src = SESSIONS_JS.read_text(encoding="utf-8")
 
-    assert "function _requestedSessionSidebarSource()" in src
+    assert "function _requestedSessionSidebarSources()" in src
     assert "function _sessionListQueryString()" in src
-    assert "qs.set('sidebar_source', _requestedSessionSidebarSource());" in src
+    assert "qs.append('sidebar_source',source)" in src
     assert "_serverWebuiSessionCount" in src
     assert "_serverCliSessionCount" in src
     assert "function _sessionSourceTabCount(" in src
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_client_source_normalization_preserves_order_and_webui_fallback():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    script = f"""
+{normalize_fn}
+console.log(JSON.stringify({{
+  ordered: _normalizeSessionSourceFilters(['matrix', 'webui', 'matrix', 'telegram']),
+  invalid: _normalizeSessionSourceFilters(['matrix', '../telegram', '']),
+  empty: _normalizeSessionSourceFilters([]),
+}}));
+"""
+    body = _run_node(script)
+
+    assert body == {
+        "ordered": ["matrix", "webui", "telegram"],
+        "invalid": ["matrix"],
+        "empty": ["webui"],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_client_source_toggle_appends_and_last_remove_restores_webui():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    set_fn = _extract_function(src, "_setSessionSourceFilters")
+    toggle_fn = _extract_function(src, "_toggleSessionSourceFilter")
+    script = f"""
+global._sessionSourceFilters = ['matrix'];
+global._activeProject = 'demo';
+global._selectedSessions = new Set(['selected']);
+global._sessionSelectMode = true;
+global.localStorage = {{writes:[],setItem(k,v){{this.writes.push([k,v]);}}}};
+global.renderSessionListFromCache = () => {{}};
+global.renderSessionList = () => Promise.resolve();
+{normalize_fn}
+{set_fn}
+{toggle_fn}
+_toggleSessionSourceFilter('telegram', true);
+const afterAdd = [..._sessionSourceFilters];
+_toggleSessionSourceFilter('matrix', false);
+const afterRemove = [..._sessionSourceFilters];
+_toggleSessionSourceFilter('telegram', false);
+console.log(JSON.stringify({{
+  afterAdd,
+  afterRemove,
+  final: _sessionSourceFilters,
+  activeProject: _activeProject,
+  selectedSize: _selectedSessions.size,
+  selectMode: _sessionSelectMode,
+  writes: localStorage.writes,
+}}));
+"""
+    body = _run_node(script)
+
+    assert body["afterAdd"] == ["matrix", "telegram"]
+    assert body["afterRemove"] == ["telegram"]
+    assert body["final"] == ["webui"]
+    assert body["activeProject"] is None
+    assert body["selectedSize"] == 0
+    assert body["selectMode"] is False
+    assert body["writes"][-1] == ["hermes-session-source-filters-v2", '["webui"]']
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_client_migrates_single_source_and_emits_repeated_query_params():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    restore_fn = _extract_function(src, "_restoreSessionSourceFilters")
+    requested_fn = _extract_function(src, "_requestedSessionSidebarSources")
+    exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
+    archive_filter_fn = _extract_function(src, "_sessionArchivePagingFilterActive")
+    query_fn = _extract_function(src, "_sessionListQueryString")
+    script = f"""
+global.window = {{_showCliSessions:true}};
+global._sessionSourceFilters = ['webui'];
+global._activeProject = null;
+global.NO_PROJECT_FILTER = '__none__';
+global._showAllProfiles = false;
+global._showArchived = false;
+global._archivedRowsLoadedLimit = 100;
+global.SESSION_ARCHIVED_PAGE_SIZE = 100;
+global.SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
+global.$ = () => ({{value:''}});
+global.localStorage = {{
+  values: {{'hermes-session-source-filter':'matrix'}},
+  writes: [],
+  getItem(k){{return this.values[k] ?? null;}},
+  setItem(k,v){{this.values[k]=v;this.writes.push([k,v]);}},
+}};
+{normalize_fn}
+{restore_fn}
+{requested_fn}
+{exclude_hidden_fn}
+{archive_filter_fn}
+{query_fn}
+_restoreSessionSourceFilters();
+_sessionSourceFilters.push('telegram');
+console.log(JSON.stringify({{filters:_sessionSourceFilters,writes:localStorage.writes,query:_sessionListQueryString()}}));
+"""
+    body = _run_node(script)
+
+    assert body == {
+        "filters": ["matrix", "telegram"],
+        "writes": [["hermes-session-source-filters-v2", '["matrix"]']],
+        "query": "?sidebar_source=matrix&sidebar_source=telegram&exclude_hidden=1",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_session_list_query_string_respects_sidebar_source_and_flags():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSources")
+    selection_key_fn = _extract_function(src, "_sessionSourceSelectionKey")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
     archive_filter_fn = _extract_function(src, "_sessionArchivePagingFilterActive")
     query_fn = _extract_function(src, "_sessionListQueryString")
     script = f"""
 global.window = {{ _showCliSessions: true }};
 global._activeProject = null;
-global._sessionSourceFilter = 'cli';
+global._sessionSourceFilters = ['cli'];
 global._showAllProfiles = true;
 global._showArchived = false;
 global.SESSION_ARCHIVED_PAGE_SIZE = 100;
@@ -318,6 +518,7 @@ global._archivedRowsLoadedLimit = 100;
 global.NO_PROJECT_FILTER = '__none__';
 let searchValue = '';
 global.$ = (id) => id === 'sessionSearch' ? {{ value: searchValue }} : null;
+{normalize_fn}
 {requested_source_fn}
 {exclude_hidden_fn}
 {archive_filter_fn}
@@ -353,7 +554,8 @@ console.log(JSON.stringify({{ first, second, searchFiltered, projectFiltered, ca
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_archived_search_input_refetches_uncapped_then_restores_paging():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSources")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
     archive_filter_fn = _extract_function(src, "_sessionArchivePagingFilterActive")
     query_fn = _extract_function(src, "_sessionListQueryString")
@@ -363,7 +565,7 @@ def test_archived_search_input_refetches_uncapped_then_restores_paging():
 global.window = {{ _showCliSessions: false }};
 global._activeProject = null;
 global.NO_PROJECT_FILTER = '__none__';
-global._sessionSourceFilter = 'webui';
+global._sessionSourceFilters = ['webui'];
 global._showAllProfiles = false;
 global._showArchived = true;
 global.SESSION_ARCHIVED_PAGE_SIZE = 100;
@@ -383,6 +585,7 @@ global.renderSessionListFromCache = () => {{}};
 global.clearTimeout = () => {{}};
 global.setTimeout = () => 1;
 global.api = () => Promise.resolve({{ sessions: [] }});
+{normalize_fn}
 {requested_source_fn}
 {exclude_hidden_fn}
 {archive_filter_fn}
@@ -406,10 +609,13 @@ console.log(JSON.stringify({{ calls }}));
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_session_source_switch_fetches_selected_bucket():
     src = SESSIONS_JS.read_text(encoding="utf-8")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    set_many_fn = _extract_function(src, "_setSessionSourceFilters")
     fn_source = _extract_function(src, "_setSessionSourceFilter")
     script = f"""
 const renderCalls = [];
 global._sessionSourceFilter = 'webui';
+global._sessionSourceFilters = ['webui'];
 global._activeProject = 'demo-project';
 global._selectedSessions = new Set(['first', 'second']);
 global._sessionSelectMode = true;
@@ -426,10 +632,13 @@ global.renderSessionList = (opts) => {{
   renderCalls.push(opts);
   return Promise.resolve();
 }};
+{normalize_fn}
+{set_many_fn}
 {fn_source}
 _setSessionSourceFilter('cli');
 console.log(JSON.stringify({{
   sourceFilter: global._sessionSourceFilter,
+  sourceFilters: global._sessionSourceFilters,
   activeProject: global._activeProject,
   selectedSize: global._selectedSessions.size,
   sessionSelectMode: global._sessionSelectMode,
@@ -440,17 +649,20 @@ console.log(JSON.stringify({{
     body = _run_node(script)
 
     assert body["sourceFilter"] == "cli"
+    assert body["sourceFilters"] == ["cli"]
     assert body["activeProject"] is None
     assert body["selectedSize"] == 0
     assert body["sessionSelectMode"] is False
-    assert body["storageWrites"] == [["hermes-session-source-filter", "cli"]]
+    assert body["storageWrites"] == [["hermes-session-source-filters-v2", '["cli"]']]
     assert body["renderCalls"] == ["cache", {"deferWhileInteracting": False}]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_apply_payload_and_tab_count_helpers_cover_old_and_new_payloads():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSources")
+    selection_key_fn = _extract_function(src, "_sessionSourceSelectionKey")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
     apply_fn = _extract_function(src, "_applySessionListPayload")
     count_fn = _extract_function(src, "_sessionSourceTabCount")
@@ -478,6 +690,7 @@ global._activeProject = null;
 global.NO_PROJECT_FILTER = '__none__';
 global._showAllProfiles = false;
 global._sessionSourceFilter = 'webui';
+global._sessionSourceFilters = ['webui'];
 global._renamingSid = null;
 global._sessionActionMenu = null;
 global.S = {{ activeProfile: 'default' }};
@@ -499,7 +712,9 @@ global.ensureActiveSessionExternalRefreshPoll = () => {{}};
     global.renderSessionListFromCache = () => {{}};
     {clear_fn}
     {count_fn}
+    {normalize_fn}
     {requested_source_fn}
+    {selection_key_fn}
     {exclude_hidden_fn}
     {apply_fn}
 const sessions = [{{ session_id: 'webui-1' }}];
@@ -527,6 +742,26 @@ console.log(JSON.stringify({{ oldPayload, newPayload }}));
 
     assert body["oldPayload"] == {"webui": 7, "cli": 3}
     assert body["newPayload"] == {"webui": 11, "cli": 5}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_inflight_cleanup_uses_the_complete_selected_source_union():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    script = f"""
+global._allSessions = [];
+global._allSessionsScope = {{sidebarSource:'webui', sidebarSourcesKey:'matrix,webui'}};
+global._sessionListSourceById = new Map([['matrix-missing','matrix'],['slack-hidden','slack']]);
+global.INFLIGHT = {{'matrix-missing':{{}},'slack-hidden':{{}}}};
+global._sendInProgress = false;
+global.clearInflightState = () => {{}};
+{purge_fn}
+_purgeStaleInflightEntries();
+console.log(JSON.stringify(Object.keys(INFLIGHT).sort()));
+"""
+    body = _run_node(script)
+
+    assert body == ["slack-hidden"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -656,7 +891,9 @@ def test_scope_mismatch_error_path_respects_sidebar_source():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
     clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
-    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
+    normalize_fn = _extract_function(src, "_normalizeSessionSourceFilters")
+    requested_source_fn = _extract_function(src, "_requestedSessionSidebarSources")
+    selection_key_fn = _extract_function(src, "_sessionSourceSelectionKey")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
     query_fn = _extract_function(src, "_sessionListQueryString")
     fetch_helper_fn = _ensure_async(
@@ -671,6 +908,7 @@ def test_scope_mismatch_error_path_respects_sidebar_source():
 global.window = {{ _showCliSessions: true }};
 global._showAllProfiles = false;
 global._showArchived = false;
+global._sessionSourceFilters = ['webui'];
 global._sessionListHasLoadedOnce = true;
 global._SESSION_LIST_BOOT_TIMEOUT_MS = 90000;
 global._renderSessionListGen = 1;
@@ -704,18 +942,22 @@ global.api = () => Promise.reject(new Error('boom'));
     global.clearInflightState = sid => cleared.push(sid);
     {purge_fn}
     {clear_fn}
-    {requested_source_fn}
+{normalize_fn}
+{requested_source_fn}
+{selection_key_fn}
     {exclude_hidden_fn}
     {query_fn}
     {fetch_helper_fn}
     {refresh_fn}
 async function runCase(requestedSource, cachedSource) {{
   global._sessionSourceFilter = requestedSource;
+  global._sessionSourceFilters = [requestedSource];
   global._allSessions = [{{ session_id: cachedSource + '-1' }}];
   global._allSessionsScope = {{
     profile: 'default',
     allProfiles: false,
     sidebarSource: cachedSource,
+    sidebarSourcesKey: cachedSource,
     excludeHidden: true,
   }};
   global._sessionListSourceById = new Map([['webui-live', 'webui']]);
@@ -755,6 +997,7 @@ async function runCase(requestedSource, cachedSource) {{
         "profile": "default",
         "allProfiles": False,
         "sidebarSource": "cli",
+        "sidebarSourcesKey": "cli",
         "excludeHidden": True,
     }
     assert body["mismatch"]["webui"] is None
@@ -769,6 +1012,7 @@ async function runCase(requestedSource, cachedSource) {{
         "profile": "default",
         "allProfiles": False,
         "sidebarSource": "webui",
+        "sidebarSourcesKey": "webui",
         "excludeHidden": True,
     }
     assert body["match"]["webui"] == 11

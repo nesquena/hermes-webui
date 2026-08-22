@@ -31,7 +31,7 @@ def test_render_uses_single_pass_partition_helper():
     render_body = _function_block("renderSessionListFromCache")
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
-    assert "_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView)])" in render_body
+    assert "_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows()])" in render_body
     assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
     assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
     assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false)]).length" in render_body
@@ -40,8 +40,6 @@ def test_render_uses_single_pass_partition_helper():
     assert "null is a deliberate \"not computed\" sentinel" in render_body
     assert "const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
     assert "const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);" in render_body
-    assert "const count=filter==='cli'?cliSessionTabCount:webuiSessionTabCount;" in render_body
-    assert "const count=filter==='cli'?renderedCliSessionCount:renderedWebuiSessionCount;" not in render_body
     assert "withMessages.filter(" not in render_body
 
 
@@ -50,15 +48,17 @@ def test_partition_helper_applies_message_source_project_and_archive_gates():
 
     assert "function _sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in SESSIONS_JS
     assert "_sidebarRowHasVisibleMessages(s, activeSidForSidebar)" in block
-    assert "if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0)" in block
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in block
+    assert "activeSourceFilters.some(source=>source!=='webui')" in block
+    assert "const selectedOrigins=new Set(activeSourceFilters);" in block
+    assert "selectedOrigins.has(effectiveOrigin(s))" in block
+    assert "parent&&_isChildSession(s)?_sessionOrigin(parent):_sessionOrigin(s)" in block
     assert "if(!_showArchived&&s.archived) continue;" in block
     assert "if(s.archived){" in block
-    assert "const serverArchivedCount=showCliOnly?_archivedCliCount:_archivedWebuiCount;" in block
+    assert "const serverArchivedCount=(selectedOrigins.has('webui')?_archivedWebuiCount:0)" in block
     assert "archivedCount: Math.max(showCliOnly ? cliArchivedCount : webuiArchivedCount, Number(serverArchivedCount||0))," in block
     assert "return {" in block
-    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in block
-    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in block
+    assert "profileFiltered: selectedProfileFiltered," in block
+    assert "sessionsRaw: selectedSessionsRaw," in block
 
 
 def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_counts():

@@ -9643,6 +9643,7 @@ _SETTINGS_DEFAULTS = {
     "show_cli_sessions": True,  # merge CLI/TUI/messaging sessions from state.db into the sidebar by default (#3988); established installs are grandfathered OFF by the load_settings backfill
     "show_claude_code_sessions": True,  # allow filtering Claude Code rows without hiding other imported sources
     "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
+    "show_matrix_sessions": False,  # surface Matrix sessions in the sidebar (subordinate to show_cli_sessions)
     "show_webhook_sessions": False,  # surface webhook sessions in the sidebar (subordinate to show_cli_sessions)
     "show_kanban_sessions": False,  # surface kanban worker sessions in the sidebar (subordinate to show_cli_sessions)
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
@@ -9988,6 +9989,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_cli_sessions",
     "show_claude_code_sessions",
     "show_cron_sessions",
+    "show_matrix_sessions",
     "show_webhook_sessions",
     "show_kanban_sessions",
     "show_previous_messaging_sessions",
