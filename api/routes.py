@@ -8546,10 +8546,19 @@ def _is_pre_compression_snapshot_id(session_id: str) -> bool:
         return False
     try:
         path = SESSION_DIR / f"{sid}.json"
-        if not path.exists():
-            return False
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return bool(data.get("pre_compression_snapshot"))
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return bool(data.get("pre_compression_snapshot"))
+        # Migrated sessions have no sidecar; check the SQLite store so
+        # compression continuation rows keep their sidebar lineage grouping.
+        from api.models import _get_sqlite_session_store
+
+        store = _get_sqlite_session_store()
+        if store:
+            meta = store.read_metadata_only(sid)
+            if meta is not None:
+                return bool(meta.get("pre_compression_snapshot"))
+        return False
     except Exception:
         return False
 
@@ -15786,13 +15795,16 @@ def handle_post(handler, parsed) -> bool:
                 unchanged = True
                 saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
                 # Draft persistence is not conversation activity. Touching updated_at
                 # here makes the active-session external-refresh poll force-reload the
                 # current chat every few seconds while the user is typing, and that
                 # delayed reload can restore an older draft over newer local input.
+                # NOTE: no pre-set of s.composer_draft — save_metadata() applies the
+                # in-memory update itself after the write succeeds. Pre-setting here
+                # would leave the cached Session ahead of disk on a failed write,
+                # and the unchanged fast path above would then skip the retry.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                s.save_metadata({"composer_draft": next_draft})
                 _draft_mark("after_save")
                 saved_draft = s.composer_draft
         _draft_mark("released_lock")
@@ -15939,6 +15951,18 @@ def handle_post(handler, parsed) -> bool:
                 prune_session_from_index(sid)
             except Exception:
                 logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+            # Migrated sessions have no JSON sidecar: remove the SQLite rows
+            # too, or the row survives in sessions.db and the next full index
+            # rebuild resurrects the deleted session in the sidebar (with its
+            # transcript still on disk).
+            try:
+                from api.models import _get_sqlite_session_store
+
+                _session_store = _get_sqlite_session_store()
+                if _session_store:
+                    _session_store.delete_session(sid)
+            except Exception:
+                logger.debug("Failed to delete SQLite rows for session %s", sid, exc_info=True)
             try:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
@@ -18008,9 +18032,12 @@ def _handle_list_dir(handler, parsed):
         return bad(handler, "session_id is required")
     webui_session = None
     try:
-        s = get_session(sid)
-        webui_session = s
+        # Metadata-only load: /api/list only needs the workspace path. Loading
+        # the full transcript (e.g. a 23 MB session) adds hundreds of ms to
+        # every directory listing for no benefit.
+        s = get_session(sid, metadata_only=True)
         workspace = s.workspace
+        webui_session = s
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory
         try:
@@ -18035,6 +18062,9 @@ def _handle_list_dir(handler, parsed):
                 get_last_workspace,
             )
             if recovered:
+                # Recovery is rare; load the full session object only when we
+                # actually need to persist a workspace binding change.
+                webui_session = get_session(sid)
                 persisted = persist_recovered_workspace_binding(
                     webui_session,
                     workspace,
@@ -22462,6 +22492,17 @@ def _handle_background(handler, body):
             # next rebuild via _index_entry_exists().
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+            except Exception:
+                pass
+            # With the SQLite store active the bg session lives in sessions.db
+            # (no sidecar); _index_entry_exists() would keep it indexed
+            # forever, surfacing hidden bg sessions in the sidebar.
+            try:
+                from api.models import _get_sqlite_session_store
+
+                _bg_store = _get_sqlite_session_store()
+                if _bg_store:
+                    _bg_store.delete_session(bg_sid)
             except Exception:
                 pass
         except Exception:
