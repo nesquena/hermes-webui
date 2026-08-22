@@ -184,7 +184,8 @@ load_env() {
       done
       if [[ "A$doobs" == "Aobfuscate" ]]; then rvalue="**OBFUSCATED**"; fi
 
-      if [ -z "${!key}" ]; then
+      export "$key=$value"
+
         echo "  ++ Setting environment variable $key [$rvalue]"
         doit=true
       elif [ "A$overwrite_if_different" == "Atrue" ]; then
