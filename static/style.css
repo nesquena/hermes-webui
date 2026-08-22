@@ -2998,10 +2998,27 @@
 
   @media(max-width:900px){
     .workspace-panel-edge-toggle{display:none!important;}
-    .rightpanel{display:none}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
+  }
+
+  /* 641–900px viewports (phone landscape / large phones / narrow windows):
+     previously the compact breakpoint forced `display:none` on `.rightpanel`,
+     leaving the workspace panel impossible to open. Add the slide-in overlay
+     used below 640px for this band too.
+     position:fixed needs !important to survive the @media(min-width:641px)
+     `.rightpanel{position:relative}` rule later in the file. */
+  @media(max-width:900px) and (min-width:641px){
+    .rightpanel{display:flex!important;position:fixed!important;
+      --mobile-rightpanel-width:min(300px, 100vw);
+      right:calc(-1 * var(--mobile-rightpanel-width))!important;
+      top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;padding-top:var(--app-titlebar-safe-top);box-sizing:border-box;transition:right .25s ease;
+      box-shadow:none!important;}
+    .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
+    .rightpanel .resize-handle{display:none;}
+    .rightpanel .panel-header{row-gap:8px;}
+    .rightpanel .panel-actions{align-items:center;gap:8px;}
   }
 
   /* Fit-based composer footer collapse. ui.js measures actual overflow on
