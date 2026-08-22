@@ -31,8 +31,8 @@ before the main stylesheet loads. Desktop CSS honors that preload marker immedia
 and `static/boot.js` keeps the dataset synchronized with the runtime panel state machine.
 
 The design philosophy is deliberately minimal. There is no build step, no bundler, no
-frontend framework. The Python server is split into a routing shell (server.py) and
-business logic modules (api/). The frontend is seven vanilla JS modules loaded from static/.
+The Python server is split into a routing shell (server.py) and
+business logic modules (api/). The frontend is a set of vanilla JS modules loaded from static/.
 This makes the code easy to modify from a terminal or by an agent.
 
 Hermes-level chrome is intentionally consolidated: the sidebar has no dedicated brand header.
@@ -74,6 +74,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       index.html           HTML template
       style.css            All CSS incl. mobile responsive, themes + skins, KaTeX
       ui.js                DOM helpers, renderMd, tool cards, context indicator, file tree
+      media-cache.js       Bounded, auth/profile-scoped Cache Storage for immutable snapshot videos
       workspace.js         File preview, file ops, git badge, central api() fetch wrapper
       sessions.js          Session CRUD, list rendering, collapsible groups, search, SSE sync
       messages.js          send(), SSE event handlers, approval/clarify, transcript, recovery
@@ -111,6 +112,63 @@ State directory (runtime data, separate from source):
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
     projects.json      Session project groups (name, color, id)
+
+### Browser-persistent snapshot video cache
+
+Only same-origin `/api/media` video URLs with a 64-hex `snap` digest and no
+session-scoped authorization token are eligible. The media response must also attest the exact served snapshot through
+`X-Hermes-Media-Snapshot`; the route's normal missing/evicted-snapshot fallback
+to live bytes is never persisted.
+
+`GET /api/media-cache/scope` returns an opaque HMAC partition derived from the
+verified WebUI auth session (or the installation-local no-auth authority), the
+request-resolved profile, exact media-authorizing session ID and its canonical
+workspace, plus the WebUI build version and cache schema. The scope endpoint
+rejects a missing, deleted, or foreign-profile session and re-runs the existing
+session-media authorization for the exact canonical path before every new cache
+consumption. Concurrent validation is deduplicated only for the same
+session-and-path pair; different paths must each reach the server. Profile and
+workspace switches broadcast both a pre-mutation clear
+and a post-mutation clear so another tab cannot finish old-authority work started
+inside the transition window. Sign-out does the same around server-side session
+invalidation; 401 redirects, authority rotation, build updates, and schema
+changes also clear or retire the previous partition.
+
+Pre-mutation cleanup is deliberately best-effort: in-memory scope, tasks, and
+Blob URLs are invalidated before the first await, but a Cache Storage/Web Lock
+deletion failure cannot suppress the authoritative profile/workspace request.
+The newly issued scope makes any undeleted old partition unreadable, and later
+reconciliation retries persistent cleanup.
+
+The cache is limited to 16 MiB per video, 256 entries, and 96 MiB total including
+video bodies plus LRU index metadata. Cache body and LRU
+metadata changes run under an origin-wide Web Lock; browsers without Web Locks
+use the native media URL instead. Each locked operation reconciles Cache Storage
+keys and every stored body's declared size with metadata so interrupted body/metadata
+writes fail closed or repair on the next access. `QuotaExceededError` causes LRU
+eviction and one retry.
+
+The bounded fetch uses a counting `TransformStream` into one shared Blob, not a
+JavaScript chunk array plus a second Blob. Concurrent players share the network
+task and Blob while owning separate progress state and object URLs. The final
+consumer teardown aborts the fetch; DOM removal, same-node source replacement,
+page teardown, profile/auth changes, success, and errors release observers,
+tasks, and URLs. Attribute observation yields permanently to the native player
+after fallback unless the node is explicitly assigned a different source.
+
+Every rejection after response headers arrive first cancels the response body
+and aborts its task controller. This includes HTTP errors, snapshot-attestation
+failure, wrong MIME, invalid or declared-oversize lengths, and unavailable
+bounded-stream primitives. A BFCache `pagehide` releases tasks and Blob URLs;
+persisted `pageshow` re-observes the retained video DOM and recreates a fresh
+Blob URL from the authority-scoped Cache Storage entry.
+
+This persistent path deliberately trades native Range playback for a bounded
+full Blob on eligible small immutable snapshots. Missing `Content-Length` is
+accepted only through the same counting stream and is aborted if it crosses the
+object cap. Declared or streamed oversize responses, invalid lengths, unsupported
+streaming/locking/cache primitives, unattested live fallbacks, and other failures
+keep the native URL and its normal Range behavior.
 
 Log file:
 

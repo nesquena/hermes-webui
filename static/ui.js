@@ -202,7 +202,7 @@ else initOfflineMonitor();
 // Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
 // escaping to the personal site root /login.
 // #5578: on a login-shaped page, reload 'login' WITHOUT a next (avoid self-nesting).
-function _redirectIfUnauth(res){if(res&&res.status===401){var _p=(window.location.pathname||'').replace(/\/+$/,'');if(/(?:^|\/)login$/.test(_p)){window.location.href='login';}else{window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);}return true;}return false;}
+function _redirectIfUnauth(res){if(!res||res.status!==401)return false;var go=function(){var _p=(window.location.pathname||'').replace(/\/+$/,'');if(/(?:^|\/)login$/.test(_p)){window.location.href='login';}else{window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);}};var cache=(typeof window!=='undefined'&&window.HermesPersistentVideoCache);if(cache&&cache.clearAll){Promise.resolve(cache.clearAll()).catch(function(){}).finally(go);}else{go();}return true;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -2673,10 +2673,15 @@ function _mediaSpeedControlsHtml(kind, label){
 function _mediaPlayerHtml(kind, src, name, extra=''){
   const safeName=esc(name||'media');
   const safeSrc=esc(src);
+  const persistVideo=kind==='video'&&typeof window!=='undefined'&&window.HermesPersistentVideoCache&&
+    window.HermesPersistentVideoCache.eligibleUrl(src);
+  const preload=persistVideo?'none':'metadata';
+  const persistentAttr=persistVideo?` data-media-source="${safeSrc}"`:'';
   const tag=kind==='video'
-    ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+    ? `<video class="msg-media-player msg-media-video" src="${safeSrc}"${persistentAttr} controls preload="${preload}" playsinline title="${safeName}"></video>`
     : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
-  return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
+  const cacheProgress=persistVideo?'<span class="msg-media-cache-progress" hidden></span>':'';
+  return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${cacheProgress}${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
 }
 // Shared MEDIA: token renderer used by both the full-pipeline renderMd() and
 // the streaming smd path in messages.js. Centralised so the live + settled

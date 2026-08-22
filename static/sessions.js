@@ -1654,9 +1654,15 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
   try{
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      await window.HermesPersistentVideoCache.prepareAuthorityChange();
+    }
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      try{await window.HermesPersistentVideoCache.refreshAuthority();}catch(_){}
+    }
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }

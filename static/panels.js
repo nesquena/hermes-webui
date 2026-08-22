@@ -6400,10 +6400,13 @@ async function switchToWorkspace(path,name){
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
+      if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+        await window.HermesPersistentVideoCache.prepareAuthorityChange();
+      }
       // System-minted session (#6022): explicit worktree:false — a workspace
       // switch from a blank page is not deliberate New Chat intent.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){try{await window.HermesPersistentVideoCache.refreshAuthority();}catch(_){}}if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
@@ -6437,8 +6440,14 @@ async function switchToWorkspace(path,name){
     }
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      await window.HermesPersistentVideoCache.prepareAuthorityChange();
+    }
     S._profileSwitchWorkspace=path;
     if(typeof newSession==='function') await newSession(false);
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      try{await window.HermesPersistentVideoCache.refreshAuthority();}catch(_){}
+    }
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
@@ -6459,6 +6468,9 @@ async function switchToWorkspace(path,name){
     : null;
   try{
     closeWsDropdown();
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      await window.HermesPersistentVideoCache.prepareAuthorityChange();
+    }
     // Invalidate any older /api/list response before the explicit workspace
     // mutation. Otherwise a delayed recovery response for this same session can
     // overwrite the user's newer selection and reject this switch's fresh tree.
@@ -6467,6 +6479,9 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
     S.session.workspace=path;
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      try{await window.HermesPersistentVideoCache.refreshAuthority();}catch(_){}
+    }
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -7046,6 +7061,9 @@ async function switchToProfile(name) {
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
   // setup can't leak the embargo and freeze the sidebar (Codex re-gate 4).
   try {
+    if (typeof window !== 'undefined' && window.HermesPersistentVideoCache) {
+      await window.HermesPersistentVideoCache.prepareAuthorityChange();
+    }
     // Invalidate any in-flight/queued session-list render BEFORE showing the skeleton,
     // so a pre-switch /api/sessions response (old profile's rows, issued before the
     // switch) can't resolve, pass the generation guard, clear the skeleton flag, and
@@ -7072,6 +7090,9 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if (typeof window !== 'undefined' && window.HermesPersistentVideoCache) {
+      try{await window.HermesPersistentVideoCache.refreshAuthority();}catch(_){}
+    }
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -12872,7 +12893,13 @@ async function saveSettings(andClose){
 
 async function signOut(){
   try{
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      try{await window.HermesPersistentVideoCache.clearAll();}catch(_){}
+    }
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
+    if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
+      try{await window.HermesPersistentVideoCache.clearAll();}catch(_){}
+    }
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){
     showToast(t('sign_out_failed')+e.message);

@@ -13062,6 +13062,75 @@ def handle_get(handler, parsed) -> bool:
             payload["bound_profile"] = session_info.get("bound_profile")
         return j(handler, payload)
 
+    if parsed.path == "/api/media-cache/scope":
+        from api.auth import build_media_cache_scope
+
+        qs = parse_qs(parsed.query)
+        session_id = qs.get("session_id", [""])[0].strip()
+        raw_path = qs.get("path", [""])[0].strip()
+        if not session_id or not raw_path:
+            return j(
+                handler,
+                {"error": "session_id and path required"},
+                status=400,
+                extra_headers={"Cache-Control": "no-store"},
+            )
+        try:
+            cache_session = get_session(session_id, metadata_only=True)
+        except KeyError:
+            cache_session = None
+        if cache_session is None or not _session_visible_to_active_profile(
+            getattr(cache_session, "profile", None), handler
+        ):
+            return j(
+                handler,
+                {"error": "Session not found"},
+                status=404,
+                extra_headers={"Cache-Control": "no-store"},
+            )
+        try:
+            media_target = Path(raw_path).expanduser().resolve()
+        except Exception:
+            media_target = None
+        video_types = {"video/mp4", "video/quicktime", "video/webm", "video/ogg"}
+        media_mime = MIME_MAP.get(media_target.suffix.lower(), "application/octet-stream") if media_target else ""
+        if (
+            media_target is None
+            or media_mime not in video_types
+            or not _session_media_token_allows_path(session_id, media_target, video_types)
+        ):
+            return j(
+                handler,
+                {"error": "Media authorization not found"},
+                status=404,
+                extra_headers={"Cache-Control": "no-store"},
+            )
+        session_workspace = str(getattr(cache_session, "workspace", None) or "<none>")
+        try:
+            if session_workspace != "<none>":
+                session_workspace = str(Path(session_workspace).expanduser().resolve())
+        except Exception:
+            session_workspace = "<none>"
+        scope = build_media_cache_scope(
+            handler,
+            profile_name=getattr(cache_session, "profile", None),
+            workspace_path=session_workspace,
+            cache_context=f"session:{session_id}",
+        )
+        if not scope:
+            return j(
+                handler,
+                {"error": "Authentication required"},
+                status=401,
+                extra_headers={"Cache-Control": "no-store"},
+            )
+        return j(
+            handler,
+            {"scope": scope, "schema": 1},
+            extra_headers={"Cache-Control": "no-store"},
+            pretty=False,
+        )
+
     if parsed.path.startswith("/api/share/"):
         token = parsed.path[len("/api/share/"):].strip()
         share = load_share(token)
@@ -19480,7 +19549,7 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
     return _bytes_etag(data), data, actual_size
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None):
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None, extra_headers: dict[str, str] | None = None):
     """Serve a file with correct MIME/disposition and optional byte-range support.
 
     Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
@@ -19549,6 +19618,8 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
                 handler.send_response(304)
                 handler.send_header("ETag", etag)
                 handler.send_header("Cache-Control", cache_control)
+                for key, value in (extra_headers or {}).items():
+                    handler.send_header(key, value)
                 _security_headers(handler)
                 handler.end_headers()
                 return True
@@ -19575,6 +19646,8 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
             handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         handler.send_header("Cache-Control", cache_control)
         handler.send_header("Content-Disposition", _content_disposition_value(disposition, download_name or target.name))
+        for key, value in (extra_headers or {}).items():
+            handler.send_header(key, value)
         if csp:
             # Sandboxed inline HTML must remain frameable for workspace previews;
             # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
@@ -20696,6 +20769,7 @@ def _handle_media(handler, parsed):
             csp=csp,
             download_name=target.name,
             anchor_root=snap_dir,
+            extra_headers={"X-Hermes-Media-Snapshot": snap_digest},
         )
 
     if not target.exists() or not target.is_file():

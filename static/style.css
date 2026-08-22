@@ -2509,6 +2509,7 @@
   .msg-media-audio.msg-media-player{height:36px;background:transparent;}
   .msg-media-meta{display:flex;align-items:center;gap:8px;min-width:0;font-size:11px;color:var(--muted);}
   .msg-media-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .msg-media-cache-progress{flex:0 0 auto;color:var(--accent);font-variant-numeric:tabular-nums;font-weight:600;}
   .media-speed-controls{display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
   .media-speed-btn{border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);border-radius:999px;padding:3px 8px;font-size:11px;font-weight:600;line-height:1.2;cursor:pointer;transition:background .15s,border-color .15s,color .15s;}
   .media-speed-btn:hover{background:var(--hover-bg);color:var(--text);}

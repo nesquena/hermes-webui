@@ -91,6 +91,39 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+## Persistent snapshot-video cache behavior gate
+
+`tests/browser_persistent_video_cache.py` serves the production
+`static/media-cache.js` unchanged through a credential-free local fixture and
+uses real Chromium Cache Storage, streams, Web Locks, observers, Blob URLs,
+reloads, and network cancellation:
+
+```bash
+python tests/browser_persistent_video_cache.py
+```
+
+The gate covers production `media-cache.js` → `ui.js` script order and
+`_mediaPlayerHtml()` integration with real session-authorized URLs, native Range fallback, first fetch versus
+cached replay/reload, server-attested snapshot-only persistence, per-file and
+global byte limits, LRU and real quota errors, auth-scope rotation, two-phase
+cross-tab authority clearing, profile/build/cache version clearing, unknown and
+declared oversize responses, same-tab deduplication, late subscribers, cross-tab
+quota serialization, crash reconciliation, DOM and same-node replacement,
+response-header rejection aborts, pagehide/final-consumer abort, persisted
+pageshow recovery, Blob playback-error fallback, progress cleanup, object-URL
+teardown, one-shot intersection,
+removed-before-intersection cleanup, Cache Storage fallback, and production-markup
+desktop/narrow progress evidence. `tests/test_persistent_video_cache_scope.py`
+separately covers the opaque server authority scope, trusted-header first request,
+build-version rotation, logout ordering, and snapshot response attestation.
+
+The authority lifecycle row also injects a Cache Storage deletion failure and
+asserts that `prepareAuthorityChange()` still resolves after tearing down local
+scope/tasks/Blob URLs, so optional cache cleanup cannot block the real mutation.
+
+Both the behavior gate and its mutation gate run in the required
+`browser-smoke` GitHub Actions job after the normal page-load smoke.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
