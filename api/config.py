@@ -9636,6 +9636,7 @@ _SETTINGS_DEFAULTS = {
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
     "hide_empty_state_panel": False,  # hide the complete new-chat welcome panel
     "new_chat_on_workspace_switch": False,  # #5473 opt-in: switching to a DIFFERENT workspace starts a new chat (leaving the current conversation on its original workspace) instead of mutating the current session's workspace in place. Default OFF preserves the shipped in-place-switch behavior.
+    "profile_switch_resume_session": False,  # opt-in: switching profiles auto-resumes the target profile's most recent session instead of always starting a fresh conversation. Default OFF preserves the shipped fresh-session behavior.
     "virtualize_transcript": False,  # #4343: virtualize long (>80 msg) transcripts. EXPERIMENTAL, opt-IN (default OFF). Was opt-out/default-on in #4325 but caused scroll-up flicker on long sessions with tall tool-call rows (variable-height anchor oscillation) — flipped off for everyone in #4343; re-enabling requires an explicit opt-in (see virtualize_transcript_optin migration in load_settings).
     "virtualize_transcript_optin": False,  # #4343 migration marker: True only once the user explicitly enables virtualize_transcript AFTER the default-off flip. A stored virtualize_transcript=True WITHOUT this marker is a stale pre-flip value and is reset to False on load (force-off-for-everyone migration).
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
@@ -9981,6 +9982,7 @@ _SETTINGS_BOOL_KEYS = {
     "hide_empty_state_suggestions",
     "hide_empty_state_panel",
     "new_chat_on_workspace_switch",
+    "profile_switch_resume_session",
     "virtualize_transcript",
     "virtualize_transcript_optin",
     "show_tps",

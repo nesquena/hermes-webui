@@ -7194,9 +7194,26 @@ async function switchToProfile(name) {
       showToast(t('profile_switched', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
-      // Start a new session for the new profile so nothing gets cross-tagged.
+      // By default, start a new session for the new profile so nothing gets
+      // cross-tagged. When the opt-in profile_switch_resume_session setting is
+      // enabled, auto-resume the new profile's most recent session instead.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      let resumed = false;
+      if (window._profileSwitchResumeSession) {
+        try {
+          const recentData = await api('/api/sessions?limit=1&order=recent');
+          if (recentData && recentData.sessions && recentData.sessions.length > 0) {
+            const recentSid = recentData.sessions[0].session_id;
+            if (recentSid) {
+              await loadSession(recentSid);
+              resumed = true;
+            }
+          }
+        } catch (_) {}
+      }
+      if (!resumed) {
+        await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      }
       if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
@@ -7212,14 +7229,14 @@ async function switchToProfile(name) {
       // and pop a stale toast. Mirrors the no-messages branch guard below.
       // (@rodboev/greptile review, #4662)
       if (_switchGen !== _profileSwitchGeneration) return false;
-      if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
+      if (!resumed && typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       // Safety net: if the new session has no workspace, newSession() won't have
       // painted the file tree — clear the up-front skeleton so it can't strand
       // (#4662 Opus gate). No-op when a real tree already rendered.
       if ((!S.session || !S.session.workspace) && typeof clearWorkspaceTreeSkeleton === 'function') {
         clearWorkspaceTreeSkeleton();
       }
-      showToast(t('profile_switched_new_conversation', name));
+      showToast(t(resumed ? 'profile_switched' : 'profile_switched_new_conversation', name));
     } else {
       // No messages yet — refresh the list and topbar in place, then the
       // workspace tree. The loading skeletons shown up front (top of this
@@ -8754,6 +8771,8 @@ function _preferencesPayloadFromUi(){
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
   if(syncCb) payload.sync_to_insights=syncCb.checked;
+  const profileSwitchResumeCb=$('settingsProfileSwitchResume');
+  if(profileSwitchResumeCb) payload.profile_switch_resume_session=profileSwitchResumeCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
   // update_channel is NOT included here — it has its own dedicated write path
@@ -9485,6 +9504,8 @@ async function loadSettingsPanel(){
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const profileSwitchResumeCb=$('settingsProfileSwitchResume');
+    if(profileSwitchResumeCb){profileSwitchResumeCb.checked=!!settings.profile_switch_resume_session;profileSwitchResumeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateChannelSel=$('settingsUpdateChannel');
