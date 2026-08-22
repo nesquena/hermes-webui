@@ -422,8 +422,14 @@ function _escHtml(s){
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
+// #5747: tools that mutate files through shell/python TEXT (sed -i, shell
+// redirects, open(...,'w')) rather than a structured path arg. Their
+// command/code/result text is scanned for the open preview's path so the
+// preview still refreshes after such edits. Complements #5752 (which scoped
+// these tools as a follow-up).
+const ARTIFACT_TEXT_MUTATION_TOOLS = new Set(['terminal','execute_code']);
 
-function _normalizeArtifactPath(path){
+function _normalizeArtifactPath(path, opts){
   if(!path) return '';
   path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
   if(!path || path.length > 240 || path.includes('://')) return '';
@@ -434,7 +440,10 @@ function _normalizeArtifactPath(path){
   path = path.replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
   if(!path) return '';
   if(ARTIFACT_IGNORE_RE.test(path)) return '';
-  if(!/[./]/.test(path)) return '';
+  // #5747: allow extension-less root files (Makefile, Dockerfile) when the path
+  // comes from a structured tool arg ({allowBare:true}); text-mined candidates
+  // keep the strict filter so prose like "hello" can't become an artifact.
+  if(!(opts&&opts.allowBare)&&!/[./]/.test(path)) return '';
   return path;
 }
 
@@ -466,14 +475,14 @@ function _artifactCandidatesFromToolCall(tc){
   const args = tc.arguments || tc.args || tc.input || {};
   const result = tc.result || tc.output || tc.snippet || '';
   const out = [];
-  const add = (path, source=name || 'tool') => {
-    path = _normalizeArtifactPath(path);
+  const add = (path, source=name || 'tool', addOpts) => {
+    path = _normalizeArtifactPath(path, addOpts);
     if(path) out.push({path, kind:source});
   };
   if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
-    for(const key of ['path','file_path','source','destination']) add(args[key]);
-    if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
-    if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
+    for(const key of ['path','file_path','source','destination']) add(args[key], name || 'tool', {allowBare:true});
+    if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p, name || 'tool', {allowBare:true}));
+    if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path, name || 'tool', {allowBare:true}));
   }
   const resultText = typeof result === 'string' ? result : (result ? JSON.stringify(result) : '');
   // Tool results may include unified diffs from patch-style tools; scan those
@@ -486,16 +495,91 @@ function _artifactCandidatesFromToolCall(tc){
   return out;
 }
 
-const _turnMutatedPreviewPaths = new Set();
+const _turnMutatedPreviewPaths = new Map(); // path -> {sessionId, profile, workspace, streamId, path}
 
 function resetTurnWorkspaceMutations(){
   _turnMutatedPreviewPaths.clear();
 }
 
+// #5747: terminal/execute_code don't expose a structured path arg — the
+// mutation target lives in the shell command / python code / tool result text.
+// Extract conservative path-like tokens (dotted filenames / slash segments) so
+// sed -i, shell redirects, and open(...,'w') writes still refresh the preview.
+// IMPORTANT: require a recognized write operation token in the text; do not
+// treat any path mention as a mutation. Resolve against the tool's workdir.
+function _textPathTokens(text, workdir){
+  if(!text || typeof text !== 'string') return [];
+  // Only consider it a mutation if text contains a recognized write operation
+  const writeOps = /\b(write_file|sed\s+-i|patch\s+.*-o|>\s*\/|>>\s*\/|open\s*\(\s*['\"][^'\"]*['\"]\s*,\s*['\"]w)/i;
+  if(!writeOps.test(text)) return [];
+  const out = [];
+  const re = /(?:^|[\s"'`=(\[,])((?:\.{0,2}\/|~\/)?(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12})(?=[\s"'`\)\],;]|$)/g;
+  let m;
+  while((m = re.exec(text))){
+    const p = _normalizeArtifactPath(m[1], {allowBare:true, workdir: workdir});
+    if(p && !out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
+// #5747: direct mention check — if the terminal/execute_code text contains the
+// open preview's relative path (or its basename), the file was very likely
+// touched even when no path-like token regex matched.
+// IMPORTANT: do not equate a path mention with a mutation. Prefer authoritative
+// mutation metadata from noteWorkspaceMutationsFromToolCall(). Only return true
+// if there's an actual mutation recorded for the current preview path.
+function _toolTextMentionsPreview(tc){
+  if(!_previewCurrentPath) return false;
+  const rel = _normalizeArtifactPath(_previewCurrentPath, {allowBare:true});
+  if(!rel) return false;
+  // Only consider it a mention if the tool call actually produced a mutation
+  // that we recorded. Don't infer mutation from mere path mentions in text.
+  return _turnMutatedPreviewPaths.has(rel);
+}
+
 function noteWorkspaceMutationsFromToolCall(tc){
   for(const a of _artifactCandidatesFromToolCall(tc)){
     const path=_normalizeArtifactPath(a.path);
-    if(path) _turnMutatedPreviewPaths.add(path);
+    if(path) _turnMutatedPreviewPaths.set(path, {
+      sessionId: S.session?.id,
+      profile: S.activeProfile?.id || 'default',
+      workspace: S.activeWorkspace?.id,
+      streamId: S.activeStreamId,
+      path: path
+    });
+  }
+  // #5747: text-based mutation tools (terminal/execute_code) — scan command,
+  // code, and result text so preview auto-refresh works for shell/python edits.
+  const name = String(tc && tc.name || '').replace(/^functions\./,'');
+  if(ARTIFACT_TEXT_MUTATION_TOOLS.has(name)){
+    const args = (tc && (tc.arguments || tc.args || tc.input)) || {};
+    const result = (tc && (tc.result || tc.output || tc.snippet)) || '';
+    // Get workdir for _textPathTokens
+    const workdir = S.activeWorkspace?.path || S.session?.cwd || '.';
+    for(const t of [
+      typeof args === 'string' ? args : JSON.stringify(args || {}),
+      typeof result === 'string' ? result : (result ? JSON.stringify(result) : '')
+    ]){
+      for(const p of _textPathTokens(t, workdir)) {
+        _turnMutatedPreviewPaths.set(p, {
+          sessionId: S.session?.id,
+          profile: S.activeProfile?.id || 'default',
+          workspace: S.activeWorkspace?.id,
+          streamId: S.activeStreamId,
+          path: p
+        });
+      }
+    }
+    if(_toolTextMentionsPreview(tc)){
+      const rel = _normalizeArtifactPath(_previewCurrentPath, {allowBare:true});
+      if(rel) _turnMutatedPreviewPaths.set(rel, {
+        sessionId: S.session?.id,
+        profile: S.activeProfile?.id || 'default',
+        workspace: S.activeWorkspace?.id,
+        streamId: S.activeStreamId,
+        path: rel
+      });
+    }
   }
 }
 
@@ -506,15 +590,40 @@ function noteWorkspaceMutationsFromToolCalls(toolCalls){
 
 function _isOpenPreviewPathMutated(){
   if(!_previewCurrentPath) return false;
-  const current=_normalizeArtifactPath(_previewCurrentPath);
-  return !!(current&&_turnMutatedPreviewPaths.has(current));
+  const current=_normalizeArtifactPath(_previewCurrentPath, {allowBare:true});
+  const entry = _turnMutatedPreviewPaths.get(current);
+  if(!entry) return false;
+  // Verify ownership: must match current session, profile, workspace, and stream
+  return entry.sessionId === (S.session?.id) &&
+         entry.profile === (S.activeProfile?.id || 'default') &&
+         entry.workspace === (S.activeWorkspace?.id) &&
+         entry.streamId === (S.activeStreamId);
 }
+
+let _previewInFlightGen = 0;
 
 async function refreshOpenPreviewIfMutated(){
   if(typeof _previewDirty!=='undefined'&&_previewDirty) return;
   if(!_isOpenPreviewPathMutated()) return;
   if(!_previewCurrentPath||!S.session) return;
-  await openFile(_previewCurrentPath, { bustCache: true });
+  
+  // Consume/coalesce: remove the mutation entry before starting refresh
+  // so one mutation causes at most one reload
+  const current=_normalizeArtifactPath(_previewCurrentPath, {allowBare:true});
+  const mutationEntry = _turnMutatedPreviewPaths.get(current);
+  if(!mutationEntry) return;
+  _turnMutatedPreviewPaths.delete(current);
+  
+  // Track in-flight generation
+  const myGen = ++_previewInFlightGen;
+  try {
+    await openFile(_previewCurrentPath, { bustCache: true });
+  } finally {
+    // If we're still the latest generation, clear in-flight
+    if(_previewInFlightGen === myGen) {
+      _previewInFlightGen = 0;
+    }
+  }
 }
 
 function collectSessionArtifacts(){
@@ -1096,8 +1205,18 @@ function _prismLanguageForPath(path){
   return _PRISM_LANG_MAP[ext]!==undefined?_PRISM_LANG_MAP[ext]:'plaintext';
 }
 
+let _previewInFlightGen = 0;
+
 async function openFile(path, opts={}){
   if(!S.session)return;
+  
+  // Capture identity before await to detect stale calls
+  const callGen = ++_previewInFlightGen;
+  const callSessionId = S.session?.id;
+  const callProfileId = S.activeProfile?.id || 'default';
+  const callWorkspaceId = S.activeWorkspace?.id;
+  const callStreamId = S.activeStreamId;
+  
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
