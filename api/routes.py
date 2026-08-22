@@ -2966,6 +2966,37 @@ def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
 # cancelled stream — so clearing early cannot clobber a newer turn (#6623).
 _STALE_CANCELLED_RUN_GRACE_SECONDS = 60.0
 
+_MAX_DRAFT_TEXT = 50_000
+_MAX_DRAFT_FILES = 50
+
+
+def _compare_and_clear_draft_locked(session, expected_text: str, expected_files: list) -> tuple[dict, bool]:
+    """Clear a draft only if it still equals the captured payload.
+
+    The caller owns the session-agent lock. Restore the in-memory value if the
+    disk write fails so an ambiguous response does not make memory look settled
+    while the persisted session still contains the draft.
+    """
+    current_draft = dict(getattr(session, "composer_draft", {}) or {})
+    if (
+        current_draft.get("text", "") != expected_text
+        or current_draft.get("files", []) != expected_files
+    ):
+        return current_draft, False
+
+    next_draft = dict(current_draft)
+    next_draft["text"] = ""
+    next_draft["files"] = []
+    if next_draft == current_draft:
+        return current_draft, True
+    try:
+        session.composer_draft = next_draft
+        session.save(touch_updated_at=False, skip_index=True)
+    except Exception:
+        session.composer_draft = current_draft
+        raise
+    return dict(session.composer_draft), True
+
 
 def _cancelled_run_is_stale(run_entry) -> bool:
     """Return True when an ACTIVE_RUNS row belongs to a cancel that has been
@@ -15754,12 +15785,20 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        compare_and_clear = body.get("compare_and_clear") is True
+        expected_stream_id = body.get("expected_stream_id")
+        if expected_stream_id is not None:
+            if not isinstance(expected_stream_id, str) or not expected_stream_id.strip():
+                return bad(handler, "expected_stream_id must be a non-empty string", 400)
+            expected_stream_id = expected_stream_id.strip()
+        compare_payload_valid = (
+            not compare_and_clear
+            or (isinstance(text, str) and isinstance(files, list))
+        )
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
         # via the 400ms debounced auto-save.
-        _MAX_DRAFT_TEXT = 50_000  # 50 KB cap on textarea content
-        _MAX_DRAFT_FILES = 50  # max number of attached file references
         if text is not None and not isinstance(text, str):
             text = ""
         if isinstance(text, str) and len(text) > _MAX_DRAFT_TEXT:
@@ -15774,29 +15813,52 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
+        compare_cleared = None
         with _get_session_agent_lock(sid):
             _draft_mark("acquired_lock")
+            if expected_stream_id is not None:
+                try:
+                    s = get_session(sid)
+                except KeyError:
+                    return bad(handler, "Session not found", 404)
+                active_stream_id = str(getattr(s, "active_stream_id", "") or "")
+                # Compare-and-clear is the interrupt cleanup operation: cancel
+                # may make the session idle before this POST acquires the lock.
+                if active_stream_id != expected_stream_id and not (
+                    compare_and_clear and not active_stream_id
+                ):
+                    return bad(handler, "Session stream changed", 409)
             current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
+            if compare_and_clear:
+                if compare_payload_valid:
+                    saved_draft, compare_cleared = _compare_and_clear_draft_locked(s, text, files)
+                else:
+                    saved_draft, compare_cleared = current_draft, False
+                unchanged = saved_draft == current_draft
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+            if not compare_and_clear:
+                if next_draft == current_draft:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    s.composer_draft = next_draft
+                    # Draft persistence is not conversation activity. Touching updated_at
+                    # here makes the active-session external-refresh poll force-reload the
+                    # current chat every few seconds while the user is typing, and that
+                    # delayed reload can restore an older draft over newer local input.
+                    _draft_mark("before_save")
+                    s.save(touch_updated_at=False, skip_index=True)
+                    _draft_mark("after_save")
+                    saved_draft = s.composer_draft
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
+        if compare_and_clear:
+            payload["compare_cleared"] = bool(compare_cleared)
         if unchanged:
             payload["unchanged"] = True
         _draft_mark("before_json")
@@ -16399,6 +16461,10 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/chat/steer":
         from api.streaming import _handle_chat_steer
         return _handle_chat_steer(handler, body)
+
+    if parsed.path == "/api/chat/interrupt":
+        from api.streaming import _handle_chat_interrupt
+        return _handle_chat_interrupt(handler, body)
 
     if parsed.path == "/api/terminal/start":
         return _handle_terminal_start(handler, body)

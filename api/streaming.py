@@ -33,7 +33,7 @@ from api.config import (
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
-    LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
+    LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
@@ -13000,6 +13000,176 @@ def _handle_chat_steer(handler, body: dict) -> bool:
 
     return j(handler, {"accepted": accepted, "fallback": None,
                        "stream_id": active_stream_id})
+
+
+_BOUNDED_REDIRECT_API_MODES = frozenset({
+    "chat_completions",
+    "codex_responses",
+    "anthropic_messages",
+    "bedrock_converse",
+})
+
+
+def _supports_bounded_active_turn_redirect(agent, redirect) -> bool:
+    """Return whether redirect is safe to call while holding the session lock."""
+    mode = getattr(agent, "api_mode", None)
+    return bool(
+        callable(redirect)
+        and getattr(agent, "_supports_active_turn_redirect", False) is True
+        and isinstance(mode, str)
+        and mode in _BOUNDED_REDIRECT_API_MODES
+    )
+
+
+def _handle_chat_interrupt(handler, body: dict) -> bool:
+    """Redirect text into the exact active local stream.
+
+    The per-session agent lock serializes this bounded native mutation with
+    finalization and successor admission. ``STREAMS_LOCK`` is held only while
+    capturing and rechecking the exact stream/owner/agent binding. Other
+    implementations, including provider/backend transports such as Codex
+    app-server, fail closed before they can block the process-wide registry.
+    """
+    from api.helpers import j, bad
+    from api import config as _cfg
+
+    raw = body if isinstance(body, dict) else {}
+    sid = str(raw.get("session_id", "") or "").strip()
+    stream_id = str(raw.get("stream_id", "") or "").strip()
+    text = str(raw.get("text", "") or "").strip()
+    if not sid:
+        return bad(handler, "session_id required")
+    if not stream_id:
+        return bad(handler, "stream_id required")
+    if not text:
+        return bad(handler, "text required")
+
+    draft_settlement_requested = "draft_text" in raw or "draft_files" in raw
+    draft_text = draft_files = None
+    if draft_settlement_requested:
+        if "draft_text" not in raw or "draft_files" not in raw:
+            return bad(handler, "draft_text and draft_files must be provided together")
+        draft_text = raw.get("draft_text")
+        draft_files = raw.get("draft_files")
+        from api.routes import _MAX_DRAFT_FILES, _MAX_DRAFT_TEXT
+
+        if not isinstance(draft_text, str):
+            return bad(handler, "draft_text must be a string")
+        if not isinstance(draft_files, list):
+            return bad(handler, "draft_files must be a list")
+        if len(draft_text) > _MAX_DRAFT_TEXT:
+            return bad(handler, "draft_text is too large")
+        if len(draft_files) > _MAX_DRAFT_FILES:
+            return bad(handler, "draft_files has too many entries")
+        draft_files = list(draft_files)
+
+    def _cancel_requested(flag) -> bool:
+        is_set = getattr(flag, "is_set", None)
+        return bool(flag is not None and callable(is_set) and is_set())
+
+    settlement_error = None
+    settlement_binding_lost = False
+    with _get_session_agent_lock(sid):
+        try:
+            session = get_session(sid)
+        except KeyError:
+            response = {"accepted": False, "fallback": "session_not_found", "stream_id": stream_id}
+        else:
+            with _cfg.STREAMS_LOCK:
+                stream = _cfg.STREAMS.get(stream_id)
+                owner = stream_owner_session_id(stream_id)
+                agent = _cfg.AGENT_INSTANCES.get(stream_id)
+                cancel_flag = _cfg.CANCEL_FLAGS.get(stream_id)
+                redirect = getattr(agent, "redirect", None) if agent is not None else None
+
+            if stream is None:
+                response = {"accepted": False, "fallback": "stream_dead", "stream_id": stream_id}
+            elif str(getattr(session, "active_stream_id", "") or "") != stream_id or owner != sid:
+                response = {"accepted": False, "fallback": "stream_mismatch", "stream_id": stream_id}
+            elif _cancel_requested(cancel_flag):
+                response = {"accepted": False, "fallback": "stream_dead", "stream_id": stream_id}
+            elif agent is None:
+                response = {"accepted": False, "fallback": "no_agent", "stream_id": stream_id}
+            elif not _supports_bounded_active_turn_redirect(agent, redirect):
+                response = {"accepted": False, "fallback": "unsupported_redirect", "stream_id": stream_id}
+            else:
+                try:
+                    accepted = bool(redirect(text))
+                except Exception:
+                    logger.debug("agent.redirect() raised for session=%s stream=%s", sid, stream_id, exc_info=True)
+                    response = {"accepted": False, "fallback": "redirect_error", "stream_id": stream_id}
+                else:
+                    with _cfg.STREAMS_LOCK:
+                        current_stream = _cfg.STREAMS.get(stream_id)
+                        current_owner = stream_owner_session_id(stream_id)
+                        current_agent = _cfg.AGENT_INSTANCES.get(stream_id)
+                        current_cancel_flag = _cfg.CANCEL_FLAGS.get(stream_id)
+                    binding_is_current = bool(
+                        current_stream is stream
+                        and current_owner == sid
+                        and current_agent is agent
+                        and not _cancel_requested(current_cancel_flag)
+                        and str(getattr(session, "active_stream_id", "") or "") == stream_id
+                    )
+                    if not binding_is_current:
+                        fallback = "stream_dead" if current_stream is None or _cancel_requested(current_cancel_flag) else "stream_mismatch"
+                        response = {"accepted": False, "fallback": fallback, "stream_id": stream_id}
+                    else:
+                        response = {
+                            "accepted": accepted,
+                            "fallback": None if accepted else "redirect_rejected",
+                            "stream_id": stream_id,
+                        }
+
+            if response.get("accepted") is True and draft_settlement_requested:
+                try:
+                    from api.routes import _compare_and_clear_draft_locked
+
+                    current_session = _resolve_current_session_for_write(session)
+                    if current_session is None:
+                        raise RuntimeError("current session unavailable for interrupt settlement")
+                    if str(getattr(current_session, "active_stream_id", "") or "") != stream_id:
+                        raise RuntimeError("current session no longer owns interrupt stream")
+                    settled_draft, compare_cleared = _compare_and_clear_draft_locked(
+                        current_session,
+                        draft_text,
+                        draft_files,
+                    )
+                except Exception:
+                    settlement_error = sys.exc_info()
+                else:
+                    response["compare_cleared"] = compare_cleared
+                    response["draft"] = settled_draft
+                    with _cfg.STREAMS_LOCK:
+                        settled_stream = _cfg.STREAMS.get(stream_id)
+                        settled_owner = stream_owner_session_id(stream_id)
+                        settled_agent = _cfg.AGENT_INSTANCES.get(stream_id)
+                        settled_cancel_flag = _cfg.CANCEL_FLAGS.get(stream_id)
+                    settlement_binding_lost = not bool(
+                        settled_stream is stream
+                        and settled_owner == sid
+                        and settled_agent is agent
+                        and not _cancel_requested(settled_cancel_flag)
+                        and str(getattr(current_session, "active_stream_id", "") or "") == stream_id
+                    )
+
+    if settlement_binding_lost:
+        logger.warning(
+            "Interrupt delivery became uncertain during draft settlement for session=%s stream=%s",
+            sid,
+            stream_id,
+        )
+        return bad(handler, "interrupt delivery became uncertain", status=500)
+    if settlement_error:
+        logger.warning(
+            "Interrupt accepted but draft settlement failed for session=%s stream=%s",
+            sid,
+            stream_id,
+            exc_info=settlement_error,
+        )
+        return bad(handler, "interrupt draft settlement failed", status=500)
+
+    return j(handler, response)
 
 
 def cancel_stream(stream_id: str) -> bool:

@@ -148,10 +148,10 @@ class TestBusyPathsStillWork:
             "cmdQueue must still queue messages when S.busy is true"
         )
 
-    def test_interrupt_still_cancels_when_busy(self):
-        """When S.busy && S.activeStreamId, cmdInterrupt must still call cancelStream."""
+    def test_interrupt_uses_redirect_first_helper_when_busy(self):
+        """When S.busy && S.activeStreamId, cmdInterrupt uses the shared helper."""
         body = self._get_function_body("cmdInterrupt", window=1200)
-        assert "cancelStream" in body
+        assert "_tryInterrupt" in body
 
     def test_steer_still_calls_trySteer_when_busy(self):
         """When S.busy && S.activeStreamId, cmdSteer must still call _trySteer."""

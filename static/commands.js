@@ -1349,11 +1349,228 @@ async function cmdQueue(args){
   showToast(t('cmd_queue_confirm'),2000);
 }
 
+function _interruptOwnerIsCurrent(ownerSid){
+  return !!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid);
+}
+
+function _interruptComposerRevision(){
+  const revision=typeof S!=='undefined'&&S?Number(S._composerRevision):0;
+  return Number.isFinite(revision)?revision:0;
+}
+
+function _interruptPayloadWasRevised(capturedFiles, submittedRevision){
+  const liveFiles=Array.isArray(S.pendingFiles)?S.pendingFiles:[];
+  return _interruptComposerRevision()!==submittedRevision
+    || liveFiles.length!==capturedFiles.length
+    || liveFiles.some((file,index)=>file!==capturedFiles[index]);
+}
+
+function _interruptStreamIsCurrent(ownerSid, ownerStreamId){
+  return !!(_interruptOwnerIsCurrent(ownerSid)&&ownerStreamId
+    &&String(S.activeStreamId||'')===String(ownerStreamId)
+    &&S.session.active_stream_id
+    &&String(S.session.active_stream_id)===String(ownerStreamId));
+}
+
+function _interruptOwnerCanMutate(ownerSid, ownerStreamId){
+  return !!(_interruptOwnerIsCurrent(ownerSid)&&_interruptStreamIsCurrent(ownerSid,ownerStreamId));
+}
+
+function _interruptDraftSaveAllowed(ownerSid, ownerStreamId){
+  return _interruptOwnerCanMutate(ownerSid,ownerStreamId);
+}
+
+function _interruptWarnDraftPreserved(){
+  if(typeof showToast==='function'){
+    showToast(t('cmd_interrupt_uncertain_preserved'),5000,'warning');
+  }
+}
+
+function _interruptSaveLatestDraftIfCurrent(ownerSid, ownerStreamId){
+  if(!_interruptOwnerCanMutate(ownerSid,ownerStreamId)||typeof _saveComposerDraftNow!=='function') return Promise.resolve();
+  const composer=$('msg');
+  const currentText=composer?String(composer.value||''):'';
+  const currentFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  return _saveComposerDraftNow(ownerSid,currentText,currentFiles,true,true,ownerStreamId,true);
+}
+
+async function _interruptPreserveDraft(ownerSid, originalMsg, filesSnapshot, submittedRevision, ownerStreamId){
+  _interruptWarnDraftPreserved();
+  const ownerCanMutate=_interruptOwnerCanMutate(ownerSid,ownerStreamId);
+  const revised=ownerCanMutate&&_interruptPayloadWasRevised(filesSnapshot,submittedRevision);
+  const composer=$('msg');
+  const liveText=composer?String(composer.value||''):'';
+  const liveFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const text=ownerCanMutate&&revised?liveText:originalMsg;
+  const files=ownerCanMutate&&revised?liveFiles:filesSnapshot;
+  if(ownerCanMutate&&!revised){
+    if(composer){composer.value=originalMsg;if(typeof autoResize==='function')autoResize();}
+    if(filesSnapshot.length){S.pendingFiles=[...filesSnapshot];if(typeof renderTray==='function')renderTray();}
+  }
+  if(!_interruptDraftSaveAllowed(ownerSid,ownerStreamId)||typeof _saveComposerDraftNow!=='function') return;
+  const savedRevision=_interruptComposerRevision();
+  const savedFiles=Array.isArray(files)?[...files]:[];
+  const ownerAtSave=ownerCanMutate;
+  await _saveComposerDraftNow(ownerSid,text,files,true,ownerCanMutate,ownerStreamId,true);
+  if(ownerAtSave&&_interruptOwnerCanMutate(ownerSid,ownerStreamId)
+      &&_interruptPayloadWasRevised(savedFiles,savedRevision)){
+    await _interruptSaveLatestDraftIfCurrent(ownerSid,ownerStreamId);
+  }
+}
+
+function _interruptSettleDraft(ownerSid, submittedText, filesSnapshot, submittedRevision, settlement, ownerStreamId, compareDraft){
+  const capturedText=String(submittedText||'');
+  const capturedFiles=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  const ownerCanMutate=_interruptOwnerCanMutate(ownerSid,ownerStreamId);
+  const revised=ownerCanMutate&&_interruptPayloadWasRevised(capturedFiles,submittedRevision);
+  const composer=$('msg');
+  const liveFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const delivered=new Set(capturedFiles);
+  const remaining=liveFiles.filter(file=>!delivered.has(file));
+  const comparePayload=compareDraft&&typeof compareDraft==='object'?compareDraft:null;
+  const compareText=comparePayload&&typeof comparePayload.text==='string'
+    ?comparePayload.text:capturedText;
+  const compareFiles=comparePayload&&Array.isArray(comparePayload.files)
+    ?(typeof _composerDraftFilesForPersist==='function'
+      ?_composerDraftFilesForPersist(comparePayload.files):comparePayload.files.filter(Boolean))
+    :capturedFiles;
+  const hasSettlement=settlement&&typeof settlement==='object'
+    &&(settlement.compare_cleared===true||settlement.compare_cleared===false);
+  const preservesSettlement=hasSettlement&&settlement.compare_cleared===false;
+  if(ownerCanMutate&&!preservesSettlement){
+    if(!revised&&composer){composer.value='';if(typeof autoResize==='function')autoResize();}
+    if(remaining.length!==liveFiles.length){S.pendingFiles=remaining;if(typeof renderTray==='function')renderTray();}
+  }
+  let clearPromise=Promise.resolve();
+  if(hasSettlement){
+    if(settlement.compare_cleared===true){
+      if(ownerCanMutate&&typeof _draftSaveTimer!=='undefined')clearTimeout(_draftSaveTimer);
+      if(typeof _clearRememberedNewChatDraftSession==='function')_clearRememberedNewChatDraftSession(ownerSid);
+      if(typeof _suppressComposerDraftRestoreAfterSubmit==='function'){
+        _suppressComposerDraftRestoreAfterSubmit(
+          ownerSid,capturedText,capturedFiles,[{text:compareText,files:compareFiles}],
+        );
+      }
+      if(typeof _rememberComposerDraftPayloadState==='function')_rememberComposerDraftPayloadState(ownerSid,'',[]);
+    }else{
+      _interruptWarnDraftPreserved();
+      if(!revised&&typeof _clearComposerDraftRestoreSuppression==='function'){
+        _clearComposerDraftRestoreSuppression(ownerSid);
+      }
+      if(settlement.draft&&typeof settlement.draft==='object'
+          &&!revised
+          &&typeof _rememberComposerDraftPayloadState==='function'){
+        _rememberComposerDraftPayloadState(ownerSid,settlement.draft.text,settlement.draft.files);
+      }
+    }
+  }else if(typeof _clearComposerDraftIfMatches==='function'){
+    clearPromise=_clearComposerDraftIfMatches(ownerSid,compareText,compareFiles,ownerStreamId,true);
+  }else if(typeof _clearComposerDraft==='function'){
+    clearPromise=_clearComposerDraft(ownerSid,compareText,compareFiles);
+  }
+  const repersistLater=()=>{
+    if(!ownerCanMutate||!_interruptPayloadWasRevised(capturedFiles,submittedRevision)){
+      return Promise.resolve();
+    }
+    return _interruptSaveLatestDraftIfCurrent(ownerSid,ownerStreamId);
+  };
+  return clearPromise&&typeof clearPromise.then==='function'
+    ? clearPromise.then(repersistLater,repersistLater)
+    : Promise.resolve(repersistLater());
+}
+
+async function _tryInterrupt(msg, confirmToastKey='busy_interrupt_confirm', cancelReason='busy-interrupt', rawSubmittedText, submittedRevision){
+  const originalMsg=String(msg||'').trim();
+  const composer=$('msg');
+  const capturedText=rawSubmittedText===undefined
+    ? (composer?String(composer.value||''):String(msg||''))
+    : String(rawSubmittedText||'');
+  const requestedRevision=Number(submittedRevision);
+  const capturedRevision=submittedRevision===undefined||!Number.isFinite(requestedRevision)
+    ? _interruptComposerRevision()
+    : requestedRevision;
+  const filesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  if(!originalMsg&&!filesSnapshot.length){showToast(t('cmd_interrupt_no_msg'));return false;}
+  const ownerSid=S.session&&S.session.session_id;
+  if(!ownerSid){showToast(t('no_active_session'));return false;}
+  const ownerStreamId=S.activeStreamId||null;
+  const capturedDraftFiles=typeof _composerDraftFilesForPersist==='function'
+    ? _composerDraftFilesForPersist(filesSnapshot)
+    : filesSnapshot.filter(Boolean);
+  const rememberedDraft=typeof _composerDraftPayloadForSid==='function'
+    ? _composerDraftPayloadForSid(ownerSid):null;
+  const draftCompare=rememberedDraft||{text:capturedText,files:capturedDraftFiles};
+  const modelState=typeof _chatPayloadModelState==='function'?_chatPayloadModelState():{};
+  const ownerProfile=S.activeProfile||'default';
+
+  if(!filesSnapshot.length&&ownerStreamId){
+    try{
+      const result=await api('/api/chat/interrupt',{
+        method:'POST',
+        retries:0,
+        body:JSON.stringify({
+          session_id:ownerSid,
+          stream_id:String(ownerStreamId),
+          text:originalMsg,
+          draft_text:draftCompare.text,
+          draft_files:draftCompare.files,
+        }),
+      });
+      if(result&&result.accepted===true&&String(result.stream_id||'')===String(ownerStreamId)){
+        if(_interruptOwnerIsCurrent(ownerSid)&&!_interruptStreamIsCurrent(ownerSid,ownerStreamId)){
+          await _interruptPreserveDraft(ownerSid,capturedText,filesSnapshot,capturedRevision,ownerStreamId);
+          return false;
+        }
+        if(result.compare_cleared!==true&&result.compare_cleared!==false){
+          await _interruptPreserveDraft(ownerSid,capturedText,filesSnapshot,capturedRevision,ownerStreamId);
+          return false;
+        }
+        await _interruptSettleDraft(
+          ownerSid,capturedText,filesSnapshot,capturedRevision,result,ownerStreamId,draftCompare,
+        );
+        if(result.compare_cleared===false) return false;
+        showToast(t(confirmToastKey),2000);
+        return true;
+      }
+      const definitive=['session_not_found','stream_mismatch','stream_dead','no_agent','unsupported_redirect','redirect_rejected'];
+      if(!(result&&result.accepted===false&&String(result.stream_id||'')===String(ownerStreamId)&&definitive.includes(result.fallback))){
+        await _interruptPreserveDraft(ownerSid,capturedText,filesSnapshot,capturedRevision,ownerStreamId);
+        return false;
+      }
+      if(['session_not_found','stream_mismatch','stream_dead'].includes(result.fallback)){
+        await _interruptPreserveDraft(ownerSid,capturedText,filesSnapshot,capturedRevision,ownerStreamId);
+        return false;
+      }
+    }catch(_){
+      await _interruptPreserveDraft(ownerSid,capturedText,filesSnapshot,capturedRevision,ownerStreamId);
+      return false;
+    }
+  }
+
+  if(!_interruptStreamIsCurrent(ownerSid,ownerStreamId)||typeof cancelStream!=='function'){
+    await _interruptPreserveDraft(ownerSid,capturedText,filesSnapshot,capturedRevision,ownerStreamId);
+    return false;
+  }
+  queueSessionMessage(ownerSid,{text:originalMsg,files:filesSnapshot,model:modelState.model||'',model_provider:modelState.model_provider||'',profile:ownerProfile});
+  updateQueueBadge(ownerSid);
+  const draftPromise=_interruptSettleDraft(
+    ownerSid,capturedText,filesSnapshot,capturedRevision,undefined,ownerStreamId,draftCompare,
+  );
+  if(_interruptStreamIsCurrent(ownerSid,ownerStreamId)){
+    if(await cancelStream(cancelReason))showToast(t(confirmToastKey),2000);
+    else showToast(t('cancel_failed'),null,'error');
+  }else if(_interruptOwnerIsCurrent(ownerSid)){
+    showToast(`Queued: "${originalMsg.slice(0,40)}${originalMsg.length>40?'…':''}"`,2000);
+  }
+  await draftPromise;
+  return false;
+}
+
 /**
  * /interrupt <message> — Cancel the current turn and send a new message.
- * Calls cancelStream() then queues the message so the drain picks it up.
+ * Redirects the active text-only turn first, then uses the legacy queue+cancel fallback.
  */
-async function cmdInterrupt(args){
+async function cmdInterrupt(args, rawSubmittedText, submittedRevision){
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_interrupt_no_msg'));return;}
   // If nothing is running, /interrupt <msg> just sends like a normal message
@@ -1364,15 +1581,8 @@ async function cmdInterrupt(args){
     return;
   }
   if(!S.session){showToast(t('no_active_session'));return;}
-  // Queue the message first (before cancel sets busy=false and drains)
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  // Cancel the active stream; setBusy(false) will drain the queue
-  if(typeof cancelStream==='function'){
-    if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
-    else showToast(t('cancel_failed'),null,'error');
-  }
+  if(rawSubmittedText===undefined) await _tryInterrupt(msg,'cmd_interrupt_confirm','slash-interrupt');
+  else await _tryInterrupt(msg,'cmd_interrupt_confirm','slash-interrupt',rawSubmittedText,submittedRevision);
 }
 
 /**
