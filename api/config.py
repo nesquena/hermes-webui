@@ -4327,6 +4327,131 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def configured_reasoning_effort_for_model(
+    config_data: dict | None,
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Resolve the configured reasoning effort for one concrete model.
+
+    ``agent.reasoning_overrides`` is a model-scoped override and must win over
+    the global ``agent.reasoning_effort`` value.  The WebUI used to read only
+    the global field in its streaming worker and Gateway bridge, so a global
+    ``max`` leaked into every model even when the core agent would have picked
+    a safer per-model value.  Keep the resolution here so status, native
+    streaming, and Gateway-backed streaming share one decision point.
+    """
+    data = config_data if isinstance(config_data, dict) else {}
+    agent_cfg = data.get("agent")
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+
+    effort = agent_cfg.get("reasoning_effort")
+    overrides = agent_cfg.get("reasoning_overrides")
+    model = str(model_id or "").strip()
+
+    if model:
+        parsed_qualified = _parse_provider_qualified_model_id(model)
+        if parsed_qualified:
+            bare_model, parsed_provider = parsed_qualified
+            model = bare_model
+            if not provider_id:
+                provider_id = parsed_provider
+
+    # Prefer the Hermes core resolver when available; it owns the tolerant
+    # spelling/qualified-model matching rules.  The fallback keeps WebUI
+    # usable in installations where the companion agent tree is unavailable.
+    per_model = None
+    if isinstance(overrides, dict) and model:
+        try:
+            from hermes_constants import resolve_per_model_reasoning_effort
+
+            per_model = resolve_per_model_reasoning_effort(model, overrides)
+        except Exception:
+            per_model = None
+        if per_model is None:
+            # Fallback candidate list.  Mirror the core resolver's shapes so an
+            # install without the companion agent tree resolves the same
+            # overrides.  Exact/full-id candidates come FIRST so a full-id
+            # override always outranks a bare-tail one.
+            candidates = [model, model.lower()]
+            if model.startswith("@") and ":" in model:
+                candidates.append(model.rsplit(":", 1)[-1])
+            # Slash-qualified ids (``openai/gpt-5.4-mini``,
+            # ``openrouter/anthropic/claude-opus-4.5``) must also match a bare
+            # override key.  Without these the override was silently dropped
+            # and the global effort won.  Emit the aggregator-stripped middle
+            # form before the bare tail so the more specific id wins.
+            for _cand in list(candidates):
+                if "/" not in _cand:
+                    continue
+                _parts = _cand.split("/")
+                if len(_parts) >= 3:
+                    candidates.append("/".join(_parts[1:]))
+                candidates.append(_parts[-1])
+
+            def _fallback_parse(raw):
+                """Parse an override value with CORE semantics.
+
+                ``parse_reasoning_effort()`` in this module returns ``None`` for
+                a YAML boolean ``False`` and for the ``"false"``/``"disabled"``
+                spellings, but Hermes core treats all of them as *reasoning
+                disabled*.  Leaving them unparsed made the fallback silently
+                ignore an explicit disable and keep the global effort.
+                """
+                if raw is False:
+                    return {"enabled": False}
+                if raw is None or raw is True:
+                    return None
+                if str(raw).strip().lower() in {"none", "false", "disabled"}:
+                    return {"enabled": False}
+                return parse_reasoning_effort(raw)
+
+            normalized_overrides = {
+                str(key).strip().lower(): value
+                for key, value in overrides.items()
+            }
+            for candidate in candidates:
+                cand_lower = candidate.lower()
+                if cand_lower in normalized_overrides:
+                    per_model = _fallback_parse(
+                        normalized_overrides[cand_lower]
+                    )
+                    if per_model is not None:
+                        break
+
+            if per_model is None:
+                canonical_overrides = {
+                    str(key).strip().lower().replace(".", "-"): value
+                    for key, value in overrides.items()
+                }
+                for candidate in candidates:
+                    cand_canon = candidate.lower().replace(".", "-")
+                    if cand_canon in canonical_overrides:
+                        per_model = _fallback_parse(
+                            canonical_overrides[cand_canon]
+                        )
+                        if per_model is not None:
+                            break
+
+    if per_model is not None:
+        if per_model.get("enabled") is False:
+            effort = "none"
+        else:
+            override_eff = str(per_model.get("effort") or "").strip().lower()
+            if override_eff in VALID_REASONING_EFFORTS:
+                effort = override_eff
+
+    return coerce_reasoning_effort_for_model(
+        effort,
+        model,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
@@ -4344,7 +4469,6 @@ def get_reasoning_status(
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -4379,9 +4503,9 @@ def get_reasoning_status(
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         # Report the COERCED effort so boot/status/chip read paths agree with
         # what streaming actually sends. (Codex review of the drop-max alignment.)
-        "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
-            resolve_model,
+        "reasoning_effort": configured_reasoning_effort_for_model(
+            config_data,
+            model_id=resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
         ),

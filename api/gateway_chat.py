@@ -26,7 +26,7 @@ from api.config import (
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
-    coerce_reasoning_effort_for_model,
+    configured_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     register_active_run,
@@ -311,14 +311,25 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
 
 
 def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+    """Read and coerce user-configured reasoning effort for a gateway request.
+
+    Deliberately does NOT pass ``base_url``. ``_gateway_base_url()`` is the
+    Hermes Gateway *transport* address (where WebUI POSTs
+    ``/v1/chat/completions``); it is not the selected model provider's
+    capability endpoint. ``resolve_model_reasoning_efforts()`` treats a
+    supplied ``base_url`` as the probe target for endpoint-probed providers
+    (``lmstudio`` hits ``<base_url>/api/v1/models``), so forwarding the Gateway
+    address would probe the Gateway as though it were LM Studio and coerce the
+    override against the wrong capability set. Omitting it lets
+    ``coerce_reasoning_effort_for_model()`` resolve the real configured
+    provider endpoint itself, which is what the native streaming path already
+    does with its own ``resolved_base_url``.
+    """
     try:
         cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
-            model,
+        coerced = configured_reasoning_effort_for_model(
+            cfg_data,
+            model_id=model,
             provider_id=model_provider,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
