@@ -6764,6 +6764,10 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _showsForkOrBranchIndicator(s){
+  return !!(s&&s.parent_session_id&&(s.session_source==='fork'||s.relationship_type==='child_session'));
+}
+
 function _isForkWithResolvableParent(s, sessionIdsInList){
   return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
 }
@@ -8165,8 +8169,10 @@ function renderSessionListFromCache(){
       wtInd.title=`${wtLabel}: ${s.worktree_branch||s.worktree_path}`;
       titleRow.appendChild(wtInd);
     }
-    // Parent session indicator for forked/branched sessions (#465)
-    if(s.parent_session_id){
+    // Reset successors retain parent_session_id as durable lineage but are
+    // independent top-level conversations. Only real forks/children get the
+    // fork indicator and its "Forked from" tooltip (#7178).
+    if(_showsForkOrBranchIndicator(s)){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
       branchInd.innerHTML=li('git-branch',12);

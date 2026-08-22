@@ -1,10 +1,12 @@
 """Regression tests for /api/sessions lineage metadata used by sidebar collapse."""
 
+import json
 import sqlite3
 import time
 
 import pytest
 
+import api.agent_sessions as agent_sessions
 import api.models as models
 import api.routes as routes
 from api.models import SESSIONS, STREAMS, Session, all_sessions
@@ -50,6 +52,8 @@ def _ensure_state_db(path):
             started_at REAL NOT NULL,
             message_count INTEGER DEFAULT 0,
             parent_session_id TEXT,
+            session_key TEXT,
+            model_config TEXT,
             ended_at REAL,
             end_reason TEXT
         );
@@ -79,14 +83,38 @@ def _insert_state_message(conn, sid, *, role, content, timestamp):
     conn.commit()
 
 
-def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
+def _insert_state_row(
+    conn,
+    sid,
+    *,
+    title=None,
+    parent=None,
+    ended_at=None,
+    end_reason=None,
+    started_at=None,
+    source='webui',
+    session_source=None,
+    session_key=None,
+    model_config=None,
+):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, title, model, started_at, message_count, parent_session_id, session_key, model_config, ended_at, end_reason)
+        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?, ?, ?)
         """,
-        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason),
+        (
+            sid,
+            source,
+            session_source,
+            title or sid,
+            started_at or time.time(),
+            parent,
+            session_key,
+            json.dumps(model_config) if isinstance(model_config, dict) else model_config,
+            ended_at,
+            end_reason,
+        ),
     )
     conn.commit()
 
@@ -200,6 +228,105 @@ def test_non_compression_state_db_parent_does_not_create_sidebar_lineage(_isolat
         assert "_lineage_root_id" not in child
     finally:
         conn.close()
+
+
+def test_all_sessions_keeps_reset_successor_top_level_with_durable_lineage(_isolate):
+    """JSON-enriched rows retain reset lineage without sidebar child metadata."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    parent_sid = 'lineage_api_reset_parent'
+    child_sid = 'lineage_api_reset_child'
+    try:
+        _save_webui_session(parent_sid, title='Previous WeCom conversation', updated_at=t0)
+        _save_webui_session(child_sid, title='New WeCom conversation', updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            parent_sid,
+            source='wecom',
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason='session_reset',
+            session_key='same-messaging-identity',
+        )
+        _insert_state_row(
+            conn,
+            child_sid,
+            source='wecom',
+            parent=parent_sid,
+            started_at=t0 + 6,
+            session_key='same-messaging-identity',
+            model_config={'_reset_from': parent_sid},
+        )
+
+        child = {row['session_id']: row for row in all_sessions()}[child_sid]
+
+        assert child.get('parent_session_id') == parent_sid
+        for key in (
+            'relationship_type',
+            'parent_title',
+            'parent_source',
+            '_parent_lineage_root_id',
+            '_parent_lineage_tip_id',
+        ):
+            assert key not in child
+    finally:
+        conn.close()
+
+
+def test_reset_projection_fails_closed_for_conflicting_or_invalid_metadata():
+    """Legacy reset fallback stays narrow; real branch/delegate rows stay children."""
+    parent = {
+        'id': 'projection_reset_parent',
+        'title': 'Parent',
+        'source': 'wecom',
+        'session_key': 'same-messaging-identity',
+        'end_reason': 'session_reset',
+        'actual_message_count': 2,
+        'started_at': 1,
+    }
+    base_child = {
+        'source': 'wecom',
+        'parent_session_id': parent['id'],
+        'session_key': 'same-messaging-identity',
+        'actual_message_count': 2,
+        'started_at': 2,
+    }
+    rows = [
+        parent,
+        {**base_child, 'id': 'projection_legacy_reset'},
+        {
+            **base_child,
+            'id': 'projection_delegate',
+            'model_config': {'_reset_from': parent['id'], '_delegate_from': parent['id']},
+        },
+        {
+            **base_child,
+            'id': 'projection_mismatched_reset',
+            'model_config': {'_reset_from': 'other-parent'},
+        },
+        {
+            **base_child,
+            'id': 'projection_invalid_config',
+            'model_config': '{not-json',
+        },
+        {
+            **base_child,
+            'id': 'projection_orphan_canonical_reset',
+            'parent_session_id': 'parent-outside-window',
+            'model_config': {'_reset_from': 'parent-outside-window'},
+        },
+    ]
+
+    projected = {row['id']: row for row in agent_sessions._project_agent_session_rows(rows)}
+
+    assert 'relationship_type' not in projected['projection_legacy_reset']
+    assert 'relationship_type' not in projected['projection_orphan_canonical_reset']
+    for sid in (
+        'projection_delegate',
+        'projection_mismatched_reset',
+        'projection_invalid_config',
+    ):
+        assert projected[sid].get('relationship_type') == 'child_session'
 
 
 
@@ -338,6 +465,38 @@ def test_state_db_webui_source_overrides_stale_cli_json_metadata(_isolate):
         assert row["session_source"] == "webui"
         assert row["source_label"] == "WebUI"
         assert row["is_cli_session"] is False
+    finally:
+        conn.close()
+
+
+def test_state_db_webui_source_preserves_explicit_sidecar_fork_metadata(_isolate):
+    """A generic WebUI mirror must not erase sidecar fork provenance."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        session = Session(
+            session_id='lineage_api_native_fork_source',
+            title='Forked conversation',
+            messages=[{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'hi'}],
+            updated_at=t0,
+            parent_session_id='lineage_api_fork_parent',
+            session_source='fork',
+        )
+        session.save(touch_updated_at=False)
+        _insert_state_row(
+            conn,
+            'lineage_api_native_fork_source',
+            source='webui',
+            started_at=t0,
+        )
+
+        row = {row['session_id']: row for row in all_sessions()}['lineage_api_native_fork_source']
+
+        assert row['session_source'] == 'fork'
+        assert row['source_tag'] == 'webui'
+        assert row['raw_source'] == 'webui'
+        assert row['source_label'] == 'WebUI'
+        assert row['is_cli_session'] is False
     finally:
         conn.close()
 
