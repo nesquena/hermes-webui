@@ -91,14 +91,35 @@ def test_attach_live_stream_reconnect_does_not_reuse_connecting_transport():
     assert "existingLive.source.readyState!==EventSource.CLOSED" not in reuse_block
 
 
-def test_attach_live_stream_closes_other_session_streams_before_opening_new_one():
-    """Only the selected conversation pane should hold an open chat SSE transport."""
+def test_attach_live_stream_prunes_background_streams_before_opening_new_one():
+    """Background chat SSE transports are pruned to a bounded pool on switch.
+
+    This used to assert that only the selected pane may hold an open chat SSE
+    transport. That was stricter than the constraint it protected (#2313: the
+    browser's per-origin connection budget) and dropped the token feed of every
+    background conversation. ``closeOtherLiveStreams`` now keeps a bounded pool
+    of live streams instead of collapsing it to one — the budget still cannot be
+    exhausted, but background turns stay live.
+
+    The ordering contract is unchanged and still asserted: same-stream reuse
+    happens before pruning, and pruning before replacing the active transport.
+    """
     body = _function_body(MESSAGES_JS, "attachLiveStream")
     helper = _function_body(MESSAGES_JS, "closeOtherLiveStreams")
 
-    helper_compact = helper.replace(" ", "")
     assert "Object.keys(LIVE_STREAMS)" in helper
-    assert "if(sid!==activeSid)closeLiveStream(sid)" in helper_compact
+    # The pool must remain bounded — the #2313 invariant — and must exclude the
+    # viewed conversation from eviction.
+    assert "_liveStreamPoolMax()" in helper, (
+        "closeOtherLiveStreams() must bound the number of concurrent live "
+        "streams so the browser connection budget cannot be exhausted (#2313)"
+    )
+    assert "sid!==activeSid" in helper.replace(" ", ""), (
+        "the viewed conversation must never be a candidate for eviction"
+    )
+    assert "closeLiveStream(" in helper, (
+        "eviction must delegate to closeLiveStream() for snapshot + reattach"
+    )
 
     reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
     close_other_pos = body.find("closeOtherLiveStreams(activeSid)")
@@ -108,6 +129,36 @@ def test_attach_live_stream_closes_other_session_streams_before_opening_new_one(
         "same-stream reuse should happen before pruning, and pruning should happen "
         "before replacing the active session transport"
     )
+
+
+def test_reconnect_marks_transport_uncertain_before_pool_pruning():
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    mark_pos = body.find("if(reconnecting) _markLiveStreamTransportUncertain()")
+    prune_pos = body.find("closeOtherLiveStreams(activeSid)")
+    assert mark_pos != -1
+    assert prune_pos != -1
+    assert mark_pos < prune_pos
+
+
+def test_stream_error_forces_safe_pool_before_reconnect_probe():
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    error_pos = body.find("source.addEventListener('error'")
+    mark_pos = body.find("_markLiveStreamTransportUncertain()", error_pos)
+    probe_pos = body.find("const _probeReconnect", error_pos)
+    assert error_pos != -1
+    assert mark_pos != -1
+    assert probe_pos != -1
+    assert error_pos < mark_pos < probe_pos
+
+
+def test_wire_sse_registers_through_late_budget_chokepoint():
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    wire_pos = body.find("function _wireSSE(source)")
+    register_pos = body.find("_registerLiveStream(activeSid,streamId,source)", wire_pos)
+    direct_publish_pos = body.find("LIVE_STREAMS[activeSid]=", wire_pos)
+    assert wire_pos != -1
+    assert register_pos != -1
+    assert direct_publish_pos == -1
 
 
 def test_attach_live_stream_updates_uploads_before_same_stream_reuse():
@@ -246,17 +297,24 @@ def test_close_live_stream_marks_inflight_for_reattach_on_return():
 
 
 def test_close_other_live_streams_triggers_reattach_for_backgrounded_sessions():
-    """closeOtherLiveStreams() during session switch must mark every closed
-    background session for reattach. Otherwise switching back to a session whose
-    stream was closed during the switch leaves the SSE permanently disconnected.
+    """closeOtherLiveStreams() during session switch must mark every session it
+    evicts for reattach. Otherwise switching back to a session whose stream was
+    closed during the switch leaves the SSE permanently disconnected.
+
+    Only streams beyond the bounded pool are evicted now, but each eviction must
+    still flow through closeLiveStream() so the reattach flag is set.
     """
     helper_body = _function_body(MESSAGES_JS, "closeOtherLiveStreams")
     close_body = _function_body(MESSAGES_JS, "closeLiveStream")
     # closeOtherLiveStreams delegates per-session teardown to closeLiveStream,
     # so the reattach flag must be set inside closeLiveStream itself for the
     # chain to work — this guards the indirection.
-    assert "closeLiveStream(sid)" in helper_body.replace(" ", ""), (
+    assert "closeLiveStream(" in helper_body, (
         "closeOtherLiveStreams() must delegate teardown to closeLiveStream()"
+    )
+    assert ".close()" not in helper_body, (
+        "closeOtherLiveStreams() must not tear down a transport directly: that "
+        "would skip the snapshot + reattach bookkeeping in closeLiveStream()"
     )
     assert "reattach" in close_body, (
         "closeLiveStream() must set the reattach flag so closeOtherLiveStreams() "
