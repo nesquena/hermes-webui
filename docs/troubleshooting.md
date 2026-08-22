@@ -179,11 +179,19 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
-**Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
+**Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI. The message includes the old and new Git revision SHAs and the latest commit author, e.g.:
+
+```
+Hermes Agent source revision changed (was abc1234, now def5678).
+Latest: def5678 User <email> 2026-07-27 08:47:54 -0300.
+Restart Hermes WebUI before retrying this action.
+```
+
+This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend. It can also happen after a legitimate developer commit or branch switch in the Agent repo while WebUI is running — the guard does not distinguish between an external update and local work.
 
 **Why.** WebUI currently imports `run_agent.AIAgent` into its long-lived Python process. Python keeps imported modules in memory. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision, producing misleading `ImportError`s or inconsistent runtime state. For local Agent-backed chat, WebUI therefore returns a retryable `409 agent_runtime_stale` before claiming or mutating session state instead of attempting a partial in-process reload. Gateway-backed chat runs in the gateway process and is not blocked by this WebUI-local check. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare.
 
-**Diagnostic.** Compare the running WebUI process start time with the Agent checkout revision and recent update history. If the Agent was updated after WebUI started, restart WebUI before investigating individual missing-symbol errors.
+**Diagnostic.** The error message itself shows the old and new HEAD SHAs and the latest commit — no extra commands needed. If more detail is required, compare the running WebUI process start time with the Agent checkout revision and recent update history. If the Agent was updated after WebUI started, restart WebUI before investigating individual missing-symbol errors.
 
 **Fix.** Restart using the same launch method that started WebUI:
 
