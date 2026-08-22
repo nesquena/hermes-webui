@@ -375,8 +375,8 @@ class TestSupportsThinkingToggleVisibility:
 # (off). The earlier round-2 fix kept the chip visible but the only rendered
 # option was "None" — so a user could turn thinking OFF but never back ON.
 # These tests drive the actual _applyReasoningOptions against a simulated
-# dropdown containing all 8 options from static/index.html (Default/none/
-# minimal/low/medium/high/xhigh/max) and pin which are visible per tier.
+# dropdown containing all 9 options from static/index.html (Default/none/
+# minimal/low/medium/high/xhigh/max/ultra) and pin which are visible per tier.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -419,7 +419,7 @@ function makeEl() {
 }
 
 // Options mirror static/index.html's composerReasoningDropdown exactly.
-const options = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(makeOption);
+const options = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(makeOption);
 const optionEls = options;
 
 const els = {
