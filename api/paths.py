@@ -90,7 +90,11 @@ _WRITE_CLEARED_MODE_BITS = stat.S_ISUID | stat.S_ISGID
 
 
 def _restore_write_cleared_mode_bits(
-    fd: int, mode: int | None, *, path: str | Path | None = None
+    fd: int,
+    mode: int | None,
+    *,
+    path: str | Path | None = None,
+    best_effort: bool = False,
 ) -> None:
     """Re-apply setuid/setgid bits that writing the payload cleared.
 
@@ -102,13 +106,32 @@ def _restore_write_cleared_mode_bits(
     bytes are down is the only ordering that preserves an administrator's
     policy on every platform, and it is skipped entirely for ordinary modes so
     the common ``0644``/``0664`` path issues no extra syscall.
+
+    Only the dropped bits are re-added, on top of whatever mode the inode
+    carries *now*: writing back the mode captured before the payload would
+    revert a permission change an administrator made while the write was in
+    flight.
+
+    ``best_effort`` suppresses errors for callers that have already committed
+    their content. Restoring the bit is secondary to the write itself, and a
+    caller who may write the file without owning it (group-writable config)
+    could not ``chmod`` it before this function existed either — failing the
+    save outright would be a worse regression than losing the bit.
     """
     if mode is None or not mode & _WRITE_CLEARED_MODE_BITS:
         return
-    if hasattr(os, "fchmod"):
-        os.fchmod(fd, mode)
-    elif path is not None:
-        os.chmod(path, mode)
+    try:
+        current = stat.S_IMODE(os.fstat(fd).st_mode)
+        desired = current | (mode & _WRITE_CLEARED_MODE_BITS)
+        if desired == current:
+            return
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, desired)
+        elif path is not None:
+            os.chmod(path, desired)
+    except OSError:
+        if not best_effort:
+            raise
 
 
 def _require_writable_target(write_path: Path) -> os.stat_result | None:
@@ -222,10 +245,14 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                     # from a discarded temp copy. Read the mode off the inode
                     # actually opened above; the outer ``mode`` is ``None``
                     # whenever the writability probe saw a non-regular file.
+                    # Best-effort: the content is already committed here, and
+                    # a group-writable config may be saved by a non-owner who
+                    # cannot chmod it at all.
                     _restore_write_cleared_mode_bits(
                         fallback_file.fileno(),
                         stat.S_IMODE(opened_stat.st_mode),
                         path=write_path,
+                        best_effort=True,
                     )
             finally:
                 if owns_fallback_fd:
