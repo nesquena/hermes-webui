@@ -23010,6 +23010,31 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     return None
 
 
+def _blocking_stream_id_for_chat_start_prefilter(session) -> str | None:
+    """Return the stream id that will reject this start, without any discovery.
+
+    ``_start_chat_stream_for_session`` remains the authoritative check (it runs
+    under the per-session lock and so closes the TOCTOU window), but it is only
+    reached after chat/start has resolved the model — which on the human path
+    rebuilds the live provider catalog over the network. A start that is going
+    to be rejected on session state has no business paying for provider
+    discovery, so mirror the decision here as a cheap read-only pre-filter.
+
+    Only an *unambiguous* rejection is reported. A stale ``active_stream_id``
+    returns None so the request still falls through to the full path and its
+    ``_clear_stale_stream_state`` cleanup — a stale id must never become a
+    permanent 409 (#3822).
+    """
+    current_stream_id = getattr(session, "active_stream_id", None)
+    if current_stream_id:
+        if _active_stream_blocks_chat_start(session, current_stream_id):
+            return str(current_stream_id)
+        return None
+    # Sidecar id already cleared by cancel_stream() while the worker unwinds:
+    # ACTIVE_RUNS is the lifecycle truth in that window (#3808).
+    return _active_run_stream_for_session(getattr(session, "session_id", None))
+
+
 def _agent_runtime_barrier_response(
     *,
     runner_local_owned: bool = False,
@@ -24217,6 +24242,22 @@ def _handle_chat_start(handler, body, diag=None):
                 moa_config = resolve_moa_config()
             except RuntimeError as e:
                 return bad(handler, str(e), 503)
+        # Reject a busy session BEFORE resolving the model: the decision below is
+        # a pure read of session/run state, while resolve_model_provider can cost
+        # a full live provider-catalog rebuild. _start_chat_stream_for_session
+        # repeats the check under the session lock and stays authoritative.
+        diag.stage("active_stream_prefilter") if diag else None
+        prefiltered_stream_id = _blocking_stream_id_for_chat_start_prefilter(s)
+        if prefiltered_stream_id:
+            diag.stage("response_write") if diag else None
+            return j(
+                handler,
+                {
+                    "error": "session already has an active stream",
+                    "active_stream_id": prefiltered_stream_id,
+                },
+                status=409,
+            )
         diag.stage("resolve_model_provider") if diag else None
         model, model_provider, normalized_model = _resolve_compatible_session_model_state(
             requested_model,
