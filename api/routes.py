@@ -10997,7 +10997,7 @@ button:hover{background:rgba(124,185,255,.25)}
   <div class="err" id="err"></div>
 </div>
 <!-- Keep login.js relative so subpath mounts load it under the current scope. -->
-<script src="static/login.js?v={{WEBUI_VERSION}}"></script>
+<script src="static/login.js?v={{WEBUI_VERSION}}-safe-next-v2"></script>
 </body></html>"""
 
 
@@ -11231,7 +11231,30 @@ def _llm_wiki_resolve_path() -> tuple[Path, str, bool]:
             configured = True
     if not raw:
         raw = "~/wiki"
-    return Path(os.path.expandvars(raw)).expanduser(), source, configured
+    resolved = Path(os.path.expandvars(raw)).expanduser()
+    # Home-relative fallback: if the configured path doesn't resolve to a real
+    # wiki directory but <HERMES_HOME>/wiki does, prefer that.  This catches the
+    # common Docker/bind-mount case where an operator's .env carries a
+    # host-authored WIKI_PATH (e.g. /home/openclaw/.hermes/wiki) that names a
+    # path the container can't see, while the same wiki content is present under
+    # the container's HERMES_HOME.  To avoid hijacking a legitimately-missing
+    # path with a random home directory that just happens to contain a "wiki/"
+    # folder, the fallback ONLY fires when the candidate directory has the shape
+    # of a real LLM wiki: SCHEMA.md, index.md, or one of the recognised page
+    # section directories (entities/concepts/comparisons/queries).
+    if not resolved.is_dir():
+        fallback = hermes_home / "wiki"
+        if (
+            fallback.is_dir()
+            and fallback != resolved
+            and (
+                (fallback / "SCHEMA.md").is_file()
+                or (fallback / "index.md").is_file()
+                or any((fallback / d).is_dir() for d in _LLM_WIKI_PAGE_DIRS)
+            )
+        ):
+            return fallback, f"{source}+home-fallback", configured
+    return resolved, source, configured
 
 
 def _llm_wiki_safe_iso(ts: float | None) -> str | None:
@@ -12894,6 +12917,19 @@ def handle_get(handler, parsed) -> bool:
     # See #2226.
     if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
         return _serve_manifest(handler)
+
+    # Cloudflare Access can resume authenticated users at /session/login.
+    # Instead of rendering login at a session-scoped URL (where relative fetches
+    # would resolve against /session/), redirect to ../login which resolves to
+    # the real mount-relative /login under both root and prefixed mounts.
+    if parsed.path == "/session/login":
+        qs = parsed.query
+        location = "../login" + ("?" + qs if qs else "")
+        handler.send_response(302)
+        handler.send_header("Location", location)
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        return True
 
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
         try:

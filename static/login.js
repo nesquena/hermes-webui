@@ -45,7 +45,11 @@ document.addEventListener('DOMContentLoaded', function () {
       var stabilized = false;
       for (var i = 0; i < 8; i++) {
         var pathOnly = probe.split('?')[0].split('#')[0].split('&')[0].replace(/\/+$/, '');
-        if (pathOnly === '/login' || /\/login$/.test(pathOnly)) return './';
+        if (
+          pathOnly === '/login' || /\/login$/.test(pathOnly) ||
+          pathOnly === '/session/login' ||
+          pathOnly.indexOf('/api/auth/') === 0
+        ) return './';
         var decoded;
         try { decoded = decodeURIComponent(probe); } catch (_) { stabilized = true; break; }
         if (decoded === probe) { stabilized = true; break; }
