@@ -1317,7 +1317,20 @@ def _run_gateway_chat_streaming(
                 )
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context + [user_msg, assistant_msg]
+            # Guard the gateway writeback too: this is the call site whose
+            # `previous_context` falls back to `s.messages` when
+            # `context_messages` is empty, mixing two independent id spaces and
+            # producing the id collisions that make the aligner splice foreign
+            # tool_calls onto a message. See _strip_orphan_tool_calls.
+            try:
+                from api.streaming import _strip_orphan_tool_calls
+
+                s.context_messages = _strip_orphan_tool_calls(
+                    previous_context + [user_msg, assistant_msg]
+                )
+            except Exception:
+                logger.debug("Failed to strip orphan tool_calls from gateway context", exc_info=True)
+                s.context_messages = previous_context + [user_msg, assistant_msg]
             try:
                 from api.streaming import _is_context_compression_marker
 

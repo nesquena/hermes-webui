@@ -2064,7 +2064,7 @@ def _settle_result_messages(
             msg_text,
             source,
         )
-    session.context_messages = (
+    session.context_messages = _strip_orphan_tool_calls(
         _deduplicate_context_messages(next_context_messages)
         if result_messages
         else list(next_context_messages or [])
@@ -5644,6 +5644,91 @@ def _deduplicate_context_messages(messages):
             seen.add(key)
         deduped.append(msg)
     return deduped
+
+
+def _strip_orphan_tool_calls(messages):
+    """Drop ``tool_calls`` entries with no matching tool_result right after them.
+
+    Fail-safe guard against TOOL_USE_RESULT_MISMATCH 400s from strict upstreams
+    (Bedrock/Anthropic reject the WHOLE request when any assistant tool_use id
+    lacks its tool_result block immediately after).
+
+    Why this is needed: ``_assign_stable_message_ids`` documents "monotonic
+    within a session", but that invariant does not hold. ``gateway_chat`` seeds
+    it from ``context_messages`` and falls back to ``messages`` when the former
+    is empty -- two independently-numbered id spaces. Once they mix, ids
+    collide, and the fork/truncate
+    aligner in ``session_ops.truncate_context_for_display_keep`` matches rows
+    by bare id equality, deliberately skipping the signature/timestamp check::
+
+        if context_id is not None and msg_id is not None:
+            if context_id == msg_id:
+                return idx, None    # same row -- by id alone
+            continue                # no signature fallback
+
+    A collision therefore aligns two unrelated rows, and one message ends up
+    carrying another turn's tool_calls. Those orphans are unrecoverable at
+    request time and poison the session permanently (every failed request
+    appended another poisoned row).
+
+    Only ever REMOVES unpaired call entries -- never reorders, synthesises, or
+    touches paired ones -- so a false positive costs at most one dropped
+    tool_call record, while a false negative bricks the session.
+
+    The TRAILING row is exempt: a tool_call on the last message is an in-flight
+    turn whose tool_result has not been appended yet (observed when a live turn
+    is cut short by a restart). Only a row followed by something else can be
+    structurally orphaned, since that already breaks the "immediately after"
+    contract. Stripping the tail would delete a legitimate pending call.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    last_idx = len(messages) - 1
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if idx == last_idx:
+            continue  # in-flight turn awaiting its tool_result
+        calls = msg.get("tool_calls")
+        if isinstance(calls, str):
+            try:
+                calls = json.loads(calls)
+            except (ValueError, TypeError):
+                continue
+        if not isinstance(calls, list) or not calls:
+            continue
+        # Collect the consecutive tool block that follows: the upstream
+        # contract is "immediately after", so a non-tool row ends coverage.
+        covered = set()
+        probe = idx + 1
+        while probe < len(messages):
+            following = messages[probe]
+            if not isinstance(following, dict) or following.get("role") != "tool":
+                break
+            covered.add(str(following.get("tool_call_id") or ""))
+            probe += 1
+        kept = []
+        dropped = []
+        for call in calls:
+            call_id = str(call.get("id") or "") if isinstance(call, dict) else ""
+            if call_id and call_id in covered:
+                kept.append(call)
+            else:
+                dropped.append(call_id)
+        if not dropped:
+            continue
+        if kept:
+            msg["tool_calls"] = kept
+        else:
+            msg.pop("tool_calls", None)
+        logger.warning(
+            "Dropped %d orphan tool_call id(s) at context index %d (no tool_result "
+            "immediately after); would have caused an upstream 400: %s",
+            len(dropped),
+            idx,
+            ", ".join(d for d in dropped if d) or "<missing id>",
+        )
+    return messages
 
 
 def _assign_stable_message_ids(result_messages, *existing_arrays):
