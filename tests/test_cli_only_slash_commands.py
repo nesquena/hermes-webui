@@ -2,17 +2,50 @@
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import textwrap
 from types import SimpleNamespace
 
-from api.commands import list_commands
+from api.commands import list_commands, _ALLOWED_AGENT_COMMANDS, _AGENT_COMMAND_ALIASES
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+
+
+def _extract_js_set_members(source: str, varname: str) -> set[str]:
+    """Return the string members of a `const NAME=new Set([...])` literal."""
+    m = re.search(rf"const\s+{re.escape(varname)}\s*=\s*new Set\(\[(.*?)\]\)", source, re.S)
+    assert m, f"could not find const {varname}=new Set([...]) in source"
+    return set(re.findall(r"'([^']*)'", m.group(1)))
+
+
+def _canonical_agent_names(names: set[str]) -> set[str]:
+    """Map underscore alias forms to canonical names via api/commands.py's map."""
+    return {_AGENT_COMMAND_ALIASES.get(n, n) for n in names}
+
+
+def _extract_busy_intercept_block() -> str:
+    """Extract the busy-path slash intercept `if` block verbatim from send()."""
+    marker = "Busy-control slash commands must be intercepted"
+    marker_idx = MESSAGES_JS.find(marker)
+    assert marker_idx != -1
+    start = MESSAGES_JS.find("if(text.startsWith('/')&&!literalSlash){", marker_idx)
+    assert start != -1
+    depth = 0
+    for i in range(start, len(MESSAGES_JS)):
+        if MESSAGES_JS[i] == "{":
+            depth += 1
+        elif MESSAGES_JS[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[start : i + 1]
+    raise AssertionError("unbalanced braces while extracting busy intercept block")
 
 
 def test_api_commands_exposes_cli_only_metadata_for_webui_intercept():
@@ -161,6 +194,30 @@ def _run_commands_js(script_body: str) -> dict:
                   description: 'Run plugin review',
                   category: 'Plugin',
                   aliases: ['plugin_review'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'agents',
+                  description: 'Manage background agents',
+                  category: 'Session',
+                  aliases: ['tasks'],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'sessions',
+                  description: 'List sessions',
+                  category: 'Session',
+                  aliases: [],
+                  cli_only: false,
+                  gateway_only: false
+                }},
+                {{
+                  name: 'resume',
+                  description: 'Resume a session',
+                  category: 'Session',
+                  aliases: [],
                   cli_only: false,
                   gateway_only: false
                 }}
@@ -356,8 +413,8 @@ def test_cli_only_slugs_reserve_skill_autocomplete_namespace():
     assert result["delegate_names"] == []
     assert result["incident_names"] == ["incident-review"]
     assert result["incident_sources"] == ["bundle"]
-    assert result["triage_names"] == ["triage-review"]
-    assert result["triage_sources"] == ["agent"]
+    assert result["triage_names"] == []
+    assert result["triage_sources"] == []
     assert result["plugin_names"] == ["plugin-review"]
     assert result["plugin_sources"] == ["plugin"]
     assert "skills" in result["skills_names"]
@@ -659,3 +716,287 @@ def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
     assert optout_idx != -1
     assert metadata_idx != -1
     assert "if(_parsedCmd&&!_cmd)" in intercept[optout_idx:metadata_idx + 120]
+
+
+# ── #6951: autocomplete must only announce commands the WebUI dispatches ─────
+
+
+def test_non_dispatchable_agent_command_hidden_from_autocomplete():
+    """#6951: registry commands the WebUI does not dispatch (e.g. /agents) must
+    not be advertised, since submitting them would fall through to plain chat."""
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        const agents = await getSlashAutocompleteMatches('/agents');
+        const ag = await getSlashAutocompleteMatches('/ag');
+        return {
+          agents_names: agents.map(item => item.name),
+          ag_names: ag.map(item => item.name)
+        };
+        """
+    )
+    assert result["agents_names"] == []
+    assert result["ag_names"] == []
+
+
+def test_dispatchable_agent_commands_stay_in_autocomplete():
+    """#6951: commands the WebUI does dispatch -- backend exec allowlist and
+    native WebUI behaviors -- must keep appearing in autocomplete."""
+    result = _run_commands_js(
+        """
+        await loadAgentCommandMetadata(true);
+        const reload = await getSlashAutocompleteMatches('/reload');
+        const sessions = await getSlashAutocompleteMatches('/sessions');
+        const resume = await getSlashAutocompleteMatches('/resume');
+        const plugin = await getSlashAutocompleteMatches('/plugin');
+        return {
+          reload_names: reload.map(item => item.name),
+          reload_sources: reload.map(item => item.source),
+          sessions_names: sessions.map(item => item.name),
+          resume_names: resume.map(item => item.name),
+          plugin_names: plugin.map(item => item.name)
+        };
+        """
+    )
+    assert result["reload_names"] == ["reload-skills"]
+    assert result["reload_sources"] == ["agent"]
+    assert result["sessions_names"] == ["sessions"]
+    assert result["resume_names"] == ["resume"]
+    assert result["plugin_names"] == ["plugin-review"]
+
+
+def test_autocomplete_allowlist_is_exact_parity_with_dispatchers():
+    """#6951 (re-gate): the announced allowlist must be in exact agreement with
+    BOTH real dispatch authorities -- api/commands.py's _ALLOWED_AGENT_COMMANDS
+    (the /api/commands/exec allowlist) and messages.js's
+    _AGENT_COMMANDS_RUN_ON_WEBUI (the send() dispatch set). This compares the
+    actual parsed sets, so drift in ANY authority fails the test: a command
+    added to one allowlist but not the others, a renamed alias, or a removed
+    entry all break parity here."""
+    announced = _extract_js_set_members(COMMANDS_JS, "_WEBUI_DISPATCHABLE_AGENT_COMMANDS")
+    dispatched = _extract_js_set_members(MESSAGES_JS, "_AGENT_COMMANDS_RUN_ON_WEBUI")
+
+    # The backend-exec family must agree exactly across all three authorities
+    # (canonical names after alias normalization).
+    backend_allowed = set(_ALLOWED_AGENT_COMMANDS)
+    assert _canonical_agent_names(dispatched) == backend_allowed
+    assert _canonical_agent_names(announced) & backend_allowed == backend_allowed
+
+    # Announced backend-exec commands are exactly the backend-exec allowlist
+    # (no announced exec command outside /api/commands/exec, none missing).
+    announced_backend = _canonical_agent_names(announced) & backend_allowed
+    assert announced_backend == backend_allowed
+
+    # Every remaining announced command must be a native WebUI behavior that
+    # send() handles without an agent round-trip (moa/sessions/resume/pet).
+    native = announced - announced_backend
+    assert native == {"moa", "sessions", "resume", "pet"}
+
+    # The plugin transport is parity by rule, not by list: the filter accepts
+    # category==='Plugin' and the dispatcher routes the exact same value.
+    assert "category==='Plugin'" in COMMANDS_JS
+    assert "_agentCmd.category==='Plugin'" in MESSAGES_JS
+
+
+def test_busy_path_intercepts_stop_before_mode_routing():
+    """#6951: while busy, /stop must cancel the active run immediately instead
+    of being steered/queued as the literal text '/stop'."""
+    busy_idx = MESSAGES_JS.find("Busy-control slash commands must be intercepted")
+    assert busy_idx != -1
+    mode_idx = MESSAGES_JS.find("const defaultMessageMode=", busy_idx)
+    assert mode_idx != -1
+    busy_block = MESSAGES_JS[busy_idx:mode_idx]
+    assert "['steer','interrupt','queue','terminal','goal','yolo','stop']" in busy_block
+    assert "cmdStop" in busy_block or "COMMANDS.find(c=>c.name===_pc.name)" in busy_block
+
+
+def _run_production_autocomplete_js(commands_payload: list[dict], script_body: str) -> dict:
+    """Run the REAL getMatchingCommands/autocomplete pipeline from commands.js
+    against a /api/commands payload (defaults to the real hermes_cli registry
+    serialized exactly as list_commands() produces it)."""
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          api: async (path) => {{
+            if (path === '/api/commands') return {{ commands: {json.dumps(commands_payload)} }};
+            if (path === '/api/commands/bundles') return {{ bundles: [] }};
+            if (path === '/api/skills') return {{ skills: [] }};
+            throw new Error('unexpected api path: ' + path);
+          }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        (async () => {{
+          const result = await vm.runInContext(`(async () => {{
+            {script_body}
+          }})()`, ctx);
+          process.stdout.write(JSON.stringify(result));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def _real_registry_payload() -> list[dict] | None:
+    """Serialize the real hermes_cli COMMAND_REGISTRY via the production
+    list_commands() path. Returns None when hermes_cli is unavailable."""
+    try:
+        return list_commands()
+    except Exception:
+        return None
+
+
+def test_real_registry_announced_commands_are_all_dispatchable():
+    """#6951 (re-gate): with the REAL hermes_cli registry as /api/commands
+    payload, every command the production autocomplete announces must be
+    dispatchable -- backend-exec via /api/commands/exec, a native WebUI
+    behavior, or a plugin command. /agents (in the registry, NOT dispatched)
+    must not be announced. This is the announced <= dispatched invariant
+    exercised against the real production data path."""
+    payload = _real_registry_payload()
+    if payload is None:
+        pytest.skip("hermes_cli registry unavailable")
+    announced_by_prefix = {}
+    for cmd in payload:
+        name = str(cmd.get("name") or "")
+        if not name:
+            continue
+        result = _run_production_autocomplete_js(
+            payload,
+            f"""
+            await loadAgentCommandMetadata(true);
+            const matches = await getSlashAutocompleteMatches('/{name}');
+            return matches.map(item => ({{ name: item.name, source: item.source }}));
+            """,
+        )
+        announced_by_prefix[name] = result
+
+    backend_allowed = set(_ALLOWED_AGENT_COMMANDS)
+    for name, rows in announced_by_prefix.items():
+        for row in rows:
+            if row["source"] not in ("agent", "plugin"):
+                continue  # builtin/subarg/skill rows are out of scope
+            assert row["name"] in backend_allowed or row["name"] in (
+                "moa",
+                "sessions",
+                "resume",
+                "pet",
+            ), f"{row['name']} announced but not dispatchable"
+
+    # /agents is in the real registry but must not be announced (it is neither
+    # backend-exec nor a native WebUI behavior nor a plugin).
+    assert announced_by_prefix.get("agents", []) == [], announced_by_prefix.get("agents")
+
+
+def test_alias_typed_text_reaches_exec_dispatch():
+    """#6951 (re-gate): typing an underscore alias (/reload_skills) must
+    resolve through getAgentCommandMetadata to the canonical name, which is
+    what the dispatcher allowlist tests -- so alias forms dispatch without
+    needing their own autocomplete row."""
+    result = _run_commands_js(
+        """
+        const byAlias = await getAgentCommandMetadata('reload_skills');
+        const canonical = byAlias && byAlias.name;
+        return { canonical, dispatched: canonical === 'reload-skills' };
+        """
+    )
+    assert result["canonical"] == "reload-skills"
+    assert result["dispatched"] is True
+
+
+def _run_busy_intercept_js(script_body: str) -> dict:
+    """Execute the REAL busy-path slash intercept block from messages.js with
+    the REAL COMMANDS table + parseCommand from commands.js. This exercises the
+    production routing branch -- not just its source text.
+
+    The harness defines `async function busyIntercept(text, literalSlash)` in
+    the vm context (so it closes over the real COMMANDS/parseCommand) and the
+    script_body then calls it. The block's inner `return;` exits run() early
+    when the command is intercepted, so `intercepted: true` is returned."""
+    block = _extract_busy_intercept_block()
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const calls = [];
+        const ctx = {{
+          console,
+          localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
+          t: (key) => key,
+          S: {{
+            busy: true,
+            activeStreamId: 'stream-1',
+            session: {{ session_id: 'sess-1' }},
+            pendingFiles: []
+          }},
+          cancelStream: async (reason) => {{ calls.push('cancelStream:' + reason); return true; }},
+          showToast: () => {{}},
+          $: () => ({{ value: '' }}),
+          autoResize: () => {{}},
+          api: async () => ({{}}),
+          _trySteer: async () => {{ calls.push('steer'); }},
+          queueSessionMessage: () => {{ calls.push('queue'); }}
+        }};
+        vm.createContext(ctx);
+        vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
+        vm.runInContext(`async function busyIntercept(text, literalSlash){{
+          let reachedModeRouting = false;
+          const run = async () => {{
+            {block}
+            reachedModeRouting = true;
+          }};
+          await run();
+          return {{ intercepted: !reachedModeRouting }};
+        }}`, ctx);
+        (async () => {{
+          const result = await vm.runInContext(`(async () => {{
+            {script_body}
+          }})()`, ctx);
+          process.stdout.write(JSON.stringify({{ result, calls }}));
+        }})().catch(err => {{
+          console.error(err && err.stack || err);
+          process.exit(1);
+        }});
+        """
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(["node", str(script_path)], check=True, capture_output=True, text=True)
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def test_busy_stop_executes_real_cancel_branch():
+    """#6951 (re-gate): executing the real busy-intercept branch from messages.js
+    with the real COMMANDS table must route /stop to cmdStop -> cancelStream,
+    and must NOT fall through to steer/queue routing."""
+    out = _run_busy_intercept_js(
+        """
+        const r1 = await busyIntercept('/stop', false);
+        const r2 = await busyIntercept('/agents', false);
+        return { stop: r1, agents: r2 };
+        """
+    )
+    # /stop is intercepted by the busy branch (cmdStop -> cancelStream ran,
+    # mode routing never reached), /agents is NOT a busy-control command so it
+    # falls through to mode routing (documented: it is no longer announced).
+    assert out["result"]["stop"] == {"intercepted": True}
+    assert out["result"]["agents"] == {"intercepted": False}
+    assert any(c.startswith("cancelStream:slash-stop") for c in out["calls"]), out["calls"]
+    assert not any(c.startswith("steer") for c in out["calls"]), out["calls"]
