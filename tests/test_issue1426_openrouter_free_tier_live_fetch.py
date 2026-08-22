@@ -296,10 +296,12 @@ def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
     grouped = _get_grouped_models()
     or_group = next((g for g in grouped if g.get("provider_id") == "openrouter"), None)
     assert or_group is not None
+    # New contract (dynamic OpenRouter threshold): the capped free-tier tranche
+    # fits in the VISIBLE models bucket — the picker is neither drowned nor
+    # discarding rows. Scan only `models` to prove visibility, not either bucket.
     free_added_ids = {
         m["id"]
-        for bucket_name in ("models", "extra_models")
-        for m in or_group.get(bucket_name, [])
+        for m in or_group.get("models", [])
         if m["id"].startswith("vendor")
     }
     expected_ids = {
@@ -308,15 +310,17 @@ def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
     }
     assert expected_ids.issubset(free_added_ids), (
         "The picker should retain the first capped tranche of free-tier models "
-        "instead of discarding the augmentation entirely."
+        "in the visible list instead of discarding the augmentation entirely."
     )
     assert len(free_added_ids) == config._OPENROUTER_FREE_TIER_AUGMENT_CAP, (
-        "The OpenRouter free-tier live fetch should stay capped so extra_models "
+        "The OpenRouter free-tier live fetch should stay capped so the picker "
         "does not balloon to hundreds of experimental variants."
     )
-    assert len(or_group.get("extra_models", [])) > 0, (
-        "When the visible picker cap is exceeded, free-tier overflow models "
-        "must move into extra_models instead of being discarded."
+    assert len(or_group.get("extra_models", [])) == 0, (
+        "With the dynamic OpenRouter threshold (curated cap + actual free-tier "
+        "count), the capped free-tier tranche renders in the visible models "
+        "bucket — nothing should spill into extra_models, and nothing is "
+        "discarded."
     )
 
 

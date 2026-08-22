@@ -2098,14 +2098,28 @@ def _format_nous_label(mid: str) -> str:
 # Above this count, _build_nous_featured_set() trims the visible list to
 # ~_NOUS_FEATURED_TARGET entries; the full catalog is still returned to the
 # client under ``extra_models`` so /model autocomplete covers everything.
-# Caps reflect human scannability — a 25-row dropdown is the practical UX
-# ceiling, and per-vendor sampling at 15 keeps the flagship shape visible
-# without one vendor dominating.
-_NOUS_FEATURED_THRESHOLD = 25
-_NOUS_FEATURED_TARGET = 15
-_MODEL_PICKER_OVERFLOW_THRESHOLD = _NOUS_FEATURED_THRESHOLD
-_MODEL_PICKER_VISIBLE_TARGET = _NOUS_FEATURED_TARGET
+# Curated-catalog caps: OpenRouter (51 curated) and Nous (33 curated) sit
+# under their thresholds so curated lists render in full. The full Nous
+# Portal catalog (385+) samples to a 40-entry visible list (round-robin so
+# no vendor monopolises the budget).
+_NOUS_FEATURED_THRESHOLD = 100
+_NOUS_FEATURED_TARGET = 40
+_OPENROUTER_CURATED_THRESHOLD = 100
+_OPENROUTER_CURATED_TARGET = 40
+# Generic overflow caps for every non-curated provider: keep the dropdown
+# scannable (25-row overflow threshold, 15 visible rows). Deliberately
+# separate from the curated caps above so expanding curated catalogs can't
+# silently balloon every provider's picker.
+_MODEL_PICKER_OVERFLOW_THRESHOLD = 25
+_MODEL_PICKER_VISIBLE_TARGET = 15
 _OPENROUTER_FREE_TIER_AUGMENT_CAP = 30
+# NOTE: the OpenRouter picker threshold is DYNAMIC — computed at group-build
+# time as _OPENROUTER_CURATED_THRESHOLD + actual_appended_free_count. Curated
+# entries and free-tier augmentation share one visible list, so the curated
+# guarantee ("≤100 curated renders in full") is enforced exactly: whatever
+# bounded augmentation was actually appended raises the bar by exactly that
+# many rows. A fixed combined constant would over-expand when fewer free
+# rows are present (e.g. 101 curated + 0 free must still sample).
 
 # Vendor-prefix priority order for featured selection. Lower index = picked
 # earlier when sampling the live catalog. Reflects which vendors users have
@@ -2245,6 +2259,29 @@ def _model_matches_picker_selection(
         candidate_provider = candidate[1 : candidate.index(":")].lower()
 
     return not selected_provider or not candidate_provider or selected_provider == candidate_provider
+
+
+def _picker_caps_for_provider(
+    provider_id: str | None,
+    *,
+    free_augment_count: int = 0,
+) -> tuple[int, int]:
+    """Return (overflow_threshold, visible_target) for a provider's picker group.
+
+    Curated providers (OpenRouter, Nous) render their curated lists in full
+    via the curated caps — including when a curated group is re-split by the
+    common overflow builder. Every other provider keeps the generic caps.
+
+    OpenRouter's threshold is dynamic: the free-tier augmentation shares the
+    same visible list as the curated entries, so the curated limit is raised
+    by exactly the number of free rows actually appended (0 when the live
+    fetch failed or no free models matched).
+    """
+    if provider_id == "nous":
+        return _NOUS_FEATURED_THRESHOLD, _NOUS_FEATURED_TARGET
+    if provider_id == "openrouter":
+        return _OPENROUTER_CURATED_THRESHOLD + free_augment_count, _OPENROUTER_CURATED_TARGET
+    return _MODEL_PICKER_OVERFLOW_THRESHOLD, _MODEL_PICKER_VISIBLE_TARGET
 
 
 def _split_picker_overflow_models(
@@ -7693,6 +7730,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 apply_prefix: bool = True,
                 decorate_overflow_label: bool = False,
                 allow_empty: bool = False,
+                openrouter_free_augment_count: int = 0,
             ) -> None:
                 picker_models = copy.deepcopy(raw_models or [])
                 if _is_openai_family_provider(provider_id):
@@ -7710,10 +7748,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
                 if apply_prefix:
                     picker_models = _apply_provider_prefix(picker_models, provider_id, active_provider)
+                _pick_threshold, _pick_target = _picker_caps_for_provider(
+                    provider_id,
+                    free_augment_count=openrouter_free_augment_count,
+                )
                 visible_models, extra_models = _split_picker_overflow_models(
                     picker_models,
                     selected_model_id=_picker_selected_model_id,
                     provider_id=provider_id,
+                    threshold=_pick_threshold,
+                    target=_pick_target,
                 )
                 if not (visible_models or extra_models or models_endpoint_error or allow_empty):
                     return
@@ -7797,6 +7841,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # Free-tier live fetch — bypasses the tool-support filter so models
                     # OpenRouter has flagged free but hasn't yet annotated with tools=[]
                     # (or that have tools=[] but the user explicitly wants to try) appear.
+                    _free_augment_count = 0
                     try:
                         import urllib.request as _urlreq
                         _req = _urlreq.Request(
@@ -7859,6 +7904,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         for _entry in free_tier_models:
                             seen_ids.add(_entry["id"])
                             raw_models.append(_entry)
+                        _free_augment_count = len(free_tier_models)
                     except Exception:
                         logger.debug("OpenRouter free-tier live fetch unavailable; using fallback")
 
@@ -7872,7 +7918,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             if m.get("provider") == "OpenRouter"
                         ]
 
-                    _append_picker_group("OpenRouter", "openrouter", raw_models)
+                    _append_picker_group(
+                        "OpenRouter",
+                        "openrouter",
+                        raw_models,
+                        openrouter_free_augment_count=_free_augment_count,
+                    )
                 elif pid == "ollama-cloud":
                     raw_models = []
                     try:
