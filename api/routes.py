@@ -9175,6 +9175,13 @@ def _display_merge_requires_lineage_provenance(session) -> bool:
     )
 
 
+def _evict_lineage_display_cache_entry(sid, expected_entry) -> None:
+    """Evict only the lineage entry that this caller validated as stale."""
+    with _lineage_display_cache_lock:
+        if _lineage_display_cache.get(sid) is expected_entry:
+            _lineage_display_cache.pop(sid, None)
+
+
 def _display_merge_cache_key(
     session,
     sidecar_messages,
@@ -9202,13 +9209,24 @@ def _display_merge_cache_key(
     parent_sigs = ()
     with _lineage_display_cache_lock:
         lineage_entry = _lineage_display_cache.get(sid)
-        if lineage_entry is not None:
-            if lineage_entry.get("provenance_complete") is not True:
+    if lineage_entry is not None:
+        if (
+            lineage_entry.get("provenance_complete") is not True
+            or lineage_entry.get("self_sig") != self_sig
+        ):
+            _evict_lineage_display_cache_entry(sid, lineage_entry)
+            return None
+        parent_sigs = tuple(
+            (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
+            for path, sig in (lineage_entry.get("parent_sigs") or [])
+        )
+        for parent_path, parent_sig in parent_sigs:
+            if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
+                _evict_lineage_display_cache_entry(sid, lineage_entry)
                 return None
-            parent_sigs = tuple(
-                (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
-                for path, sig in (lineage_entry.get("parent_sigs") or [])
-            )
+        with _lineage_display_cache_lock:
+            if _lineage_display_cache.get(sid) is not lineage_entry:
+                return None
     if not parent_sigs and _display_merge_requires_lineage_provenance(session):
         return None
     last_ts = None
@@ -9632,6 +9650,8 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
                             dict(m) if isinstance(m, dict) else m
                             for m in entry["messages"]
                         ]
+            else:
+                _evict_lineage_display_cache_entry(sid, entry)
 
     segments = []
     current = session

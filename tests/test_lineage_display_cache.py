@@ -243,6 +243,55 @@ def test_parent_replace_during_load_is_not_published(lineage, monkeypatch):
     assert second[0]["content"] == "parent-new"
 
 
+def test_unverifiable_warm_parent_evicts_lineage_and_blocks_display_hit(
+    lineage, monkeypatch
+):
+    """Old provenance cannot survive a parent replacement plus stat failure."""
+    routes, Session, child = lineage
+    from api import models
+
+    state_signature = ("target-session-revision",)
+    monkeypatch.setattr(
+        routes, "_state_db_session_signature", lambda *_a, **_k: state_signature
+    )
+    old_messages = routes._webui_sidecar_lineage_messages_for_display(child)
+    old_key = routes._display_merge_cache_key(
+        child,
+        old_messages,
+        [],
+        state_db_signature=state_signature,
+    )
+    assert old_key is not None
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache[child.session_id] = {
+            "key": old_key,
+            "messages": old_messages,
+            "stored_at": 0.0,
+        }
+
+    parent = Session.load("lineage_parent")
+    parent.messages[0] = {
+        "role": "user",
+        "content": "parent-new",
+        "timestamp": 1000,
+    }
+    parent.save()
+    real_signature = models._sidecar_stat_signature
+
+    def unavailable_parent(path):
+        if path.stem == "lineage_parent":
+            return None
+        return real_signature(path)
+
+    monkeypatch.setattr(models, "_sidecar_stat_signature", unavailable_parent)
+    rebuilt = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    assert rebuilt[0]["content"] == "parent-new"
+    with routes._lineage_display_cache_lock:
+        assert child.session_id not in routes._lineage_display_cache
+    assert routes._display_merge_cached_messages(child, rebuilt) is None
+
+
 def test_sessions_without_lineage_do_not_pollute_cache(lineage):
     routes, Session, child = lineage
     routes._lineage_display_cache.clear()
