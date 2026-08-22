@@ -3340,7 +3340,13 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
     if isinstance(model_cfg, str):
         default_model = model_cfg.strip()
     elif isinstance(model_cfg, dict):
-        cfg_default = str(model_cfg.get("default") or "").strip()
+        # `name` is the key the agent/gateway path reads; `default` is the
+        # WebUI-era spelling. Accept both — a config that only sets `name`
+        # (the shape `hermes` itself writes) otherwise resolves to "" here and
+        # the model picker renders a bare "default" chip. Same precedence as
+        # every other resolver in this tree (see _resolve_* below, and
+        # api/streaming.py's effective-model lookup).
+        cfg_default = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
         if cfg_default:
             default_model = cfg_default
 
