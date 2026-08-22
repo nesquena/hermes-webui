@@ -1850,9 +1850,20 @@ async function loadSession(sid){
   // resolution out of the first-paint path; old provider-shaped model IDs are
   // repaired by the deferred resolver after S.session is assigned.
   // Guard against network/server failures to prevent a permanently stuck loading state.
+  // Start fresh click-time metadata and tail requests in parallel, while
+  // preserving metadata-first state assignment and same-session reload width.
+  const _freshNavigationRequests = sameSessionForceReload
+    ? null
+    : _startFreshSessionNavigationRequests(sid);
+  const _metadataRequest = _freshNavigationRequests
+    ? _freshNavigationRequests.metadata
+    : api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+  const _freshMessagesRequest = _freshNavigationRequests
+    ? _freshNavigationRequests.messages
+    : null;
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    data = await _metadataRequest;
   } catch(e) {
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
@@ -2135,7 +2146,7 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, messageRequest:_freshMessagesRequest});
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -2241,7 +2252,7 @@ async function loadSession(sid){
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration, messageRequest:_freshMessagesRequest});
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
@@ -3035,6 +3046,9 @@ let _messagesTruncated = false;
 // server-bounded and do not consume the visible-message budget.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+// Ordinary navigation and older-message pagination intentionally share the
+// established 30-renderable-message window.
+const _INITIAL_TAIL_MSG_LIMIT = _INITIAL_MSG_LIMIT;
 // ============================================================================
 // COUPLED CONSTANT — keep in sync with api/routes.py:_MAX_MSG_LIMIT.
 // ============================================================================
@@ -3102,7 +3116,23 @@ function _messageReloadLimitForSession(sid){
       return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
     }
   }
-  return _INITIAL_MSG_LIMIT;
+  // Ordinary first paint keeps the same 30-message contract as older pages.
+  return _INITIAL_TAIL_MSG_LIMIT;
+}
+
+function _startFreshSessionNavigationRequests(sid){
+  const base=`/api/session?session_id=${encodeURIComponent(sid)}`;
+  const metadata=api(`${base}&messages=0&resolve_model=0`);
+  const messages=api(
+    `${base}&messages=1&resolve_model=0&msg_limit=${_INITIAL_TAIL_MSG_LIMIT}&expand_renderable=1`,
+    {timeoutMs:120000}
+  );
+  // Metadata failures can end navigation before the tail is awaited. Attach a
+  // handler immediately so a later tail failure is not reported as an
+  // unhandled rejection; _ensureMessagesLoaded still awaits the original
+  // promise and follows its existing message-load error path when metadata wins.
+  messages.catch(()=>{});
+  return {metadata,messages};
 }
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
@@ -3172,10 +3202,12 @@ async function _ensureMessagesLoaded(sid, opts) {
   const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
   let data;
   try {
-    data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
-      {timeoutMs:120000}
-    );
+    data = opts.messageRequest
+      ? await opts.messageRequest
+      : await api(
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+        {timeoutMs:120000}
+      );
   } finally {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
