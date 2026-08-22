@@ -492,8 +492,11 @@ else
     fi
     chmod -R u+w "$_stage_src" \
       || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
-    uv pip install -e "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+    _override_file="/tmp/hermes-agent-overrides.txt"
+    printf 'packaging==26.0\n' > "$_override_file"
+    uv pip install -e "$_stage_src[all]" --overrides "$_override_file" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
       || error_exit "Failed to install hermes-agent's requirements"
+    rm -f "$_override_file"
   else
     echo ""
     echo "!! WARNING: hermes-agent source not found."

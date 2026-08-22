@@ -28,10 +28,10 @@ document.addEventListener('DOMContentLoaded', function () {
   function _safeNextPath() {
     try {
       var raw = new URL(window.location.href).searchParams.get('next');
-      if (!raw) return './';
-      if (raw.charAt(0) !== '/') return './';             // must be path-absolute
-      if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './'; // reject // and \\
-      if (/[\x00-\x1f\x7f\s]/.test(raw)) return './';  // reject control chars / whitespace
+      if (!raw) return '/';
+      if (raw.charAt(0) !== '/') return '/';             // must be path-absolute
+      if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return '/'; // reject // and \\
+      if (/[\x00-\x1f\x7f\s]/.test(raw)) return '/';  // reject control chars / whitespace
       // #5578: never redirect back to the login page — that self-referential
       // chain is what grows the URL exponentially on repeated expired-auth
       // bounces. Detect the login route even through nested percent-encoding
@@ -40,21 +40,26 @@ document.addEventListener('DOMContentLoaded', function () {
       // few levels and check the leading PATH. Only collapse login-route chains
       // — a legitimate non-login path that merely carries its own `next=` query
       // key must still round-trip.
-      if (raw.length > 2048) return './';
+      if (raw.length > 2048) return '/';
       var probe = raw;
       var stabilized = false;
       for (var i = 0; i < 8; i++) {
         var pathOnly = probe.split('?')[0].split('#')[0].split('&')[0].replace(/\/+$/, '');
-        if (pathOnly === '/login' || /\/login$/.test(pathOnly)) return './';
+        if (
+          pathOnly === '/login' || /\/login$/.test(pathOnly) ||
+          pathOnly === '/session/login' ||
+          pathOnly.indexOf('/api/auth/') === 0 ||
+          pathOnly.indexOf('/session/api/auth/') === 0
+        ) return '/';
         var decoded;
         try { decoded = decodeURIComponent(probe); } catch (_) { stabilized = true; break; }
         if (decoded === probe) { stabilized = true; break; }
         probe = decoded;
       }
       // If still decoding at the cap (pathologically deep encoding), fail closed.
-      if (!stabilized) return './';
+      if (!stabilized) return '/';
       return raw;
-    } catch (_) { return './'; }
+    } catch (_) { return '/'; }
   }
 
   async function doLogin(e) {
@@ -62,7 +67,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var pw = input.value;
     hideErr();
     try {
-      var res = await fetch('api/auth/login', {
+      var res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: pw }),
@@ -103,7 +108,7 @@ document.addEventListener('DOMContentLoaded', function () {
     hideErr();
     try {
       passkeyBtn.disabled = true;
-      var optRes = await fetch('api/auth/passkey/options', { method: 'POST', body: '{}', credentials: 'include' });
+      var optRes = await fetch('/api/auth/passkey/options', { method: 'POST', body: '{}', credentials: 'include' });
       var optData = await optRes.json();
       if (!optRes.ok || !optData.publicKey) throw new Error(optData.error || 'Passkey unavailable');
       var pk = optData.publicKey;
@@ -124,7 +129,7 @@ document.addEventListener('DOMContentLoaded', function () {
           userHandle: cred.response.userHandle ? bytesToB64u(cred.response.userHandle) : null,
         },
       };
-      var res = await fetch('api/auth/passkey/login', {
+      var res = await fetch('/api/auth/passkey/login', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload), credentials: 'include',
       });
@@ -140,7 +145,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   if (passkeyBtn && window.PublicKeyCredential && navigator.credentials) {
-    fetch('api/auth/status', { credentials: 'include' })
+    fetch('/api/auth/status', { credentials: 'include' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) { if (s && s.passkeys_enabled) passkeyBtn.style.display = 'block'; })
       .catch(function () {});
@@ -169,7 +174,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function probe() {
-      fetch('health', { method: 'GET', credentials: 'same-origin' })
+      fetch('/health', { method: 'GET', credentials: 'same-origin' })
         .then(function (r) {
           if (r.ok) {
             // Server is reachable — if we were in retry mode, reload so the

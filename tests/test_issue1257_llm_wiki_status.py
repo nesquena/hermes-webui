@@ -56,6 +56,10 @@ def test_llm_wiki_status_reports_unavailable_when_path_missing(tmp_path, monkeyp
 
     missing = tmp_path / "does-not-exist"
     monkeypatch.setenv("WIKI_PATH", str(missing))
+    # Isolate HERMES_HOME so the home-relative fallback introduced in
+    # _llm_wiki_resolve_path does not rescue this deliberately-broken path
+    # by finding a shape-valid wiki under the developer's real ~/.hermes.
+    monkeypatch.setattr(routes, "_llm_wiki_active_hermes_home", lambda: tmp_path)
 
     status = routes._build_llm_wiki_status()
 
@@ -66,6 +70,76 @@ def test_llm_wiki_status_reports_unavailable_when_path_missing(tmp_path, monkeyp
     assert status["raw_source_count"] == 0
     assert status["last_updated"] is None
     assert status["status"] == "missing"
+
+
+def test_llm_wiki_status_falls_back_to_home_wiki_when_configured_path_missing(tmp_path, monkeypatch):
+    """When WIKI_PATH points at a non-existent path but <HERMES_HOME>/wiki has
+    the shape of a real wiki (SCHEMA.md / index.md / a page section dir), the
+    resolver falls back to it. This mirrors the common Docker/bind-mount case
+    where a host-authored .env carries a WIKI_PATH the container can't see.
+    """
+    import api.routes as routes
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    home_wiki = home / "wiki"
+    _write(home_wiki / "SCHEMA.md", "# Schema\n")
+    _write(home_wiki / "entities" / "foo.md", "---\ntitle: Foo\n---\nbody\n")
+
+    missing = tmp_path / "does-not-exist"
+    monkeypatch.setenv("WIKI_PATH", str(missing))
+    monkeypatch.setattr(routes, "_llm_wiki_active_hermes_home", lambda: home)
+
+    resolved, source, configured = routes._llm_wiki_resolve_path()
+    assert resolved == home_wiki
+    assert source == "WIKI_PATH+home-fallback"
+    assert configured is True
+
+    status = routes._build_llm_wiki_status()
+    assert status["available"] is True
+    assert status["entry_count"] == 1
+    assert status["page_count"] == 1
+
+
+def test_llm_wiki_home_fallback_ignores_empty_wiki_dir(tmp_path, monkeypatch):
+    """Fallback must NOT hijack a broken path just because <HERMES_HOME>/wiki
+    exists — the fallback directory has to actually look like a wiki
+    (SCHEMA.md or index.md or a recognised page section dir).
+    """
+    import api.routes as routes
+
+    home = tmp_path / "hermes-home"
+    (home / "wiki").mkdir(parents=True)  # exists, but no SCHEMA/index/section dirs
+
+    missing = tmp_path / "does-not-exist"
+    monkeypatch.setenv("WIKI_PATH", str(missing))
+    monkeypatch.setattr(routes, "_llm_wiki_active_hermes_home", lambda: home)
+
+    resolved, source, configured = routes._llm_wiki_resolve_path()
+    assert resolved == missing
+    assert "fallback" not in source
+    assert configured is True
+
+
+def test_llm_wiki_home_fallback_respects_valid_configured_path(tmp_path, monkeypatch):
+    """Fallback must NEVER hijack a valid custom WIKI_PATH — even if
+    <HERMES_HOME>/wiki also exists, the explicit configuration wins.
+    """
+    import api.routes as routes
+
+    home = tmp_path / "hermes-home"
+    _write(home / "wiki" / "SCHEMA.md")
+
+    custom = tmp_path / "custom-wiki"
+    _write(custom / "SCHEMA.md")
+
+    monkeypatch.setenv("WIKI_PATH", str(custom))
+    monkeypatch.setattr(routes, "_llm_wiki_active_hermes_home", lambda: home)
+
+    resolved, source, configured = routes._llm_wiki_resolve_path()
+    assert resolved == custom
+    assert source == "WIKI_PATH"  # no fallback suffix — configured path was valid
+    assert configured is True
 
 
 def test_api_wiki_status_route_is_registered(monkeypatch, tmp_path):
