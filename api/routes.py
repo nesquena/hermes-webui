@@ -15004,6 +15004,29 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         return True
 
+    if parsed.path == "/api/feedback":
+        # Backend-only endpoint for now (no client UI wired). See api/feedback.py.
+        from api.feedback import (
+            FeedbackValidationError,
+            append_feedback,
+            feedback_rate_limited,
+            feedback_record_rate_hit,
+            normalize_feedback_payload,
+        )
+
+        try:
+            record = normalize_feedback_payload(body)
+            if feedback_rate_limited(record["session_id"]):
+                return bad(handler, "Too many feedback submissions", status=429)
+            append_feedback(record)
+            feedback_record_rate_hit(record["session_id"])
+        except FeedbackValidationError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception:
+            logger.exception("failed to persist feedback")
+            return bad(handler, "Failed to save feedback", status=500)
+        return j(handler, {"ok": True})
+
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
 
