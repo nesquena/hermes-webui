@@ -303,6 +303,11 @@ def test_same_text_different_image_turns_remain_distinct(tmp_path, monkeypatch):
 
     assert [message["content"] for message in merged] == [first, second]
 
+    from api.streaming import _deduplicate_context_messages
+
+    deduplicated = _deduplicate_context_messages(merged)
+    assert [message["content"] for message in deduplicated] == [first, second]
+
 
 def test_reconciled_model_context_preserves_structured_state_db_content(
     tmp_path,

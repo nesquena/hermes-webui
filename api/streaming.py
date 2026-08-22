@@ -72,6 +72,7 @@ from api.models import (
     get_state_db_session_messages,
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
+    _session_message_visible_key,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
 from api.process_event_utils import (
@@ -6008,6 +6009,15 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
 
 def _message_replay_key(msg):
     """Return a stable comparison key for replay/overlap de-duplication."""
+    if (
+        isinstance(msg, dict)
+        and not msg.get("_partial")
+        and isinstance(msg.get("content"), (list, dict))
+    ):
+        return (
+            *_session_message_visible_key(msg, normalize_workspace_prefix=True),
+            str(msg.get("tool_call_id") or ""),
+        )
     identity = _message_identity(msg)
     # ``api_content`` is a provider-facing replay sidecar.  It must participate
     # in context/replay overlap identity or two same-visible turns can collapse
