@@ -117,6 +117,9 @@ var _sessionListSkeletonActive = false;
 var _sessionVirtualScrollRaf = 0;
 global.cancelAnimationFrame = function(){};
 global.requestAnimationFrame = function(){ return 0; };
+// showSessionListSkeleton owns profile-scope selection reset in production;
+// this harness isolates only the skeleton DOM contract.
+function _resetSessionSelectionForScopeChange(){}
 eval(extractConst(sessSrc, '_SESSION_SKELETON_GROUPS'));
 eval(extractFunc(sessSrc, 'showSessionListSkeleton'));
 

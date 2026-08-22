@@ -202,6 +202,10 @@
       </div>
       <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" type="search" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
+      <div class="session-batch-dock" id="sessionBatchDock">
+        <button type="button" class="session-select-toggle" id="sessionSelectToggle" data-i18n="session_select_mode" onclick="toggleSessionSelectMode()">Select</button>
+        <div class="batch-action-bar" id="batchActionBar" role="toolbar" aria-label="Conversation selection" hidden></div>
+      </div>
     </div>
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">

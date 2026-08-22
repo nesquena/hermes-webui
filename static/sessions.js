@@ -2608,6 +2608,7 @@ function _setActiveProjectFilter(projectId) {
   const next = projectId === NO_PROJECT_FILTER ? NO_PROJECT_FILTER : (projectId || null);
   if (_activeProject === next) return;
   _activeProject = next;
+  _resetSessionSelectionForScopeChange();
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
 }
@@ -2617,8 +2618,7 @@ function _setSessionSourceFilter(filter) {
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
-  _selectedSessions.clear();
-  _sessionSelectMode = false;
+  _resetSessionSelectionForScopeChange();
   try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
   renderSessionListFromCache();
   void renderSessionList({deferWhileInteracting:false});
@@ -3951,6 +3951,7 @@ let _renamingSid = null;  // session_id currently being renamed (blocks list re-
 let _showArchived = false;  // toggle to show archived sessions
 let _sessionSelectMode = false;  // batch select mode
 const _selectedSessions = new Set();  // selected session IDs
+let _batchProjectPickerCleanup = null;
 let _allProjects = [];  // cached project list
 // Sentinel value for the _activeProject state when filtering to sessions
 // that have no project_id assigned. Distinct from real project IDs so the
@@ -3979,8 +3980,17 @@ function _restoreShowAllProfiles(){
 }
 
 function _setShowAllProfiles(enabled){
-  _showAllProfiles=!!enabled;
+  const next=!!enabled;
+  if(_showAllProfiles!==next&&typeof _resetSessionSelectionForScopeChange==='function')_resetSessionSelectionForScopeChange();
+  _showAllProfiles=next;
   try{ localStorage.setItem(SHOW_ALL_PROFILES_STORAGE_KEY,_showAllProfiles?'1':'0'); }catch(_e){}
+}
+
+function _toggleArchivedSessionsVisibility(){
+  _resetSessionSelectionForScopeChange();
+  _showArchived=!_showArchived;
+  if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;
+  return renderSessionList();
 }
 
 _restoreShowAllProfiles();
@@ -4258,17 +4268,43 @@ function _setActiveSessionUrl(sid){
 }
 
 // ── Batch select mode ──
+function _focusSessionBatchControl(id){
+  const target=$(id);
+  if(!target||!target.isConnected||typeof target.focus!=='function')return false;
+  try{target.focus({preventScroll:true});}catch(_){target.focus();}
+  return document.activeElement===target;
+}
+function _resetSessionSelectionForScopeChange(){
+  _sessionSelectMode=false;
+  _selectedSessions.clear();
+  if(typeof _batchProjectPickerCleanup==='function')_batchProjectPickerCleanup(false);
+  _renderBatchActionBar();
+}
+function _pruneSessionSelectionToCurrentScope(sessions,referenceSessions){
+  if(!_selectedSessions.size)return false;
+  const validIds=new Set([...(Array.isArray(sessions)?sessions:[]),...(Array.isArray(referenceSessions)?referenceSessions:[])]
+    .filter(session=>session&&session.session_id&&!_isReadOnlySession(session))
+    .map(session=>session.session_id));
+  let changed=false;
+  for(const sid of _selectedSessions){
+    if(validIds.has(sid))continue;
+    _selectedSessions.delete(sid);
+    changed=true;
+  }
+  if(changed)_renderBatchActionBar();
+  return changed;
+}
 function toggleSessionSelectMode(){
   _sessionSelectMode=!_sessionSelectMode;
   _selectedSessions.clear();
   renderSessionListFromCache();
+  _focusSessionBatchControl(_sessionSelectMode?'batchSelectAllBtn':'sessionSelectToggle');
 }
 function exitSessionSelectMode(){
   _sessionSelectMode=false;
   _selectedSessions.clear();
-  const bar=$('batchActionBar');
-  if(bar) bar.style.display='none';
   renderSessionListFromCache();
+  _focusSessionBatchControl('sessionSelectToggle');
 }
 function toggleSessionSelect(sid){
   if(_selectedSessions.has(sid)) _selectedSessions.delete(sid);
@@ -4286,12 +4322,13 @@ function setSessionSelected(sid, selected){
   const item=cb?cb.closest('.session-item,.session-child-session-fork'):null;
   if(item){item.classList.toggle('selected',_selectedSessions.has(sid));if(cb)cb.checked=_selectedSessions.has(sid);}
 }
+function _selectableSessionIds(){
+  if(Array.isArray(_sessionVisibleSidebarIds)&&_sessionVisibleSidebarIds.length) return _sessionVisibleSidebarIds.filter(Boolean);
+  return Array.from(document.querySelectorAll('.session-select-cb')).map(cb=>cb.dataset.sid).filter(Boolean);
+}
 function selectAllSessions(){
   _selectedSessions.clear();
-  const ids=Array.isArray(_sessionVisibleSidebarIds)&&_sessionVisibleSidebarIds.length
-    ? _sessionVisibleSidebarIds
-    : Array.from(document.querySelectorAll('.session-select-cb')).map(cb=>cb.dataset.sid).filter(Boolean);
-  ids.forEach(sid=>_selectedSessions.add(sid));
+  _selectableSessionIds().forEach(sid=>_selectedSessions.add(sid));
   document.querySelectorAll('.session-select-cb').forEach(cb=>{
     const sid=cb.dataset.sid;
     if(sid){cb.checked=_selectedSessions.has(sid);const item=cb.closest('.session-item,.session-child-session-fork');if(item)item.classList.toggle('selected',_selectedSessions.has(sid));}
@@ -4304,19 +4341,43 @@ function deselectAllSessions(){
   _updateBatchActionBar();
 }
 function _updateBatchActionBar(){
-  const bar=$('batchActionBar');if(!bar)return;
-  const count=_selectedSessions.size;
-  if(count>0){_renderBatchActionBar();}
-  else{bar.style.display='none';}
+  _renderBatchActionBar();
 }
 function _renderBatchActionBar(){
   const bar=$('batchActionBar');if(!bar)return;
-  bar.innerHTML='';bar.style.display=_selectedSessions.size>0?'flex':'none';
-  const countBadge=document.createElement('span');countBadge.className='batch-count';
-  countBadge.textContent=t('session_selected_count',_selectedSessions.size);bar.appendChild(countBadge);
+  const activePicker=bar.querySelector('.batch-project-picker');
+  const activePickerItems=activePicker?Array.from(activePicker.querySelectorAll('.project-picker-item')):[];
+  const activePickerFocusIndex=activePickerItems.indexOf(document.activeElement);
+  const reopenProjectPicker=Boolean(activePicker);
+  const restoreFocusId=bar.contains(document.activeElement)?document.activeElement.id:'';
+  if(typeof _batchProjectPickerCleanup==='function')_batchProjectPickerCleanup(false);
+  const toggle=$('sessionSelectToggle');
+  if(toggle) toggle.hidden=_sessionSelectMode;
+  bar.hidden=!_sessionSelectMode;
+  bar.innerHTML='';
+  if(!_sessionSelectMode)return;
+  bar.setAttribute('aria-label',t('session_select_mode_desc'));
+
+  const selectableIds=_selectableSessionIds();
+  const allSelected=selectableIds.length>0&&selectableIds.every(sid=>_selectedSessions.has(sid));
+  const count=_selectedSessions.size;
+
+  const controls=document.createElement('div');controls.className='batch-selection-controls';
+  const exitBtn=document.createElement('button');exitBtn.id='batchExitSelectBtn';exitBtn.type='button';exitBtn.className='batch-exit-btn';
+  exitBtn.textContent='\u2715';exitBtn.title=t('cancel');exitBtn.setAttribute('aria-label',t('cancel'));
+  exitBtn.onclick=(e)=>{e.stopPropagation();exitSessionSelectMode();};controls.appendChild(exitBtn);
+  const selectAllBtn=document.createElement('button');selectAllBtn.id='batchSelectAllBtn';selectAllBtn.type='button';selectAllBtn.className='batch-select-all-btn';
+  selectAllBtn.textContent=t(allSelected?'session_deselect_all':'session_select_all');
+  selectAllBtn.disabled=selectableIds.length===0;
+  selectAllBtn.onclick=(e)=>{e.stopPropagation();if(allSelected)deselectAllSessions();else selectAllSessions();};controls.appendChild(selectAllBtn);
+  const countBadge=document.createElement('span');countBadge.className='batch-count';countBadge.setAttribute('aria-live','polite');
+  countBadge.textContent=t('session_selected_count',count);controls.appendChild(countBadge);
+  bar.appendChild(controls);
+
+  const actions=document.createElement('div');actions.className='batch-action-buttons';bar.appendChild(actions);
   // Archive
-  const archiveBtn=document.createElement('button');archiveBtn.className='batch-action-btn';
-  archiveBtn.textContent=t('session_batch_archive');
+  const archiveBtn=document.createElement('button');archiveBtn.id='batchArchiveBtn';archiveBtn.type='button';archiveBtn.className='batch-action-btn';
+  archiveBtn.textContent=t('session_batch_archive');archiveBtn.disabled=count===0;
   archiveBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
@@ -4335,14 +4396,14 @@ function _renderBatchActionBar(){
       const retainedCount=_worktreeResponseCount(results);
       showToast(retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Archive failed: '+(e.message||e));}
-  };bar.appendChild(archiveBtn);
+  };actions.appendChild(archiveBtn);
   // Move
-  const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
-  moveBtn.textContent=t('session_batch_move');
-  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker();};bar.appendChild(moveBtn);
+  const moveBtn=document.createElement('button');moveBtn.id='batchMoveBtn';moveBtn.type='button';moveBtn.className='batch-action-btn';
+  moveBtn.textContent=t('session_batch_move');moveBtn.disabled=count===0;moveBtn.setAttribute('aria-expanded','false');moveBtn.setAttribute('aria-controls','batchProjectPicker');
+  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker();};actions.appendChild(moveBtn);
   // Delete
-  const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
-  deleteBtn.textContent=t('session_batch_delete');
+  const deleteBtn=document.createElement('button');deleteBtn.id='batchDeleteBtn';deleteBtn.type='button';deleteBtn.className='batch-action-btn batch-action-btn-danger';
+  deleteBtn.textContent=t('session_batch_delete');deleteBtn.disabled=count===0;
   deleteBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
@@ -4372,33 +4433,70 @@ function _renderBatchActionBar(){
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
-  };bar.appendChild(deleteBtn);
+  };actions.appendChild(deleteBtn);
+  if(reopenProjectPicker&&count>0){
+    _showBatchProjectPicker({focusIndex:Math.max(0,activePickerFocusIndex)});
+  }else if(restoreFocusId){
+    _focusSessionBatchControl(restoreFocusId);
+  }
 }
-function _showBatchProjectPicker(){
+function _showBatchProjectPicker({focusIndex=0}={}){
   const ids=[..._selectedSessions];if(!ids.length)return;
   const bar=$('batchActionBar');if(!bar)return;
-  bar.querySelectorAll('.batch-project-picker').forEach(p=>p.remove());
-  const picker=document.createElement('div');picker.className='project-picker batch-project-picker';
-  const none=document.createElement('div');none.className='project-picker-item';none.textContent='No project';
-  none.onclick=async()=>{picker.remove();
-    try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:null})})));
-      showToast('Removed from project');exitSessionSelectMode();await renderSessionList();
+  if(typeof _batchProjectPickerCleanup==='function'){
+    _batchProjectPickerCleanup(true);
+    return;
+  }
+  const moveBtn=$('batchMoveBtn');
+  const picker=document.createElement('div');picker.id='batchProjectPicker';picker.className='project-picker batch-project-picker';
+  picker.setAttribute('role','group');picker.setAttribute('aria-label',t('session_batch_move'));
+  let closed=false;
+  const onOutside=(e)=>{if(!picker.contains(e.target)&&e.target!==moveBtn)cleanup(false);};
+  const cleanup=(restoreFocus=false)=>{
+    if(closed)return;
+    closed=true;
+    picker.remove();
+    document.removeEventListener('click',onOutside);
+    if(moveBtn&&moveBtn.isConnected)moveBtn.setAttribute('aria-expanded','false');
+    _batchProjectPickerCleanup=null;
+    if(restoreFocus)_focusSessionBatchControl('batchMoveBtn');
+  };
+  _batchProjectPickerCleanup=cleanup;
+  if(moveBtn)moveBtn.setAttribute('aria-expanded','true');
+
+  const moveSelected=async(projectId,successMessage)=>{
+    cleanup(true);
+    try{
+      await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:projectId})})));
+      showToast(successMessage);exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Move failed: '+(e.message||e));}
-  };picker.appendChild(none);
+  };
+  const none=document.createElement('button');none.type='button';none.className='project-picker-item';none.textContent='No project';
+  none.onclick=()=>moveSelected(null,'Removed from project');picker.appendChild(none);
   for(const p of(_allProjects||[])){
-    const item=document.createElement('div');item.className='project-picker-item';
+    const item=document.createElement('button');item.type='button';item.className='project-picker-item';
     if(p.color){const dot=document.createElement('span');dot.className='color-dot';
       dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
     const name=document.createElement('span');name.textContent=p.name;item.appendChild(name);
-    item.onclick=async()=>{picker.remove();
-      try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:p.project_id})})));
-        showToast('Moved to '+p.name);exitSessionSelectMode();await renderSessionList();
-      }catch(e){showToast('Move failed: '+(e.message||e));}
-    };picker.appendChild(item);
+    item.onclick=()=>moveSelected(p.project_id,'Moved to '+p.name);picker.appendChild(item);
   }
+  picker.onkeydown=(e)=>{
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();cleanup(true);return;}
+    if(e.key!=='ArrowDown'&&e.key!=='ArrowUp')return;
+    const options=Array.from(picker.querySelectorAll('.project-picker-item'));
+    const current=options.indexOf(document.activeElement);
+    const delta=e.key==='ArrowDown'?1:-1;
+    const next=options[(current+delta+options.length)%options.length];
+    if(next){e.preventDefault();next.focus();}
+  };
   bar.appendChild(picker);
-  const close=(e)=>{if(!picker.contains(e.target)){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
+  setTimeout(()=>{
+    if(!picker.isConnected)return;
+    document.addEventListener('click',onOutside);
+    const options=Array.from(picker.querySelectorAll('.project-picker-item'));
+    const focusTarget=options[Math.min(Math.max(0,focusIndex),Math.max(0,options.length-1))]||none;
+    try{focusTarget.focus({preventScroll:true});}catch(_){focusTarget.focus();}
+  },0);
 }
 
 function _focusSessionActionMenuRestoreTarget(target){
@@ -5164,6 +5262,7 @@ const _SESSION_SKELETON_GROUPS = [
 function showSessionListSkeleton(targetProfile){
   const list = $('sessionList');
   if(!list) return;
+  _resetSessionSelectionForScopeChange();
   // Tear down any active virtual-scroll state up front so a pending scroll-driven
   // render can't repaint the previous profile's cached rows over the skeleton
   // (#4662 Codex gate). Cancel the queued RAF and drop the data-session-virtual-*
@@ -5449,6 +5548,7 @@ function _applySessionListPayload(sessData, projData, opts){
     : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  _pruneSessionSelectionToCurrentScope(_allSessions,_sidebarReferenceSessions);
   // Tag the cache with the scope it was loaded under (active profile +
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
@@ -7744,25 +7844,6 @@ function renderSessionListFromCache(){
   // this assignment as a defensive backstop for any future non-switch caller that
   // reaches a real paint with the flag somehow still set.
   _sessionListSkeletonActive=false;
-  // Batch select bar (when in select mode)
-  if(_sessionSelectMode){
-    const selectBar=document.createElement('div');selectBar.className='session-select-bar';
-    const exitBtn=document.createElement('button');exitBtn.className='batch-exit-btn';
-    exitBtn.textContent='\u2715';exitBtn.title='Exit select mode';
-    exitBtn.onclick=(e)=>{e.stopPropagation();exitSessionSelectMode();};
-    selectBar.appendChild(exitBtn);
-    const selectAllBtn=document.createElement('button');selectAllBtn.className='batch-select-all-btn';
-    selectAllBtn.textContent=t('session_select_all');
-    selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};
-    selectBar.appendChild(selectAllBtn);
-    list.appendChild(selectBar);
-  }
-  // Ensure batch action bar exists in DOM
-  let batchBar=$('batchActionBar');
-  if(!batchBar){batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';}
-  list.appendChild(batchBar);
-  if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
-  else{batchBar.style.display='none';}
   if(_sessionListLoadError){
     const note=_renderSessionListLoadErrorNote();
     if(note) list.appendChild(note);
@@ -7906,11 +7987,7 @@ function renderSessionListFromCache(){
     const toggle=document.createElement('div');
     toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
-    toggle.onclick=()=>{
-      _showArchived=!_showArchived;
-      if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;
-      renderSessionList();
-    };
+    toggle.onclick=_toggleArchivedSessionsVisibility;
     list.appendChild(toggle);
   }
   // Empty state for active project filter
@@ -7953,7 +8030,10 @@ function renderSessionListFromCache(){
     if(_groupCollapsed[g.label]) continue;
     for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
   }
-  _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
+  _sessionVisibleSidebarIds=flatSessionRows
+    .map(row=>row.session)
+    .filter(session=>session&&session.session_id&&!_isReadOnlySession(session))
+    .map(session=>session.session_id);
   for(const row of flatSessionRows){
     const s=row.session;
     if(!s||!Array.isArray(s._child_sessions)) continue;
@@ -7965,6 +8045,7 @@ function renderSessionListFromCache(){
       }
     }
   }
+  _renderBatchActionBar();
   _ensureSessionVirtualScrollHandler(list);
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
   const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
@@ -8079,13 +8160,6 @@ function renderSessionListFromCache(){
       };
       list.appendChild(more);
     }
-  }
-  // Select mode toggle button (only when NOT in select mode)
-  if(!_sessionSelectMode){
-    const toggleBtn=document.createElement('div');toggleBtn.className='session-select-toggle';
-    toggleBtn.textContent=t('session_select_mode');
-    toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
-    list.appendChild(toggleBtn);
   }
   // Refresh FLIP and queued archive/delete reflow both drive
   // --session-reflow-offset. Refresh wins so one render has one transform writer.
@@ -9029,6 +9103,7 @@ async function _handleShowAllProfilesStorageEvent(e){
   if(!e || e.key !== SHOW_ALL_PROFILES_STORAGE_KEY) return;
   const next=e.newValue==='1'||e.newValue==='true';
   if(_showAllProfiles===next) return;
+  _resetSessionSelectionForScopeChange();
   _showAllProfiles=next;
   if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
 }

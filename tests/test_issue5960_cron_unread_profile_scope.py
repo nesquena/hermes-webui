@@ -699,6 +699,7 @@ function _reconcileActiveSessionIdleStateFromList(){{}}
 function _mergeOptimisticFirstTurnSessions(s){{ return s; }}
 function _recordSessionProfileCount(){{}}
 function _syncSessionAttentionSoundState(){{}}
+function _pruneSessionSelectionToCurrentScope(){{ return false; }}
 function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
@@ -821,6 +822,7 @@ function _reconcileActiveSessionIdleStateFromList(){{}}
 function _mergeOptimisticFirstTurnSessions(s){{ return s; }}
 function _recordSessionProfileCount(){{}}
 function _syncSessionAttentionSoundState(){{}}
+function _pruneSessionSelectionToCurrentScope(){{ return false; }}
 function _pruneLineageReportCacheToVisibleSessions(){{}}
 function _requestedSessionSidebarSource(){{ return 'webui'; }}
 function _sessionListExcludeHiddenEnabled(){{ return false; }}
