@@ -15,6 +15,7 @@ import json
 from api import models
 from api.models import (
     _matching_visible_duplicate,
+    _session_message_content_key,
     _session_message_dedup_key,
     _session_message_merge_key,
     _session_message_visible_key,
@@ -62,6 +63,33 @@ class TestMergeKeyToolCalls:
         with_tc = _assistant_tc("call_1", "read_file")
         assert _session_message_merge_key(empty) != _session_message_merge_key(with_tc)
 
+    def test_scalar_json_and_structured_content_use_distinct_exact_keys(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+            "timestamp": 1000,
+        }
+        structured = {"role": "user", "content": json.loads(json.dumps(rich, sort_keys=True)), "timestamp": 1000}
+        scalar_mirror = dict(scalar)
+        structured_mirror = {"role": "user", "content": json.loads(scalar["content"]), "timestamp": 1000}
+
+        for key_fn in (_session_message_merge_key,):
+            assert key_fn(scalar) != key_fn(structured)
+            assert key_fn(scalar) == key_fn(scalar_mirror)
+            assert key_fn(structured) == key_fn(structured_mirror)
+
+    def test_stable_id_merge_key_behavior_is_unchanged_by_content_shape(self):
+        rich = [{"type": "text", "text": "same turn"}]
+        scalar = {"id": "message-1", "role": "user", "content": json.dumps(rich)}
+        structured = {"id": "message-1", "role": "user", "content": rich}
+
+        assert _session_message_merge_key(scalar) == _session_message_merge_key(structured)
+        assert _session_message_dedup_key(scalar) == _session_message_dedup_key(structured)
+
 
 # ── _session_message_dedup_key ──────────────────────────────────────────────
 
@@ -76,6 +104,24 @@ class TestDedupKeyToolCalls:
         a = _assistant_tc("call_1", "read_file")
         b = _assistant_tc("call_2", "terminal")
         assert _session_message_dedup_key(a) != _session_message_dedup_key(b)
+
+    def test_scalar_json_and_structured_content_use_distinct_exact_keys(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+            "timestamp": 1000,
+        }
+        structured = {"role": "user", "content": json.loads(json.dumps(rich, sort_keys=True)), "timestamp": 1000}
+        scalar_mirror = dict(scalar)
+        structured_mirror = {"role": "user", "content": json.loads(scalar["content"]), "timestamp": 1000}
+
+        assert _session_message_dedup_key(scalar) != _session_message_dedup_key(structured)
+        assert _session_message_dedup_key(scalar) == _session_message_dedup_key(scalar_mirror)
+        assert _session_message_dedup_key(structured) == _session_message_dedup_key(structured_mirror)
 
 
 # ── _session_message_visible_key + _matching_visible_duplicate ──────────────
@@ -107,7 +153,7 @@ class TestVisibleKeyToolCalls:
             "role": "user",
             "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
         }
-        structured = {"role": "user", "content": rich}
+        structured = {"role": "user", "content": json.loads(json.dumps(rich, sort_keys=True))}
 
         scalar_key = _session_message_visible_key(scalar)
         structured_key = _session_message_visible_key(structured)
@@ -115,6 +161,24 @@ class TestVisibleKeyToolCalls:
         assert scalar_key != structured_key
         merged = merge_session_messages_append_only([scalar], [structured])
         assert merged == [scalar, structured]
+
+    def test_scalar_json_and_structured_content_use_distinct_content_and_visible_keys(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+        }
+        structured = {"role": "user", "content": rich}
+        scalar_mirror = dict(scalar)
+        structured_mirror = {"role": "user", "content": json.loads(scalar["content"])}
+
+        for key_fn in (_session_message_content_key, _session_message_visible_key):
+            assert key_fn(scalar) != key_fn(structured)
+            assert key_fn(scalar) == key_fn(scalar_mirror)
+            assert key_fn(structured) == key_fn(structured_mirror)
 
     def test_mixed_shape_fuzzy_match_requires_equal_visible_text(self):
         structured = {

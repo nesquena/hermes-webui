@@ -1,6 +1,7 @@
 """Regression coverage for Hermes Agent structured state.db content."""
 
 import json
+import math
 import sqlite3
 from types import SimpleNamespace
 
@@ -332,6 +333,59 @@ def test_session_load_repairs_encoded_rich_sidecar_before_reconciliation(
     assert persisted["context_messages"][0]["content"] == content
 
 
+def test_session_load_only_self_heals_when_decoder_replaces_content_object(
+    tmp_path,
+    monkeypatch,
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    sidecar_path = session_dir / f"{SESSION_ID}.json"
+    base = {
+        "session_id": SESSION_ID,
+        "title": "Multimodal",
+        "workspace": str(tmp_path),
+        "model": "test-model",
+        "created_at": 1000.0,
+        "updated_at": 1001.0,
+        "context_messages": [],
+        "tool_calls": [],
+    }
+    sidecar_path.write_text(
+        json.dumps({**base, "messages": [{"role": "user", "content": float("nan")}] }),
+        encoding="utf-8",
+    )
+
+    save_calls = []
+    original_save = models.Session.save
+
+    def counting_save(self, *args, **kwargs):
+        save_calls.append(self.session_id)
+        return original_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(models.Session, "save", counting_save)
+
+    first = models.Session.load(SESSION_ID)
+    second = models.Session.load(SESSION_ID)
+
+    assert math.isnan(first.messages[0]["content"])
+    assert math.isnan(second.messages[0]["content"])
+    assert save_calls == []
+
+    encoded = _encoded_content(_rich_content())
+    sidecar_path.write_text(
+        json.dumps({**base, "messages": [{"role": "user", "content": encoded}]}),
+        encoding="utf-8",
+    )
+
+    repaired = models.Session.load(SESSION_ID)
+
+    assert repaired.messages[0]["content"] == _rich_content()
+    assert save_calls == [SESSION_ID]
+
+
 def test_missing_sidecar_recovery_decodes_rich_state_db_content(
     tmp_path,
     monkeypatch,
@@ -524,3 +578,14 @@ def test_replay_key_keeps_scalar_and_image_turns_distinct():
     )
     assert _strip_replayed_prefix([scalar], [text_only]) == []
     assert _dedupe_replayed_context_messages([scalar], [text_only]) == [scalar]
+
+
+def test_replay_key_treats_empty_structured_content_as_scalar_mirror():
+    from api.streaming import _message_replay_key, _strip_replayed_prefix
+
+    tool_calls = [{"id": "call_1", "function": {"name": "read_file", "arguments": "{}"}}]
+    scalar = {"role": "assistant", "content": "", "tool_calls": tool_calls}
+    empty_structured = {"role": "assistant", "content": [], "tool_calls": tool_calls}
+
+    assert _message_replay_key(scalar) == _message_replay_key(empty_structured)
+    assert _strip_replayed_prefix([scalar], [empty_structured]) == []

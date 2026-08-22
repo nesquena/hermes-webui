@@ -5998,7 +5998,7 @@ def _message_identity(msg):
 
 
 def _message_replay_content_is_text_only(content):
-    if not isinstance(content, list) or not content:
+    if not isinstance(content, list):
         return False
     text_keys = {"text", "content", "input_text", "output_text"}
     for part in content:

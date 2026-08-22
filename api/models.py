@@ -1571,8 +1571,9 @@ class Session:
             normalized_values = []
             for message in values:
                 if isinstance(message, dict):
-                    decoded_content = _decode_state_db_content(message.get('content'))
-                    if decoded_content != message.get('content'):
+                    content = message.get('content')
+                    decoded_content = _decode_state_db_content(content)
+                    if decoded_content is not content:
                         message = {**message, 'content': decoded_content}
                         _content_changed = True
                 normalized_values.append(message)
@@ -8714,6 +8715,10 @@ def _session_message_api_content_key(msg: dict | None):
     return value if isinstance(value, str) and value else None
 
 
+def _session_message_content_shape(content) -> str:
+    return "structured" if isinstance(content, (list, dict)) else "scalar"
+
+
 def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
     """Append provider sidecar identity only when one is actually present.
 
@@ -8808,7 +8813,8 @@ def _session_message_merge_key(msg: dict):
     # timestamp<=max_sidecar_timestamp blanket-skip at line ~4218 drops
     # every state.db tool-call after the first one registered by the sidecar.
     _tc = msg.get("tool_calls")
-    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    content_shape = _session_message_content_shape(msg.get("content"))
+    _tc_key = f"{content_shape}:{json.dumps(_tc, sort_keys=True, default=str) if _tc else ''}"
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
@@ -9513,7 +9519,8 @@ def _session_message_dedup_key(msg: dict):
     # different tool invocations (but identical empty content/timestamp)
     # are never collapsed into one.  (#3346 regression)
     _tc = msg.get("tool_calls")
-    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
+    content_shape = _session_message_content_shape(msg.get("content"))
+    _tc_key = f"{content_shape}:{json.dumps(_tc, sort_keys=True, default=str) if _tc else ''}"
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
@@ -9562,6 +9569,7 @@ def _session_message_content_key(
         msg,
         normalize_workspace_prefix=normalize_workspace_prefix,
     )
+    content = f"{_session_message_content_shape(msg.get('content'))}:{content}"
     return _session_message_key_with_sidecar((
         role,
         content,
@@ -9582,9 +9590,7 @@ def _session_message_visible_key(
     # prefix matching.  Without this, all tool-calling messages map to
     # ("assistant", "") and the merge treats state.db rows as replays.
     _tc = msg.get("tool_calls")
-    content_shape = (
-        "structured" if isinstance(msg.get("content"), (list, dict)) else "scalar"
-    )
+    content_shape = _session_message_content_shape(msg.get("content"))
     _tc_key = f"{content_shape}:{json.dumps(_tc, sort_keys=True, default=str) if _tc else ''}"
     role = str(msg.get("role") or "")
     # Fold the state.db workspace wrapper out of scalar and structured user

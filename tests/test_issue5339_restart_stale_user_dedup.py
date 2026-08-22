@@ -161,7 +161,7 @@ def test_content_key_is_idempotent_for_bare_user_message():
     bare = {"role": "user", "content": "just a plain message"}
     assert _session_message_content_key(bare) == (
         "user",
-        "just a plain message",
+        "scalar:just a plain message",
         "",
         "",
     )
