@@ -342,36 +342,55 @@ def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
     assert sid not in ids_after,         f"Deleted session {sid} still appears in list -- index not invalidated on delete"
 
 
-def test_server_delete_prunes_session_index(cleanup_test_sessions):
-    """session/delete should prune the deleted row without discarding the index."""
-    src = (REPO_ROOT / "server.py").read_text()
-    routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
-    # Find the delete handler in either file
-    for label, text in [("server.py", src), ("api/routes.py", routes_src)]:
-        # Accept both single-quote and double-quote style (formatting varies by contributor)
-        delete_idx = max(
-            text.find("if parsed.path == '/api/session/delete':"),
-            text.find('if parsed.path == "/api/session/delete":'),
-        )
-        if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
-            assert "prune_session_from_index(sid)" in delete_block, \
-                f"{label} session/delete must prune SESSION_INDEX_FILE"
-            return
-    assert False, "session/delete handler not found in server.py or api/routes.py"
+def test_server_delete_prunes_only_target_session_from_index(cleanup_test_sessions):
+    """session/delete removes its index row without discarding sibling rows."""
+    from tests._pytest_port import TEST_STATE_DIR
+
+    first = make_session(cleanup_test_sessions)
+    second = make_session(cleanup_test_sessions)
+    _make_session_visible(first)
+    _make_session_visible(second)
+    get("/api/sessions")
+
+    index_path = pathlib.Path(
+        os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(TEST_STATE_DIR))
+    ) / "sessions" / "_index.json"
+    before = json.loads(index_path.read_text(encoding="utf-8"))
+    assert {row.get("session_id") for row in before} >= {first, second}
+
+    result, status = post("/api/session/delete", {"session_id": first})
+    assert status == 200 and result.get("ok") is True
+    cleanup_test_sessions.remove(first)
+
+    after = json.loads(index_path.read_text(encoding="utf-8"))
+    indexed_ids = {row.get("session_id") for row in after}
+    assert first not in indexed_ids
+    assert second in indexed_ids
 
 
-def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
-    """session/delete must remove sidecar backups so deleted sessions stay deleted."""
-    routes_src = (REPO_ROOT / "api" / "routes.py").read_text()
-    delete_idx = max(
-        routes_src.find("if parsed.path == '/api/session/delete':"),
-        routes_src.find('if parsed.path == "/api/session/delete":'),
+def test_server_delete_removes_sidecar_backup_and_context_brief(cleanup_test_sessions):
+    """Deleted sessions leave neither recovery backups nor derivable briefs."""
+    from tests._pytest_port import TEST_STATE_DIR
+
+    sid = make_session(cleanup_test_sessions)
+    _make_session_visible(sid)
+    state_dir = pathlib.Path(
+        os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(TEST_STATE_DIR))
     )
-    assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    session_path = state_dir / "sessions" / f"{sid}.json"
+    backup_path = session_path.with_suffix(".json.bak")
+    backup_path.write_bytes(session_path.read_bytes())
+    brief_path = state_dir / "context-briefs" / f"{sid}.json"
+    brief_path.parent.mkdir(parents=True, exist_ok=True)
+    brief_path.write_text('{"format": 1, "text": "derived"}', encoding="utf-8")
+
+    result, status = post("/api/session/delete", {"session_id": sid})
+    assert status == 200 and result.get("ok") is True
+    cleanup_test_sessions.remove(sid)
+
+    assert not session_path.exists()
+    assert not backup_path.exists()
+    assert not brief_path.exists()
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 

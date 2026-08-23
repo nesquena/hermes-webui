@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from api import context_brief as cb
+from tests._aux_client_helpers import auxiliary_client_modules
 
 
 @pytest.fixture(autouse=True)
@@ -71,16 +72,17 @@ class TestAuxiliaryRouting:
             captured.update(kwargs)
             return {"choices": [{"message": {"content": "x" * 300}}]}
 
-        monkeypatch.setattr(aux, "call_llm", fake)
+        monkeypatch.setattr(aux, "call_llm", fake, raising=False)
         monkeypatch.setattr(cb, "_distill_transcript", lambda s: "distilled")
         monkeypatch.setattr(cb, "_extract_llm_content", lambda r: "x" * 300)
 
     def test_generate_uses_compression_slot_without_model_override(self, monkeypatch):
         captured = {}
-        self._fake_call_llm(monkeypatch, captured)
-        text, source = cb._generate_llm_brief(
-            _session(), "sid", {"meta": {"title": "t", "message_count": 5}}
-        )
+        with auxiliary_client_modules():
+            self._fake_call_llm(monkeypatch, captured)
+            text, source = cb._generate_llm_brief(
+                _session(), "sid", {"meta": {"title": "t", "message_count": 5}}
+            )
         assert source == "auxiliary-llm"
         assert captured["task"] == "compression"
         assert "model" not in captured
