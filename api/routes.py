@@ -10518,6 +10518,7 @@ from api.workspace import (
     raw_authorized_escape_target,
     resolve_trusted_workspace,
     resolve_implicit_workspace_with_recovery,
+    WorkspaceAccessError,
     open_anchored_fd,
     open_anchored_create_fd,
     open_anchored_write_fd,
@@ -15238,11 +15239,18 @@ def handle_post(handler, parsed) -> bool:
             workspace_prev_session_id = None
         try:
             workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
+        except WorkspaceAccessError as e:
+            # The server could not INSPECT the path (permission denied, transient
+            # stat failure). The user can fix that — grant macOS Full Disk Access,
+            # remount the volume — and re-send this exact request successfully, so
+            # it is not tagged as a verdict on the path and a boot-time
+            # ?workspace= launcher keeps the intent for the retry.
+            return bad(handler, str(e))
         except (TypeError, ValueError) as e:
-            # `code` marks this 400 as an objective verdict on the workspace
-            # path itself, so a boot-time ?workspace= launcher can tell it
-            # apart from a 400 raised by any other field in the same request
-            # and decide whether retrying the URL could ever succeed.
+            # `code` marks this 400 as an objective, permanent verdict on the
+            # workspace path itself, so a boot-time ?workspace= launcher can tell
+            # it apart from a 400 raised by any other field in the same request
+            # and knows that retrying this URL can never succeed.
             return bad(handler, str(e), code="invalid_workspace")
         worktree_info = None
         worktree_skipped = None

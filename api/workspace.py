@@ -328,6 +328,29 @@ def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does 
     return None
 
 
+class WorkspaceAccessError(ValueError):
+    """A workspace path the server could not inspect, as opposed to one it
+    inspected and refused.
+
+    Callers that persist or discard a user's workspace intent need to tell the
+    two apart: a permission or transient stat failure can be fixed by the user
+    (granting macOS Full Disk Access, remounting a volume) and the same request
+    can then succeed unchanged, whereas an untrusted or non-directory path is a
+    verdict that re-sending will never change.
+    """
+
+
+def _raise_workspace_access_error(message: str) -> None:
+    """Raise the access error with the recoverable//permanent distinction.
+
+    A path that simply does not exist is a permanent verdict on this request;
+    an inaccessible one is recoverable.
+    """
+    if message.startswith("Cannot access path:"):
+        raise WorkspaceAccessError(message)
+    raise ValueError(message)
+
+
 def _migrate_global_workspaces() -> list:
     """Read the legacy global workspaces.json, clean it, and return the result.
 
@@ -849,7 +872,7 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         # update the workspace hint even though this WebUI host cannot stat
         # the target-side path.
         if remote_candidate is None:
-            raise ValueError(access_error)
+            _raise_workspace_access_error(access_error)
 
     if remote_candidate is not None:
         return remote_candidate

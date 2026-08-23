@@ -694,3 +694,47 @@ def test_server_tags_workspace_rejection_with_a_code():
         payload = json.loads(e.read())
     assert payload.get("code") == "invalid_workspace"
     assert payload.get("error")          # human-readable message still present
+
+
+def test_inaccessible_workspace_is_not_tagged_as_a_verdict(tmp_path):
+    """A path the server cannot INSPECT (permission denied) is recoverable:
+    the user grants access and the same request succeeds unchanged. It must
+    not carry the permanent-rejection code, or the boot would discard a launch
+    that a reload would have completed."""
+    from tests._pytest_port import BASE
+
+    denied_parent = tmp_path / "denied"
+    denied_parent.mkdir()
+    (denied_parent / "project").mkdir()
+    denied_parent.chmod(0o000)
+    try:
+        body = json.dumps({"workspace": str(denied_parent / "project")}).encode()
+        req = urllib.request.Request(
+            BASE + "/api/session/new", data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                pytest.skip(f"path was not access-denied for the server (status {r.status})")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+            payload = json.loads(e.read())
+    finally:
+        denied_parent.chmod(0o755)
+
+    if "Cannot access path" not in (payload.get("error") or ""):
+        pytest.skip("server resolved the path without an access error (running as root?)")
+    assert payload.get("code") != "invalid_workspace", (
+        "a recoverable access failure must not be tagged as a permanent path verdict"
+    )
+
+
+def test_workspace_access_error_is_a_valueerror_subclass():
+    """Existing callers catch ValueError; the new distinction must not change
+    who catches what."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from api.workspace import WorkspaceAccessError
+
+    assert issubclass(WorkspaceAccessError, ValueError)
