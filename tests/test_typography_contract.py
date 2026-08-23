@@ -158,12 +158,24 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
   </style>
 </head>
 <body>
+  <button id="buttonSentinel">button</button>
+  <input id="inputSentinel">
+  <select id="selectSentinel"><option>select</option></select>
+  <textarea id="textareaSentinel"></textarea>
   <div class="msg-body">
     <p>inline <code id="inlineCode" class="language-js">token</code> sample.</p>
     <pre id="fencedPre" class="language-js"><code id="fencedCode" class="language-js">fenced token</code></pre>
+    <input class="markdown-table-filter" id="markdownTableFilter">
+    <table>
+      <thead><tr><th><button class="markdown-table-sort" id="markdownTableSort">sort</button></th></tr></thead>
+      <tbody><tr><td id="markdownTableCell">row</td></tr></tbody>
+    </table>
   </div>
   <textarea class="msg-edit-area" id="msgEditArea"></textarea>
   <textarea id="previewEditArea" style="{preview_style_match.group(1)}"></textarea>
+  <div class="detail-form-row">
+    <textarea id="detailFormTextarea"></textarea>
+  </div>
 </body>
 </html>
 """
@@ -205,6 +217,22 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
             preview_edit_font = page.eval_on_selector(
                 "#previewEditArea",
                 "el => getComputedStyle(el).fontFamily",
+            )
+            component_fonts = page.evaluate(
+                """
+                () => Object.fromEntries(
+                  ["markdownTableFilter", "markdownTableSort", "markdownTableCell", "detailFormTextarea"]
+                    .map(id => [id, getComputedStyle(document.getElementById(id)).fontFamily])
+                )
+                """
+            )
+            native_control_fonts = page.evaluate(
+                """
+                () => Object.fromEntries(
+                  ["buttonSentinel", "inputSentinel", "selectSentinel", "textareaSentinel"]
+                    .map(id => [id, getComputedStyle(document.getElementById(id)).fontFamily])
+                )
+                """
             )
             runtime_token_font = page.evaluate("""
                 () => {
@@ -248,6 +276,13 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
     assert "MonoFontSentinel" in fenced_code_font
     assert "ConvoFontSentinel" in message_edit_font
     assert "MonoFontSentinel" in preview_edit_font
+    for control_id, font in native_control_fonts.items():
+        assert "UiFontSentinel" in font, f"{control_id} computed {font!r}"
+    assert "UiFontSentinel" in component_fonts["markdownTableFilter"]
+    assert "MonoFontSentinel" in component_fonts["markdownTableSort"]
+    assert "MonoFontSentinel" in component_fonts["markdownTableCell"]
+    assert component_fonts["markdownTableSort"] == component_fonts["markdownTableCell"]
+    assert "MonoFontSentinel" in component_fonts["detailFormTextarea"]
     assert "RuntimeMono" in runtime_token_font
     assert "EditedRuntimeMono" in edited_runtime_token_font
     assert "LinkedRuntimeMono" in linked_stylesheet_font

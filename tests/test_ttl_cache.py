@@ -111,39 +111,61 @@ def test_ttl_expiry():
 def test_mtime_invalidation():
     """Populate the cache, then change _cfg_mtime to simulate a config file
     change on disk. The next call should invalidate the cache and re-scan.
+
+    This test is fully self-contained: it invalidates both memory and disk
+    caches first, then populates the cache via a priming call, then verifies
+    that an mtime mismatch triggers a cache rebuild. It does not depend on
+    any sibling test's execution order.
     """
-    _reset_cache()
+    # Fully invalidate (memory + disk) so we start from a known clean state.
+    config.invalidate_models_cache()
 
-    # Ensure _cfg_mtime matches file so first call doesn't re-scan due to mtime
+    # Force the synchronous (unbounded) rebuild path so the priming call is
+    # guaranteed to have published the cache when it returns. With the
+    # default bounded budget (_LIVE_REBUILD_BUDGET_SECONDS=4.0), a cold
+    # rebuild on a slow/loaded box can exceed the budget and return a
+    # static fallback WITHOUT populating _available_models_cache — which
+    # made this test fail when run in isolation (it previously only passed
+    # because a sibling test had already warmed the cache in-process).
+    original_budget = config._LIVE_REBUILD_BUDGET_SECONDS
+    config._LIVE_REBUILD_BUDGET_SECONDS = 0.0
+    real_mtime = 0.0
+
     try:
-        real_mtime = config.Path(config._get_config_path()).stat().st_mtime
-    except OSError:
-        real_mtime = 0.0
-    config._cfg_mtime = real_mtime
+        # Ensure _cfg_mtime matches file so first call doesn't re-scan due to mtime
+        try:
+            real_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except OSError:
+            real_mtime = 0.0
+        config._cfg_mtime = real_mtime
 
-    # First call populates cache
-    result1 = config.get_available_models()
-    assert config._available_models_cache is not None
+        # Priming call: populate the cache (both memory and disk)
+        result1 = config.get_available_models()
+        assert config._available_models_cache is not None, (
+            "Priming call should populate the in-memory cache"
+        )
+        assert config._available_models_cache_ts > 0.0, (
+            "Priming call should set a valid cache timestamp"
+        )
 
-    # Simulate config.yaml changed on disk by setting _cfg_mtime to 0
-    # (which won't match the actual file mtime)
-    config._cfg_mtime = 0.0
+        # Simulate config.yaml changed on disk by setting _cfg_mtime to 0
+        # (which won't match the actual file mtime)
+        config._cfg_mtime = 0.0
 
-    # The next call should detect mtime mismatch, reload, and invalidate cache
-    old_cache = config._available_models_cache
-    old_ts = config._available_models_cache_ts
+        # The next call should detect mtime mismatch, reload, and invalidate cache
+        result2 = config.get_available_models()
 
-    result2 = config.get_available_models()
-
-    # Cache must have been refreshed — timestamp advanced since we reset it
-    # to 0.0 on invalidation.
-    assert config._available_models_cache_ts > 0.0, (
-        "Cache timestamp should be updated after invalidation + rebuild"
-    )
-
-    # Restore
-    config._cfg_mtime = real_mtime
-    _reset_cache()
+        # Cache must have been refreshed — timestamp advanced since we reset it
+        # to 0.0 on invalidation.
+        assert config._available_models_cache_ts > 0.0, (
+            "Cache timestamp should be updated after invalidation + rebuild"
+        )
+        # Both calls must return a valid /api/models payload.
+        assert "groups" in result1 and "groups" in result2
+    finally:
+        config._LIVE_REBUILD_BUDGET_SECONDS = original_budget
+        config._cfg_mtime = real_mtime
+        config.invalidate_models_cache()
 
 
 # ── 4. test_deepcopy_isolation ────────────────────────────────────────────

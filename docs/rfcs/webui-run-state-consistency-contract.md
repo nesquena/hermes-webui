@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-07-16
+- **Updated:** 2026-08-22
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -70,6 +70,7 @@ and 5; it does not mark every run-state boundary implemented.
 | Model context / `context_messages` | Supplies conversation state to the agent | Must include the current visible user turn unless deliberately excluded with a user-visible reason | Let the agent resume from context that contradicts what the user can see |
 | Pending turn metadata | Bridges submitted-but-not-yet-finalized user input | Must identify the user turn and stream that own active work | Become a permanent duplicate transcript row after recovery |
 | Live stream / SSE | Delivers active runtime events to the browser | Must remain an observation path, not the only durable truth for already-emitted events | Lose the visible scene on refresh, reconnect, or session switch |
+| Worker lifecycle registry (`ACTIVE_RUNS`) | Tracks whether a worker still occupies the session, so a successor turn cannot start on top of it | Broader than "attachable UI work": a cancelled worker stays registered while it unwinds | Be read directly as the set of runs a browser may attach to |
 | Run journal / replay | Rebuilds emitted runtime events after reconnect or restart | Must be cursor-safe and idempotent | Duplicate assistant text, thinking text, tool cards, or compression cards |
 | Compression summary / handoff | Gives the agent recovery context after automatic compression | Must remain agent-facing recovery material unless explicitly rendered as history | Pollute the active turn or become implicit current user intent |
 | Live UI scene/cache | Preserves expanded rows, in-progress cards, local scroll, and transient grouping | May optimize presentation but must be rebuildable or degradable from transcript/replay | Become the only place where chronological ordering exists |
@@ -98,6 +99,16 @@ and 5; it does not mark every run-state boundary implemented.
    browser-facing timeline renderer as live SSE events so recovery does not
    downgrade a structured Thinking / progress / tool / compression turn into a
    separate flattened presentation.
+   When session loading combines a WebUI sidecar with Hermes Agent `state.db`, a
+   native-image user turn may appear as both rich multipart content and scalar
+   text that replaces each image part with `[screenshot]`. Reconciliation may
+   treat those rows as one turn only when the multipart value contains text and
+   recognized native-image parts, its exact scalar projection matches, role and
+   tool shape match, timestamps match exactly, stable IDs and provider metadata
+   do not conflict, and the pairing is unambiguous. Keep the rich sidecar row;
+   if any requirement is missing or contradictory, preserve both rows rather
+   than deduplicating. Literal scalar `[screenshot]` text alone is not identity
+   evidence.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
@@ -121,6 +132,26 @@ and 5; it does not mark every run-state boundary implemented.
 8. **Every mutation names its layer.** A PR touching streaming, recovery,
    context reconstruction, compression, replay, or sidebar metadata should state
    which layer it changes and what regression proves the invariant still holds.
+9. **Lifecycle-busy is not client-attachable.** `ACTIVE_RUNS` answers "may a new
+   turn start?", not "may a browser attach a renderer?". Cancellation splits the
+   two: `cancel_stream()` keeps the row as `phase="cancelling"` so a successor
+   cannot overlap the unwinding worker, but the client has already reached a
+   terminal state for that stream because its run journal ends in a terminal
+   event. Recovery paths that hand a stream id to a renderer — session SSE
+   recovery and hidden-tab status polling — must therefore exclude cancelling
+   rows, while busy/admission checks must keep counting them. Reading the
+   registry with a single meaning resurrects a cancelled run on every fresh
+   subscription: the client attaches, consumes the terminal event, tears the
+   renderer down, resubscribes, and the loop repeats indefinitely.
+
+   Because a cancelling row can otherwise persist forever, cancellation unwind is
+   bounded: a cancelling row older than that window **and** owning no live
+   `STREAMS` channel is reclaimed from `ACTIVE_RUNS` along with its stream-owner
+   entry, so a wedged worker cannot suppress background wakeups permanently.
+   Reclamation requires both conditions — age alone must not evict a row that
+   still owns a live channel. Staleness is measured from the cancellation
+   timestamp (falling back to run start), so a long-running turn cancelled
+   moments ago is never mistaken for an orphan.
 
 ## Review Checklist
 
@@ -138,6 +169,11 @@ context reconstruction, or session metadata:
   interim assistant text, tool cards, compression cards, and terminal states?
 - Can this change move a session in the sidebar without meaningful user or
   assistant activity?
+- Does this change read `ACTIVE_RUNS` for admission ("may a turn start?") or for
+  attachment ("may a browser render this?"), and does it use the matching
+  predicate for that question?
+- If it introduces or changes a reclamation window, what proves an in-flight
+  cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
 - What test or manual evidence proves the invariant?
 
