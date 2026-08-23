@@ -12,9 +12,11 @@ swing to the opposite failure, so these tests pin BOTH edges of the contract:
   is followed by project-scoped, per-project-budgeted queries (greptile P1);
 * the follow-up is COMPLETE — every starved project is served, with no fixed
   per-build project cap that would permanently skip the rest (greptile P1);
-* the recovered set is BOUNDED — per project, counting logical conversations —
-  including assigned rows that arrive as imported WebUI sidecars and therefore
-  never pass through any state.db cap;
+* the recovered set is BOUNDED — the FINAL MERGED assigned payload never exceeds
+  the 200-row assigned cap, counting logical conversations, including assigned
+  rows that arrive as imported WebUI sidecars and therefore never pass through
+  any state.db cap — and that bound is spent by a fair per-project draw, so
+  bounding the payload does not starve a quiet project;
 * assigned rows do not spend the unassigned sidebar quota: 20 unique unassigned
   logical conversations survive after lineage/sidecar dedup;
 * a deleted or cross-profile ``project_id`` cannot hide a session — it resolves
@@ -291,11 +293,57 @@ def test_route_cap_bounds_imported_sidecar_assigned_rows(fake_hermes_home):
     assert not any("default_hidden" in row for row in sidecars)
 
 
-def test_route_cap_bounds_each_project_independently(fake_hermes_home):
+def _assigned_project_counts(rows):
+    """project_id -> kept row count, for the assigned rows only."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        project_id = row.get("project_id")
+        if project_id:
+            counts[project_id] = counts.get(project_id, 0) + 1
+    return counts
+
+
+def test_route_cap_bounds_the_reviewers_five_project_reproduction(fake_hermes_home):
+    """The review's literal reproduction: 1,000 assigned rows over 5 projects.
+
+    A PER-PROJECT 200 is not a bound on the payload — every one of the five
+    projects stayed under its own 200, so 1,000 rows went in and 1,000 came out,
+    which is exactly what review finding 1 reported. The review asked for "the
+    existing 200-row assigned cap across the final MERGED CLI set", so the bound
+    is on the whole assigned payload, not on one project.
+    """
+    project_count = 5
+    per_project = 200
+    rows = []
+    for project in range(project_count):
+        rows.extend(
+            {
+                "session_id": f"project-{project}-{index:04d}",
+                "is_cli_session": True,
+                "project_id": f"project-{project}",
+            }
+            for index in range(per_project)
+        )
+    assert len(rows) == 1000
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP == 200
+    # Bounded by a FAIR draw, not by truncating the head of the list: the rows
+    # are grouped per project, so a flat `sessions[:200]` would have handed
+    # project-0 every slot and left the other four unreachable — the starvation
+    # greptile rejected as P1.
+    counts = _assigned_project_counts(kept)
+    assert len(counts) == project_count
+    assert set(counts.values()) == {routes.CLI_PROJECT_ASSIGNED_CAP // project_count}
+
+
+def test_route_cap_splits_the_merged_budget_fairly_between_projects(fake_hermes_home):
     """A busy project must not evict another project's history (greptile P1).
 
-    The bound is per project, so a profile with more than
-    ``CLI_PROJECT_ASSIGNED_CAP`` assigned conversations in TOTAL keeps them all.
+    The merged budget is drawn round-robin, newest first WITHIN each project, so
+    two equally deep projects get an equal share and each keeps its newest
+    conversations rather than an arbitrary slice.
     """
     rows = []
     for project in ("project-a", "project-b"):
@@ -310,27 +358,26 @@ def test_route_cap_bounds_each_project_independently(fake_hermes_home):
 
     kept = routes._cap_recent_cli_sessions(rows)
 
-    counts: dict[str, int] = {}
-    for row in kept:
-        counts[row["project_id"]] = counts.get(row["project_id"], 0) + 1
-    assert counts == {
-        "project-a": routes.CLI_PROJECT_ASSIGNED_CAP,
-        "project-b": routes.CLI_PROJECT_ASSIGNED_CAP,
-    }
-    assert len(kept) > routes.CLI_PROJECT_ASSIGNED_CAP
+    half = routes.CLI_PROJECT_ASSIGNED_CAP // 2
+    assert _assigned_project_counts(kept) == {"project-a": half, "project-b": half}
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    # Newest first within each project: the draw keeps the head of each queue.
+    kept_ids = {row["session_id"] for row in kept}
+    for project in ("project-a", "project-b"):
+        assert f"{project}-0000" in kept_ids
+        assert f"{project}-{half - 1:04d}" in kept_ids
+        assert f"{project}-{half:04d}" not in kept_ids
 
 
-def test_route_cap_bounds_the_whole_merged_assigned_set(fake_hermes_home):
-    """A per-project bound alone is not a bound on the payload (finding 1).
+def test_route_cap_never_starves_a_project_with_more_projects_than_slots(
+    fake_hermes_home,
+):
+    """Every project with an assigned session keeps at least one row.
 
-    ``CLI_PROJECT_ASSIGNED_CAP`` rows times N projects grows with the project
-    count: 1,000 assigned conversations spread over 5 projects reproduced the
-    review's original "1,000 rows in, 1,000 rows out" exactly, because every
-    project stayed under its own 200. The equal share of
-    ``CLI_PROJECT_ASSIGNED_SCAN_CEILING`` is what actually bounds the merged set.
+    40 projects x 200 rows still fits the merged cap because 200 // 40 = 5 — the
+    draw shrinks each project's slice instead of dropping whole projects.
     """
     project_count = 40
-    per_project = 200
     rows = []
     for project in range(project_count):
         rows.extend(
@@ -339,31 +386,23 @@ def test_route_cap_bounds_the_whole_merged_assigned_set(fake_hermes_home):
                 "is_cli_session": True,
                 "project_id": f"project-{project:02d}",
             }
-            for index in range(per_project)
+            for index in range(200)
         )
-    assert len(rows) > routes.CLI_PROJECT_ASSIGNED_SCAN_CEILING
 
     kept = routes._cap_recent_cli_sessions(rows)
 
-    assert len(kept) <= routes.CLI_PROJECT_ASSIGNED_SCAN_CEILING
-    # Bounded by an EQUAL share, not by dropping whole projects: every project
-    # keeps a slice, or this would be the starvation greptile P1 rejected.
-    counts: dict[str, int] = {}
-    for row in kept:
-        counts[row["project_id"]] = counts.get(row["project_id"], 0) + 1
-    share = routes.CLI_PROJECT_ASSIGNED_SCAN_CEILING // project_count
+    counts = _assigned_project_counts(kept)
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
     assert len(counts) == project_count
-    assert set(counts.values()) == {share}
-    # The share only bites once it is tighter than the per-project cap.
-    assert share < routes.CLI_PROJECT_ASSIGNED_CAP
+    assert min(counts.values()) >= 1
+    assert set(counts.values()) == {routes.CLI_PROJECT_ASSIGNED_CAP // project_count}
 
 
-def test_route_cap_share_does_not_shrink_below_the_per_project_cap(fake_hermes_home):
-    """Few projects must keep the full 200 — the ceiling is a ceiling, not a quota.
+def test_route_cap_keeps_every_assigned_row_under_the_merged_cap(fake_hermes_home):
+    """Negative control: the draw is inert while the assigned set fits.
 
-    Negative control for the test above: with the ceiling comfortably wider than
-    ``project_count * CLI_PROJECT_ASSIGNED_CAP`` the share is inert, so the
-    bounding above is attributable to the ceiling and not to a blanket shrink.
+    Without this, "bounded at 200" could just as well be a blanket shrink. Two
+    projects with 60 conversations each keep all 120.
     """
     rows = []
     for project in ("project-a", "project-b"):
@@ -373,31 +412,27 @@ def test_route_cap_share_does_not_shrink_below_the_per_project_cap(fake_hermes_h
                 "is_cli_session": True,
                 "project_id": project,
             }
-            for index in range(250)
+            for index in range(60)
         )
 
     kept = routes._cap_recent_cli_sessions(rows)
 
-    counts: dict[str, int] = {}
-    for row in kept:
-        counts[row["project_id"]] = counts.get(row["project_id"], 0) + 1
-    assert counts == {
-        "project-a": routes.CLI_PROJECT_ASSIGNED_CAP,
-        "project-b": routes.CLI_PROJECT_ASSIGNED_CAP,
-    }
+    assert _assigned_project_counts(kept) == {"project-a": 60, "project-b": 60}
+    assert len(kept) == 120 < routes.CLI_PROJECT_ASSIGNED_CAP
 
 
-def test_route_project_ceiling_matches_the_model_constant():
-    """The route literal must not drift from the model-side scan ceiling.
+def test_route_merged_assigned_cap_is_the_existing_model_row_cap():
+    """The route's merged bound must stay the 200-row cap the review named.
 
-    Same reasoning as ``test_background_source_exclusion_literal_matches_the_constant``:
-    the value is duplicated because ``api.models`` is imported below this cap in
-    ``api/routes.py``, so only a test can keep the two honest. If they diverge the
-    route could hand back more assigned rows than the model pass ever recovers.
+    ``api.models`` is imported below this cap in ``api/routes.py``, so the value
+    is spelled as a literal there and only a test can keep the two honest. The
+    merged bound must also never exceed what the model recovery pass can deliver,
+    or the route would advertise a budget nothing can fill.
     """
+    assert routes.CLI_PROJECT_ASSIGNED_CAP == models.PROJECT_ASSIGNED_CLI_LIMIT == 200
     assert (
-        routes.CLI_PROJECT_ASSIGNED_SCAN_CEILING
-        == models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+        routes.CLI_PROJECT_ASSIGNED_CAP
+        <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
     )
 
 
