@@ -640,7 +640,11 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                     self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
                     self.assertNotIn('data-ref="/tmp/report.xlsx%22"', result["html"])
                     self.assertNotIn("data-ref=\"/tmp/report.xlsx'\"", result["html"])
-                    self.assertIn(".", result["text"])
+                    expected_quote = "'" if case_name in ("quotedSingleSplit", "entityQuotedSingleEnd") else '"'
+                    self.assertTrue(
+                        result["text"].rstrip().endswith(f"{expected_quote}."),
+                        result["text"],
+                    )
 
     def test_real_smd_parser_preserves_quoted_remote_query_and_fragment_values(self):
         expected = {
