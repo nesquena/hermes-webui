@@ -1,6 +1,7 @@
 """Visible-order contract for the first anchor-backed Compact Worklog handoff."""
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -767,7 +768,18 @@ def test_live_footer_owner_guard_blocks_stale_session_updates():
     update = _function_body(UI_JS, "updateLiveRunStatus")
     hide = _function_body(UI_JS, "hideLiveRunStatus")
 
-    assert "opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId" in update
+    # The owner guard must reject updates addressed to a session that no longer
+    # owns the live footer. The identity may be read into a local (`sid`) before
+    # the comparison, so anchor on the comparison contract rather than on one
+    # spelling of the expression.
+    assert re.search(
+        r"(opts&&opts\.sessionId|const sid=String\(opts&&opts\.sessionId\|\|''\);)",
+        update,
+    )
+    assert re.search(
+        r"(opts\.sessionId|sid)&&_liveRunStatusSessionId&&(opts\.sessionId|sid)!==_liveRunStatusSessionId",
+        update,
+    )
     assert "sid&&_liveRunStatusSessionId&&sid!==_liveRunStatusSessionId" in hide
 
 
