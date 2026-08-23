@@ -232,6 +232,28 @@ def test_prewarmed_row_ignores_label_from_ignored_later_duplicate(live_endpoint,
     )
 
 
+def test_prewarmed_row_ignores_label_from_duplicate_of_unlabeled_dict(live_endpoint, _sync_rebuild):
+    """Deep-review 2026-08-20, hot path: an unlabeled dict also claims the id,
+    so the labeled duplicate after it is ignored by the ids walker and the
+    endpoint label of the accepted row stands."""
+    _ModelsEndpoint.payload = {"data": [{"id": "model-a", "name": "Endpoint Label"}]}
+    result = _models_with_cfg(
+        model_cfg=_active_cfg(live_endpoint),
+        custom_providers=[
+            {
+                **_gateway_cfg(live_endpoint),
+                "models": [{"id": "model-a"}, {"id": "model-a", "label": "Later Duplicate"}],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == "Endpoint Label", (
+        "an unlabeled first occurrence supplies no override, so the endpoint "
+        f"label must survive, got {row['label']!r}"
+    )
+
+
 def test_prewarmed_row_labeled_dict_then_bare_keeps_first_label(live_endpoint, _sync_rebuild):
     """Deep-review 2026-08-20, hot path, reverse ordering: the labeled dict is
     the accepted first occurrence, so its label wins; the bare-string
@@ -337,6 +359,28 @@ def test_cold_catalog_ignores_label_from_ignored_later_duplicate():
     assert row is not None
     assert row["label"] == config._get_label_for_model("model-a", []), (
         "the accepted bare-string row must fall through to the derived label, "
+        f"got {row['label']!r}"
+    )
+    assert row["label"] != "Later Duplicate"
+
+
+def test_cold_catalog_ignores_label_from_duplicate_of_unlabeled_dict():
+    """Deep-review 2026-08-20, cold path: `[{id}, {id, label}]` accepts the
+    unlabeled dict and ignores the labeled duplicate, so the displayed row
+    falls through to the derived label."""
+    result = _cold_catalog_with_cfg(
+        model_cfg=_active_cfg("https://gw.example.com/v1"),
+        custom_providers=[
+            {
+                **_gateway_cfg("https://gw.example.com/v1"),
+                "models": [{"id": "model-a"}, {"id": "model-a", "label": "Later Duplicate"}],
+            }
+        ],
+    )
+    row = _row_by_model_id(result.get("groups", []), "custom:mygateway", "model-a")
+    assert row is not None
+    assert row["label"] == config._get_label_for_model("model-a", []), (
+        "the accepted unlabeled-dict row must fall through to the derived label, "
         f"got {row['label']!r}"
     )
     assert row["label"] != "Later Duplicate"
