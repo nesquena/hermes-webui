@@ -10163,12 +10163,23 @@ CLI_VISIBLE_SESSION_CAP = 20
 # which no model-side cap applies to — so it is the only place that can actually
 # bound the assigned set (#6659 review finding 1).
 CLI_PROJECT_ASSIGNED_CAP = 200
+# Global ceiling on the assigned rows this cap will emit, mirroring
+# models.PROJECT_ASSIGNED_CLI_SCAN_CEILING so the route can never hand back more
+# assigned conversations than the model pass was allowed to recover. A flat
+# per-project bound does NOT bound the payload: 200 rows x N projects grows with
+# the project count, and 1,000 assigned rows spread over 5 projects still
+# returned all 1,000 — the exact reproduction from #6659 review finding 1.
+# Spelled as a literal because api.models is imported further down this module;
+# pinned equal to the model constant by
+# test_route_project_ceiling_matches_the_model_constant.
+CLI_PROJECT_ASSIGNED_SCAN_CEILING = 2000
 
 
 def _cap_recent_cli_sessions(
     sessions: list[dict],
     cli_cap: int = CLI_VISIBLE_SESSION_CAP,
     project_cap: int = CLI_PROJECT_ASSIGNED_CAP,
+    project_ceiling: int = CLI_PROJECT_ASSIGNED_SCAN_CEILING,
 ) -> list[dict]:
     """Cap the default CLI list while retaining project-addressable rows.
 
@@ -10186,9 +10197,31 @@ def _cap_recent_cli_sessions(
       window is full. Past that bound they are dropped: keeping assigned rows past
       the *recent* cap is the fix, keeping them past *all* bounds just trades a
       vanishing session for a stalled sidebar.
+
+    That per-project budget is an EQUAL share of ``project_ceiling``
+    (``ceiling // projects``, never below 1) once enough projects exist to exceed
+    it, which is what makes the merged payload bounded no matter how many
+    projects a profile has while keeping a project's allowance independent of how
+    loud its neighbours are. Same shape as the model-side share of
+    ``PROJECT_ASSIGNED_CLI_SCAN_CEILING``, and for the same reason a flat global
+    cap is not usable here: it would leave every project past it permanently
+    unreachable on every rebuild (greptile P1 on #6659).
     """
     if cli_cap <= 0:
         return sessions
+    # The share denominator has to be known before the first assigned row is
+    # charged against it, so count the distinct assigned projects up front.
+    assigned_projects = {
+        project_id
+        for session in sessions
+        if _is_cli_session_for_settings(session)
+        and (project_id := str(session.get("project_id") or "").strip())
+    }
+    effective_project_cap = project_cap
+    if project_cap > 0 and project_ceiling > 0 and assigned_projects:
+        effective_project_cap = min(
+            project_cap, max(1, project_ceiling // len(assigned_projects))
+        )
     kept = []
     recent_seen = 0
     unassigned_seen = 0
@@ -10204,7 +10237,7 @@ def _cap_recent_cli_sessions(
             else:
                 seen = assigned_seen.get(project_id, 0) + 1
                 assigned_seen[project_id] = seen
-                if project_cap > 0 and seen > project_cap:
+                if effective_project_cap > 0 and seen > effective_project_cap:
                     continue
                 if recent_seen >= cli_cap:
                     session = dict(session)
