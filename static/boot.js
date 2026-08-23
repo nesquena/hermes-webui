@@ -3841,6 +3841,23 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
     }
   }
+  if(_workspaceLaunchOwnsSession){
+    // The workspace launch is still outstanding for this URL and the preserved
+    // `workspace` parameter is the only carrier of that intent. Falling into
+    // the normal restore would destroy it two ways: loadSession() calls
+    // _setActiveSessionUrl(), which rewrites the whole query string, and the
+    // no-saved-session path can auto-bind a fresh default-workspace session.
+    // Either way the deep link is lost, or a second wrong-workspace session
+    // exists by the time the user retries. Stop here instead: render the empty
+    // state, leave the URL untouched, and let the reload carry the intent.
+    S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+    S._bootReady=true;
+    syncTopbar();syncWorkspacePanelState();
+    try{$('emptyState').style.display='';}catch(_){}
+    await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
+    if(typeof startGatewaySSE==='function')startGatewaySSE();
+    return;
+  }
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
     try{

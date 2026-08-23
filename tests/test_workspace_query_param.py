@@ -335,6 +335,10 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
   const routed = await runBootBlocks(ctx);
   console.log(JSON.stringify({{
     routed: routed === undefined ? 'routed' : routed,
+    // The boot either created/restored a session (S.session set), stopped on
+    // purpose to protect an outstanding workspace launch (returned early with
+    // no session), or fell through to the normal restore path below the block.
+    held: routed === undefined && ctx.S.session === null,
     calls: ctx.calls,
     switchCalls: ctx.switchCalls,
     search: window.location.search,
@@ -405,7 +409,7 @@ def test_incomplete_profile_switch_defers_workspace(outcome):
     assert state["switchCalls"] == ["work"]      # the switch was attempted
     assert state["calls"] == []                  # but no session was created
     assert "workspace=" in state["search"]       # and the intent survives
-    assert state["routed"] == "fell-through"
+    assert state["held"] is True                 # boot held instead of restoring
 
 
 def test_completed_profile_switch_routes_workspace_under_new_profile():
@@ -570,7 +574,7 @@ def test_deferred_profile_switch_suppresses_the_new_chat_shortcut():
     assert state["switchCalls"] == ["work"]
     assert state["calls"] == []                  # no session at all this boot
     assert "workspace=" in state["search"]       # intent preserved for retry
-    assert state["routed"] == "fell-through"
+    assert state["held"] is True                 # boot held instead of restoring
 
 
 def test_transport_failure_suppresses_the_new_chat_shortcut():
@@ -585,7 +589,7 @@ def test_transport_failure_suppresses_the_new_chat_shortcut():
     state = json.loads(out)
     assert len(state["calls"]) == 1              # the failed attempt only
     assert "workspace=" in state["search"]
-    assert state["routed"] == "fell-through"
+    assert state["held"] is True                 # boot held instead of restoring
 
 
 @pytest.mark.parametrize("code", [None, "invalid_toolsets"])
@@ -600,7 +604,7 @@ def test_unrelated_400_preserves_workspace_param(code):
         new_session_reject_code=code,
         extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj")))
     state = json.loads(out)
-    assert state["routed"] == "fell-through"
+    assert state["held"] is True                 # boot held instead of restoring
     assert "workspace=" in state["search"]
 
 
@@ -615,7 +619,7 @@ def test_transport_failure_preserves_workspace_param(status):
         new_session_reject_status=status,
         extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj&q=hello")))
     state = json.loads(out)
-    assert state["routed"] == "fell-through"
+    assert state["held"] is True                 # boot held instead of restoring
     assert "workspace=%2FUsers%2Fx%2Fproj" in state["search"] or \
            "workspace=/Users/x/proj" in state["search"]
     assert state["cueAfter"] is None
@@ -629,7 +633,7 @@ def test_network_error_without_status_preserves_workspace_param():
         new_session_throws=True,
         extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj")))
     state = json.loads(out)
-    assert state["routed"] == "fell-through"
+    assert state["held"] is True                 # boot held instead of restoring
     assert "workspace=" in state["search"]
 
 
@@ -672,9 +676,49 @@ def test_blank_workspace_param_is_consumed_and_falls_through():
 
 
 # ---------------------------------------------------------------------------
-# Server side of the same contract: the discriminator the client branches on
+# An outstanding launch must survive the fallback restore path too
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("saved_session", [None, "sess-abc"])
+def test_held_launch_does_not_reach_the_restore_path(saved_session):
+    """Suppressing only the new-chat shortcut is not enough. Below it,
+    loadSession() calls _setActiveSessionUrl(), which rewrites the entire query
+    string and would drop the preserved `workspace`; and the no-saved-session
+    path can auto-bind a fresh default-workspace session. Boot must stop before
+    either, whether or not a saved session exists."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=503,
+        extra_js=(
+            (f"localStorage.setItem('hermes-webui-session', {saved_session!r});\n  "
+             if saved_session else "")
+            + _apply("/?workspace=%2FUsers%2Fx%2Fproj&q=hello")
+        )))
+    state = json.loads(out)
+    assert state["held"] is True                 # returned before the restore
+    assert len(state["calls"]) == 1              # only the failed attempt
+    assert "workspace=" in state["search"]       # intent intact for the reload
+    assert "q=hello" in state["search"]          # prefill intact too
+
+
+def test_held_launch_leaves_the_url_byte_identical():
+    """The whole point of holding is that the next load replays the same URL.
+    Nothing in the held path may touch it."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="{hasParam:true,valid:true,name:'work'}",
+        switch_outcome="throws",
+        extra_js=_apply("/app/?profile=work&workspace=%2FUsers%2Fx%2Fproj&q=hi#frag")))
+    state = json.loads(out)
+    assert state["held"] is True
+    assert state["calls"] == []
+    assert "profile=work" in state["search"]     # not consumed either: the
+    assert "workspace=" in state["search"]       # retry needs the whole launch
+    assert "q=hi" in state["search"]
+
+
+# ---------------------------------------------------------------------------
+# Server side of the same contract: the discriminator the client branches on
+# ---------------------------------------------------------------------------
 def test_server_tags_workspace_rejection_with_a_code():
     """The client can only tell a path verdict from an unrelated 400 because
     POST /api/session/new tags the former. Pin that contract server-side so
