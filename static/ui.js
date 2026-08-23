@@ -15056,7 +15056,17 @@ function ensureRunActivityGroup(inner, opts){
 const _liveRunStatusTimers={};  // keyed by sessionId, max 1 active
 let _liveRunStatusTokens=null;
 let _liveRunStatusSessionId=null;
-let _liveRunMeta=null;  // {model, effort} announced by the backend run_meta SSE
+let _liveRunStatusStreamId=null;
+let _liveRunMeta=null;  // {sessionId, streamId, model, effort} from run_meta SSE
+function _claimLiveRunStatusOwner(sid,streamId){
+  const nextSid=String(sid||'');
+  const nextStreamId=String(streamId||'');
+  _liveRunStatusSessionId=nextSid||null;
+  _liveRunStatusStreamId=nextStreamId||null;
+  const metaOwnsNext=!!(_liveRunMeta&&
+    _liveRunMeta.sessionId===nextSid&&_liveRunMeta.streamId===nextStreamId);
+  if(!nextSid||!nextStreamId||!metaOwnsNext)_liveRunMeta=null;
+}
 function _formatRunElapsed(seconds){
   const n=Number(seconds);
   if(!Number.isFinite(n)||n<0)return'00:00';
@@ -15099,6 +15109,7 @@ function placeLiveRunStatusHost(){
   return _moveLiveRunStatusToTurnEnd(el);
 }
 function showLiveRunStatus(sid,opts){
+  _claimLiveRunStatusOwner(sid,opts&&opts.streamId);
   if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
     _liveRunStatusSessionId=sid;
     _liveRunStatusTokens=opts&&opts.tokens||null;
@@ -15121,7 +15132,9 @@ function _renderLiveRunStatusContent(el,startedAt){
   const elapsed=startedAt?Math.max(0,now-startedAt):0;
   const timeStr=_formatRunElapsed(elapsed);
   const tokens=_liveRunStatusTokens;
-  const meta=_liveRunMeta||{};
+  const meta=(_liveRunMeta&&
+    _liveRunMeta.sessionId===String(_liveRunStatusSessionId||'')&&
+    _liveRunMeta.streamId===String(_liveRunStatusStreamId||''))?_liveRunMeta:{};
   // run_meta is authoritative for the active attempt. Do not fall back to the
   // requested session model: after a runtime fallback that value is stale, and
   // an absent effective model must remain undisplayed rather than guessed.
@@ -15132,9 +15145,16 @@ function _renderLiveRunStatusContent(el,startedAt){
   el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}${metaModel?`<span class="lf-sep">·</span><span class="lf-model">${esc(metaModel)}</span>`:''}${effortLabel?`<span class="lf-sep">·</span><span class="lf-effort" title="${esc(t('reasoning_effort')||'Effective reasoning effort')}">${esc(effortLabel)}</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
 }
 function updateLiveRunStatus(opts){
-  if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
+  const sid=String(opts&&opts.sessionId||'');
+  const streamId=String(opts&&opts.streamId||'');
+  if(sid&&_liveRunStatusSessionId&&sid!==_liveRunStatusSessionId) return;
+  if(streamId&&_liveRunStatusStreamId&&streamId!==_liveRunStatusStreamId) return;
   if(opts&&opts.tokens!==undefined)_liveRunStatusTokens=opts.tokens;
-  if(opts&&opts.meta)_liveRunMeta=opts.meta;
+  if(opts&&opts.meta){
+    if(!sid||!streamId)return;
+    _claimLiveRunStatusOwner(sid,streamId);
+    _liveRunMeta={...opts.meta,sessionId:sid,streamId};
+  }
   const el=$('liveRunStatus');
   if(el&&!el.hidden){
     _moveLiveRunStatusToTurnEnd(el);
@@ -15146,6 +15166,7 @@ function updateLiveRunStatus(opts){
 function _syncLiveRunStatusAfterRender(){
   const sid=S.session&&S.session.session_id;
   if(!sid||!S.activeStreamId||!S.busy) return;
+  _claimLiveRunStatusOwner(sid,S.activeStreamId);
   const timer=_liveRunStatusTimers[sid];
   const startedAt=(timer&&timer.startedAt)||((S.session&&S.session.pending_started_at)||Date.now()/1000);
   if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
@@ -15159,16 +15180,17 @@ function _syncLiveRunStatusAfterRender(){
     _renderLiveRunStatusContent(el,startedAt);
     return;
   }
-  showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});
+  showLiveRunStatus(sid,{streamId:S.activeStreamId,startedAt,tokens:_liveRunStatusTokens});
 }
-function hideLiveRunStatus(sid){
+function hideLiveRunStatus(sid,streamId){
   if(sid&&_liveRunStatusSessionId&&sid!==_liveRunStatusSessionId) return;
+  if(streamId&&_liveRunStatusStreamId&&streamId!==_liveRunStatusStreamId) return;
   const el=$('liveRunStatus');
   if(el){el.hidden=true;el.innerHTML='';}
   _clearLiveRunStatusTimer(sid||_liveRunStatusSessionId);
   _liveRunStatusTokens=null;
   _liveRunStatusSessionId=null;
-  _liveRunMeta=null;
+  _liveRunStatusStreamId=null;
 }
 function _startLiveRunStatusTimer(sid,startedAt){
   if(!sid)return;

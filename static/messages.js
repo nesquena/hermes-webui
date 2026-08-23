@@ -1962,7 +1962,7 @@ async function send(){
       const _startedAt=typeof startData?.pending_started_at==='number'
         ? startData.pending_started_at
         : (S.session.pending_started_at||Date.now()/1000);
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+      showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
     }
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
@@ -2022,7 +2022,7 @@ async function startRegeneration(sessionId, regenerationRevision){
     if(!INFLIGHT[sid])INFLIGHT[sid]={messages:S.messages.slice(),uploaded:[],toolCalls:[]};
     markInflight(sid,streamId);
     if(typeof saveInflightState==='function')saveInflightState(sid,{streamId,messages:S.messages.slice(),uploaded:[],toolCalls:[]});
-    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{startedAt:S.session.pending_started_at||Date.now()/1000});
+    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{streamId,startedAt:S.session.pending_started_at||Date.now()/1000});
     if(typeof updateSendBtn==='function')updateSendBtn();
     if(typeof renderSessionList==='function')void renderSessionList();
     attachLiveStream(sid,streamId,[]);
@@ -2098,10 +2098,11 @@ function closeLiveStream(sessionId, streamId, source){
   // thinking/tool content (only the elapsed clock survives). Capturing here
   // guarantees switch-back restores the exact state shown at switch-away. (#3668)
   if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(sessionId);
-  // Stop the live footer timer/status for the pane that is being detached; the
-  // reattach path will rebuild it from INFLIGHT/server state if the user returns.
-  if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(sessionId);
-  if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
+  // Stop the live footer timer/status only when this stream still owns it. A
+  // successor can already have claimed the same session before the old source
+  // reaches stream_end, and stale teardown must not hide the successor footer.
+  if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId,live.streamId||streamId);
+  else if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
   _resumeSessionStreamAfterLiveChat(sessionId);
@@ -2165,6 +2166,7 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  if(typeof _claimLiveRunStatusOwner==='function') _claimLiveRunStatusOwner(activeSid,streamId);
   const reconnecting=!!options.reconnecting;
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
@@ -2217,7 +2219,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
       const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+      showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
     }
     return;
   }
@@ -2229,7 +2231,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // hides the status while tearing down stale EventSource ownership.
   if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
     const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
-    showLiveRunStatus(activeSid,{startedAt:_startedAt});
+    showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
   }
   _suspendSessionStreamForLiveChat(activeSid);
 
@@ -6157,7 +6159,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const d=JSON.parse(e.data||'{}');
         if(d&&d.session_id&&activeSid&&d.session_id!==activeSid)return;
         if(typeof updateLiveRunStatus==='function'){
-          updateLiveRunStatus({sessionId:activeSid,meta:{
+          updateLiveRunStatus({sessionId:activeSid,streamId,meta:{
             model:String((d&&d.model)||''),
             effort:String((d&&d.reasoning_effort)||''),
           }});

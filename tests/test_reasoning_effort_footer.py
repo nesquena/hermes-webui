@@ -318,6 +318,123 @@ console.log(JSON.stringify({{
     return json.loads(_run_node(source))
 
 
+def _eval_live_run_meta_ownership() -> dict:
+    """Exercise live metadata across successor, regeneration, and reconnect owners."""
+    ui_js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {ui_js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _liveRunStatusTimers = {{}};
+let _liveRunStatusTokens = null;
+let _liveRunStatusSessionId = null;
+let _liveRunStatusStreamId = null;
+let _liveRunMeta = null;
+const el = {{ hidden: true, innerHTML: '', isConnected: true }};
+const S = {{ session: {{ session_id: 'same-session' }}, activeStreamId: null }};
+function $(id) {{ return id === 'liveRunStatus' ? el : null; }}
+function placeLiveRunStatusHost() {{ return el; }}
+function _moveLiveRunStatusToTurnEnd(candidate) {{ return candidate; }}
+function _startLiveRunStatusTimer(sid, startedAt) {{
+  _liveRunStatusTimers[sid] = {{ startedAt }};
+}}
+function _clearLiveRunStatusTimer(sid) {{ delete _liveRunStatusTimers[sid]; }}
+function isCompactWorklogMode() {{ return false; }}
+function _compactComposerModelChipLabel(model) {{ return model; }}
+function getModelLabel(model) {{ return model; }}
+function _fmtTokens(tokens) {{ return String(tokens); }}
+function esc(value) {{ return String(value == null ? '' : value); }}
+function t(key) {{ return key === 'reasoning_off' ? 'reasoning off' : ''; }}
+eval(extractFunc('_formatRunElapsed'));
+if (src.includes('function _claimLiveRunStatusOwner')) {{
+  eval(extractFunc('_claimLiveRunStatusOwner'));
+}}
+eval(extractFunc('_renderLiveRunStatusContent'));
+eval(extractFunc('showLiveRunStatus'));
+eval(extractFunc('updateLiveRunStatus'));
+eval(extractFunc('hideLiveRunStatus'));
+eval(extractFunc('_reasoningEffortChipLabel'));
+eval(extractFunc('_usedModelTurnChipLabel'));
+function hasMeta(model, effort) {{
+  return el.innerHTML.includes(model) && el.innerHTML.includes(effort);
+}}
+
+S.activeStreamId = 'run-a';
+showLiveRunStatus('same-session', {{ streamId: 'run-a', startedAt: 1 }});
+updateLiveRunStatus({{
+  sessionId: 'same-session', streamId: 'run-a',
+  meta: {{ model: 'fallback-a', effort: 'high' }},
+}});
+const firstHasOwnMeta = hasMeta('fallback-a', 'high');
+showLiveRunStatus('same-session', {{ streamId: 'run-a', startedAt: 1 }});
+const rerenderKeepsMeta = hasMeta('fallback-a', 'high');
+
+const settled = {{ _usedModel: 'fallback-a', _reasoningEffort: 'high' }};
+S.activeStreamId = 'run-b';
+showLiveRunStatus('same-session', {{ streamId: 'run-b', startedAt: 2 }});
+const successorStartsClean = !el.innerHTML.includes('fallback-a') && !el.innerHTML.includes('high');
+hideLiveRunStatus('same-session', 'run-a');
+const stalePriorTeardownIgnored = !el.hidden && !el.innerHTML.includes('fallback-a');
+updateLiveRunStatus({{
+  sessionId: 'same-session', streamId: 'run-a',
+  meta: {{ model: 'late-a', effort: 'max' }},
+}});
+const stalePriorEventIgnored = !el.innerHTML.includes('late-a') && !el.innerHTML.includes('max');
+updateLiveRunStatus({{
+  sessionId: 'same-session', streamId: 'run-b',
+  meta: {{ model: 'model-b', effort: 'low' }},
+}});
+const successorHasOwnMeta = hasMeta('model-b', 'low');
+
+S.activeStreamId = 'regen-c';
+showLiveRunStatus('same-session', {{ streamId: 'regen-c', startedAt: 3 }});
+const regenerationStartsClean = !el.innerHTML.includes('model-b') && !el.innerHTML.includes('low');
+updateLiveRunStatus({{
+  sessionId: 'same-session', streamId: 'run-b',
+  meta: {{ model: 'late-b', effort: 'max' }},
+}});
+const staleSuccessorEventIgnored = !el.innerHTML.includes('late-b') && !el.innerHTML.includes('max');
+updateLiveRunStatus({{
+  sessionId: 'same-session', streamId: 'regen-c',
+  meta: {{ model: 'model-c', effort: 'off' }},
+}});
+const regenerationHasOwnMeta = hasMeta('model-c', 'reasoning off');
+showLiveRunStatus('same-session', {{ streamId: 'regen-c', startedAt: 3 }});
+const regenerationRerenderKeepsMeta = hasMeta('model-c', 'reasoning off');
+hideLiveRunStatus('same-session', 'regen-c');
+showLiveRunStatus('same-session', {{ streamId: 'regen-c', startedAt: 3 }});
+const reconnectKeepsMeta = hasMeta('model-c', 'reasoning off');
+
+console.log(JSON.stringify({{
+  firstHasOwnMeta,
+  rerenderKeepsMeta,
+  reconnectKeepsMeta,
+  successorStartsClean,
+  stalePriorTeardownIgnored,
+  stalePriorEventIgnored,
+  successorHasOwnMeta,
+  regenerationStartsClean,
+  staleSuccessorEventIgnored,
+  regenerationHasOwnMeta,
+  regenerationRerenderKeepsMeta,
+  settledModel: _usedModelTurnChipLabel(settled),
+  settledEffort: _reasoningEffortChipLabel(settled),
+}}));
+"""
+    return json.loads(_run_node(source))
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_reasoning_effort_chip_label_cases():
     cases = _eval_reasoning_effort_chip_cases()
@@ -329,6 +446,26 @@ def test_reasoning_effort_chip_label_cases():
     assert cases["padded"] == "low"
     assert cases["absent"] == ""
     assert cases["nullMsg"] == ""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_live_run_meta_is_owned_by_stream_generation():
+    result = _eval_live_run_meta_ownership()
+    assert result == {
+        "firstHasOwnMeta": True,
+        "rerenderKeepsMeta": True,
+        "reconnectKeepsMeta": True,
+        "successorStartsClean": True,
+        "stalePriorTeardownIgnored": True,
+        "stalePriorEventIgnored": True,
+        "successorHasOwnMeta": True,
+        "regenerationStartsClean": True,
+        "staleSuccessorEventIgnored": True,
+        "regenerationHasOwnMeta": True,
+        "regenerationRerenderKeepsMeta": True,
+        "settledModel": "fallback-a",
+        "settledEffort": "high",
+    }
 
 
 class TestFrontendWiring:
@@ -347,10 +484,31 @@ class TestFrontendWiring:
         journal_list = MESSAGES_JS.split("_runJournalEventName of [", 1)[1].split("]", 1)[0]
         assert "'run_meta'" in journal_list
         assert "let _liveRunMeta=null" in UI_JS
-        assert "opts.meta)_liveRunMeta=opts.meta" in UI_JS
+        assert "_liveRunMeta={...opts.meta,sessionId:sid,streamId}" in UI_JS
+        assert "updateLiveRunStatus({sessionId:activeSid,streamId,meta:" in MESSAGES_JS
         assert "String(meta.model||'').trim()" in UI_JS
         assert "meta.model||((S.session&&S.session.model)||'')" not in UI_JS
         assert ".live-run-status .lf-effort" in STYLE_CSS
+
+    def test_new_run_call_sites_claim_stream_before_first_render(self):
+        send = MESSAGES_JS.split("const startData = postStartData || {};", 1)[1].split(
+            "async function startRegeneration", 1
+        )[0]
+        send_show = "showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt})"
+        assert send_show in send
+        assert send.index(send_show) < send.index(
+            "attachLiveStream(activeSid, streamId, uploadedNames)"
+        )
+
+        regeneration = MESSAGES_JS.split("async function startRegeneration", 1)[1].split(
+            "const LIVE_STREAMS", 1
+        )[0]
+        regeneration_show = "showLiveRunStatus(sid,{streamId,startedAt:"
+        assert regeneration_show in regeneration
+        assert regeneration.index(regeneration_show) < regeneration.index(
+            "attachLiveStream(sid,streamId,[])"
+        )
+        assert "_claimLiveRunStatusOwner(activeSid,streamId)" in MESSAGES_JS
 
     def test_i18n_keys_en_and_fr(self):
         assert "reasoning_effort: 'Effective reasoning effort'" in I18N_JS
