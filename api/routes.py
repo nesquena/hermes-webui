@@ -10157,29 +10157,73 @@ def _dedupe_cli_sidebar_sessions_for_api(
 
 
 CLI_VISIBLE_SESSION_CAP = 20
-# Per-project bound on project-assigned CLI rows in the FINAL MERGED payload.
-# This is the only place that sees every source of assigned rows at once —
-# state.db's own bounded passes plus imported WebUI sidecars from all_sessions(),
-# which no model-side cap applies to — so it is the only place that can actually
-# bound the assigned set (#6659 review finding 1).
+# Bound on project-assigned CLI rows in the FINAL MERGED payload, across EVERY
+# project. This is the only place that sees every source of assigned rows at
+# once — state.db's own bounded passes plus imported WebUI sidecars from
+# all_sessions(), which no model-side cap applies to — so it is the only place
+# that can actually bound the assigned set (#6659 review finding 1).
+#
+# It has to bound the MERGED set, not one project: 200 rows x N projects grows
+# with the project count, and 1,000 assigned conversations spread over 5 projects
+# still returned all 1,000 — the exact reproduction from that finding. Spelled as
+# a literal because api.models is imported further down this module; pinned equal
+# to models.PROJECT_ASSIGNED_CLI_LIMIT by
+# test_route_merged_assigned_cap_is_the_existing_model_row_cap.
 CLI_PROJECT_ASSIGNED_CAP = 200
-# Global ceiling on the assigned rows this cap will emit, mirroring
-# models.PROJECT_ASSIGNED_CLI_SCAN_CEILING so the route can never hand back more
-# assigned conversations than the model pass was allowed to recover. A flat
-# per-project bound does NOT bound the payload: 200 rows x N projects grows with
-# the project count, and 1,000 assigned rows spread over 5 projects still
-# returned all 1,000 — the exact reproduction from #6659 review finding 1.
-# Spelled as a literal because api.models is imported further down this module;
-# pinned equal to the model constant by
-# test_route_project_ceiling_matches_the_model_constant.
-CLI_PROJECT_ASSIGNED_SCAN_CEILING = 2000
+
+
+def _draw_assigned_cli_rows_fairly(
+    rows_by_project: dict[str, list[int]], budget: int
+) -> set[int]:
+    """Pick ``budget`` assigned row indices, spread fairly across the projects.
+
+    ``rows_by_project`` maps project id -> that project's row indices, newest
+    first, keyed in order of each project's most recent assigned conversation
+    (``sessions`` is newest-first, so insertion order already is that order).
+
+    Each round hands one slot to every project that still has history left, so:
+
+    * the drawn set never exceeds ``budget`` — that is the whole point, a
+      per-project bound does not bound the payload (#6659 review finding 1);
+    * no single busy project can eat every slot, which a flat ``sessions[:200]``
+      truncation would do to whichever project sorts first — the starvation
+      greptile rejected as P1 on #6659;
+    * every project keeps at least one row whenever
+      ``budget >= len(rows_by_project)``. Past that the bound wins: with more
+      assigned projects than slots, the ``budget`` most recently active projects
+      get one row each, because the review's number is the hard constraint.
+
+    Within a project the draw is newest-first, so what a chip loses is always the
+    oldest end of its own history.
+    """
+    drawn: set[int] = set()
+    if budget <= 0 or not rows_by_project:
+        return drawn
+    queues = list(rows_by_project.values())
+    offsets = [0] * len(queues)
+    remaining = budget
+    while remaining > 0:
+        progressed = False
+        for position, project_rows in enumerate(queues):
+            offset = offsets[position]
+            if offset >= len(project_rows):
+                continue
+            drawn.add(project_rows[offset])
+            offsets[position] = offset + 1
+            remaining -= 1
+            progressed = True
+            if remaining <= 0:
+                break
+        if not progressed:
+            # Every project is exhausted — the whole assigned set fits.
+            break
+    return drawn
 
 
 def _cap_recent_cli_sessions(
     sessions: list[dict],
     cli_cap: int = CLI_VISIBLE_SESSION_CAP,
     project_cap: int = CLI_PROJECT_ASSIGNED_CAP,
-    project_ceiling: int = CLI_PROJECT_ASSIGNED_SCAN_CEILING,
 ) -> list[dict]:
     """Cap the default CLI list while retaining project-addressable rows.
 
@@ -10192,41 +10236,37 @@ def _cap_recent_cli_sessions(
     * ``cli_cap`` unassigned conversations own the default sidebar window. An
       assigned row must not spend one of those slots, or assigning three sessions
       to a project silently shortens everyone's sidebar to 17 rows.
-    * ``project_cap`` assigned conversations PER PROJECT stay in the payload so
-      the project chip can reveal them, marked ``default_hidden`` once the recent
-      window is full. Past that bound they are dropped: keeping assigned rows past
-      the *recent* cap is the fix, keeping them past *all* bounds just trades a
-      vanishing session for a stalled sidebar.
+    * ``project_cap`` assigned conversations IN TOTAL, across every project, stay
+      in the payload so the project chips can reveal them, marked
+      ``default_hidden`` once the recent window is full. Past that bound they are
+      dropped: keeping assigned rows past the *recent* cap is the fix, keeping
+      them past *all* bounds just trades a vanishing session for a stalled
+      sidebar.
 
-    That per-project budget is an EQUAL share of ``project_ceiling``
-    (``ceiling // projects``, never below 1) once enough projects exist to exceed
-    it, which is what makes the merged payload bounded no matter how many
-    projects a profile has while keeping a project's allowance independent of how
-    loud its neighbours are. Same shape as the model-side share of
-    ``PROJECT_ASSIGNED_CLI_SCAN_CEILING``, and for the same reason a flat global
-    cap is not usable here: it would leave every project past it permanently
-    unreachable on every rebuild (greptile P1 on #6659).
+    That assigned budget is spent by a fair round-robin draw across the projects
+    (see ``_draw_assigned_cli_rows_fairly``) instead of by truncating the merged
+    list, so bounding the payload cannot starve a quiet project (greptile P1 on
+    #6659). ``project_cap <= 0`` disables the assigned bound entirely.
     """
     if cli_cap <= 0:
         return sessions
-    # The share denominator has to be known before the first assigned row is
-    # charged against it, so count the distinct assigned projects up front.
-    assigned_projects = {
-        project_id
-        for session in sessions
-        if _is_cli_session_for_settings(session)
-        and (project_id := str(session.get("project_id") or "").strip())
-    }
-    effective_project_cap = project_cap
-    if project_cap > 0 and project_ceiling > 0 and assigned_projects:
-        effective_project_cap = min(
-            project_cap, max(1, project_ceiling // len(assigned_projects))
-        )
+    # Group the assigned rows per project first: the draw has to weigh the
+    # projects against each other, which a single forward pass cannot do.
+    rows_by_project: dict[str, list[int]] = {}
+    for index, session in enumerate(sessions):
+        if not _is_cli_session_for_settings(session):
+            continue
+        project_id = str(session.get("project_id") or "").strip()
+        if project_id:
+            rows_by_project.setdefault(project_id, []).append(index)
+    drawn = (
+        None if project_cap <= 0
+        else _draw_assigned_cli_rows_fairly(rows_by_project, project_cap)
+    )
     kept = []
     recent_seen = 0
     unassigned_seen = 0
-    assigned_seen: dict[str, int] = {}
-    for session in sessions:
+    for index, session in enumerate(sessions):
         if _is_cli_session_for_settings(session):
             project_id = str(session.get("project_id") or "").strip()
             if not project_id:
@@ -10235,9 +10275,7 @@ def _cap_recent_cli_sessions(
                     continue
                 recent_seen += 1
             else:
-                seen = assigned_seen.get(project_id, 0) + 1
-                assigned_seen[project_id] = seen
-                if effective_project_cap > 0 and seen > effective_project_cap:
+                if drawn is not None and index not in drawn:
                     continue
                 if recent_seen >= cli_cap:
                     session = dict(session)
