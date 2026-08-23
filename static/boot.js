@@ -3775,15 +3775,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       _workspaceLaunchOwnsSession=true;
       console.warn('[boot] workspace query deferred: profile switch did not complete');
     }else if(workspaceIntent.valid){
-      let _sessionCreated=false;
+      // Track creation by observing S.session rather than by a flag set after
+      // newSession() returns: newSession() keeps initializing client state
+      // AFTER the server accepted (todo hydration, stream start, dropdown
+      // sync), and a throw from any of those steps would otherwise leave the
+      // "created" signal false for a session that exists server-side —
+      // replaying the launch on reload and orphaning it.
+      const _sessionBefore=S.session;
+      const _createdWorkspaceSession=()=>!!(S.session&&S.session!==_sessionBefore);
       try{
         S._profileSwitchWorkspace=workspaceIntent.path;
         await newSession(true,{worktree:false});
-        // The server accepted the session. Everything below is local rendering:
-        // if any of it throws, the session EXISTS, so the launch must not be
-        // replayed — a reload would create a second workspace session and
-        // orphan this one.
-        _sessionCreated=true;
         // Consume the launch intents only now that the server accepted the
         // session. Consuming before the POST loses the intent whenever the
         // request fails for a transport reason — most visibly on a 401,
@@ -3799,7 +3801,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
       }catch(e){
         S._profileSwitchWorkspace=null;
-        if(_sessionCreated){
+        if(_createdWorkspaceSession()){
           // Post-create rendering failure. The launch already produced its one
           // session, so the intent is spent: consume the parameter, keep the
           // session, and let the normal boot path below finish drawing the UI.

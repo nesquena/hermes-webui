@@ -177,6 +177,11 @@ async function runBootBlocks(ctx) {{
     }}
     if (ctx.newSessionThrows) throw new Error('session-create rejected');
     S.session = {{ session_id: 'test' }};
+    if (ctx.newSessionThrowsAfterCreate) {{
+      // The real newSession() keeps initializing client state after the server
+      // accepted and S.session is set; any of those steps can throw.
+      throw new Error('post-accept init failed');
+    }}
   }}
   const syncTopbar = () => {{}};
   const syncWorkspacePanelState = () => {{}};
@@ -313,6 +318,7 @@ console.log(JSON.stringify({calls: window.history.calls.length}));
 
 def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
                    new_session_throws: bool = False,
+                   new_session_throws_after_create: bool = False,
                    render_throws: bool = False,
                    new_session_reject_status: int | None = None,
                    new_session_reject_code: str | None = "invalid_workspace",
@@ -329,6 +335,7 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
     profileIntent: {profile_intent},
     switchOutcome: {switch_outcome!r},
     newSessionThrows: {'true' if new_session_throws else 'false'},
+    newSessionThrowsAfterCreate: {'true' if new_session_throws_after_create else 'false'},
     renderThrows: {'true' if render_throws else 'false'},
     newSessionRejectStatus: {new_session_reject_status if new_session_reject_status else 'null'},
     newSessionRejectCode: {json.dumps(new_session_reject_code)},
@@ -754,6 +761,26 @@ def test_post_create_render_failure_keeps_the_session_and_spends_the_intent():
     assert "workspace=" not in state["search"]   # intent spent, not replayable
     assert state["held"] is False                # and the boot did not hold
     assert state["routed"] == "fell-through"     # normal path finishes the UI
+
+
+def test_throw_inside_new_session_after_accept_still_spends_the_intent():
+    """newSession() keeps initializing client state after the server accepted
+    and S.session is set (todo hydration, stream start, dropdown sync). A
+    throw from inside that tail must be classified like any other post-create
+    failure: the session exists, so the launch is spent — creation is detected
+    by observing S.session, not by a flag set only after newSession()
+    returns."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_throws_after_create=True,
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj&q=hello")))
+    state = json.loads(out)
+    assert len(state["calls"]) == 1              # the POST happened once
+    assert "workspace=" not in state["search"]   # intent spent, not replayable
+    assert state["routed"] == "fell-through"     # boot finishes normally
+    # And the session survives for the normal path to render:
+    # held would have cleared it.
+    assert state["held"] is False
 
 
 # ---------------------------------------------------------------------------

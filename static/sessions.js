@@ -1503,7 +1503,12 @@ async function newSession(flash, options={}){
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
-      _clearEmptyComposerModelOverride();
+      // Guarded: the server has already accepted the session. A failure in
+      // this local cleanup must not make the whole creation look failed to
+      // callers that decide retry policy on it (the boot ?workspace= routing
+      // replays the launch when creation "failed" — replaying a creation that
+      // actually succeeded orphans the server-side session).
+      try{_clearEmptyComposerModelOverride();}catch(_){}
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
     S._pendingSessionToolsets=null;
