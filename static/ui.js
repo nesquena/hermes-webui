@@ -9573,7 +9573,7 @@ function autoReadLastAssistant(){
 const TAB_ID_KEY = 'hermes-webui-tab-id';
 const TAB_ID_RELEASED_BASE = 'hermes-webui-tab-released';
 const _TAB_RELEASED_TTL_MS = 24 * 60 * 60 * 1000;
-const INFLIGHT_KEY_BASE = 'hermes-webui-inflight'; // legacy/global (migration only)
+const INFLIGHT_KEY_BASE = 'hermes-webui-inflight'; // scoped base; unsuffixed form is legacy/ownerless
 const INFLIGHT_STATE_KEY_BASE = 'hermes-webui-inflight-state';
 const ACTIVE_SESSION_KEY_LEGACY = 'hermes-webui-session';
 const ACTIVE_SESSION_TOMBSTONE_BASE = 'hermes-webui-session-none';
@@ -9815,27 +9815,17 @@ function _forgetActiveSession(expectedSid){
   if(!_hermesTabId()) return;
   window.__hermesActiveSession=null;
   window.__hermesActiveSessionKnown=true;
-  let own=null;
-  try{ own=localStorage.getItem(_activeSessionKey()); }catch(_){}
   try{ localStorage.removeItem(_activeSessionKey()); }catch(_){}
   // Persist an explicit "no session" tombstone so the legacy fallback cannot
   // resurrect a forgotten (possibly dead/404) session on the next read.
   try{ localStorage.setItem(_activeSessionTombstoneKey(), String(Date.now())); }catch(_){}
   _mirrorTabValue(TAB_ACTIVE_SESSION_MIRROR_KEY,null);
   _mirrorTabValue(TAB_ACTIVE_SESSION_TOMBSTONE_MIRROR_KEY,String(Date.now()));
-  // The legacy key is SHARED: it is the first-paint fallback for a brand-new
-  // tab (which has no scoped key yet) and for any older client. Only clear it
-  // when it still points at the session THIS tab is forgetting — otherwise one
-  // tab closing a conversation would drop every other tab's restore target and
-  // new tabs would open the empty state. `expectedSid` lets self-heal paths
-  // (404 / profile switch) name the dead session explicitly, so a legacy-only
-  // entry that was never adopted into scoped storage is still cleared.
-  const expected=own||(typeof expectedSid==='string'&&expectedSid?expectedSid:null);
-  try{
-    if(expected&&localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY)===expected){
-      localStorage.removeItem(ACTIVE_SESSION_KEY_LEGACY);
-    }
-  }catch(_){}
+  // The legacy key is shared, ownerless bootstrap state for brand-new and old
+  // clients. A matching SID (including expectedSid from a 404 self-heal) proves
+  // content equality, not deletion authority: another document may still rely
+  // on that same fallback. Never mutate it while forgetting document-local
+  // state; a stale fallback is advisory and each new document self-heals it.
 }
 if(typeof window!=='undefined'){
   window._rememberActiveSession=_rememberActiveSession;
@@ -9866,70 +9856,14 @@ function _getInflightStateLimits(){
   };
 }
 
-// One-shot rollout migration (maintainer re-gate, PR #7084): before this fix
-// shipped, the reconnect marker and the mid-stream transcript snapshots lived
-// in the UNSUFFIXED `hermes-webui-inflight` / `hermes-webui-inflight-state`
-// keys. Both readers below use suffixed keys exclusively, so without this
-// migration an upgrade mid-stream would silently discard the user's existing
-// recovery state. When this tab has no scoped state yet: validate the legacy
-// payload (shape + SID + age), re-stamp it under THIS tab's id, then remove
-// the legacy entries so they are consumed exactly once. Invalid or stale
-// legacy payloads are removed without migrating.
+// Pre-upgrade inflight entries in the unsuffixed keys have no authoritative
+// document owner. Shape, SID and age cannot establish ownership: the first tab
+// loading the update may be unrelated to the stream that wrote them. Keep this
+// guard at both reader boundaries, but deliberately neither adopt nor delete
+// shared legacy bytes. New documents fail closed to their scoped state while a
+// still-running legacy document/client retains its recovery data.
 function _migrateLegacyInflight(){
-  if(!_hermesTabId()) return;
-  if(typeof window!=='undefined'){
-    if(window.__hermesLegacyInflightMigrated) return;
-    window.__hermesLegacyInflightMigrated=true;
-  }
-  const now=Date.now();
-  // Reconnect marker: {sid, streamId, ts}.
-  try{
-    const legacyRaw=localStorage.getItem(INFLIGHT_KEY_BASE);
-    if(legacyRaw!=null){
-      try{
-        const parsed=JSON.parse(legacyRaw);
-        const sid=(parsed&&typeof parsed.sid==='string')?parsed.sid:'';
-        const ts=Number(parsed&&parsed.ts);
-        const streamOk=parsed&&(parsed.streamId==null||typeof parsed.streamId==='string');
-        if(sid&&streamOk&&Number.isFinite(ts)&&(now-ts)<=10*60*1000
-           &&localStorage.getItem(_inflightKey())==null){
-          const adopted=JSON.stringify({sid, streamId:parsed.streamId||null, ts});
-          localStorage.setItem(_inflightKey(),adopted);
-          _mirrorTabValue(TAB_INFLIGHT_MIRROR_KEY,adopted);
-        }
-      }catch(_){}
-      // One-shot: the legacy slot is consumed (or invalidated) exactly once,
-      // whether or not it was migratable — it must never be read again.
-      try{ localStorage.removeItem(INFLIGHT_KEY_BASE); }catch(_){}
-    }
-  }catch(_){}
-  // Transcript snapshots: {sid: entry} map.
-  try{
-    const legacyRaw=localStorage.getItem(INFLIGHT_STATE_KEY_BASE);
-    if(legacyRaw!=null){
-      try{
-        const parsed=JSON.parse(legacyRaw);
-        if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
-          const fresh={};
-          for(const [sid,entry] of Object.entries(parsed)){
-            if(!sid||!entry||typeof entry!=='object'||Array.isArray(entry)) continue;
-            const upd=Number(entry.updated_at);
-            if(!Number.isFinite(upd)||(now-upd)>10*60*1000) continue;
-            // Re-stamp under the adopting tab: loadInflightState() rejects
-            // entries owned by a different tab id, and the pre-fix entries
-            // carry no owner (or a meaningless one).
-            fresh[sid]={...entry, tabId:_hermesTabId()};
-          }
-          if(Object.keys(fresh).length&&localStorage.getItem(_inflightStateKey())==null){
-            const adopted=JSON.stringify(fresh);
-            localStorage.setItem(_inflightStateKey(),adopted);
-            _mirrorTabValue(TAB_INFLIGHT_STATE_MIRROR_KEY,adopted);
-          }
-        }
-      }catch(_){}
-      try{ localStorage.removeItem(INFLIGHT_STATE_KEY_BASE); }catch(_){}
-    }
-  }catch(_){}
+  return;
 }
 function _readInflightStateMap(){
   try{
@@ -11646,9 +11580,8 @@ function getPendingSessionMessage(session, messagesOverride=null){
   };
 }
 async function checkInflightOnBoot(sid) {
-  // Rollout migration: adopt a valid pre-upgrade (unsuffixed) reconnect marker
-  // under this tab's scoped key before reading, or the in-flight recovery that
-  // existed before the per-tab upgrade would be silently discarded.
+  // Enter the legacy quarantine boundary before reading this document's scoped
+  // marker. Ownerless unsuffixed state is never adopted or consumed here.
   let raw=null;
   try{
     _migrateLegacyInflight();
