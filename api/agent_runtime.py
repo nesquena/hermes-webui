@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import math
 import os
+from functools import lru_cache
 from pathlib import Path
 import stat
 import sys
@@ -178,8 +179,9 @@ def _reasoning_config_for_agent_destination(agent, value):
     return clamped
 
 
+@lru_cache(maxsize=1)
 def _destination_aware_ai_agent_class(agent_class):
-    """Return an AIAgent subclass that guards transition-time reasoning writes."""
+    """Return a bounded-cached class guarding transition-time reasoning writes."""
     if agent_class is None or getattr(
         agent_class, "_webui_destination_reasoning_guard", False
     ):
@@ -493,12 +495,12 @@ def ensure_agent_runtime_current() -> None:
 
 
 def require_ai_agent_class():
-    """Import ``AIAgent`` after proving the loaded source revision is current."""
+    """Import the guarded ``AIAgent`` after proving its revision is current."""
     ensure_agent_runtime_current()
     from run_agent import AIAgent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
-    return AIAgent
+    return _destination_aware_ai_agent_class(AIAgent)
 
 
 def get_ai_agent_class():
@@ -512,5 +514,5 @@ def get_ai_agent_class():
                 agent_class = require_ai_agent_class()
             except ImportError:
                 return None
-            _AIAgent = _destination_aware_ai_agent_class(agent_class)
+            _AIAgent = agent_class
         return _AIAgent
