@@ -346,7 +346,8 @@ const legacyAfter = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
 // A brand-new tab has no scoped key and must fall back to the shared slot.
 const tabC = makeTab();
 useTab(tabC); const fresh = _rememberedActiveSession();
-// And when the LAST writer forgets, the shared slot is released.
+// Even the last writer has no proof that an older client stopped relying
+// on the ownerless shared slot.
 useTab(tabB); _forgetActiveSession();
 const legacyFinal = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
 console.log(JSON.stringify({{legacyAfter, fresh, legacyFinal}}));
@@ -354,7 +355,9 @@ console.log(JSON.stringify({{legacyAfter, fresh, legacyFinal}}));
     out = _run(script)
     assert out["legacyAfter"] == "session-BBB", "another tab's fallback must survive"
     assert out["fresh"] == "session-BBB", "a new tab must still restore the last session"
-    assert out["legacyFinal"] is None, "the owning tab must still be able to clear it"
+    assert out["legacyFinal"] == "session-BBB", (
+        "content equality does not give a document authority over shared fallback state"
+    )
 
 
 def test_release_markers_are_independent_per_document():
@@ -601,35 +604,38 @@ console.log(JSON.stringify({{afterForget, afterRewrite, afterReopen}}));
     )
 
 
-def test_forget_clears_expected_legacy_only_sid_on_upgrade():
-    """Must-fix 3b (ui.js:9441): a legacy-only dead session (written by the
-    pre-upgrade build, so no scoped value exists) used to survive
-    _forgetActiveSession(), defeating the 404/profile-switch self-heal. The
-    caller now names the dead sid explicitly and a matching legacy value is
-    cleared even without scoped state."""
+def test_self_heal_cannot_delete_ownerless_shared_fallback():
+    """P1 r3837215782: the unsuffixed fallback has no document owner.
+
+    A tab self-healing the same SID must therefore leave it intact for a
+    brand-new document and for a pre-upgrade client that can only read the
+    shared key. Matching the SID is not authority to delete shared state.
+    """
     script = f"""
 {_HARNESS}
 {_helpers()}
-// Pre-upgrade storage: only the unsuffixed key exists.
-localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'dead-session');
-const tab = makeTab();
-useTab(tab);
-_forgetActiveSession('dead-session');           // 404 self-heal names the sid
-const legacyAfterHeal = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
-// A mismatching expected sid must NOT clear someone else's fallback.
-localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'other-tabs-session');
-useTab(makeTab());
-_forgetActiveSession('a-different-dead-sid');
-const legacyAfterMismatch = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
-console.log(JSON.stringify({{legacyAfterHeal, legacyAfterMismatch}}));
+localStorage.setItem(ACTIVE_SESSION_KEY_LEGACY, 'shared-session');
+const healingTab = makeTab();
+useTab(healingTab);
+_forgetActiveSession('shared-session');
+const fallbackAfterHeal = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
+// A new document has no scoped state and depends on the shared bootstrap slot.
+const freshTab = makeTab();
+useTab(freshTab);
+const freshRestore = _rememberedActiveSession();
+// This raw read models a legacy-only client that knows no scoped key format.
+const legacyClientRestore = localStorage.getItem(ACTIVE_SESSION_KEY_LEGACY);
+console.log(JSON.stringify({{fallbackAfterHeal, freshRestore, legacyClientRestore}}));
 """
     out = _run(script)
-    assert out["legacyAfterHeal"] is None, (
-        "forget must clear a matching legacy-only sid so a dead session cannot "
-        "survive the 404 self-heal on upgrade"
+    assert out["fallbackAfterHeal"] == "shared-session", (
+        "a self-healing tab must not delete an ownerless shared fallback"
     )
-    assert out["legacyAfterMismatch"] == "other-tabs-session", (
-        "a non-matching expected sid must leave the shared fallback alone"
+    assert out["freshRestore"] == "shared-session", (
+        "a brand-new document must retain the shared bootstrap target"
+    )
+    assert out["legacyClientRestore"] == "shared-session", (
+        "legacy-only clients must retain their sole restore target"
     )
 
 
@@ -660,53 +666,68 @@ console.log(JSON.stringify({{first, scoped, second}}));
     )
 
 
-def test_upgrade_migrates_populated_legacy_inflight_under_new_tab_stamp():
-    """Must-fix 4 (ui.js:9498): both inflight readers use suffixed keys
-    exclusively, so a populated pre-upgrade `hermes-webui-inflight` /
-    `hermes-webui-inflight-state` produced empty scoped reads and mid-stream
-    recovery was lost on upgrade. A valid legacy payload must be migrated once
-    under the adopting tab's stamp, then the legacy entries removed."""
+def test_upgrade_never_claims_or_deletes_ownerless_legacy_inflight():
+    """P1 r3837215783: valid legacy inflight data is still ownerless.
+
+    The first new document to load the update is not necessarily the document
+    whose stream produced the shared entries. It must neither re-stamp/accept
+    them nor consume them before the actual legacy document can read them.
+    """
     script = f"""
 {_HARNESS}
 {_helpers()}
-// Pre-upgrade mid-stream state, written by the old build minutes ago.
-localStorage.setItem(INFLIGHT_KEY_BASE, JSON.stringify({{sid:'sess-1', streamId:'stream-1', ts:__now-60_000}}));
-localStorage.setItem(INFLIGHT_STATE_KEY_BASE, JSON.stringify({{
-  'sess-1': {{streamId:'stream-1', messages:[{{role:'user',content:'hi'}}], updated_at:__now-60_000}},
-}}));
-const tab = makeTab();
-useTab(tab);
-const restored = loadInflightState('sess-1', 'stream-1');
-const marker = JSON.parse(localStorage.getItem(_inflightKey()) || 'null');
-const legacyMarkerGone = localStorage.getItem(INFLIGHT_KEY_BASE) === null;
-const legacyStateGone = localStorage.getItem(INFLIGHT_STATE_KEY_BASE) === null;
+const legacyMarker = JSON.stringify({{sid:'foreign-sess', streamId:'foreign-stream', ts:__now-1000}});
+const legacyState = JSON.stringify({{
+  'foreign-sess': {{streamId:'foreign-stream', messages:[{{role:'user',content:'foreign'}}], updated_at:__now-1000}},
+}});
+localStorage.setItem(INFLIGHT_KEY_BASE, legacyMarker);
+localStorage.setItem(INFLIGHT_STATE_KEY_BASE, legacyState);
+
+// The unrelated document wins the load race. Shape/SID/age all look valid,
+// but none of them prove ownership.
+const unrelated = makeTab();
+useTab(unrelated);
+const crossRecovered = loadInflightState('foreign-sess', 'foreign-stream');
+const unrelatedScopedMarker = localStorage.getItem(_inflightKey());
+const unrelatedScopedState = localStorage.getItem(_inflightStateKey());
+const markerAfterFirstLoad = localStorage.getItem(INFLIGHT_KEY_BASE);
+const stateAfterFirstLoad = localStorage.getItem(INFLIGHT_STATE_KEY_BASE);
+
+// A second upgraded document must also see only its own empty scoped state;
+// the shared bytes remain available to a still-running legacy client.
+const second = makeTab();
+useTab(second);
+const secondScopedState = _readInflightStateMap();
+const legacyClientMarker = localStorage.getItem(INFLIGHT_KEY_BASE);
+const legacyClientState = localStorage.getItem(INFLIGHT_STATE_KEY_BASE);
 console.log(JSON.stringify({{
-  restoredStream: restored && restored.streamId,
-  restoredTab: restored && restored.tabId,
-  tabId: _hermesTabId(),
-  markerSid: marker && marker.sid,
-  legacyMarkerGone, legacyStateGone,
+  crossRecovered,
+  unrelatedScopedMarker,
+  unrelatedScopedState,
+  markerAfterFirstLoad,
+  stateAfterFirstLoad,
+  secondScopedState,
+  legacyClientMarker,
+  legacyClientState,
+  legacyMarker,
+  legacyState,
 }}));
 """
     out = _run(script)
-    assert out["restoredStream"] == "stream-1", (
-        "a populated legacy inflight-state map must be readable after upgrade"
+    assert out["crossRecovered"] is None, (
+        "an unrelated document must not accept ownerless recovery state"
     )
-    assert out["restoredTab"] == out["tabId"], (
-        "migrated entries must be re-stamped under the adopting tab's id"
-    )
-    assert out["markerSid"] == "sess-1", (
-        "the legacy reconnect marker must be migrated under the scoped key"
-    )
-    assert out["legacyMarkerGone"] and out["legacyStateGone"], (
-        "legacy entries must be removed after the one-shot migration"
-    )
+    assert out["unrelatedScopedMarker"] is None
+    assert out["unrelatedScopedState"] is None
+    assert out["secondScopedState"] == {}
+    assert out["markerAfterFirstLoad"] == out["legacyMarker"]
+    assert out["stateAfterFirstLoad"] == out["legacyState"]
+    assert out["legacyClientMarker"] == out["legacyMarker"]
+    assert out["legacyClientState"] == out["legacyState"]
 
 
-def test_stale_or_malformed_legacy_inflight_is_invalidated_not_migrated():
-    """Must-fix 4 (validation): the legacy payload is validated (shape + age)
-    before adoption; stale/corrupt entries are removed without migrating, and
-    existing scoped state is never overwritten."""
+def test_stale_or_malformed_legacy_inflight_is_ignored_without_mutation():
+    """Age and parseability do not confer authority over ownerless state."""
     script = f"""
 {_HARNESS}
 {_helpers()}
@@ -718,8 +739,8 @@ useTab(tab);
 _migrateLegacyInflight();
 const scopedMarker = localStorage.getItem(_inflightKey());
 const scopedState = localStorage.getItem(_inflightStateKey());
-const legacyGone = localStorage.getItem(INFLIGHT_KEY_BASE) === null
-  && localStorage.getItem(INFLIGHT_STATE_KEY_BASE) === null;
+const staleMarkerKept = localStorage.getItem(INFLIGHT_KEY_BASE);
+const corruptStateKept = localStorage.getItem(INFLIGHT_STATE_KEY_BASE);
 // Second scenario: a tab that already HAS scoped state keeps it.
 const tab2 = makeTab();
 useTab(tab2);
@@ -728,39 +749,38 @@ localStorage.setItem(_inflightKey(), JSON.stringify({{sid:'own-sess', streamId:'
 _migrateLegacyInflight();
 const kept = JSON.parse(localStorage.getItem(_inflightKey()));
 console.log(JSON.stringify({{
-  scopedMarker, scopedState, legacyGone,
+  scopedMarker, scopedState, staleMarkerKept, corruptStateKept,
   keptSid: kept && kept.sid,
-  legacyGone2: localStorage.getItem(INFLIGHT_KEY_BASE) === null,
+  validLegacyKept: localStorage.getItem(INFLIGHT_KEY_BASE),
 }}));
 """
     out = _run(script)
     assert out["scopedMarker"] is None, "a stale legacy marker must not be migrated"
     assert out["scopedState"] is None, "a corrupt legacy state map must not be migrated"
-    assert out["legacyGone"], "invalid legacy entries must still be invalidated (removed)"
+    assert "old-sess" in out["staleMarkerKept"]
+    assert out["corruptStateKept"] == "not json at all"
     assert out["keptSid"] == "own-sess", (
-        "migration must never overwrite a tab's existing scoped marker"
+        "legacy quarantine must never overwrite a tab's existing scoped marker"
     )
-    assert out["legacyGone2"], "the legacy slot is consumed exactly once either way"
+    assert "legacy-sess" in out["validLegacyKept"]
 
 
-def test_inflight_readers_run_the_migration_before_scoped_reads():
-    """Wiring: both readers (the boot marker check and the state-map read) must
-    invoke the one-shot migration BEFORE their scoped read, or a populated
-    legacy payload stays invisible exactly as the re-gate reproduced."""
+def test_inflight_readers_enter_legacy_quarantine_before_scoped_reads():
+    """Both readers cross the explicit ownerless-state guard before scoped I/O."""
     check_body = _function_body(UI_SRC, "async function checkInflightOnBoot")
     assert "_migrateLegacyInflight()" in check_body, (
-        "checkInflightOnBoot must migrate legacy inflight before reading"
+        "checkInflightOnBoot must cross the legacy quarantine before reading"
     )
     assert check_body.index("_migrateLegacyInflight()") < check_body.index(
         "localStorage.getItem(_inflightKey())"
-    ), "migration must precede the scoped marker read"
+    ), "legacy quarantine must precede the scoped marker read"
     read_body = _function_body(UI_SRC, "function _readInflightStateMap")
     assert "_migrateLegacyInflight()" in read_body, (
-        "_readInflightStateMap must migrate legacy inflight before reading"
+        "_readInflightStateMap must cross the legacy quarantine before reading"
     )
     assert read_body.index("_migrateLegacyInflight()") < read_body.index(
         "localStorage.getItem(_inflightStateKey())"
-    ), "migration must precede the scoped state read"
+    ), "legacy quarantine must precede the scoped state read"
 
 
 def test_simultaneous_same_id_documents_remint_before_scoped_access():
