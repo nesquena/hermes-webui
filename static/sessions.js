@@ -4198,17 +4198,22 @@ function _workspaceQueryIntentFromLocation(){
   // canonicalizes cross-platform paths (Unix, Windows drive paths, ~ homes).
   // No client-side restriction on the path language: server rejection falls
   // back to the normal boot restore.
+  //
+  // Trimming is a blank-detection predicate ONLY — the decoded value is
+  // forwarded verbatim. Surrounding whitespace can be significant: a Unix
+  // directory name may legitimately end (or begin) with a space, so
+  // ?workspace=%2Fhome%2Fu%2Fproject%20 must reach the server as
+  // "/home/u/project ", not as a different, possibly existing directory.
   const empty={hasParam:false,valid:false,path:''};
   if(typeof window==='undefined'||!window.location) return empty;
   try{
     const qs=new URLSearchParams(window.location.search||'');
     if(!qs.has('workspace')) return empty;
     const path=String(qs.get('workspace')||'');
-    const trimmed=path.trim();
     return {
       hasParam:true,
-      valid:trimmed.length>0,
-      path:trimmed
+      valid:path.trim().length>0,
+      path
     };
   }catch(_e){return empty;}
 }
@@ -4218,6 +4223,25 @@ function _consumeWorkspaceQueryParamFromLocation(){
     const current=new URL(window.location.href);
     const before=current.searchParams.toString();
     current.searchParams.delete('workspace');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
+function _consumeLaunchActionParamFromLocation(){
+  // Consume the PWA shortcut's `action=new-chat` launch intent. Normally
+  // _setActiveSessionUrl() replaces the whole URL after a session is created
+  // and the parameter disappears with it, but the ?workspace= routing path
+  // must consume both launch intents explicitly at the same point (right
+  // after the server accepts the session): a compound
+  // `?action=new-chat&workspace=…` launch creates exactly one session, so a
+  // leftover action= must not make a later reload mint a second one.
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('action');
     const after=current.searchParams.toString();
     if(after===before) return;
     const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');

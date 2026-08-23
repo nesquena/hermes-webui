@@ -99,16 +99,26 @@ global.localStorage = {{
 }};
 evalSession('_workspaceQueryIntentFromLocation');
 evalSession('_consumeWorkspaceQueryParamFromLocation');
+evalSession('_consumeLaunchActionParamFromLocation');
 evalSession('_consumeProfileQueryParamFromLocation');
 """
 
 
 def _node_boot_runner() -> str:
-    """Run the real profile-switch block, then the real workspace routing
-    block, both extracted verbatim from static/boot.js, in a shared scope.
+    """Run the real profile-switch block, then the real workspace-routing +
+    action=new-chat launch region, all extracted verbatim from static/boot.js
+    in their shipped production order, in a shared scope.
 
-    switchToProfile is stubbed per scenario (true / false / throw), so the
-    completion flag is computed by the shipped code, not preset by the test.
+    The second slice deliberately spans from the workspace block through the
+    `action=new-chat` branch (it ends at the saved-session restore), so the
+    ordering between the two launch intents is exercised by the shipped code
+    rather than asserted on source shape. `_shouldStartFreshPwaChat` is also
+    extracted verbatim instead of stubbed.
+
+    switchToProfile is stubbed per scenario (true / false / throw) and
+    newSession can reject with a real HTTP status, so completion flags and
+    the reject/consume policy are computed by the shipped code, not preset by
+    the test.
     """
     return _node_prelude() + f"""
 const bootSrc = {BOOT_JS!r};
@@ -119,12 +129,16 @@ function slice(start, end) {{
   return bootSrc.slice(s, e);
 }}
 const profileBlock = slice({PROFILE_BLOCK_START!r}, {PROFILE_BLOCK_END!r});
-const wsBlock = slice({WS_BLOCK_START!r}, {WS_BLOCK_END!r});
+const launchBlock = slice({WS_BLOCK_START!r}, {WS_BLOCK_END!r});
+globalThis._shouldStartFreshPwaChat = (0, eval)('(' + extractFunc(bootSrc, '_shouldStartFreshPwaChat') + ')');
 async function runBootBlocks(ctx) {{
   const S = ctx.S;
   const profileIntent = ctx.profileIntent;
   const prefillIntent = null;
   const calls = ctx.calls;
+  const pwaLaunchAction = ctx.pwaLaunchAction;
+  const urlSession = ctx.urlSession;
+  const _shouldStartFreshPwaChat = globalThis._shouldStartFreshPwaChat;
   const _profileSwitchProfileBefore = S.activeProfile || 'default';
   const _profileSwitchIsDefaultBefore = !!S.activeProfileIsDefault;
   async function switchToProfile(name) {{
@@ -138,8 +152,20 @@ async function runBootBlocks(ctx) {{
     calls.push({{
       fresh, opts,
       workspaceAtCall: S._profileSwitchWorkspace,
-      profileAtCall: S.activeProfile
+      profileAtCall: S.activeProfile,
+      searchAtCall: window.location.search
     }});
+    if (ctx.newSessionRejectStatus) {{
+      // Mirror the error shape api() throws for a non-ok response. When
+      // rejectOnlyWorkspaceCue is set, only the workspace-cued attempt fails
+      // — that is what a 400 from resolve_trusted_workspace() means: the
+      // verdict is on the path, so the same request without it succeeds.
+      if (!ctx.rejectOnlyWorkspaceCue || S._profileSwitchWorkspace !== null) {{
+        const err = new Error('session-create rejected');
+        err.status = ctx.newSessionRejectStatus;
+        throw err;
+      }}
+    }}
     if (ctx.newSessionThrows) throw new Error('session-create rejected');
     S.session = {{ session_id: 'test' }};
   }}
@@ -148,7 +174,7 @@ async function runBootBlocks(ctx) {{
   const renderSessionList = async () => {{}};
   const _finalizeComposerPrefillOnBoot = async () => {{}};
   const _startBootModelDropdown = () => {{}};
-  return await eval('(async () => {{' + profileBlock + ';' + wsBlock + '; return "fell-through";}})()');
+  return await eval('(async () => {{' + profileBlock + ';' + launchBlock + '; return "fell-through";}})()');
 }}
 """
 
@@ -274,6 +300,10 @@ console.log(JSON.stringify({calls: window.history.calls.length}));
 
 def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
                    new_session_throws: bool = False,
+                   new_session_reject_status: int | None = None,
+                   reject_only_workspace_cue: bool = False,
+                   pwa_launch_action: str | None = None,
+                   url_session: str | None = None,
                    extra_js: str = "") -> str:
     return _node_boot_runner() + f"""
 (async () => {{
@@ -284,6 +314,10 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
     profileIntent: {profile_intent},
     switchOutcome: {switch_outcome!r},
     newSessionThrows: {'true' if new_session_throws else 'false'},
+    newSessionRejectStatus: {new_session_reject_status if new_session_reject_status else 'null'},
+    rejectOnlyWorkspaceCue: {'true' if reject_only_workspace_cue else 'false'},
+    pwaLaunchAction: {json.dumps(pwa_launch_action)},
+    urlSession: {json.dumps(url_session)},
     calls: [],
     switchCalls: []
   }};
@@ -385,9 +419,194 @@ def test_failed_session_create_clears_cue_and_falls_through():
     newSession() does not inherit it) and fall back to normal restore."""
     out = _run_node(_boot_scenario(
         "", profile_intent="null", switch_outcome="returns-true",
-        new_session_throws=True,
+        new_session_reject_status=400,
         extra_js=_apply("/?workspace=%2Fnot%2Fallowed")))
     state = json.loads(out)
     assert state["routed"] == "fell-through"
     assert state["cueAfter"] is None
     assert len(state["calls"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Significant surrounding whitespace — trimming is a blank predicate only
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path", ["/home/u/project ", " /home/u/project", "/home/u/pro ject"])
+def test_significant_whitespace_is_preserved_verbatim(path):
+    """A Unix directory name may legitimately carry leading/trailing spaces.
+    Trimming the value would silently route to a DIFFERENT directory, so the
+    decoded string must reach the parser output untouched."""
+    out = _run_node(_node_prelude() + f"""
+applyUrl('/?workspace=' + encodeURIComponent({path!r}));
+console.log(JSON.stringify(_workspaceQueryIntentFromLocation()));
+""")
+    intent = json.loads(out)
+    assert intent["valid"] is True
+    assert intent["path"] == path
+
+
+def test_trailing_space_path_reaches_session_create_unmodified():
+    """End-to-end through the real boot block: the exact decoded path, spaces
+    included, is what the session-create request receives."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        extra_js=_apply("/?workspace=%2Fhome%2Fu%2Fproject%20")))
+    state = json.loads(out)
+    assert state["routed"] == "routed"
+    assert state["calls"][0]["workspaceAtCall"] == "/home/u/project "
+
+
+# ---------------------------------------------------------------------------
+# Composed launch: ?action=new-chat + ?workspace= must create ONE session
+# ---------------------------------------------------------------------------
+
+def test_new_chat_launch_with_workspace_creates_one_session_with_workspace():
+    """`?action=new-chat&workspace=…&q=…` must not create a workspace-less
+    session first. The workspace block owns the single creation, and both
+    launch intents are consumed so a reload cannot mint a second session."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        pwa_launch_action="new-chat",
+        extra_js=_apply("/?action=new-chat&workspace=%2FUsers%2Fx%2Fproj&q=hello")))
+    state = json.loads(out)
+    assert state["routed"] == "routed"
+    assert len(state["calls"]) == 1                       # exactly one session
+    assert state["calls"][0]["workspaceAtCall"] == "/Users/x/proj"
+    assert state["calls"][0]["opts"] == {"worktree": False}
+    assert "workspace=" not in state["search"]            # both launch intents
+    assert "action=" not in state["search"]               # are consumed
+    assert "q=hello" in state["search"]                   # prefill still pending
+
+
+def test_new_chat_launch_with_workspace_survives_hard_reload_as_one_session():
+    """Simulate the hard reload: replay the boot against the URL left behind
+    by the first launch. No launch intent remains, so no second session is
+    created — the whole launch produced exactly one."""
+    first = json.loads(_run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        pwa_launch_action="new-chat",
+        extra_js=_apply("/?action=new-chat&workspace=%2FUsers%2Fx%2Fproj&q=hello"))))
+    assert len(first["calls"]) == 1
+    reload_url = "/" + (first["search"] or "")
+    second = json.loads(_run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        pwa_launch_action=None,
+        extra_js=_apply(reload_url))))
+    assert second["calls"] == []
+    assert second["routed"] == "fell-through"
+
+
+def test_new_chat_launch_without_workspace_still_creates_session():
+    """The plain PWA shortcut path is untouched by the reordering."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        pwa_launch_action="new-chat",
+        extra_js=_apply("/?action=new-chat")))
+    state = json.loads(out)
+    assert state["routed"] == "routed"
+    assert len(state["calls"]) == 1
+    assert state["calls"][0]["fresh"] is True
+    # newSession(true) is called with no options argument on this path, so the
+    # key is absent from the serialized call record (undefined, not {worktree:false}).
+    assert "opts" not in state["calls"][0]
+
+
+def test_new_chat_with_url_session_does_not_create_a_session():
+    """_shouldStartFreshPwaChat() is false when the URL names a session; the
+    reordering must not change that."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        pwa_launch_action="new-chat", url_session="abc123",
+        extra_js=_apply("/?action=new-chat&session=abc123")))
+    state = json.loads(out)
+    assert state["calls"] == []
+    assert state["routed"] == "fell-through"
+
+
+def test_rejected_workspace_falls_back_to_the_new_chat_launch():
+    """When the server rejects the path on an `?action=new-chat&workspace=…`
+    launch, the workspace intent is consumed and the shortcut still honours
+    its own contract: one workspace-less new chat, not a silent restore."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=400,
+        reject_only_workspace_cue=True,
+        pwa_launch_action="new-chat",
+        extra_js=_apply("/?action=new-chat&workspace=%2Fetc")))
+    state = json.loads(out)
+    assert state["routed"] == "routed"
+    assert len(state["calls"]) == 2          # rejected attempt, then the shortcut
+    assert state["calls"][1]["workspaceAtCall"] is None
+    assert "workspace=" not in state["search"]
+
+
+# ---------------------------------------------------------------------------
+# Failure policy: the parameter survives transport failures, and is consumed
+# only on an objective server verdict
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", [401, 500, 503])
+def test_transport_failure_preserves_workspace_param(status):
+    """A 401 between profile bootstrap and session creation redirects to
+    `login?next=<pathname+search>`. If the parameter had already been
+    consumed, that snapshot would drop the requested project silently. Same
+    reasoning for 5xx and network errors: they are not verdicts on the path."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=status,
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj&q=hello")))
+    state = json.loads(out)
+    assert state["routed"] == "fell-through"
+    assert "workspace=%2FUsers%2Fx%2Fproj" in state["search"] or \
+           "workspace=/Users/x/proj" in state["search"]
+    assert state["cueAfter"] is None
+
+
+def test_network_error_without_status_preserves_workspace_param():
+    """A fetch-level TypeError carries no .status; it must be treated as
+    transport, not as a server verdict."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_throws=True,
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj")))
+    state = json.loads(out)
+    assert state["routed"] == "fell-through"
+    assert "workspace=" in state["search"]
+
+
+def test_server_rejected_path_consumes_param_before_fallback():
+    """400 is resolve_trusted_workspace()'s objective verdict on the path:
+    retrying the same URL can only fail again, so the parameter is consumed
+    and the boot falls back to the documented restore."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=400,
+        extra_js=_apply("/?workspace=%2Fetc&q=hello")))
+    state = json.loads(out)
+    assert state["routed"] == "fell-through"
+    assert "workspace=" not in state["search"]
+    assert "q=hello" in state["search"]
+
+
+def test_param_is_not_consumed_before_the_create_attempt():
+    """The URL still carries the parameter at the moment newSession() is
+    called — consumption happens strictly after the server accepts."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj")))
+    state = json.loads(out)
+    assert "workspace=" in state["calls"][0]["searchAtCall"]
+    assert "workspace=" not in state["search"]
+
+
+def test_blank_workspace_param_is_consumed_and_falls_through():
+    """A blank value is an objectively unusable intent: consume it so it
+    cannot loop, and fall through to the normal restore."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        extra_js=_apply("/?workspace=%20%20&q=hello")))
+    state = json.loads(out)
+    assert state["calls"] == []
+    assert state["routed"] == "fell-through"
+    assert "workspace=" not in state["search"]
+    assert "q=hello" in state["search"]

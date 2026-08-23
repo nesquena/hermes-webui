@@ -3743,6 +3743,65 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
+  // ?workspace=<path> (one-shot, symmetric to ?profile=) — route the boot
+  // into a fresh session bound to that workspace instead of restoring the
+  // saved one. Reuses the S._profileSwitchWorkspace one-shot contract that
+  // newSession() already consumes (same path as a profile-switch workspace).
+  // Combined with ?q=, this lets an external launcher open the agent on the
+  // right project with a prefilled composer. Path trust/existence decisions
+  // are the server's (resolve_trusted_workspace()); a rejected path falls
+  // back to the normal restore below.
+  //
+  // This block runs BEFORE the action=new-chat launch branch and owns the
+  // single new-session creation for the whole boot. Ordered the other way,
+  // `?action=new-chat&workspace=…` created a first session WITHOUT the
+  // requested workspace and returned early, leaving `workspace` unconsumed
+  // in the URL — so a hard reload created a SECOND session, this time with
+  // it. One launch must produce exactly one session.
+  const workspaceIntent=(typeof _workspaceQueryIntentFromLocation==='function')?_workspaceQueryIntentFromLocation():null;
+  if(workspaceIntent&&workspaceIntent.hasParam){
+    // Compound ?profile=&workspace= launch: if a valid profile switch was
+    // requested but did not complete (returned false or threw), creating the
+    // session now would silently bind the workspace to the wrong profile.
+    // Leave the workspace parameter in the URL so a retry after the profile
+    // issue is resolved still carries the intent.
+    const _profileSwitchPending=!!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!_profileSwitchCompleted);
+    if(_profileSwitchPending){
+      console.warn('[boot] workspace query deferred: profile switch did not complete');
+    }else if(workspaceIntent.valid){
+      try{
+        S._profileSwitchWorkspace=workspaceIntent.path;
+        await newSession(true,{worktree:false});
+        // Consume the launch intents only now that the server accepted the
+        // session. Consuming before the POST loses the intent whenever the
+        // request fails for a transport reason — most visibly on a 401,
+        // where api() redirects to `login?next=<pathname+search>` and that
+        // snapshot would no longer carry `workspace`, so the post-login
+        // bounce would silently drop the requested project.
+        if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+        if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)&&typeof _consumeLaunchActionParamFromLocation==='function') _consumeLaunchActionParamFromLocation();
+        if(S.session){
+          try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+        }
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+      }catch(e){
+        S._profileSwitchWorkspace=null;
+        // A 400 is the server's objective verdict on the path itself
+        // (resolve_trusted_workspace() raised): retrying the same URL can
+        // only fail again, so consume the parameter and fall through to the
+        // documented restore. Anything else — 401, network error, timeout,
+        // 5xx — is transport, not a verdict on the path: keep the parameter
+        // so the retry (or the post-login bounce) still carries the intent.
+        const _serverRejectedPath=!!(e&&Number(e.status)===400);
+        if(_serverRejectedPath&&typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+        console.warn('[boot] workspace query routing failed', e);
+      }
+    }else{
+      if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+      console.warn('[boot] ignored invalid workspace query', workspaceIntent.path);
+    }
+  }
   if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
     try{
       await newSession(true);
@@ -3757,44 +3816,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
-  }
-  // ?workspace=<path> (one-shot, symmetric to ?profile=) — route the boot
-  // into a fresh session bound to that workspace instead of restoring the
-  // saved one. Reuses the S._profileSwitchWorkspace one-shot contract that
-  // newSession() already consumes (same path as a profile-switch workspace).
-  // Combined with ?q=, this lets an external launcher open the agent on the
-  // right project with a prefilled composer. Path trust/existence decisions
-  // are the server's (resolve_trusted_workspace()); a rejected path falls
-  // back to the normal restore below.
-  const workspaceIntent=(typeof _workspaceQueryIntentFromLocation==='function')?_workspaceQueryIntentFromLocation():null;
-  if(workspaceIntent&&workspaceIntent.hasParam){
-    // Compound ?profile=&workspace= launch: if a valid profile switch was
-    // requested but did not complete (returned false or threw), creating the
-    // session now would silently bind the workspace to the wrong profile.
-    // Leave the workspace parameter in the URL so a retry after the profile
-    // issue is resolved still carries the intent.
-    const _profileSwitchPending=!!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!_profileSwitchCompleted);
-    if(_profileSwitchPending){
-      console.warn('[boot] workspace query deferred: profile switch did not complete');
-    }else{
-      if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
-      if(workspaceIntent.valid){
-        try{
-          S._profileSwitchWorkspace=workspaceIntent.path;
-          await newSession(true,{worktree:false});
-          if(S.session){
-            try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
-          }
-          S._bootReady=true;
-          syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
-        }catch(e){
-          S._profileSwitchWorkspace=null;
-          console.warn('[boot] workspace query routing failed', e);
-        }
-      }else{
-        console.warn('[boot] ignored invalid workspace query', workspaceIntent.path);
-      }
-    }
   }
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
