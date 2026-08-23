@@ -11,6 +11,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -59,7 +60,8 @@ def _section_source(name: str, next_name: str) -> str:
 def _run_node(script: str) -> dict:
     assert NODE is not None
     result = subprocess.run(
-        [NODE, "-e", script],
+        [NODE, "-"],
+        input=script,
         capture_output=True,
         text=True,
         timeout=15,
@@ -69,8 +71,22 @@ def _run_node(script: str) -> dict:
     return json.loads(result.stdout)
 
 
-def test_diff_preview_explains_forbidden_path_instead_of_calling_patch_broken():
-    """The reported 403 shape must tell the user to move/copy the file."""
+def test_forbidden_copy_covers_location_and_permission_failures():
+    script = (
+        "const localStorage={getItem(){return null;},setItem(){}};\n"
+        "const document={documentElement:{},querySelectorAll(){return [];}};\n"
+        + I18N_JS
+        + "\nprocess.stdout.write(JSON.stringify({message:t('media_preview_forbidden')}));"
+    )
+    result = _run_node(script)
+    assert result["message"] == (
+        "WebUI could not access this file. Move or copy it into the active workspace, "
+        "or check file permissions, then try again."
+    )
+
+
+def test_diff_preview_explains_forbidden_access_instead_of_calling_patch_broken():
+    """The reported 403 shape must provide accurate recovery options."""
     require_response = _function_source("_requireMediaResponse")
     error_key = _function_source("_mediaPreviewErrorKey")
     load_diff = _function_source("loadDiffInline")
@@ -79,7 +95,7 @@ const el={{dataset:{{path:'/outside/report.patch'}},setAttribute(){{}},outerHTML
 const root={{querySelectorAll(){{return [el];}}}};
 const translations={{
   diff_error:'Could not load patch file',
-  media_preview_forbidden:'This file is outside WebUI allowed locations. Move or copy it into the active workspace, then try again.'
+  media_preview_forbidden:'WebUI could not access this file. Move or copy it into the active workspace, or check file permissions, then try again.'
 }};
 const t=(key)=>translations[key]||key;
 const esc=(value)=>String(value);
@@ -92,7 +108,8 @@ loadDiffInline(root);
 setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
 """
     result = _run_node(script)
-    assert "Move or copy it into the active workspace" in result["html"]
+    assert "WebUI could not access this file" in result["html"]
+    assert "check file permissions" in result["html"]
     assert "Could not load patch file" not in result["html"]
 
 
@@ -123,15 +140,61 @@ process.stdout.write(JSON.stringify({{keys,networkKey,ok}}));
     }
 
 
-def test_all_lazy_media_fetchers_use_the_shared_http_error_contract():
-    fallbacks = {
-        "loadDiffInline": ("buildCsvTablePreview", "diff_error"),
-        "loadCsvInline": ("loadExcalidrawInline", "csv_error"),
-        "loadExcalidrawInline": ("_renderExcalidrawCanvases", "excalidraw_error"),
-        "loadPdfInline": ("loadHtmlInline", "pdf_error"),
-        "loadHtmlInline": ("renderMermaidBlocks", "html_error"),
+@pytest.mark.parametrize(
+    ("function_name", "path"),
+    [
+        ("loadDiffInline", "/workspace/report.patch"),
+        ("loadCsvInline", "/workspace/report.csv"),
+        ("loadExcalidrawInline", "/workspace/report.excalidraw"),
+        ("loadPdfInline", "/workspace/report.pdf"),
+        ("loadHtmlInline", "/workspace/report.html"),
+    ],
+)
+def test_all_lazy_media_fetchers_render_the_shared_http_error_contract(
+    function_name: str, path: str
+):
+    next_functions = {
+        "loadDiffInline": "_mediaSessionQuery",
+        "loadCsvInline": "loadExcalidrawInline",
+        "loadExcalidrawInline": "_renderExcalidrawCanvases",
+        "loadPdfInline": "loadHtmlInline",
+        "loadHtmlInline": "renderMermaidBlocks",
     }
-    for function_name, (next_name, fallback) in fallbacks.items():
-        body = _section_source(function_name, next_name)
-        assert "_requireMediaResponse" in body, function_name
-        assert f"_mediaPreviewErrorKey(error,'{fallback}')" in body, function_name
+    helpers = [
+        _function_source("_requireMediaResponse"),
+        _function_source("_mediaPreviewErrorKey"),
+        _section_source("_mediaSnapQuery", "_csvMediaUrl"),
+    ]
+    setup = ""
+    if function_name == "loadCsvInline":
+        helpers.extend(
+            [
+                _section_source("_mediaSessionQuery", "_mediaSnapQuery"),
+                _section_source("_csvMediaUrl", "buildCsvTablePreview"),
+                _section_source("_csvPreviewErrorHtml", "loadCsvInline"),
+            ]
+        )
+    elif function_name == "loadPdfInline":
+        setup = "let _pdfjsReady=true,_pdfjsLoading=false;const window={_pdfjsLib:{}};"
+
+    helpers.append(_section_source(function_name, next_functions[function_name]))
+    script = f"""
+const el={{dataset:{{path:{json.dumps(path)}}},setAttribute(){{}},outerHTML:'',parentNode:{{}}}};
+const root={{querySelectorAll(){{return [el];}}}};
+const translations={{
+  media_preview_forbidden:'WebUI could not access this file. Move or copy it into the active workspace, or check file permissions, then try again.',
+  diff_error:'FORMAT ERROR',csv_error:'FORMAT ERROR',excalidraw_error:'FORMAT ERROR',
+  pdf_error:'FORMAT ERROR',html_error:'FORMAT ERROR'
+}};
+const t=(key)=>translations[key]||key;
+const esc=(value)=>String(value);
+const fetch=()=>Promise.resolve({{ok:false,status:403}});
+{setup}
+{''.join(helpers)}
+{function_name}(root);
+setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
+"""
+    result = _run_node(script)
+    assert "WebUI could not access this file" in result["html"]
+    assert "check file permissions" in result["html"]
+    assert "FORMAT ERROR" not in result["html"]
