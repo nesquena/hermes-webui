@@ -3,6 +3,7 @@
 from pathlib import Path
 import inspect
 import json
+import re
 import subprocess
 import sys
 
@@ -121,6 +122,102 @@ def test_session_reasoning_survives_fallback_and_model_switch(monkeypatch):
     assert agent.reasoning_config == {"enabled": True, "effort": "high"}
     agent.switch_model("switched", "other-provider")
     assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_session_effort_survives_switch_fallback_and_next_turn_primary_restore(monkeypatch):
+    """The full production lifecycle, including the next-turn primary restore.
+
+    The installed Agent's ``switch_model()`` snapshots the value it resolved
+    from profile/per-model config into ``_primary_runtime['reasoning_config']``,
+    and ``restore_primary_runtime()`` copies that snapshot back at the START of
+    a later turn — after WebUI's already-bound guard has returned. Rebinding
+    only the live ``agent.reasoning_config`` therefore lost the session value
+    one turn later, silently reverting to the global/per-model default.
+
+    Global default is 'minimal' and the per-model default is 'medium' here, so
+    a regression cannot pass by coincidentally matching either one.
+    """
+
+    class Agent:
+        model = "primary"
+        provider = "provider"
+        base_url = None
+        reasoning_config = {"enabled": True, "effort": "minimal"}
+
+        def __init__(self):
+            # Snapshot as the Agent builds it: the per-model/global value, NOT
+            # the session override.
+            self._primary_runtime = {
+                "model": "primary",
+                "provider": "provider",
+                "reasoning_config": {"enabled": True, "effort": "medium"},
+            }
+
+        def switch_model(self, model, provider):
+            self.model = model
+            self.provider = provider
+            self.reasoning_config = {"enabled": True, "effort": "medium"}
+            self._primary_runtime["model"] = model
+            self._primary_runtime["provider"] = provider
+            self._primary_runtime["reasoning_config"] = {"enabled": True, "effort": "medium"}
+
+        def _try_activate_fallback(self):
+            self.model = "fallback"
+            self.reasoning_config = {"enabled": True, "effort": "minimal"}
+            return True
+
+        def restore_primary_runtime(self):
+            rt = self._primary_runtime
+            self.model = rt["model"]
+            self.provider = rt["provider"]
+            saved = rt.get("reasoning_config")
+            if saved is not None:
+                self.reasoning_config = dict(saved)
+            return True
+
+    monkeypatch.setattr(
+        config,
+        "resolve_model_reasoning_efforts",
+        lambda *a, **k: list(config.VALID_REASONING_EFFORTS),
+    )
+    agent = Agent()
+    _bind_session_reasoning_effort(agent, {}, "high")
+
+    # Turn 1: user switches model, then the primary rate-limits and the
+    # fallback activates.
+    agent.switch_model("switched", "other-provider")
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+    assert agent._try_activate_fallback() is True
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+    # Turn 2: the Agent restores the primary runtime from its snapshot. The
+    # session override must still win over the snapshotted default.
+    assert agent.restore_primary_runtime() is True
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}, (
+        "restore_primary_runtime() copied the stale per-model snapshot back "
+        "over the session override"
+    )
+    assert agent._primary_runtime["reasoning_config"] == {"enabled": True, "effort": "high"}
+
+
+def test_reasoning_command_parity_includes_ultra():
+    """/reasoning must accept every level the composer menu and backend expose."""
+    commands = (Path(__file__).resolve().parent.parent / "static" / "commands.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'data-effort="ultra"' in INDEX, "composer menu should expose Ultra"
+    assert "ultra" in config.VALID_REASONING_EFFORTS
+
+    reasoning_entry = commands.split("{name:'reasoning'", 1)[1].split("},", 1)[0]
+    assert "'ultra'" in reasoning_entry, (
+        "/reasoning subArgs/autocomplete must list ultra, otherwise the command "
+        "surface silently rejects a level the UI and backend both accept"
+    )
+
+    body = commands.split("function cmdReasoning", 1)[1].split("\nfunction ", 1)[0]
+    efforts = re.search(r"const EFFORTS=\[(.*?)\];", body)
+    assert efforts and "'ultra'" in efforts.group(1), "cmdReasoning parser must accept ultra"
+    assert "xhigh|max|ultra" in body, "/reasoning help text must advertise ultra"
 
 
 def test_reasoning_parameter_does_not_shift_legacy_session_arguments():

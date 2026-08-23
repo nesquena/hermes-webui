@@ -399,12 +399,57 @@ def _auto_approve_gateway_run(
 
 
 # Effort ladder every runs-API gateway can carry inside ``model_options``.
-# The installed API server's ``_request_reasoning_config`` parser accepts only
-# this six-level set; a level outside it (WebUI 'max'/'ultra') is DROPPED by the
-# receiver and parsed as a bare ``{"enabled": True}`` — losing the session's
-# choice. Newer gateways may advertise a wider ladder through
-# ``/v1/capabilities`` ``features.reasoning_efforts``.
+# A level outside this six-level set is DROPPED by *older* receivers and parsed
+# as a bare ``{"enabled": True}`` — losing the session's choice.
 _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+# Supra-legacy levels that only NEWER receivers accept.
+# Two receiver generations are in the wild and NEITHER advertises its ladder:
+#
+#   * older: ``_REASONING_EFFORTS`` = the six legacy levels — 'max'/'ultra' are
+#     dropped by ``_request_reasoning_config()`` and the request degenerates to
+#     a bare ``{"enabled": True}``, losing the session's explicit choice;
+#   * current: ``_REASONING_EFFORTS`` also contains 'max' and 'ultra', which
+#     ``_request_reasoning_config()`` preserves verbatim.
+#
+# A reachable-but-silent ``/v1/capabilities`` is therefore genuinely ambiguous:
+# it does NOT identify which generation is answering. Guessing "current"
+# would fail open — on an older receiver we would send a level it silently
+# discards, which is strictly worse than sending a slightly lower level it
+# honours. So the ambiguous case fails closed onto the legacy ladder.
+#
+# The ambiguity is resolved on the receiver side, not by heuristics here:
+# hermes-agent#92839 makes the API server advertise its accepted ladder as
+# ``features.reasoning_efforts``. Once a receiver advertises, this function
+# preserves exactly what it declares — including 'max'/'ultra'.
+_GATEWAY_SUPRA_LEGACY_MODEL_OPTIONS_EFFORTS = ("max", "ultra")
+
+
+def _gateway_receiver_supported_efforts(base_url="", api_key=""):
+    """Return the effort ladder the receiving gateway is KNOWN to carry.
+
+    ``features.reasoning_efforts`` from ``/v1/capabilities`` is the only
+    authority: it is an explicit, machine-readable declaration of what the
+    receiver's parser accepts, so it is trusted verbatim.
+
+    Anything else — no advertisement, an unreachable probe, a malformed
+    response — means we cannot establish the receiver's parser surface, and we
+    fall back to the legacy ladder every runs-API receiver can carry.
+    """
+    legacy = list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS)
+    try:
+        from api.config import get_gateway_caps
+
+        caps = get_gateway_caps(base_url, api_key)
+    except Exception:
+        return legacy
+    if not isinstance(caps, dict):
+        return legacy
+    advertised = caps.get("reasoning_efforts")
+    if not advertised:
+        return legacy
+    levels = [str(level).strip().lower() for level in advertised if str(level).strip()]
+    return levels or legacy
 
 
 def _gateway_run_model_options(effort, base_url="", api_key=""):
@@ -417,11 +462,11 @@ def _gateway_run_model_options(effort, base_url="", api_key=""):
     None when no explicit reasoning should be requested (gateway resolves its
     own profile/per-model default).
 
-    Capability/version handling for supra-legacy levels ('max'/'ultra'): send
-    them verbatim only when the receiving gateway advertises them via
-    ``features.reasoning_efforts``; otherwise degrade down the WebUI ladder to
-    the closest lower level the receiver's parser can carry — never escalate,
-    and never let the receiver silently fall back to the profile default.
+    Capability handling for supra-legacy levels ('max'/'ultra'): send them
+    verbatim whenever the live receiver can carry them (see
+    ``_gateway_receiver_supported_efforts``); only degrade down the WebUI
+    ladder for a receiver that genuinely cannot. Never escalate, and never let
+    the receiver silently fall back to the profile default.
     """
     effort = str(effort or "").strip().lower()
     if not effort:
@@ -430,14 +475,7 @@ def _gateway_run_model_options(effort, base_url="", api_key=""):
         return {"reasoning": {"enabled": False}, "reasoning_effort": "none"}
     wire_effort = effort
     if effort not in _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS:
-        advertised = None
-        try:
-            from api.config import get_gateway_caps
-
-            advertised = get_gateway_caps(base_url, api_key).get("reasoning_efforts")
-        except Exception:
-            advertised = None
-        supported = advertised if advertised else list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS)
+        supported = _gateway_receiver_supported_efforts(base_url, api_key)
         if effort not in supported:
             try:
                 from api.config import VALID_REASONING_EFFORTS
