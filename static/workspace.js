@@ -482,7 +482,7 @@ function _classifyArtifactPath(path, workspace){
   const workspaceIsWindows = /^[A-Za-z]:\//.test(ws);
   const absolute = pathIsWindows || normalized.startsWith('/');
   if(!absolute){
-    const relative = normalized.split('/').filter(Boolean).filter(segment => segment !== '.').join('/');
+    const relative = normalized.split('/').filter(segment => segment !== '.').join('/');
     if(!relative) return blocked('unsupported');
     return {
       kind:'workspace-relative',
@@ -497,11 +497,14 @@ function _classifyArtifactPath(path, workspace){
     const match = value.match(/^([A-Za-z]:)?\/(.*)$/);
     return {
       drive:match&&match[1] ? match[1].toLowerCase() : '',
-      segments:(match ? match[2] : value).split('/').filter(segment => segment && segment !== '.'),
+      segments:(match ? match[2] : value).split('/').filter(segment => segment !== '.'),
     };
   };
   const pathParts = split(normalized);
   const workspaceParts = split(ws);
+  while(workspaceParts.segments.length && workspaceParts.segments[workspaceParts.segments.length - 1] === ''){
+    workspaceParts.segments.pop();
+  }
   const fold = value => pathIsWindows ? value.toLowerCase() : value;
   if(fold(pathParts.drive) !== fold(workspaceParts.drive) || pathParts.segments.length < workspaceParts.segments.length) return blocked('outside');
   for(let i=0;i<workspaceParts.segments.length;i++){
