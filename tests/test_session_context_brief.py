@@ -9,16 +9,16 @@ duplicate, status polling, fallback when the auxiliary model is absent).
 """
 
 import json
-import sys
 import threading
 import time
 from pathlib import Path  # noqa: F401  (kept for fixture parity with the auto layer)
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from api import context_brief
+from tests._aux_client_helpers import auxiliary_client_modules
 
 
 SID = "20260812_120000_cb12ef"
@@ -337,18 +337,10 @@ def test_legacy_brief_without_transcript_digest_is_always_unverifiable(tmp_path)
 
 def test_brief_job_generates_fallback_without_aux_model(tmp_path):
     sess = _make_session(tmp_path)
-    fake_agent = ModuleType("agent")
-    fake_agent.__path__ = []
-    fake_aux = ModuleType("agent.auxiliary_client")
-
-    def _unavailable(*_args, **_kwargs):
-        raise RuntimeError("auxiliary model unavailable in unit test")
-
-    fake_aux.call_llm = _unavailable  # type: ignore[attr-defined]
-    fake_agent.auxiliary_client = fake_aux  # type: ignore[attr-defined]
-    with _patch_resolution(sess), patch.dict(
-        sys.modules,
-        {"agent": fake_agent, "agent.auxiliary_client": fake_aux},
+    with _patch_resolution(sess), auxiliary_client_modules(), patch(
+        "agent.auxiliary_client.call_llm",
+        side_effect=RuntimeError("auxiliary model unavailable in unit test"),
+        create=True,
     ):
         job = context_brief.start_brief_job(SID)
         assert job["status"] == "running"
