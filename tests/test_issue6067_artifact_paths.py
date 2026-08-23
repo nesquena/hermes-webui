@@ -22,9 +22,9 @@ ARTIFACT_CASES = [
     {"path": "src/api/routes/users.py", "source": "tool", "display": "src/api/routes/users.py", "name": "users.py", "head": "src/api/", "tail": "routes/"},
     {"path": "dir/foo.py", "source": "single", "display": "dir/foo.py", "name": "foo.py", "head": "", "tail": "dir/"},
     {"path": "src/project/app/api/routes/handlers/users.py", "source": "", "display": "src/project/app/api/routes/handlers/users.py", "name": "users.py", "head": "src/project/app/api/routes/", "tail": "handlers/"},
-    {"path": "/file.txt", "source": "root", "display": "/file.txt", "name": "file.txt", "head": "/", "tail": ""},
+    {"path": "/workspace/file.txt", "source": "root", "display": "file.txt", "name": "file.txt", "head": "", "tail": ""},
     {"path": "dir/", "source": "trail", "display": "dir/", "name": "", "head": "", "tail": "dir/"},
-    {"path": "", "source": "empty", "display": "", "name": "", "head": "", "tail": ""},
+    {"path": "empty.txt", "source": "empty", "display": "empty.txt", "name": "empty.txt", "head": "", "tail": ""},
     {"path": "src//users.py", "source": "gap", "display": "src//users.py", "name": "users.py", "head": "src/", "tail": "/"},
     {"path": "src/lastIndexOf/users.py", "source": "literal", "display": "src/lastIndexOf/users.py", "name": "users.py", "head": "src/", "tail": "lastIndexOf/"},
     {"path": "/workspace/über/<unsafe>/routes/quote&.py", "source": "<source>&", "display": "über/<unsafe>/routes/quote&.py", "name": "quote&.py", "head": "über/<unsafe>/", "tail": "routes/"},
@@ -121,6 +121,9 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
 
     items = [{"path": case["path"], "source": case["source"]} for case in ARTIFACT_CASES]
     renderer = _function(WORKSPACE_JS, "renderSessionArtifacts")
+    sanitizer = _function(WORKSPACE_JS, "_sanitizeArtifactPath")
+    classifier = _function(WORKSPACE_JS, "_classifyArtifactPath")
+    ignore_re = re.search(r"const ARTIFACT_IGNORE_RE = .*?;", WORKSPACE_JS).group(0)
     css = STYLE_CSS.replace("</style>", "")
     harness = f"""
         <style>{css}</style>
@@ -190,6 +193,10 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
           const t = key => key === 'workspace_artifact_source_session' ? 'session' : key;
           const collectSessionArtifacts = () => S.artifacts;
           const openArtifactPath = path => opened.push(path);
+          {ignore_re}
+          {sanitizer}
+          {_function(WORKSPACE_JS, "_classifyArtifactCandidate")}
+          {classifier}
           {renderer}
           renderSessionArtifacts();
         </script>
@@ -236,7 +243,6 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
                 for index, case in enumerate(ARTIFACT_CASES):
                     if case["name"]:
                         assert _filename_visible(buttons.nth(index).locator(".workspace-artifact-filename"))
-                assert buttons.nth(4).locator(".workspace-artifact-directory-head").inner_text() == "/"
                 assert buttons.nth(7).locator(".workspace-artifact-directory-tail").inner_text() == "/"
                 deep_head = buttons.nth(3).locator(".workspace-artifact-directory-head")
                 assert deep_head.evaluate("node => node.scrollWidth >= node.clientWidth")
@@ -273,4 +279,40 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
             assert page.evaluate("() => document.activeElement.classList.contains('workspace-artifact-item')")
             buttons.nth(index).click()
         assert page.evaluate("opened") == [case["path"] for case in ARTIFACT_CASES]
+        browser.close()
+
+
+def test_display_only_rows_are_metadata_without_open_attributes():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run manual local browser proof for issue #6067")
+    renderer = _function(WORKSPACE_JS, "renderSessionArtifacts")
+    sanitizer = _function(WORKSPACE_JS, "_sanitizeArtifactPath")
+    classifier = _function(WORKSPACE_JS, "_classifyArtifactPath")
+    candidate = _function(WORKSPACE_JS, "_classifyArtifactCandidate")
+    ignore_re = re.search(r"const ARTIFACT_IGNORE_RE = .*?;", WORKSPACE_JS).group(0)
+    harness = f'''<div id="workspaceArtifacts"></div><span id="workspaceArtifactsCount"></span>
+      <script>
+      {ignore_re}
+      {sanitizer}{classifier}{candidate}
+      const S={{session:{{workspace:'/workspace'}},artifacts:[]}};
+      const $=id=>document.getElementById(id); const esc=s=>String(s); const t=k=>k;
+      const collectSessionArtifacts=()=>[
+        {{path:'/workspace/report.md',source:'inside'}},
+        {{path:'/workspace-other/report.md',source:'outside'}},
+        {{path:'~/shared/file.md',source:'unsupported'}},
+        {{path:'../secret.md',source:'unsupported'}}];
+      {renderer}
+      renderSessionArtifacts();
+      </script>'''
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=HEADLESS, args=["--no-sandbox"])
+        page = browser.new_page(viewport={"width": 600, "height": 400})
+        page.set_content(harness)
+        assert page.locator("button.workspace-artifact-item").count() == 1
+        assert page.locator(".workspace-artifact-item-display-only").count() == 3
+        assert page.locator(".workspace-artifact-item-display-only[onclick]").count() == 0
+        assert page.locator(".workspace-artifact-item-display-only[data-artifact-path]").count() == 0
+        assert page.locator(".workspace-artifact-explanation").count() == 3
         browser.close()
