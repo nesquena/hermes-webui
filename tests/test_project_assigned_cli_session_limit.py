@@ -1109,6 +1109,97 @@ def test_model_refills_the_unassigned_window_consumed_by_assigned_rows(
     assert len([s for s in sessions if s["project_id"] == "project-a"]) == 3
 
 
+def _write_webui_sidecar(session_dir, sid, *, project_id, updated_at):
+    """A WebUI session sidecar carrying a project assignment.
+
+    This is what ``/api/session/move`` actually writes: it sets ``s.project_id``
+    and saves the sidecar. NOTHING writes ``state.db.sessions.project_id`` —
+    ``grep 'UPDATE sessions'`` only ever touches title / message_count /
+    parent_session_id — so the assignment exists only here.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / f"{sid}.json").write_text(
+        json.dumps({
+            "session_id": sid,
+            "title": sid,
+            "created_at": updated_at,
+            "updated_at": updated_at,
+            "message_count": 1,
+            "project_id": project_id,
+            "messages": [],
+            "tool_calls": [],
+        }),
+        encoding="utf-8",
+    )
+    models.clear_sidecar_metadata_cache()
+    models.clear_cli_sessions_cache()
+
+
+def test_sidecar_carried_assignment_does_not_spend_an_unassigned_slot(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A WebUI-side move must not shorten the unassigned sidebar window.
+
+    ``/api/session/move`` records the assignment on the WebUI sidecar ONLY, so
+    the model's unassigned counter — which read ``state.db.project_id`` — saw all
+    23 conversations as unassigned and stopped at its 20-row window. The route
+    then reclassified the 3 moved conversations as assigned (``all_sessions()``
+    re-surfaces the sidecar's ``project_id`` and the state row is dropped as
+    already represented), leaving only 17 unassigned CLI rows in the payload and
+    never fetching cli-00 / cli-01 / cli-02 at all — the reviewer's exact 3 + 20
+    -> 17 number, in the guarantee this file's docstring claims to pin.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(23)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    # The three NEWEST conversations were moved into a project from the WebUI.
+    moved = {"cli-22", "cli-21", "cli-20"}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    sessions = models.get_cli_sessions()
+
+    # The real route pipeline: the moved conversations come back as WebUI sidecar
+    # rows and their state.db projections are dropped as duplicates.
+    deduped = routes._dedupe_cli_sidebar_sessions_for_api(sessions, set(moved))
+    webui_rows = [
+        {
+            "session_id": sid,
+            "is_cli_session": True,
+            "project_id": "project-a",
+            "updated_at": BASE_TS + int(sid.split("-")[1]),
+        }
+        for sid in sorted(moved)
+    ]
+    merged = sorted(
+        webui_rows + deduped, key=lambda s: s.get("updated_at") or 0, reverse=True
+    )
+    kept = routes._cap_recent_cli_sessions(merged)
+
+    unassigned_cli = [
+        row for row in kept if row.get("is_cli_session") and not row.get("project_id")
+    ]
+    assert len(unassigned_cli) == routes.CLI_VISIBLE_SESSION_CAP == 20
+    # The three genuinely unassigned conversations at the bottom of state.db are
+    # what the lost slots cost: they were never fetched.
+    kept_ids = {row["session_id"] for row in kept}
+    assert {"cli-00", "cli-01", "cli-02"} <= kept_ids
+
+    # ...and the model's own notion of "unassigned" agrees with the
+    # classification the route applied, which is what made the refill reachable.
+    assert sum(1 for s in sessions if not s["project_id"]) == 20
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+
+
 def test_unassigned_window_counts_logical_conversations_not_segments(
     fake_hermes_home, tmp_path
 ):
