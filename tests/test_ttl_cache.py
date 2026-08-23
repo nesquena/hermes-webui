@@ -217,7 +217,8 @@ def test_invalidate_models_cache_direct():
     """Call invalidate_models_cache() after populating the cache.
     _AVAILABLE_MODELS_CACHE should be None and the next call should re-scan.
     """
-    _reset_cache()
+    config.invalidate_models_cache()
+    saved_mtime = config._cfg_mtime
 
     # Ensure _cfg_mtime matches file so mtime check doesn't invalidate
     try:
@@ -255,4 +256,5 @@ def test_invalidate_models_cache_direct():
             )
             assert "groups" in result1 and "groups" in result2
         finally:
-            _reset_cache()
+            config._cfg_mtime = saved_mtime
+            config.invalidate_models_cache()

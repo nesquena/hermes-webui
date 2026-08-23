@@ -181,6 +181,7 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
     release_probe = threading.Event()
     real_thread = threading.Thread
     rebuild_workers = []
+    rebuild_worker = None
 
     def _record_thread(*args, **kwargs):
         worker = real_thread(*args, **kwargs)
@@ -214,10 +215,11 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
             "the rebuild worker should have started"
         )
         assert len(rebuild_workers) == 1
+        rebuild_worker = rebuild_workers[0]
         # The foreground returned while the probe was deliberately blocked, so
         # the result can only be the bounded-path fallback. Assert that contract
         # directly instead of comparing wall-clock time on a contended runner.
-        assert rebuild_workers[0].is_alive()
+        assert rebuild_worker.is_alive()
         assert isinstance(result, dict)
         for k in (
             "active_provider",
@@ -231,9 +233,13 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
         release_probe.set()
         for worker in rebuild_workers:
             worker.join(timeout=5.0)
+        for worker in rebuild_workers:
+            assert not worker.is_alive(), "slow rebuild worker did not finish"
+        if rebuild_workers:
+            assert cfg._cache_build_in_progress is False
+        cfg.invalidate_models_cache()
 
-    assert not rebuild_workers[0].is_alive(), "slow rebuild worker did not finish"
-    assert cfg._cache_build_in_progress is False
+    assert rebuild_worker is not None
 
 
 def test_minimal_static_catalog_is_network_free(monkeypatch):
