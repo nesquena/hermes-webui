@@ -538,6 +538,53 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
             sid, item, cron_job_prefixes
         )
         overlaid.append(item)
+    # State.db freshness overlay (#local): desktop/CLI-owned sessions write to
+    # the agent state.db, not the WebUI sidecar, so their index rows freeze at
+    # import time. Overlay fresh updated_at / last_message_at / message_count /
+    # title from the agent state.db projection (same source the gateway watcher
+    # uses) so the sidebar tracks live activity for external sessions. Fail-open:
+    # any error leaves the rows as-is.
+    try:
+        from api.gateway_watcher import _get_agent_sessions_from_db
+        fresh_rows = _get_agent_sessions_from_db() or []
+        fresh_by_id = {str(r.get("session_id") or "").strip(): r for r in fresh_rows if r.get("session_id")}
+    except Exception:
+        fresh_by_id = {}
+    if fresh_by_id:
+        for item in overlaid:
+            sid = str(item.get("session_id") or "").strip()
+            fr = fresh_by_id.get(sid)
+            if not fr:
+                continue
+            # Only overlay when state.db is genuinely newer than the sidecar
+            # row (last_activity comparison) — the sidecar stays authoritative
+            # for WebUI-native or more-recently-written sessions. Monotonic:
+            # never downgrade a newer value.
+            fresh_activity = _session_list_row_numeric_value(fr.get("updated_at"))
+            current_activity = _session_list_row_numeric_value(item.get("updated_at"))
+            if fresh_activity <= current_activity:
+                continue
+            for key in ("updated_at", "last_message_at"):
+                fresh_val = _session_list_row_numeric_value(fr.get(key))
+                cur_val = _session_list_row_numeric_value(item.get(key))
+                if fresh_val > cur_val:
+                    item[key] = fr.get(key)
+            # The watcher projection carries `updated_at` = state.db last_activity
+            # but no `last_message_at`. The sort timestamp prefers last_message_at
+            # FIRST (last_message_at -> updated_at -> created_at), so a stale
+            # sidecar last_message_at would still pin the row to the past and
+            # defeat the live updated_at overlay above. When the fresh
+            # last_activity is newer than the row's last_message_at, propagate it
+            # so both display and sort follow live activity.
+            stale_last_msg = _session_list_row_numeric_value(item.get("last_message_at"))
+            if fresh_activity > stale_last_msg and not _session_list_row_numeric_value(fr.get("last_message_at")):
+                item["last_message_at"] = fr.get("updated_at")
+            fresh_cnt = _session_list_row_numeric_value(fr.get("message_count"))
+            if fresh_cnt > _session_list_row_numeric_value(item.get("message_count")):
+                item["message_count"] = fresh_cnt
+            fresh_title = str(fr.get("title") or "").strip()
+            if fresh_title and str(item.get("title") or "").strip() != fresh_title:
+                item["title"] = fresh_title
     overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid
 
