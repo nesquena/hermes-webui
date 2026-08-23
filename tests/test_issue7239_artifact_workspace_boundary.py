@@ -111,6 +111,19 @@ def test_windows_containment_matrix():
     assert rows[1]["openPath"] == "report.pdf"
 
 
+def test_repeated_absolute_separators_keep_display_and_open_paths_distinct():
+    posix = _classify(["/workspace//report.md"], "/workspace")[0]
+    windows = _classify([r"D:\Proj\\report.md"], r"D:\Proj")[0]
+
+    assert posix["kind"] == "workspace-contained"
+    assert posix["displayPath"] == "/report.md"
+    assert posix["openPath"] == "report.md"
+    assert posix["dedupeKey"] == "report.md"
+    assert windows["kind"] == "workspace-contained"
+    assert windows["openPath"] == "report.md"
+    assert windows["dedupeKey"] == "report.md"
+
+
 def test_windows_relative_and_canonical_boundary_matrix():
     rows = _classify([
         "./report.md", "Report.md", "d:/proj/report.md",

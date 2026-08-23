@@ -511,8 +511,9 @@ function _classifyArtifactPath(path, workspace){
     if(fold(pathParts.segments[i]) !== fold(workspaceParts.segments[i])) return blocked('outside');
   }
   const suffix = pathParts.segments.slice(workspaceParts.segments.length).join('/');
-  const dedupePath = suffix || '.';
-  return {kind:'workspace-contained', displayPath:dedupePath, dedupeKey:pathIsWindows ? dedupePath.toLowerCase() : dedupePath, openPath:dedupePath};
+  const containedDisplayPath = suffix || '.';
+  const openPath = suffix.split('/').filter(Boolean).join('/') || '.';
+  return {kind:'workspace-contained', displayPath:containedDisplayPath, dedupeKey:pathIsWindows ? openPath.toLowerCase() : openPath, openPath};
 }
 
 function _classifyArtifactCandidate(path, workspace){
