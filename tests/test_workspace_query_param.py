@@ -19,6 +19,8 @@ blocks extracted verbatim from static/boot.js against stubbed collaborators
 import json
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -156,13 +158,20 @@ async function runBootBlocks(ctx) {{
       searchAtCall: window.location.search
     }});
     if (ctx.newSessionRejectStatus) {{
-      // Mirror the error shape api() throws for a non-ok response. When
-      // rejectOnlyWorkspaceCue is set, only the workspace-cued attempt fails
-      // — that is what a 400 from resolve_trusted_workspace() means: the
-      // verdict is on the path, so the same request without it succeeds.
+      // Mirror the error shape api() throws for a non-ok response, body
+      // included: the boot block discriminates a workspace verdict from any
+      // other 400 by parsing `code` out of it. When rejectOnlyWorkspaceCue is
+      // set, only the workspace-cued attempt fails — that is what a workspace
+      // 400 means: the verdict is on the path, so the same request without it
+      // succeeds.
       if (!ctx.rejectOnlyWorkspaceCue || S._profileSwitchWorkspace !== null) {{
         const err = new Error('session-create rejected');
         err.status = ctx.newSessionRejectStatus;
+        err.body = JSON.stringify(
+          ctx.newSessionRejectCode
+            ? {{ error: 'rejected', code: ctx.newSessionRejectCode }}
+            : {{ error: 'rejected' }}
+        );
         throw err;
       }}
     }}
@@ -301,6 +310,7 @@ console.log(JSON.stringify({calls: window.history.calls.length}));
 def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
                    new_session_throws: bool = False,
                    new_session_reject_status: int | None = None,
+                   new_session_reject_code: str | None = "invalid_workspace",
                    reject_only_workspace_cue: bool = False,
                    pwa_launch_action: str | None = None,
                    url_session: str | None = None,
@@ -315,6 +325,7 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
     switchOutcome: {switch_outcome!r},
     newSessionThrows: {'true' if new_session_throws else 'false'},
     newSessionRejectStatus: {new_session_reject_status if new_session_reject_status else 'null'},
+    newSessionRejectCode: {json.dumps(new_session_reject_code)},
     rejectOnlyWorkspaceCue: {'true' if reject_only_workspace_cue else 'false'},
     pwaLaunchAction: {json.dumps(pwa_launch_action)},
     urlSession: {json.dumps(url_session)},
@@ -545,6 +556,54 @@ def test_rejected_workspace_falls_back_to_the_new_chat_launch():
 # only on an objective server verdict
 # ---------------------------------------------------------------------------
 
+def test_deferred_profile_switch_suppresses_the_new_chat_shortcut():
+    """`?profile=&workspace=&action=new-chat` where the profile switch fails:
+    the workspace launch is deferred, so the new-chat shortcut must NOT create
+    a workspace-less session — otherwise the later successful retry produces a
+    second session from the same launch."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="{hasParam:true,valid:true,name:'work'}",
+        switch_outcome="returns-false",
+        pwa_launch_action="new-chat",
+        extra_js=_apply("/?profile=work&action=new-chat&workspace=%2FUsers%2Fx%2Fproj")))
+    state = json.loads(out)
+    assert state["switchCalls"] == ["work"]
+    assert state["calls"] == []                  # no session at all this boot
+    assert "workspace=" in state["search"]       # intent preserved for retry
+    assert state["routed"] == "fell-through"
+
+
+def test_transport_failure_suppresses_the_new_chat_shortcut():
+    """Same invariant for a transport failure: the workspace parameter
+    survives, so the shortcut must not mint a session the retry would
+    duplicate."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=401,
+        pwa_launch_action="new-chat",
+        extra_js=_apply("/?action=new-chat&workspace=%2FUsers%2Fx%2Fproj")))
+    state = json.loads(out)
+    assert len(state["calls"]) == 1              # the failed attempt only
+    assert "workspace=" in state["search"]
+    assert state["routed"] == "fell-through"
+
+
+@pytest.mark.parametrize("code", [None, "invalid_toolsets"])
+def test_unrelated_400_preserves_workspace_param(code):
+    """A 400 raised by another field of the same request (an invalid
+    enabled_toolsets payload, say) is not a verdict on the path. Only the
+    server's `code:"invalid_workspace"` marks a permanent rejection, so an
+    unrelated 400 must leave the intent retryable."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=400,
+        new_session_reject_code=code,
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj")))
+    state = json.loads(out)
+    assert state["routed"] == "fell-through"
+    assert "workspace=" in state["search"]
+
+
 @pytest.mark.parametrize("status", [401, 500, 503])
 def test_transport_failure_preserves_workspace_param(status):
     """A 401 between profile bootstrap and session creation redirects to
@@ -610,3 +669,28 @@ def test_blank_workspace_param_is_consumed_and_falls_through():
     assert state["routed"] == "fell-through"
     assert "workspace=" not in state["search"]
     assert "q=hello" in state["search"]
+
+
+# ---------------------------------------------------------------------------
+# Server side of the same contract: the discriminator the client branches on
+# ---------------------------------------------------------------------------
+
+def test_server_tags_workspace_rejection_with_a_code():
+    """The client can only tell a path verdict from an unrelated 400 because
+    POST /api/session/new tags the former. Pin that contract server-side so
+    the two halves cannot drift apart."""
+    from tests._pytest_port import BASE
+
+    body = json.dumps({"workspace": "/definitely/not/a/trusted/workspace"}).encode()
+    req = urllib.request.Request(
+        BASE + "/api/session/new", data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            pytest.fail(f"expected a 400 rejection, got {r.status}")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+        payload = json.loads(e.read())
+    assert payload.get("code") == "invalid_workspace"
+    assert payload.get("error")          # human-readable message still present

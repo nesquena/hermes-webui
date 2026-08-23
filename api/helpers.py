@@ -45,9 +45,17 @@ def require(body: dict, *fields) -> None:
         raise ValueError(f"Missing required field(s): {', '.join(missing)}")
 
 
-def bad(handler, msg, status: int=400):
-    """Return a clean JSON error response."""
-    return j(handler, {'error': msg}, status=status)
+def bad(handler, msg, status: int=400, code: str | None=None):
+    """Return a clean JSON error response.
+
+    ``code`` attaches a stable machine-readable discriminator alongside the
+    human-readable message, so a client can tell *which* field a 400 came
+    from instead of guessing from the status alone.
+    """
+    payload = {'error': msg}
+    if code:
+        payload['code'] = code
+    return j(handler, payload, status=status)
 
 
 def _sanitize_error(e: Exception) -> str:

@@ -15239,7 +15239,11 @@ def handle_post(handler, parsed) -> bool:
         try:
             workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
         except (TypeError, ValueError) as e:
-            return bad(handler, str(e))
+            # `code` marks this 400 as an objective verdict on the workspace
+            # path itself, so a boot-time ?workspace= launcher can tell it
+            # apart from a 400 raised by any other field in the same request
+            # and decide whether retrying the URL could ever succeed.
+            return bad(handler, str(e), code="invalid_workspace")
         worktree_info = None
         worktree_skipped = None
         # Three-value worktree model (#6022): an explicit body value always

@@ -3759,6 +3759,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // in the URL — so a hard reload created a SECOND session, this time with
   // it. One launch must produce exactly one session.
   const workspaceIntent=(typeof _workspaceQueryIntentFromLocation==='function')?_workspaceQueryIntentFromLocation():null;
+  // Set whenever a workspace launch is still outstanding for this URL: the
+  // action=new-chat shortcut must then stay out of the way, or the launch
+  // would produce a workspace-less session now plus a workspace-bound one on
+  // the retry that eventually succeeds.
+  let _workspaceLaunchOwnsSession=false;
   if(workspaceIntent&&workspaceIntent.hasParam){
     // Compound ?profile=&workspace= launch: if a valid profile switch was
     // requested but did not complete (returned false or threw), creating the
@@ -3767,6 +3772,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // issue is resolved still carries the intent.
     const _profileSwitchPending=!!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!_profileSwitchCompleted);
     if(_profileSwitchPending){
+      _workspaceLaunchOwnsSession=true;
       console.warn('[boot] workspace query deferred: profile switch did not complete');
     }else if(workspaceIntent.valid){
       try{
@@ -3787,14 +3793,25 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
       }catch(e){
         S._profileSwitchWorkspace=null;
-        // A 400 is the server's objective verdict on the path itself
-        // (resolve_trusted_workspace() raised): retrying the same URL can
-        // only fail again, so consume the parameter and fall through to the
-        // documented restore. Anything else — 401, network error, timeout,
-        // 5xx — is transport, not a verdict on the path: keep the parameter
-        // so the retry (or the post-login bounce) still carries the intent.
-        const _serverRejectedPath=!!(e&&Number(e.status)===400);
+        // Consume the parameter only on an objective verdict about the path
+        // itself: POST /api/session/new tags that one 400 with
+        // `code:"invalid_workspace"` (api/routes.py), so a 400 raised by any
+        // other field in the same request — an invalid enabled_toolsets
+        // payload, say — is NOT mistaken for a permanent path rejection.
+        // Everything else (401, network error, timeout, 5xx) is transport
+        // rather than a verdict: keep the parameter so the retry, including
+        // the `login?next=<pathname+search>` bounce, still carries the intent.
+        let _serverRejectedPath=false;
+        if(e&&Number(e.status)===400&&e.body){
+          try{_serverRejectedPath=JSON.parse(e.body).code==='invalid_workspace';}catch(_){}
+        }
         if(_serverRejectedPath&&typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+        // A deferred or failed workspace launch must not fall through into the
+        // action=new-chat branch below: that would create a workspace-less
+        // session now, and the retry that succeeds later would create a second
+        // one from the same launch. Suppress the shortcut for this boot; the
+        // preserved parameter carries the intent to the next load.
+        if(!_serverRejectedPath) _workspaceLaunchOwnsSession=true;
         console.warn('[boot] workspace query routing failed', e);
       }
     }else{
@@ -3803,19 +3820,26 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }
   }
   if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){
-    try{
-      await newSession(true);
-      // New-chat PWA launches need the empty conversation visible immediately.
-      // Boot model hydration can take several seconds when /api/models falls
-      // into a cold provider-catalog rebuild; it is already safe to finish in
-      // the background because newSession() posted the configured default and
-      // rendered the session's authoritative model/provider.
-      if(S.session){
-        try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
-      }
-      S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
-    }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
+    // A workspace launch still outstanding for this URL (deferred profile
+    // switch, or a transport failure that preserved the parameter) owns this
+    // boot's session creation. Minting a workspace-less session here would
+    // leave the retry that eventually succeeds to create a second one from
+    // the same launch.
+    if(!_workspaceLaunchOwnsSession){
+      try{
+        await newSession(true);
+        // New-chat PWA launches need the empty conversation visible immediately.
+        // Boot model hydration can take several seconds when /api/models falls
+        // into a cold provider-catalog rebuild; it is already safe to finish in
+        // the background because newSession() posted the configured default and
+        // rendered the session's authoritative model/provider.
+        if(S.session){
+          try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+        }
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+      }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
+    }
   }
   const _profileQueryBlocksSavedLocal=_profileQueryBlocksSavedLocalRestore(profileIntent, urlSession);
   if(_profileQueryBlocksSavedLocal&&_profileSwitchCompleted&&_profileSwitchChangedProfile){
