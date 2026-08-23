@@ -111,6 +111,26 @@ def test_windows_containment_matrix():
     assert rows[1]["openPath"] == "report.pdf"
 
 
+def test_windows_relative_and_canonical_boundary_matrix():
+    rows = _classify([
+        "./report.md", "Report.md", "d:/proj/report.md",
+        "d:/proj/dir/./report.md", "d:/proj/foo/..", "C:/report.md",
+    ], r"D:\Proj")
+    assert [row["kind"] for row in rows] == [
+        "workspace-relative", "workspace-relative", "workspace-contained",
+        "workspace-contained", "unsupported", "outside",
+    ]
+    assert rows[0]["openPath"] == "report.md"
+    assert rows[1]["dedupeKey"] == "report.md"
+    assert rows[2]["dedupeKey"] == "report.md"
+    assert rows[3]["openPath"] == "dir/report.md"
+
+    root_rows = _classify(["/report.md", "report.md", "C:/report.md"], "/")
+    assert [row["kind"] for row in root_rows] == [
+        "workspace-contained", "workspace-relative", "outside",
+    ]
+
+
 def test_direct_outside_open_call_has_no_side_effects():
     script = _common_js("_sanitizeArtifactPath", "_classifyArtifactPath", "_workspacePathExists", "openArtifactPath") + r'''
 const calls=[]; const S={session:{workspace:'/workspace',session_id:'s'}}; const t=k=>k;

@@ -461,29 +461,44 @@ function _sanitizeArtifactPath(path){
 }
 
 function _classifyArtifactPath(path, workspace){
+  const input = String(path || '').trim().replace(/\\/g,'/');
+  if(input.split('/').includes('..')){
+    const displayPath = _sanitizeArtifactPath(path);
+    return {kind:'unsupported', displayPath, dedupeKey:displayPath, openPath:null};
+  }
   const raw = _sanitizeArtifactPath(path);
   const displayPath = raw;
   const blocked = kind => ({kind, displayPath, dedupeKey:displayPath, openPath:null});
   if(!raw || !workspace || typeof workspace !== 'string') return blocked('unsupported');
   if(raw.startsWith('~') || raw.includes('://')) return blocked('unsupported');
   const normalized = raw.replace(/\\/g,'/');
-  const ws = workspace.trim().replace(/\\/g,'/').replace(/\/+$/,'');
+  let ws = workspace.trim().replace(/\\/g,'/');
+  const workspaceRoot = ws === '/' || /^[A-Za-z]:\/$/.test(ws);
+  if(!workspaceRoot) ws = ws.replace(/\/+$/,'');
   if(!ws || normalized.includes('\0')) return blocked('unsupported');
   if(normalized.split('/').includes('..')) return blocked('unsupported');
   if(/^\/\//.test(normalized) || /^[A-Za-z]:[^/]/.test(normalized)) return blocked('unsupported');
   const pathIsWindows = /^[A-Za-z]:\//.test(normalized);
   const workspaceIsWindows = /^[A-Za-z]:\//.test(ws);
-  if(pathIsWindows !== workspaceIsWindows) return blocked('outside');
   const absolute = pathIsWindows || normalized.startsWith('/');
   if(!absolute){
-    const relative = normalized.replace(/^(?:\.\/)+/,'');
+    const relative = normalized.split('/').filter(Boolean).filter(segment => segment !== '.').join('/');
     if(!relative) return blocked('unsupported');
-    return {kind:'workspace-relative', displayPath:relative, dedupeKey:relative, openPath:relative};
+    return {
+      kind:'workspace-relative',
+      displayPath:relative,
+      dedupeKey:workspaceIsWindows ? relative.toLowerCase() : relative,
+      openPath:relative,
+    };
   }
+  if(pathIsWindows !== workspaceIsWindows) return blocked('outside');
   if(!(workspaceIsWindows || ws.startsWith('/'))) return blocked('outside');
   const split = value => {
     const match = value.match(/^([A-Za-z]:)?\/(.*)$/);
-    return {drive:match&&match[1] ? match[1].toLowerCase() : '', segments:(match ? match[2] : value).split('/').filter(Boolean)};
+    return {
+      drive:match&&match[1] ? match[1].toLowerCase() : '',
+      segments:(match ? match[2] : value).split('/').filter(segment => segment && segment !== '.'),
+    };
   };
   const pathParts = split(normalized);
   const workspaceParts = split(ws);
