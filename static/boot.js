@@ -3775,9 +3775,15 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       _workspaceLaunchOwnsSession=true;
       console.warn('[boot] workspace query deferred: profile switch did not complete');
     }else if(workspaceIntent.valid){
+      let _sessionCreated=false;
       try{
         S._profileSwitchWorkspace=workspaceIntent.path;
         await newSession(true,{worktree:false});
+        // The server accepted the session. Everything below is local rendering:
+        // if any of it throws, the session EXISTS, so the launch must not be
+        // replayed — a reload would create a second workspace session and
+        // orphan this one.
+        _sessionCreated=true;
         // Consume the launch intents only now that the server accepted the
         // session. Consuming before the POST loses the intent whenever the
         // request fails for a transport reason — most visibly on a 401,
@@ -3793,6 +3799,13 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         syncTopbar();syncWorkspacePanelState();await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();return;
       }catch(e){
         S._profileSwitchWorkspace=null;
+        if(_sessionCreated){
+          // Post-create rendering failure. The launch already produced its one
+          // session, so the intent is spent: consume the parameter, keep the
+          // session, and let the normal boot path below finish drawing the UI.
+          if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
+          console.warn('[boot] workspace session created but boot rendering failed', e);
+        }else{
         // Consume the parameter only on an objective verdict about the path
         // itself: POST /api/session/new tags that one 400 with
         // `code:"invalid_workspace"` (api/routes.py), so a 400 raised by any
@@ -3813,6 +3826,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         // preserved parameter carries the intent to the next load.
         if(!_serverRejectedPath) _workspaceLaunchOwnsSession=true;
         console.warn('[boot] workspace query routing failed', e);
+        }
       }
     }else{
       if(typeof _consumeWorkspaceQueryParamFromLocation==='function') _consumeWorkspaceQueryParamFromLocation();
@@ -3850,11 +3864,20 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // Either way the deep link is lost, or a second wrong-workspace session
     // exists by the time the user retries. Stop here instead: render the empty
     // state, leave the URL untouched, and let the reload carry the intent.
+    //
+    // Deliberately NOT calling _finalizeComposerPrefillOnBoot(): it consumes
+    // `q=` and fills the composer. Both are wrong here. Consuming would strip
+    // the prefill from the URL the retry depends on, and a filled composer
+    // invites a Send that routes through plain newSession() — no workspace cue
+    // — creating a session on the default workspace while the requested
+    // workspace is still pending, which is exactly the duplicate this branch
+    // exists to prevent. The prefill stays in the URL and lands when the
+    // launch completes.
     S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
     S._bootReady=true;
     syncTopbar();syncWorkspacePanelState();
     try{$('emptyState').style.display='';}catch(_){}
-    await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);
+    await renderSessionList();
     if(typeof startGatewaySSE==='function')startGatewaySSE();
     return;
   }

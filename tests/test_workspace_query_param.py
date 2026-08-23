@@ -180,8 +180,12 @@ async function runBootBlocks(ctx) {{
   }}
   const syncTopbar = () => {{}};
   const syncWorkspacePanelState = () => {{}};
-  const renderSessionList = async () => {{}};
-  const _finalizeComposerPrefillOnBoot = async () => {{}};
+  const renderSessionList = async () => {{
+    // A post-create rendering step: the session already exists server-side when
+    // this runs, which is exactly the case the boot block must not replay.
+    if (ctx.renderThrows) throw new Error('render failed');
+  }};
+  const _finalizeComposerPrefillOnBoot = async () => {{ ctx.prefillFinalized = true; }};
   const _startBootModelDropdown = () => {{}};
   return await eval('(async () => {{' + profileBlock + ';' + launchBlock + '; return "fell-through";}})()');
 }}
@@ -309,6 +313,7 @@ console.log(JSON.stringify({calls: window.history.calls.length}));
 
 def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
                    new_session_throws: bool = False,
+                   render_throws: bool = False,
                    new_session_reject_status: int | None = None,
                    new_session_reject_code: str | None = "invalid_workspace",
                    reject_only_workspace_cue: bool = False,
@@ -324,6 +329,7 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
     profileIntent: {profile_intent},
     switchOutcome: {switch_outcome!r},
     newSessionThrows: {'true' if new_session_throws else 'false'},
+    renderThrows: {'true' if render_throws else 'false'},
     newSessionRejectStatus: {new_session_reject_status if new_session_reject_status else 'null'},
     newSessionRejectCode: {json.dumps(new_session_reject_code)},
     rejectOnlyWorkspaceCue: {'true' if reject_only_workspace_cue else 'false'},
@@ -342,6 +348,7 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
     calls: ctx.calls,
     switchCalls: ctx.switchCalls,
     search: window.location.search,
+    prefillFinalized: ctx.prefillFinalized === true,
     cueAfter: ctx.S._profileSwitchWorkspace
   }}));
 }})().catch(e => {{ console.error(e); process.exit(1); }});
@@ -716,6 +723,39 @@ def test_held_launch_leaves_the_url_byte_identical():
     assert "q=hi" in state["search"]
 
 
+def test_held_launch_does_not_finalize_the_composer_prefill():
+    """`_finalizeComposerPrefillOnBoot()` consumes `q=` and fills the composer.
+    Both are wrong while a launch is outstanding: consuming strips the prefill
+    from the URL the retry depends on, and a filled composer invites a Send
+    that routes through plain newSession() with no workspace cue — creating a
+    default-workspace session while the requested one is still pending, i.e.
+    the very duplicate the held branch exists to prevent."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=503,
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj&q=hello")))
+    state = json.loads(out)
+    assert state["held"] is True
+    assert state["prefillFinalized"] is False    # composer left untouched
+    assert "q=hello" in state["search"]          # prefill still in the URL
+
+
+def test_post_create_render_failure_keeps_the_session_and_spends_the_intent():
+    """When /api/session/new succeeded but a later rendering step throws, the
+    launch already produced its one session. Replaying it on reload would
+    create a second workspace session and orphan the first, so the parameter
+    must be consumed and the boot must not hold."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        render_throws=True,
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj&q=hello")))
+    state = json.loads(out)
+    assert len(state["calls"]) == 1              # the session was created
+    assert "workspace=" not in state["search"]   # intent spent, not replayable
+    assert state["held"] is False                # and the boot did not hold
+    assert state["routed"] == "fell-through"     # normal path finishes the UI
+
+
 # ---------------------------------------------------------------------------
 # Server side of the same contract: the discriminator the client branches on
 # ---------------------------------------------------------------------------
@@ -782,3 +822,47 @@ def test_workspace_access_error_is_a_valueerror_subclass():
     from api.workspace import WorkspaceAccessError
 
     assert issubclass(WorkspaceAccessError, ValueError)
+
+
+def test_malformed_path_is_classified_permanent_not_recoverable():
+    """An embedded NUL makes `Path.stat()` raise ValueError, and the message
+    carries the same "Cannot access path:" prefix as a permission failure. It
+    is nonetheless permanent -- no user action makes that value resolvable --
+    so it must not be classified recoverable, or boot would preserve and
+    replay an intrinsically invalid intent on every reload.
+
+    This is why the classification travels as a flag from the probe rather
+    than being re-derived from the message text."""
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from api.workspace import _workspace_access_failure
+
+    failure = _workspace_access_failure(_Path("/tmp/bad\x00path"))
+    assert failure is not None
+    message, recoverable = failure
+    assert "Cannot access path" in message      # reads like an access failure
+    assert recoverable is False                 # but is emphatically not one
+
+
+@pytest.mark.parametrize("case,recoverable", [
+    ("missing", False),
+    ("not-a-directory", False),
+])
+def test_permanent_workspace_failures_are_not_recoverable(tmp_path, case, recoverable):
+    """The other permanent verdicts keep their classification."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from api.workspace import _workspace_access_failure
+
+    if case == "missing":
+        target = tmp_path / "nope"
+    else:
+        target = tmp_path / "file.txt"
+        target.write_text("x", encoding="utf-8")
+
+    failure = _workspace_access_failure(target)
+    assert failure is not None
+    assert failure[1] is recoverable

@@ -297,8 +297,16 @@ def _clean_workspace_list(workspaces: list) -> list:
     return result
 
 
-def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does not exist") -> str | None:
-    """Return a user-facing validation error for an unusable workspace path.
+def _workspace_access_failure(
+    candidate: Path, *, missing_label: str = "Path does not exist"
+) -> tuple[str, bool] | None:
+    """Probe a candidate workspace and classify the failure, if any.
+
+    Returns ``(message, recoverable)`` or ``None`` when the path is usable.
+    ``recoverable`` means the server could not *inspect* the path but the user
+    can change that -- granting macOS Full Disk Access, remounting a volume --
+    and re-send the identical request successfully. Everything else is a
+    verdict re-sending will never change.
 
     ``Path.exists()`` can collapse permission/stat failures into a generic falsey
     result on some Python/OS combinations, which produced misleading "does not
@@ -309,23 +317,38 @@ def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does 
     try:
         st = candidate.stat()
     except FileNotFoundError:
-        return f"{missing_label}: {candidate}"
+        return (f"{missing_label}: {candidate}", False)
     except ValueError as exc:
         # Embedded null byte (or similar invalid path) — .stat() raises ValueError,
         # not OSError. Report as an access error rather than letting it surface as
-        # an uncaught 500.
-        return f"Cannot access path: {candidate!r}. Invalid path ({exc})."
+        # an uncaught 500. NOT recoverable: the path is malformed, so re-sending
+        # the same value can never succeed no matter what the user changes.
+        return (f"Cannot access path: {candidate!r}. Invalid path ({exc}).", False)
     except PermissionError as exc:
         return (
             f"Cannot access path: {candidate}. The server process could not inspect "
             f"this directory ({exc}). On macOS, grant Full Disk Access or Files and "
-            f"Folders permission to the Hermes/WebUI app or server process, then try again."
+            f"Folders permission to the Hermes/WebUI app or server process, then try again.",
+            True,
         )
     except OSError as exc:
-        return f"Cannot access path: {candidate}. The server process could not inspect this path ({exc})."
+        return (
+            f"Cannot access path: {candidate}. The server process could not inspect this path ({exc}).",
+            True,
+        )
     if not stat.S_ISDIR(st.st_mode):
-        return f"Path is not a directory: {candidate}"
+        return (f"Path is not a directory: {candidate}", False)
     return None
+
+
+def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does not exist") -> str | None:
+    """Return a user-facing validation error for an unusable workspace path.
+
+    Message-only view of :func:`_workspace_access_failure` for callers that do
+    not need the recoverable/permanent classification.
+    """
+    failure = _workspace_access_failure(candidate, missing_label=missing_label)
+    return failure[0] if failure else None
 
 
 class WorkspaceAccessError(ValueError):
@@ -340,13 +363,16 @@ class WorkspaceAccessError(ValueError):
     """
 
 
-def _raise_workspace_access_error(message: str) -> None:
-    """Raise the access error with the recoverable//permanent distinction.
+def _raise_workspace_access_error(message: str, recoverable: bool) -> None:
+    """Raise the access failure, preserving the recoverable/permanent split.
 
-    A path that simply does not exist is a permanent verdict on this request;
-    an inaccessible one is recoverable.
+    The classification comes from :func:`_workspace_access_failure`, which knows
+    which ``stat()`` outcome produced the message. Never re-derive it from the
+    message text: several distinct outcomes share the ``Cannot access path:``
+    prefix, and a malformed path (embedded NUL) is emphatically not recoverable
+    even though it reads like an access failure.
     """
-    if message.startswith("Cannot access path:"):
+    if recoverable:
         raise WorkspaceAccessError(message)
     raise ValueError(message)
 
@@ -864,6 +890,10 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     candidate = _resolve_path(path)
 
+    # Call the message-only helper first: it is the long-standing seam that
+    # callers and tests monkeypatch to override accessibility. Consult the
+    # classifying probe only when that seam reports a real failure, so an
+    # override that suppresses the error keeps suppressing it.
     access_error = _workspace_access_error(candidate)
     remote_candidate = _remote_terminal_workspace_candidate(path)
     if access_error:
@@ -872,7 +902,12 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         # update the workspace hint even though this WebUI host cannot stat
         # the target-side path.
         if remote_candidate is None:
-            _raise_workspace_access_error(access_error)
+            classified = _workspace_access_failure(candidate)
+            # Recoverable only when the probe agrees on both the message and
+            # the classification; an override that changed the message falls
+            # back to the permanent verdict.
+            recoverable = bool(classified and classified[0] == access_error and classified[1])
+            _raise_workspace_access_error(access_error, recoverable)
 
     if remote_candidate is not None:
         return remote_candidate
