@@ -81,6 +81,24 @@ def test_posix_containment_matrix():
     assert rows[5]["openPath"] == "relative.md"
 
 
+def test_collection_dedupes_relative_and_workspace_absolute_aliases():
+    script = _common_js(
+        "_sanitizeArtifactPath",
+        "_classifyArtifactPath",
+        "_classifyArtifactCandidate",
+        "_artifactCandidatesFromToolCall",
+        "_artifactCandidatesFromText",
+        "collectSessionArtifacts",
+    ) + r'''
+const S={session:{workspace:'/workspace'},toolCalls:[
+  {name:'write_file',args:{path:'./report.md'}},
+  {name:'write_file',args:{path:'/workspace/report.md'}},
+  {name:'write_file',args:{path:'report.md'}}
+],messages:[]};
+process.stdout.write(JSON.stringify(collectSessionArtifacts().map(item=>item.classification.dedupeKey)));'''
+    assert _node_json(script) == ["report.md"]
+
+
 def test_windows_containment_matrix():
     rows = _classify([
         r"d:/proj/src/report.pdf", r"D:\Proj\report.pdf", r"E:\Proj\file.md",
@@ -114,8 +132,8 @@ openArtifactPath('/workspace/missing.md').then(()=>process.stdout.write(JSON.str
 
 
 def test_artifact_boundary_keys_exist_in_all_locale_blocks():
-    blocks = list(re.finditer(r"^  (?:en|it|ja|ru|es|de|zh|pt|ko|fr|cs|tr|pl|vi): \{", I18N_JS, re.MULTILINE))
-    assert len(blocks) == 14
+    blocks = list(re.finditer(r"^  (?:'[^']+'|[A-Za-z-]+): \{", I18N_JS, re.MULTILINE))
+    assert len(blocks) == 15
     for index, match in enumerate(blocks):
         end = blocks[index + 1].start() if index + 1 < len(blocks) else I18N_JS.index("\n};", match.start())
         block = I18N_JS[match.start() : end]
