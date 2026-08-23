@@ -185,6 +185,7 @@ async function runBootBlocks(ctx) {{
   }}
   const syncTopbar = () => {{}};
   const syncWorkspacePanelState = () => {{}};
+  const lockComposerForClarify = (placeholder) => {{ ctx.composerLocked = placeholder || true; }};
   const renderSessionList = async () => {{
     // A post-create rendering step: the session already exists server-side when
     // this runs, which is exactly the case the boot block must not replay.
@@ -356,6 +357,7 @@ def _boot_scenario(url: str, *, profile_intent: str, switch_outcome: str,
     switchCalls: ctx.switchCalls,
     search: window.location.search,
     prefillFinalized: ctx.prefillFinalized === true,
+    composerLocked: ctx.composerLocked || false,
     cueAfter: ctx.S._profileSwitchWorkspace
   }}));
 }})().catch(e => {{ console.error(e); process.exit(1); }});
@@ -745,6 +747,32 @@ def test_held_launch_does_not_finalize_the_composer_prefill():
     assert state["held"] is True
     assert state["prefillFinalized"] is False    # composer left untouched
     assert "q=hello" in state["search"]          # prefill still in the URL
+
+
+def test_held_launch_locks_the_composer():
+    """An empty-but-interactive composer is still an escape hatch: a manually
+    typed Send routes through plain newSession() and binds to the
+    profile-default workspace while the requested one is pending. The held
+    state must lock the composer (with an explanatory placeholder) so the only
+    action is the reload that retries the launch."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        new_session_reject_status=503,
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj")))
+    state = json.loads(out)
+    assert state["held"] is True
+    assert state["composerLocked"]               # locked, not merely empty
+    assert "reload" in str(state["composerLocked"]).lower()
+
+
+def test_successful_launch_does_not_lock_the_composer():
+    """The lock is strictly a held-state affordance."""
+    out = _run_node(_boot_scenario(
+        "", profile_intent="null", switch_outcome="returns-true",
+        extra_js=_apply("/?workspace=%2FUsers%2Fx%2Fproj")))
+    state = json.loads(out)
+    assert state["routed"] == "routed"
+    assert state["composerLocked"] is False
 
 
 def test_post_create_render_failure_keeps_the_session_and_spends_the_intent():

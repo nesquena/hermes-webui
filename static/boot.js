@@ -3875,8 +3875,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // workspace is still pending, which is exactly the duplicate this branch
     // exists to prevent. The prefill stays in the URL and lands when the
     // launch completes.
+    //
+    // For the same reason the composer is locked, not merely left empty: a
+    // manually typed Send would also route through plain newSession() and
+    // bind to the profile-default workspace while the requested one is still
+    // pending. lockComposerForClarify() is the existing mechanism for exactly
+    // this shape (disable + explanatory placeholder); reload is the retry.
     S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
     S._bootReady=true;
+    if(typeof lockComposerForClarify==='function'){
+      try{lockComposerForClarify('Workspace launch pending — reload the page to retry opening the requested project.');}catch(_){}
+    }
     syncTopbar();syncWorkspacePanelState();
     try{$('emptyState').style.display='';}catch(_){}
     await renderSessionList();
