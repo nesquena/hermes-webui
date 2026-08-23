@@ -7646,7 +7646,14 @@ def clear_sidecar_metadata_cache() -> None:
 
 
 def _state_projection_sidecar_metadata(sid: str) -> dict:
-    """Return UI-owned metadata (title + archived) for a state.db-projected row.
+    """Return UI-owned metadata (title + archived + project_id) for a state row.
+
+    ``project_id`` is UI-owned in exactly the same way as the other two:
+    ``/api/session/move`` writes it onto the sidecar and NOTHING writes
+    ``state.db.sessions.project_id``. Reading it here is what lets the sidebar
+    projection agree with the assignment ``all_sessions()`` re-surfaces, instead
+    of counting a moved conversation against the unassigned window (#6659 review
+    finding 2).
 
     Memoized by the sidecar file's (path, mtime_ns, size, ctime_ns) stat
     signature so the sidebar projection — which calls this once per row in both
@@ -7657,11 +7664,11 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     Returns a COPY so callers can't mutate the cached dict.
 
     NOTE: this stat-gates on ``SESSION_DIR / f'{sid}.json'`` because that file is
-    ``Session.load_metadata_only``'s sole source for title+archived. If that ever
-    stops being true (metadata moves to another store), this gate would short-
-    circuit before the real source — update both together.
+    ``Session.load_metadata_only``'s sole source for title+archived+project_id. If
+    that ever stops being true (metadata moves to another store), this gate would
+    short-circuit before the real source — update both together.
     """
-    default = {"title": None, "archived": False}
+    default = {"title": None, "archived": False, "project_id": None}
     if not is_safe_session_id(sid):
         return dict(default)
     p = SESSION_DIR / f'{sid}.json'
@@ -7689,6 +7696,8 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
         if title:
             metadata["title"] = title
         metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+        project_id = str(getattr(webui_meta, 'project_id', None) or '').strip()
+        metadata["project_id"] = project_id or None
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either
@@ -7840,12 +7849,33 @@ def _load_cli_sessions_uncached(
             return _webhook_pid()
         return None
 
+    # Sidecar-carried assignments, memoized per sid for this scan.
+    # _state_projection_sidecar_metadata is already stat-cached, but
+    # _interactive_row_project_id is called several times per row (budget
+    # seeding, the unassigned count, the projection), and one os.stat per call
+    # per row is the kind of cold-sidebar I/O #4842 removed.
+    _sidecar_pid_cache: dict[str, str | None] = {}
+    def _sidecar_row_project_id(sid: str) -> str | None:
+        if sid not in _sidecar_pid_cache:
+            _sidecar_pid_cache[sid] = _state_projection_sidecar_metadata(sid).get('project_id')
+        return _sidecar_pid_cache[sid]
+
     def _interactive_row_project_id(row: dict) -> str | None:
         """Project chip for an interactive (CLI/TUI/ACP) state.db row.
 
         Single resolved value for both the cap decisions below and the projected
         payload, so the code that budgets a row and the code that renders it can
         never disagree about which project it belongs to.
+
+        The WebUI sidecar is consulted when state.db carries no assignment,
+        because ``/api/session/move`` writes ``project_id`` onto the sidecar ONLY
+        — nothing writes ``state.db.sessions.project_id``. Without this the
+        "``CLI_VISIBLE_SESSION_LIMIT`` unassigned conversations" guarantee counted
+        a WebUI-side assignment as unassigned while the route (which sees the
+        sidecar's value through ``all_sessions()``) classified the same
+        conversation as ASSIGNED, so three moved sessions silently shortened
+        everyone's sidebar to 17 rows (#6659 review finding 2). state.db wins when
+        it has an assignment of its own: it is the agent's own record.
 
         Background sources keep the system-chip answer even when a
         ``source_filter`` routes them through this loop, so one kanban row cannot
@@ -7860,7 +7890,10 @@ def _load_cli_sessions_uncached(
             or is_webhook_session(sid, source)
         ):
             return _state_row_project_id(sid, source)
-        return _resolved_project_id(row.get('project_id'))
+        resolved = _resolved_project_id(row.get('project_id'))
+        if resolved is None:
+            resolved = _resolved_project_id(_sidecar_row_project_id(sid))
+        return resolved
 
     profile_value = _cli_profile or 'default'
     # A deleted WebUI session is tombstoned (see _record_webui_deleted_session_tombstone)
@@ -8120,6 +8153,17 @@ def _load_cli_sessions_uncached(
         unassigned_seen = sum(
             1 for row in state_rows if _interactive_row_project_id(row) is None
         )
+        # A sidecar-carried assignment is invisible to the SQL 'unassigned'
+        # filter (state.db still says NULL), so the refill query would spend
+        # that many of its own slots re-fetching conversations this pass already
+        # classified as assigned and already represents. Widen the query by that
+        # count so it can actually reach the older unassigned conversations the
+        # moved rows displaced (#6659 review finding 2).
+        sidecar_only_assigned = sum(
+            1 for row in state_rows
+            if _interactive_row_project_id(row) is not None
+            and _resolved_project_id(row.get('project_id')) is None
+        )
         if (
             unassigned_target
             and unassigned_seen < unassigned_target
@@ -8134,7 +8178,7 @@ def _load_cli_sessions_uncached(
             try:
                 for row in read_importable_agent_session_rows(
                     db_path,
-                    limit=unassigned_target,
+                    limit=unassigned_target + sidecar_only_assigned,
                     log=logger,
                     exclude_sources=interactive_excluded,
                     project_assignment='unassigned',
