@@ -472,7 +472,7 @@ def test_installed_handler_behaviour_on_supra_legacy_levels_justifies_failing_cl
         {"kind": "model_options", "model_options": {"reasoning": {"enabled": True, "effort": "ultra"}}},
     ])
 
-    for level, result in zip(("max", "ultra"), results):
+    for level, result in zip(("max", "ultra"), results, strict=True):
         if level in accepted:
             assert result == {"enabled": True, "effort": level}
         else:
