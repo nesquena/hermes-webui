@@ -493,7 +493,8 @@ function _classifyArtifactPath(path, workspace){
     if(fold(pathParts.segments[i]) !== fold(workspaceParts.segments[i])) return blocked('outside');
   }
   const suffix = pathParts.segments.slice(workspaceParts.segments.length).join('/');
-  return {kind:'workspace-contained', displayPath:suffix || '.', dedupeKey:pathIsWindows ? normalized.toLowerCase() : normalized, openPath:suffix || '.'};
+  const dedupePath = suffix || '.';
+  return {kind:'workspace-contained', displayPath:dedupePath, dedupeKey:pathIsWindows ? dedupePath.toLowerCase() : dedupePath, openPath:dedupePath};
 }
 
 function _classifyArtifactCandidate(path, workspace){
@@ -586,8 +587,13 @@ function collectSessionArtifacts(){
   const seen = new Set();
   const push = (path, source) => {
     path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path);
-    if(!path || seen.has(path)) return;
-    seen.add(path); items.push({path, source, classification:typeof _classifyArtifactCandidate === 'function' ? _classifyArtifactCandidate(path, S.session && S.session.workspace) : null});
+    if(!path) return;
+    const classification = typeof _classifyArtifactCandidate === 'function'
+      ? _classifyArtifactCandidate(path, S.session && S.session.workspace)
+      : null;
+    const dedupeKey = classification && classification.dedupeKey || path;
+    if(seen.has(dedupeKey)) return;
+    seen.add(dedupeKey); items.push({path, source, classification});
   };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
@@ -668,7 +674,7 @@ function renderSessionArtifacts(){
       return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
     }
     const explanationKey = classification.kind === 'unsupported' ? 'workspace_artifact_unsupported' : 'workspace_artifact_outside_workspace';
-    return `<div class="workspace-artifact-item workspace-artifact-item-display-only" title="${esc(path)}"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div><div class="workspace-artifact-explanation">${esc(t(explanationKey))}</div></div>`;
+    return `<div class="workspace-artifact-item workspace-artifact-item-display-only" title="${esc(path)}"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div><div class="workspace-artifact-explanation" data-i18n="${explanationKey}">${esc(t(explanationKey))}</div></div>`;
   }).join('');
 }
 
