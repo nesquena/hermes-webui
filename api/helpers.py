@@ -240,12 +240,43 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
 
 
+def _inject_rotated_csrf_token(handler, payload):
+    """Attach the replacement session's CSRF token to a JSON payload.
+
+    Trusted-header reconciliation (``ensure_trusted_auth_session``) can
+    rotate the session on ANY request, not just one that then fails CSRF —
+    a plain GET (e.g. the session poll) rotates just as readily. The 403
+    path (``_csrf_rejection_payload``) already hands its replacement token
+    back explicitly; this covers every other response so the open tab never
+    has to hit a `token_mismatch` on its next unsafe request before it has
+    any way to learn the token changed. `csrf_token` already present means
+    the caller (the 403 path) built its own recovery payload — leave it
+    alone.
+    """
+    if not isinstance(payload, dict) or 'csrf_token' in payload:
+        return payload
+    if not getattr(handler, '_trusted_auth_session_rotated', False):
+        return payload
+    replacement = getattr(handler, '_trusted_auth_session_cookie_value', None)
+    if not replacement:
+        return payload
+    from api.auth import csrf_token_for_session, verify_session
+
+    if not verify_session(replacement):
+        return payload
+    token = csrf_token_for_session(replacement)
+    if not token:
+        return payload
+    return {**payload, 'csrf_token': token}
+
+
 def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
     """
+    payload = _inject_rotated_csrf_token(handler, payload)
     body = _json_response_body(payload, pretty=pretty)
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')

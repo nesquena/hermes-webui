@@ -34,28 +34,44 @@
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
   if(!token||!window.fetch)return;
   var originalFetch=window.fetch.bind(window);
+  function sameOriginUrl(input){
+    try{
+      var raw=(typeof input==='string'||input instanceof URL)?input:(input&&input.url)||'';
+      return new URL(raw,document.baseURI||location.href);
+    }catch(_){return null;}
+  }
   function sameOriginUnsafe(input,init){
     var method=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
     if(!/^(POST|PUT|PATCH|DELETE)$/.test(method))return false;
-    try{
-      var raw=(typeof input==='string'||input instanceof URL)?input:(input&&input.url)||'';
-      var url=new URL(raw,document.baseURI||location.href);
-      if(url.origin!==location.origin)return false;
-      return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
-    }catch(_){return false;}
+    var url=sameOriginUrl(input);
+    if(!url||url.origin!==location.origin)return false;
+    return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
+  }
+  // A safe (GET/HEAD) same-origin request can ALSO rotate the trusted-auth
+  // session server-side (e.g. the periodic session poll) — it just doesn't
+  // need the CSRF header attached. Watch its response for a replacement
+  // token too, or the tab keeps sending the dead token until its next
+  // unsafe request happens to trip the 403 recovery path.
+  function sameOriginSafe(input,init){
+    var method=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+    if(!/^(GET|HEAD)$/.test(method))return false;
+    var url=sameOriginUrl(input);
+    return !!url&&url.origin===location.origin;
   }
   function adoptRotatedToken(res){
-    // Trusted-header reconciliation can rotate the session mid-request; the
-    // 403 carries the replacement CSRF token so the retry succeeds without a
-    // page reload.
-    if(res&&res.status===403&&typeof res.clone==='function'){
-      try{
-        res.clone().json().then(function(body){
-          if(body&&body.reason==='session_rotated'&&typeof body.csrf_token==='string'&&body.csrf_token)token=body.csrf_token;
-        }).catch(function(){});
-      }catch(_){}
-    }
-    return res;
+    // Returns a promise that resolves only once any replacement token has
+    // been read and adopted — a caller that awaits this fetch and
+    // immediately issues the next unsafe request must see the updated
+    // token, not a stale one still in flight in a detached microtask.
+    if(!res||typeof res.clone!=='function')return Promise.resolve(res);
+    var contentType=(res.headers&&typeof res.headers.get==='function'&&res.headers.get('Content-Type'))||'';
+    if(!/^application\/json/i.test(contentType))return Promise.resolve(res);
+    try{
+      return res.clone().json().then(function(body){
+        if(body&&typeof body.csrf_token==='string'&&body.csrf_token)token=body.csrf_token;
+        return res;
+      }).catch(function(){return res;});
+    }catch(_){return Promise.resolve(res);}
   }
   window.fetch=function(input,init){
     if(sameOriginUnsafe(input,init)){
@@ -64,6 +80,9 @@
       if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
       opts.headers=headers;
       return originalFetch(input,opts).then(adoptRotatedToken);
+    }
+    if(sameOriginSafe(input,init)){
+      return originalFetch(input,init).then(adoptRotatedToken);
     }
     return originalFetch(input,init);
   };

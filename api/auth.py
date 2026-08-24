@@ -888,6 +888,46 @@ def _apply_trusted_session_profile(handler, bound_profile: str | None, cookie_va
         _queue_pending_cookie(handler, _build_profile_cookie_header(bound_profile, cookie_value))
 
 
+# Two concurrent requests that both find the SAME stale/mismatched trusted
+# identity (e.g. two tabs polling at once, right after a group→profile
+# remap) must not each mint their own replacement session: cookie B from one
+# response paired with the CSRF token minted for cookie A from the other's
+# response bricks whichever tab receives the mismatched pair. Within this
+# short window, the second request reuses the first request's freshly
+# created replacement instead of creating its own. Keyed by the identity
+# being rotated INTO (username, bound_profile), not by the stale cookie
+# being rotated OUT of, so unrelated identities never collide.
+#
+# Dedicated lock: `create_session()` below acquires `_SESSIONS_LOCK`
+# internally, and that lock is not reentrant, so this critical section must
+# use a lock of its own rather than `_SESSIONS_LOCK` itself.
+_ROTATION_REUSE_WINDOW_S = 5.0
+_ROTATION_REUSE_LOCK = threading.Lock()
+_rotation_reuse_cache: dict[tuple[str, str | None], tuple[str, float]] = {}
+
+
+def _rotated_trusted_session(username: str, bound_profile: str | None) -> str:
+    """Return a fresh replacement session for (username, bound_profile).
+
+    Concurrent callers within :data:`_ROTATION_REUSE_WINDOW_S` of each other
+    get back the SAME cookie value instead of each minting their own. Must be
+    called with the rotation already decided (i.e. after the caller has
+    determined the existing session is stale) — this never returns a session
+    that only optionally needed to rotate.
+    """
+    key = (username, bound_profile)
+    now = time.time()
+    with _ROTATION_REUSE_LOCK:
+        cached = _rotation_reuse_cache.get(key)
+        if cached:
+            cookie_value, expiry = cached
+            if expiry > now and verify_session(cookie_value):
+                return cookie_value
+        cookie_value = create_session(auth_type='trusted', username=username, bound_profile=bound_profile)
+        _rotation_reuse_cache[key] = (cookie_value, now + _ROTATION_REUSE_WINDOW_S)
+        return cookie_value
+
+
 def ensure_trusted_auth_session(handler) -> dict | None:
     if hasattr(handler, '_trusted_auth_session_reconciled'):
         return handler._trusted_auth_session_reconciled
@@ -962,11 +1002,7 @@ def ensure_trusted_auth_session(handler) -> dict | None:
         # as deliberately retryable (the replacement cookie and its CSRF
         # token are emitted with the 403, so a retry/reload succeeds).
         handler._trusted_auth_session_rotated = True
-    cookie_value = create_session(
-        auth_type='trusted',
-        username=username,
-        bound_profile=bound_profile,
-    )
+    cookie_value = _rotated_trusted_session(username, bound_profile)
     _queue_pending_cookie(handler, _auth_cookie_header(cookie_value, handler))
     _apply_trusted_session_profile(handler, bound_profile, cookie_value)
     if preserved_profile:
