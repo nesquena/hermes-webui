@@ -263,7 +263,7 @@ def test_bindings_dialog_preserves_provider_scoped_duplicate_model_ids():
 
 def test_bindings_dialog_provider_scoped_key_roundtrip_via_node():
     """Node-evaluated roundtrip: provider+model synthetic keys isolate routes."""
-    import subprocess, shutil, json as _json, tempfile, os
+    import shutil, json as _json, tempfile, os
 
     node = shutil.which("node")
     if not node:
