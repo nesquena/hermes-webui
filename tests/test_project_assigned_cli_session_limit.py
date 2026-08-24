@@ -1328,10 +1328,14 @@ def test_sidecar_moves_below_the_window_still_deliver_the_full_window(
     # applied to rows that were never read cannot invent them.
     model_ids = {s["session_id"] for s in sessions}
     assert expected_unassigned_tail in model_ids
-    # At LEAST the window: the proportional widening can over-read when the
-    # moved conversations cluster at the top of the window (it infers the moved
-    # share from what it has seen), and reading a few spare conversations is
-    # cheaper than another query. The sidebar cap below trims the surplus.
+    # At LEAST the window: every widening estimates the depth it needs from the
+    # rows in hand, so it over-reads whenever the moved conversations are denser
+    # deeper in the history than that. How MUCH it can over-read is not "a few":
+    # a shape that keeps the window short through all three estimates reaches the
+    # forced ceiling query and the model then carries the whole band, up to
+    # UNASSIGNED_CLI_REFILL_SCAN_CEILING (200) rows to deliver 20. The sidebar cap
+    # below trims the surplus, but only after it has been read and stat()ed. The
+    # two cost pins further down hold the ordinary shapes off that path.
     assert sum(1 for s in sessions if not s["project_id"]) >= 20
     assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
 
@@ -1482,6 +1486,106 @@ def test_unassigned_refill_query_count_is_bounded(
 
     kept = _sidebar_rows_after_route(sessions, moved)
     assert len(_unassigned_cli_ids(kept)) == 20
+
+
+def _refill_cost(fake_hermes_home, tmp_path, monkeypatch, *, total, moved_indexes):
+    """Build the sidebar for one arrangement and report what it COST.
+
+    Returns the width of every unassigned refill query plus the row counts the
+    model handed on, which is the part the sidebar cap cannot make cheaper: those
+    rows were read, sidecar-stat()ed and (on the gateway stream) serialised.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:03d}", BASE_TS + index) for index in range(total)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:03d}" for index in moved_indexes}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+    cli_rows = [s for s in sessions if s.get("is_cli_session")]
+    kept = _sidebar_rows_after_route(sessions, moved)
+    return {
+        "queries": unassigned_queries,
+        "model_rows": len(cli_rows),
+        "model_unassigned": sum(1 for s in cli_rows if not s["project_id"]),
+        "sidebar_unassigned": len(_unassigned_cli_ids(kept)),
+    }
+
+
+def test_moving_the_newest_conversations_does_not_buy_a_ceiling_read(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A filed-away newest 40 costs 60 rows, not the whole 200-row ceiling.
+
+    The FIRST refill query here finds zero still-unassigned conversations (all 40
+    it can reach were moved from the WebUI), so the proportional estimate has no
+    density to extrapolate from. Dividing by ``max(unassigned_seen, 1)`` instead
+    made it 20 * 40 = 800, clamped to the scan ceiling: every profile that had
+    moved >= 21 of its newest conversations jumped straight to a 200-row read
+    when the 60-row exact-width floor fills the window on the nose.
+
+    Cost pin, not a correctness pin -- the window is full either way. Widths are
+    asserted exactly so a future widening cannot quietly buy the ceiling back.
+    """
+    cost = _refill_cost(
+        fake_hermes_home, tmp_path, monkeypatch,
+        total=400, moved_indexes=range(360, 400),
+    )
+
+    assert cost["queries"] == [40, 60]
+    assert max(cost["queries"]) < models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+    # 60 rows carried to deliver 20, not 200 rows carrying 160 spares.
+    assert cost["model_rows"] == 60
+    assert cost["model_unassigned"] == 20
+    assert cost["sidebar_unassigned"] == 20
+
+
+def test_moves_clustered_at_the_window_edge_do_not_spend_the_whole_budget(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Eight moves at the bottom edge cost two queries, not four.
+
+    This is the other over-read shape. 19 unassigned conversations sit above the
+    moved block, so every re-count returns ``unassigned_seen == 19`` and the
+    proportional estimate advances by ~2 a time (21, 23, 25): all four queries
+    spent, the last of them reading the full ceiling band, and the model carrying
+    200 rows / 192 of them unassigned to deliver 20. Geometric growth paced by the
+    remaining budget reaches the needed depth of 28 on the second query instead.
+    """
+    cost = _refill_cost(
+        fake_hermes_home, tmp_path, monkeypatch,
+        total=200, moved_indexes=range(173, 181),
+    )
+
+    assert cost["queries"] == [21, 28]
+    assert len(cost["queries"]) < models.UNASSIGNED_CLI_REFILL_MAX_QUERIES
+    assert max(cost["queries"]) < models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+    # 28 rows for a 20-row window: the 8 moved conversations plus the window.
+    assert cost["model_rows"] == 28
+    assert cost["model_unassigned"] == 20
+    assert cost["sidebar_unassigned"] == 20
 
 
 def test_unassigned_refill_stops_widening_on_an_exhausted_database(
