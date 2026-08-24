@@ -4886,8 +4886,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         writeCurrent(slice);
       }
       const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,m[1],parent):null;
-      const hasDetachedSuffix=!!(parts&&parts[1]);
-      if(matchEnd===combined.length && !hasDetachedSuffix && !_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])){
+      // A detached suffix is not itself a reliable streaming boundary: the
+      // chunk may have ended inside a filename (e.g. a. + png). Keep buffering
+      // until the parsed reference itself proves complete.
+      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
