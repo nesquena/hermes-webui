@@ -684,7 +684,9 @@ class cron_profile_context_for_home:
             self._home_override_mod = _resolve_hermes_home_override()
             self._home_override_token = None
             self._home_override_installed = False
-            self._env_mirrored = False
+            # Always mirror to env var for cron scopes (fix for #6857)
+            self._prev_env = os.environ.get('HERMES_HOME')
+            os.environ['HERMES_HOME'] = str(self._home)
             if self._home_override_mod is not None:
                 try:
                     self._home_override_token = self._home_override_mod.set_hermes_home_override(
@@ -694,12 +696,8 @@ class cron_profile_context_for_home:
                 except Exception:
                     self._home_override_token = None
                     self._home_override_installed = False
-            if not self._home_override_installed:
-                self._prev_env = os.environ.get('HERMES_HOME')
-                os.environ['HERMES_HOME'] = str(self._home)
-                self._env_mirrored = True
-            else:
-                self._prev_env = None
+            # Note: _env_mirrored is no longer used; we always restore env var below
+            self._env_mirrored = True  # kept for compatibility but not used
 
             # Re-patch cron.jobs module-level constants (see main context manager
             # below for the rationale).
@@ -746,11 +744,11 @@ class cron_profile_context_for_home:
                     )
                 except Exception:
                     pass
-            elif getattr(self, '_env_mirrored', False):
-                if self._prev_env is None:
-                    os.environ.pop('HERMES_HOME', None)
-                else:
-                    os.environ['HERMES_HOME'] = self._prev_env
+            # Always restore env var mirror for cron scopes
+            if self._prev_env is None:
+                os.environ.pop('HERMES_HOME', None)
+            else:
+                os.environ['HERMES_HOME'] = self._prev_env
             if self._prev_cj is not None:
                 try:
                     import cron.jobs as _cj
@@ -793,7 +791,9 @@ class cron_profile_context:
             self._home_override_mod = _resolve_hermes_home_override()
             self._home_override_token = None
             self._home_override_installed = False
-            self._env_mirrored = False
+            # Always mirror to env var for cron scopes (fix for #6857)
+            self._prev_env = os.environ.get('HERMES_HOME')
+            os.environ['HERMES_HOME'] = str(home)
             if self._home_override_mod is not None:
                 try:
                     self._home_override_token = self._home_override_mod.set_hermes_home_override(
@@ -803,12 +803,8 @@ class cron_profile_context:
                 except Exception:
                     self._home_override_token = None
                     self._home_override_installed = False
-            if not self._home_override_installed:
-                self._prev_env = os.environ.get('HERMES_HOME')
-                os.environ['HERMES_HOME'] = str(home)
-                self._env_mirrored = True
-            else:
-                self._prev_env = None
+            # Note: _env_mirrored is no longer used; we always restore env var below
+            self._env_mirrored = True  # kept for compatibility but not used
 
             # Re-patch cron.jobs module-level constants. They are snapshot at
             # import time (line 68-71 of cron/jobs.py) and don't participate in
@@ -854,13 +850,11 @@ class cron_profile_context:
                     )
                 except Exception:
                     pass
-            elif getattr(self, '_env_mirrored', False):
-                if self._prev_env is None:
-                    os.environ.pop('HERMES_HOME', None)
-                else:
-                    os.environ['HERMES_HOME'] = self._prev_env
-
-            # Restore cron.jobs module constants
+            # Always restore env var mirror for cron scopes
+            if self._prev_env is None:
+                os.environ.pop('HERMES_HOME', None)
+            else:
+                os.environ['HERMES_HOME'] = self._prev_env
             if self._prev_cj is not None:
                 try:
                     import cron.jobs as _cj
