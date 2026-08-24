@@ -1,7 +1,10 @@
 """Trusted gateway wake provenance projection and delivery-id dedup."""
 
+import ast
+import inspect
 import json
 import sqlite3
+import textwrap
 
 import api.models as models
 import api.streaming as streaming
@@ -223,3 +226,22 @@ def test_run_conversation_contract_omits_wakeup_fields_for_older_agent():
 
     assert "persist_user_display_kind" not in kwargs
     assert "persist_user_display_metadata" not in kwargs
+
+
+def test_all_run_conversation_retries_forward_wakeup_provenance():
+    """Credential self-heal retries must keep the original turn authority."""
+    source = textwrap.dedent(inspect.getsource(streaming._run_agent_streaming))
+    tree = ast.parse(source)
+    builders = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_build_run_conversation_kwargs"
+    ]
+
+    assert len(builders) == 3
+    for call in builders:
+        keyword_names = {keyword.arg for keyword in call.keywords}
+        assert "persist_user_display_kind" in keyword_names
+        assert "persist_user_display_metadata" in keyword_names

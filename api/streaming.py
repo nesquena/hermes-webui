@@ -12580,6 +12580,8 @@ def _run_agent_streaming(
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     persist_user_timestamp=_heal_persist_user_timestamp,
+                                    persist_user_display_kind=_persist_user_display_kind,
+                                    persist_user_display_metadata=_persist_user_display_metadata,
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -13947,6 +13949,8 @@ def _run_agent_streaming(
                             task_id=session_id,
                             persist_user_message=msg_text,
                             persist_user_timestamp=_heal_persist_user_timestamp,
+                            persist_user_display_kind=_persist_user_display_kind,
+                            persist_user_display_metadata=_persist_user_display_metadata,
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
