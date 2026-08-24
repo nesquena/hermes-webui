@@ -12,6 +12,8 @@ import sys
 import unittest
 from unittest import mock
 
+from tests.js_source_extract import extract_function
+
 # Ensure repo is on sys.path so api.config can be imported
 _REPO_ROOT = pathlib.Path(__file__).parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -283,9 +285,12 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
     def test_sync_topbar_before_render_session_list(self):
         """syncTopbar() should be called before renderSessionList()
         so the chips are correct when the UI re-renders."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        switch_profile = extract_function(
+            PANELS_JS, "switchToProfile", prefix="async function"
+        )
+        idx = switch_profile.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        block = switch_profile[idx:]
 
         pos_sync = block.find('syncTopbar()')
         pos_render = block.find('await renderSessionList()')

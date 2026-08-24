@@ -118,10 +118,8 @@ def test_loadsession_has_generation_token_and_forwards_to_ensure_messages_loaded
         "loadSession() should check ownership in multiple await/catch paths, "
         "including stale _ensureMessagesLoaded catch branches"
     )
-    ensure_call = _normalise_ws("await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});")
-    assert ensure_call in norm, (
-        "loadSession() must pass generation into _ensureMessagesLoaded() for stale-owner checks"
-    )
+    assert "expectedSessionId:opts.expectedSessionId" in norm
+    assert "expectedProfile:opts.expectedProfile" in norm
     assert (
         "showToast('Failed to load session" in LOAD_SESSION_SRC
         or "showToast('Failed to load conversation messages" in LOAD_SESSION_SRC
@@ -206,6 +204,7 @@ function createEnvironment() {
   globalThis._loadingSessionId = null;
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
+  globalThis._sessionNavigationGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;

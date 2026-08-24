@@ -6965,6 +6965,7 @@ function _openProfileSwitchSessionBrowser(){
 }
 
 async function switchToProfile(name) {
+  const options=arguments[1]||{};
   // ── #4671 profile-switch loading-skeleton — FOUR-GUARD CONTRACT ───────────────
   // The skeleton must never be clobbered by the OLD profile's content and must never
   // strand. Four interacting pieces of state cooperate; an edit touching one without
@@ -6988,7 +6989,11 @@ async function switchToProfile(name) {
   // already on this profile, so paths like activateCurrentProfile() (which
   // doesn't pre-check) can't flash a skeleton→restore for a click that changes
   // nothing. (#4662 Opus gate)
-  if (name && name === S.activeProfile) return true;
+  if (name && !options.force && (
+    name === S.activeProfile ||
+    (typeof _profileMatchesActiveProfile === 'function' &&
+      _profileMatchesActiveProfile(name,S.activeProfile||'default'))
+  )) return true;
   S._pendingSessionToolsets=null;
   // Profile switches are per-client cookie/TLS scoped, so a running stream in
   // the current session can safely continue while this tab moves to another
@@ -7003,7 +7008,43 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
-  const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  const _openingExistingSidebarSession = !!options.openExistingSession ||
+    !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
+  const _navigationGeneration=Number.isFinite(options.navigationGeneration)
+    ? Number(options.navigationGeneration) : null;
+  const _navigationIsCurrent=()=>_navigationGeneration===null||
+    (typeof _sessionNavigationGeneration==='undefined'||_sessionNavigationGeneration===_navigationGeneration);
+  const _preNavigationBrowserState=_navigationGeneration===null?null:{
+    defaultModel:window._defaultModel,
+    activeProvider:window._activeProvider,
+    profileDefaultWorkspace:S._profileDefaultWorkspace,
+    profileSwitchWorkspace:S._profileSwitchWorkspace,
+    pendingProfileModel:S._pendingProfileModel,
+    pendingProfileModelProvider:S._pendingProfileModelProvider,
+    persistedModel:localStorage.getItem('hermes-webui-model'),
+    persistedModelState:localStorage.getItem('hermes-webui-model-state'),
+  };
+  const _restorePreNavigationBrowserState=()=>{
+    if(!_preNavigationBrowserState) return;
+    window._defaultModel=_preNavigationBrowserState.defaultModel;
+    window._activeProvider=_preNavigationBrowserState.activeProvider;
+    S._profileDefaultWorkspace=_preNavigationBrowserState.profileDefaultWorkspace;
+    S._profileSwitchWorkspace=_preNavigationBrowserState.profileSwitchWorkspace;
+    S._pendingProfileModel=_preNavigationBrowserState.pendingProfileModel;
+    S._pendingProfileModelProvider=_preNavigationBrowserState.pendingProfileModelProvider;
+    if(_preNavigationBrowserState.persistedModel===null) localStorage.removeItem('hermes-webui-model');
+    else localStorage.setItem('hermes-webui-model',_preNavigationBrowserState.persistedModel);
+    if(_preNavigationBrowserState.persistedModelState===null) localStorage.removeItem('hermes-webui-model-state');
+    else localStorage.setItem('hermes-webui-model-state',_preNavigationBrowserState.persistedModelState);
+  };
+  const _abortSupersededNavigation=async()=>{
+    if(_navigationIsCurrent()) return false;
+    if(_switchGen===_profileSwitchGeneration&&!options.navigationRollback){
+      const compensated=await switchToProfile(_prevProfileName,{openExistingSession:true,force:true,navigationRollback:true});
+      if(compensated===true) _restorePreNavigationBrowserState();
+    }
+    return true;
+  };
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
@@ -7035,7 +7076,7 @@ async function switchToProfile(name) {
     S.session.active_stream_id ||
     S.session.pending_user_message
   ));
-  if (_openingExistingSidebarSession && S.session) {
+  if (_openingExistingSidebarSession) {
     // A cross-profile sidebar click is about to load a concrete existing session.
     // Do not create or retag a blank intermediary session in the destination profile.
     sessionInProgress = true;
@@ -7069,6 +7110,7 @@ async function switchToProfile(name) {
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
+    if(await _abortSupersededNavigation()) return false;
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
@@ -7104,15 +7146,32 @@ async function switchToProfile(name) {
     // Apply the profile defaults returned by /api/profile/switch immediately.
     // Refreshing the full model/workspace catalogs is useful, but it should not
     // hold the visible switch animation open.
-    if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-    else localStorage.removeItem('hermes-webui-model');
+    // Existing-session navigation is transactional: switch the profile cookie
+    // so the target session can be validated, but leave the visible/session
+    // model and workspace surfaces under the previous session's ownership.
+    // loadSession() adopts the validated target values; compensation therefore
+    // never has to undo a transient target-model dropdown repaint.
+    const _applyProfileDefaults=!_openingExistingSidebarSession;
+    if(_applyProfileDefaults){
+      if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+      else {
+        localStorage.removeItem('hermes-webui-model');
+        localStorage.removeItem('hermes-webui-model-state');
+      }
+    }
     _skillsData = null;
     _workspaceList = null;
-    if (data.default_model) window._defaultModel = data.default_model;
-    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    if (_applyProfileDefaults&&data.default_model) window._defaultModel = data.default_model;
+    else if(_applyProfileDefaults){
+      window._defaultModel = null;
+      S._pendingProfileModel = null;
+      S._pendingProfileModelProvider = null;
+    }
+    if (_applyProfileDefaults&&data.default_model_provider) window._activeProvider = data.default_model_provider;
+    else if(_applyProfileDefaults) window._activeProvider = null;
 
     // ── Apply model ────────────────────────────────────────────────────────
-    if (data.default_model) {
+    if (_applyProfileDefaults&&data.default_model) {
       const sel = $('modelSelect');
       const providerId = data.default_model_provider || window._activeProvider || null;
       const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === data.default_model) : null;
@@ -7151,12 +7210,12 @@ async function switchToProfile(name) {
     if (S.session && !sessionInProgress) {
       S.session.profile = data.active || name;
     }
-    if (typeof refreshProfileTransitionReasoningChip === 'function') {
+    if (_applyProfileDefaults&&typeof refreshProfileTransitionReasoningChip === 'function') {
       refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
     }
 
     // ── Apply workspace ────────────────────────────────────────────────────
-    if (data.default_workspace) {
+    if (_applyProfileDefaults&&data.default_workspace) {
       // Always store the persistent profile default — used for blank-page display
       // and workspace auto-bind throughout the session lifecycle (#804, #823).
       S._profileDefaultWorkspace = data.default_workspace;
@@ -7176,6 +7235,9 @@ async function switchToProfile(name) {
           S.session.workspace = data.default_workspace;
         } catch (_) {}
       }
+    } else if(_applyProfileDefaults){
+      S._profileDefaultWorkspace = null;
+      S._profileSwitchWorkspace = null;
     }
 
     // ── Session ────────────────────────────────────────────────────────────
@@ -7189,6 +7251,7 @@ async function switchToProfile(name) {
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
+      if(await _abortSupersededNavigation()) return false;
       if (_switchGen !== _profileSwitchGeneration) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
@@ -7197,6 +7260,7 @@ async function switchToProfile(name) {
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
       await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+      if(await _abortSupersededNavigation()) return false;
       if (_switchGen !== _profileSwitchGeneration) return false;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
@@ -7206,6 +7270,7 @@ async function switchToProfile(name) {
       // this render the first allowed to paint the new profile's rows.
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
+      if(await _abortSupersededNavigation()) return false;
       // Re-check generation after the awaited list render: a newer switch can be
       // started while renderSessionList() is in flight, and without this guard
       // the superseded switch would clear the newer switch's workspace skeleton
@@ -7234,6 +7299,7 @@ async function switchToProfile(name) {
       // #4671: lift the embargo immediately before the switch-owned render (see above).
       if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
       await renderSessionList();
+      if(await _abortSupersededNavigation()) return false;
       if (_switchGen !== _profileSwitchGeneration) return;
       if (typeof _openProfileSwitchSessionBrowser === 'function') _openProfileSwitchSessionBrowser();
       syncTopbar();
@@ -7242,6 +7308,7 @@ async function switchToProfile(name) {
       if (S.session && S.session.workspace) {
         const dirLoad = loadDir('.');
         if (workspaceVisible) await dirLoad;
+        if(await _abortSupersededNavigation()) return false;
       } else if (typeof clearWorkspaceTreeSkeleton === 'function') {
         // New profile has no bound workspace — clear the up-front skeleton so it
         // doesn't strand (#4662 Opus gate).
@@ -7251,6 +7318,7 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    if(await _abortSupersededNavigation()) return false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 

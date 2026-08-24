@@ -24,6 +24,7 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+let _sessionNavigationGeneration = 0;
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -151,6 +152,12 @@ function _profileMatchesActiveProfile(profile, activeProfile){
   const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
   if(eventName === activeName) return true;
   return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+function _profileMatchesProfileState(profile, activeProfile, activeIsDefault){
+  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(eventName === activeName) return true;
+  return eventName === 'default' && !!activeIsDefault;
 }
 
 function _sessionEventProfilesMatch(eventProfile, activeProfile){
@@ -1083,14 +1090,17 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
 }
 
 function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
-  if(!serverLiveSnapshot) return localInflight||null;
-  if(!localInflight||!_inflightHasVisibleLiveState(localInflight)) return serverLiveSnapshot;
+  const requestedActiveId=String(activeStreamId||'').trim();
+  const localId=String(localInflight&&localInflight.streamId||'').trim();
+  const serverId=String(serverLiveSnapshot&&serverLiveSnapshot.streamId||'').trim();
+  const localVisible=!!(localInflight&&_inflightHasVisibleLiveState(localInflight));
+  const localMatchesActive=!!(requestedActiveId&&localId&&localId===requestedActiveId);
+  const serverMatchesActive=!!(requestedActiveId&&serverId&&serverId===requestedActiveId);
+  if(!serverMatchesActive) return localVisible&&localMatchesActive?localInflight:null;
+  if(!localInflight||!localVisible) return serverLiveSnapshot;
 
   // The run journal owns the Worklog projection. A same-stream browser tail
   // wins only when it advanced after the metadata snapshot was read.
-  const requestedActiveId=String(activeStreamId||'').trim();
-  const localId=String(localInflight.streamId||'').trim();
-  const serverId=String(serverLiveSnapshot.streamId||'').trim();
   const activeId=requestedActiveId||serverId;
   const selectDurableSnapshot=()=>{
     if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
@@ -1098,9 +1108,6 @@ function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeSt
     }
     return serverLiveSnapshot;
   };
-  if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
-    return localId===requestedActiveId?localInflight:null;
-  }
   if(activeId&&localId!==activeId) return selectDurableSnapshot();
 
   const localSeq=Math.max(0,Number(localInflight.lastRunJournalSeq)||0);
@@ -1646,48 +1653,180 @@ function _sessionProfileMismatchFromError(e){
   return null;
 }
 
-async function _switchProfileForSessionLoad(profile){
-  const name=String(profile||'').trim();
-  if(!name) throw new Error('missing profile');
-  if(name===S.activeProfile) return;
-  if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
-  if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
-  if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+function _sessionReferenceIdIsValid(value){
+  return /^[A-Za-z0-9_-]{1,256}$/.test(String(value||''));
+}
+function _sessionReferenceProfileIsValid(value){
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(String(value||''));
+}
+function _parseSessionReference(sid, profile){
+  const id=String(sid||'');
+  if(!_sessionReferenceIdIsValid(id)) return null;
+  if(profile===null||typeof profile==='undefined') return {sid:id,profile:null};
+  const name=String(profile);
+  return _sessionReferenceProfileIsValid(name)?{sid:id,profile:name}:null;
+}
+function _sessionProfilesMatch(expected, actual){
+  const left=String(expected||'').trim()||'default';
+  const right=String(actual||'').trim()||'default';
+  if(left===right) return true;
+  const activeName=String((S&&S.activeProfile)||'').trim()||'default';
+  const activeIsDefault=!!(S&&S.activeProfileIsDefault);
+  if((right===activeName&&_profileMatchesProfileState(left,right,activeIsDefault))||
+    (left===activeName&&_profileMatchesProfileState(right,left,activeIsDefault))) return true;
+  const rootAlias=name=>name==='default'||(
+    typeof _cronProfileNameIsRootAlias==='function'&&_cronProfileNameIsRootAlias(name));
+  const matches=(eventName,activeName)=>_profileMatchesProfileState(eventName,activeName,rootAlias(activeName));
+  return matches(left,right)||matches(right,left);
+}
+function _sessionPayloadProfileForExpected(session, expectedProfile){
+  const raw=session&&typeof session.profile==='string'?session.profile.trim():'';
+  if(_sessionReferenceProfileIsValid(raw)) return raw;
+  const isMissing=!session||session.profile===null||typeof session.profile==='undefined'||session.profile==='';
+  if(!isMissing) return null;
+  const activeName=String((S&&S.activeProfile)||'').trim()||'default';
+  return _profileMatchesProfileState(expectedProfile,activeName,!!(S&&S.activeProfileIsDefault))
+    ? activeName : null;
+}
+function _quarantineExplicitInflight(sid, enabled){
+  if(!enabled||!sid||typeof INFLIGHT==='undefined'||!INFLIGHT) return;
+  delete INFLIGHT[sid];
+}
+async function _preflightSessionReference(sid, profile){
   try{
-    const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
-    S.activeProfile=data.active||name;
-    S.activeProfileIsDefault=!!data.is_default;
-    if(typeof _resetCronUnreadForProfileSwitch==='function'){
-      _resetCronUnreadForProfileSwitch();
+    const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const session=data&&data.session;
+    const returnedProfile=_sessionPayloadProfileForExpected(session,profile);
+    if(!session||String(session.session_id||'')!==sid||!returnedProfile) return null;
+    return _sessionProfilesMatch(profile,returnedProfile)?{profile:returnedProfile}:null;
+  }catch(e){
+    const mismatch=_sessionProfileMismatchFromError(e);
+    if(!mismatch||mismatch.session_id!==sid||!_sessionReferenceProfileIsValid(mismatch.profile)) return null;
+    return _sessionProfilesMatch(profile,mismatch.profile)?{profile:mismatch.profile}:null;
+  }
+}
+async function _restoreSessionReference(previous, rollbackUrl){
+  const rollbackGeneration=++_sessionNavigationGeneration;
+  const previousProfile=previous.profile||'default';
+  if(!_sessionProfilesMatch(previousProfile,S.activeProfile||'default')){
+    if(typeof switchToProfile!=='function'||await switchToProfile(previousProfile,{
+      openExistingSession:true,force:true,navigationRollback:true
+    })!==true) return false;
+  }
+  if(_sessionNavigationGeneration!==rollbackGeneration) return false;
+  if(previous.sid){
+    const restored=await loadSession(previous.sid,{
+      _preloadNotified:true,
+      skipProfileResolve:true,
+      skipLineageResolve:true,
+      expectedSessionId:previous.sid,
+      expectedProfile:previousProfile,
+      _navigationGeneration:rollbackGeneration,
+      force:true,
+      clearProfileIntent:!previous.explicitProfile
+    });
+    if(restored!==true) return false;
+    if(previous.explicitProfile) S._verifiedSessionProfileIntent={sid:previous.sid,profile:previous.explicitProfile};
+    else S._verifiedSessionProfileIntent=null;
+    if(!rollbackUrl) _setActiveSessionUrl(previous.sid,previous.explicitProfile||null);
+  }else{
+    if(typeof stopSessionStream==='function') stopSessionStream();
+    S.session=null;S.messages=[];S.toolCalls=[];S.activeStreamId=null;S.busy=false;
+    S._verifiedSessionProfileIntent=null;
+  }
+  if(rollbackUrl&&typeof history!=='undefined'&&history.replaceState){
+    try{history.replaceState(history.state||null,'',rollbackUrl);}catch(_){ }
+  }
+  return true;
+}
+async function _openSessionReference(sid, profile, navigationOptions){
+  navigationOptions=navigationOptions||{};
+  const rollbackUrl=typeof navigationOptions.rollbackUrl==='string'?navigationOptions.rollbackUrl:null;
+  const restoreRollbackUrl=()=>{
+    if(!rollbackUrl||typeof history==='undefined'||!history.replaceState) return;
+    try{history.replaceState(history.state||null,'',rollbackUrl);}catch(_){ }
+  };
+  const requested=_parseSessionReference(sid,profile);
+  if(!requested){restoreRollbackUrl();return false;}
+  if(typeof _hermesNotifySessionOpen==='function'){
+    try{
+      const pre=_hermesNotifySessionOpen(requested.sid,null,{
+        preload:true,opts:{...navigationOptions,explicitProfile:requested.profile}
+      });
+      if(pre&&pre.cancel===true){restoreRollbackUrl();return false;}
+    }catch(_){restoreRollbackUrl();return false;}
+  }
+  if(requested.profile===null){
+    try{return await loadSession(requested.sid,{clearProfileIntent:true,_preloadNotified:true})===true;}
+    catch(_){return false;}
+  }
+  const navigationGeneration=++_sessionNavigationGeneration;
+  const canonicalSid=requested.sid;
+  const previous={
+    sid:S.session&&S.session.session_id?String(S.session.session_id):null,
+    profile:String(S.activeProfile||'').trim()||'default',
+    explicitProfile:S._verifiedSessionProfileIntent&&S._verifiedSessionProfileIntent.sid===S.session?.session_id
+      ? S._verifiedSessionProfileIntent.profile:null,
+    url:typeof window!=='undefined'&&window.location
+      ? window.location.pathname+window.location.search+window.location.hash : null,
+  };
+  try{
+    const preflight=await _preflightSessionReference(canonicalSid,requested.profile);
+    if(_sessionNavigationGeneration!==navigationGeneration) return false;
+    if(!preflight){restoreRollbackUrl();return false;}
+    const profileChanged=!_sessionProfilesMatch(requested.profile,previous.profile);
+    if(profileChanged){
+      if(typeof switchToProfile!=='function'||await switchToProfile(requested.profile,{
+        openExistingSession:true,navigationGeneration
+      })!==true) throw new Error('profile switch failed');
     }
-    if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-    else localStorage.removeItem('hermes-webui-model');
-    if(data.default_model) window._defaultModel=data.default_model;
-    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
-    if(typeof refreshProfileTransitionReasoningChip==='function'){
-      refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
-    }
-    if(typeof startGatewaySSE==='function') startGatewaySSE();
-    if(typeof syncTopbar==='function') syncTopbar();
-    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
-    if(typeof renderSessionList==='function') await renderSessionList();
-  }catch(switchErr){
-    // The switch POST failed, so we're still on the previous profile and its
-    // caches are intact. Clear the up-front skeleton and re-render the real
-    // list so the sidebar doesn't strand on the skeleton (the #4671 strand bug
-    // — _sessionListSkeletonActive hard-gates renderSessionListFromCache + the
-    // SSE/poll repaints until an unrelated full render fires). Mirror the
-    // canonical switch's catch in panels.js, then rethrow so loadSession's
-    // catch(switchErr) still routes into the generic error handler.
-    if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
-    _sessionListSkeletonActive=false;
-    if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-    throw switchErr;
+    if(_sessionNavigationGeneration!==navigationGeneration) return false;
+    _quarantineExplicitInflight(canonicalSid,profileChanged);
+    const sameSession=!!(S.session&&S.session.session_id===canonicalSid);
+    const force=sameSession&&(!_sessionReferenceProfileIsValid(S.session.profile)||
+      !_sessionProfilesMatch(S.session.profile,requested.profile));
+    const acceptedSession={sid:canonicalSid};
+    const loaded=await loadSession(canonicalSid,{
+      _explicitPrepared:true,
+      _preloadNotified:true,
+      skipProfileResolve:true,
+      skipLineageResolve:true,
+      expectedSessionId:canonicalSid,
+      expectedProfile:requested.profile,
+      _acceptedSessionId:acceptedSession,
+      _navigationGeneration:navigationGeneration,
+      _ignorePersistedInflight:profileChanged,
+      force
+    });
+    const acceptedSid=acceptedSession.sid||canonicalSid;
+    const acceptedProfile=_sessionPayloadProfileForExpected(S.session,requested.profile);
+    if(loaded!==true||!_sessionReferenceIdIsValid(acceptedSid)||!S.session||String(S.session.session_id)!==acceptedSid||
+      !acceptedProfile||!_sessionProfilesMatch(acceptedProfile,requested.profile)||
+      !_sessionProfilesMatch(requested.profile,S.activeProfile||'default')) throw new Error('session identity validation failed');
+    if(profileChanged&&typeof clearInflightState==='function') clearInflightState(acceptedSid);
+    S._verifiedSessionProfileIntent={sid:acceptedSid,profile:requested.profile};
+    _setActiveSessionUrl(acceptedSid,requested.profile);
+    return true;
+  }catch(_){
+    if(_sessionNavigationGeneration!==navigationGeneration) return false;
+    let restored=false;
+    try{restored=await _restoreSessionReference(previous,rollbackUrl||previous.url);}catch(_){ }
+    if(!restored) restoreRollbackUrl();
+    return false;
   }
 }
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  const hasNavigationGeneration=Object.prototype.hasOwnProperty.call(opts,'_navigationGeneration');
+  let navigationGeneration;
+  if(hasNavigationGeneration){
+    if(opts._navigationGeneration!==_sessionNavigationGeneration) return false;
+    navigationGeneration=opts._navigationGeneration;
+  }else navigationGeneration=++_sessionNavigationGeneration;
+  if(Object.prototype.hasOwnProperty.call(opts,'explicitProfile')&&!opts._explicitPrepared){
+    return _openSessionReference(sid,opts.explicitProfile);
+  }
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
@@ -1695,19 +1834,21 @@ async function loadSession(sid){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
   }
+  if(typeof _quarantineExplicitInflight==='function'){
+    _quarantineExplicitInflight(sid,!!opts._ignorePersistedInflight);
+  }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
   // when loadSession runs the actual navigation inside it.
   if(!opts.skipExtHooks && !opts._preloadNotified && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(sid, null, {preload:true, opts:opts});
     if(_preResult&&_preResult.cancel===true){
-      return;
+      return false;
     }
   }
-  const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
-  const sameSessionForceReload = forceReload && currentSid===sid;
-  // Clicking the already-open session in the sidebar is a no-op. Reloading it
+  // Clicking the already-open session in the sidebar is a no-op only while the
+  // visible owner still matches the active/expected owner. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
   // refresh paths pass {force:true} when external state.db changes arrive.
@@ -1723,7 +1864,29 @@ async function loadSession(sid){
   // for the same sid is a legitimate supersede (generation bump below) that
   // cross-session ordering tests rely on. Coalescing at the entry point would
   // drop the superseding fetch and leave a stale first load in charge.
-  if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){
+  const visibleSessionProfile=S.session&&(
+    typeof _sessionPayloadProfileForExpected==='function'
+      ? _sessionPayloadProfileForExpected(S.session,S.activeProfile||'default')
+      : (typeof S.session.profile==='string'&&S.session.profile.trim()
+        ? S.session.profile.trim() : null));
+  const profilesMatch=(expected,actual)=>typeof _sessionProfilesMatch==='function'
+    ? _sessionProfilesMatch(expected,actual)
+    : String(expected||'').trim()===String(actual||'').trim();
+  const expectedProfileForVisible=opts.expectedProfile&&S.session&&(
+    typeof _sessionPayloadProfileForExpected==='function'
+      ? _sessionPayloadProfileForExpected(S.session,opts.expectedProfile)
+      : (typeof S.session.profile==='string'&&S.session.profile.trim()
+        ? S.session.profile.trim() : null));
+  const visibleOwnerMatchesActive=!!(visibleSessionProfile&&profilesMatch(
+    visibleSessionProfile,S.activeProfile||'default'));
+  const expectedOwnerMatchesVisible=!opts.expectedProfile||!!(
+    expectedProfileForVisible&&profilesMatch(opts.expectedProfile,expectedProfileForVisible)&&
+    profilesMatch(opts.expectedProfile,S.activeProfile||'default'));
+  const ownerMismatch=currentSid===sid&&(!visibleOwnerMatchesActive||!expectedOwnerMatchesVisible);
+  const forceReload = !!opts.force||ownerMismatch;
+  const sameSessionForceReload = forceReload && currentSid===sid;
+  if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid) &&
+    visibleOwnerMatchesActive&&expectedOwnerMatchesVisible){
     // Re-selecting the already-open session is a no-op for transcript/scroll, but
     // it is still a *visit*: clear a stale sidebar unread dot (e.g. one a
     // background completion left on the open, unfocused pane) before returning.
@@ -1734,12 +1897,24 @@ async function loadSession(sid){
         Number(S.session.last_message_at || S.session.updated_at || 0)
       );
     }
-    return;
+    if(opts.expectedProfile){
+      const activeSessionProfile=_sessionPayloadProfileForExpected(S.session,opts.expectedProfile);
+      if(!activeSessionProfile||
+        !_sessionProfilesMatch(opts.expectedProfile,activeSessionProfile)||
+        !_sessionProfilesMatch(opts.expectedProfile,S.activeProfile||'default')) return false;
+      S._verifiedSessionProfileIntent={sid,profile:opts.expectedProfile};
+      _setActiveSessionUrl(sid,opts.expectedProfile);
+    }else if(opts.clearProfileIntent){
+      S._verifiedSessionProfileIntent=null;
+      _setActiveSessionUrl(sid,null);
+    }
+    return true;
   }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
+  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration &&
+    navigationGeneration===_sessionNavigationGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
@@ -1777,7 +1952,7 @@ async function loadSession(sid){
     // continuation can't wipe S.messages / write the loading placeholder /
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) return false;
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
@@ -1858,11 +2033,13 @@ async function loadSession(sid){
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return false;
       }
       try{
         if(typeof showToast==='function') showToast(`Switching to ${profileMismatch.profile} profile for this session…`,2200);
-        await _switchProfileForSessionLoad(profileMismatch.profile);
+        if(await switchToProfile(profileMismatch.profile,{openExistingSession:true,navigationGeneration})!==true){
+          throw new Error('profile switch failed');
+        }
         // Post-await stale-load guard (Codex): the profile switch above does a
         // network POST + session-list re-render, during which the user may have
         // navigated to a different session. If we no longer own the load, bail
@@ -1870,7 +2047,7 @@ async function loadSession(sid){
         // continuation can't hijack the UI back to the old target.
         if (!_isCurrentLoad()) {
           _rearmActiveSessionStream();
-          return;
+          return false;
         }
         if (_isCurrentLoad()) _loadingSessionId = null;
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
@@ -1888,7 +2065,7 @@ async function loadSession(sid){
     // or self-heal.
     if (!_isCurrentLoad()) {
       _rearmActiveSessionStream();
-      return;
+      return false;
     }
     if(_msgInner){
       if(e.status===404){
@@ -1951,7 +2128,7 @@ async function loadSession(sid){
         && typeof startSessionStream === 'function') {
       startSessionStream(currentSid);
     }
-    return;
+    return false;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
@@ -1964,7 +2141,7 @@ async function loadSession(sid){
     // #2971: re-arm the still-displayed session's stream (defensive — harmless
     // if the 401 redirect is already tearing the page down). Idempotent.
     _rearmActiveSessionStream();
-    return;
+    return false;
   }
   // Stale response? A newer loadSession() call has already started (#1060).
   if (!_isCurrentLoad()) {
@@ -1974,18 +2151,45 @@ async function loadSession(sid){
     // Re-arm the genuinely-displayed S.session (idempotent — no-ops once the
     // newer load arms its own sid).
     _rearmActiveSessionStream();
-    return;
+    return false;
   }
+  let returnedSession=data&&data.session;
+  const returnedSid=returnedSession&&String(returnedSession.session_id||'');
+  const returnedProfile=opts.expectedProfile
+    ? _sessionPayloadProfileForExpected(returnedSession,opts.expectedProfile) : null;
+  if(!returnedSession||returnedSid!==String(sid)||
+    (opts.expectedSessionId&&returnedSid!==String(opts.expectedSessionId))||
+    (opts.expectedProfile&&(
+      !returnedProfile||
+      !_sessionProfilesMatch(opts.expectedProfile,returnedProfile)||
+      !_sessionProfilesMatch(opts.expectedProfile,S.activeProfile||'default')))){
+    if(_isCurrentLoad()) _loadingSessionId=null;
+    _rearmActiveSessionStream();
+    return false;
+  }
+  if(opts.expectedProfile&&returnedProfile!==returnedSession.profile){
+    returnedSession={...returnedSession,profile:returnedProfile};
+    data={...data,session:returnedSession};
+  }
+  if(opts._acceptedSessionId) opts._acceptedSessionId.sid=returnedSid;
   // #2980: if this (current) load resolved a hidden pre-compression snapshot,
   // follow the backend's continuation hint to the visible continuation so a
   // mobile reload mid-compression doesn't strand the user on a hidden snapshot.
   // Do NOT write URL/localStorage here — let the re-entrant loadSession update
   // them only once the continuation actually loads, so a rejected/deleted/
   // cross-profile continuation can't poison restore state with an unusable id.
-  const continuationSid=(data.session&&data.session.continuation_session_id)||'';
+  const continuationSid=String((data.session&&data.session.continuation_session_id)||'');
+  if(continuationSid&&!_sessionReferenceIdIsValid(continuationSid)){
+    if(_isCurrentLoad()) _loadingSessionId=null;
+    return false;
+  }
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
+    if(typeof _quarantineExplicitInflight==='function'){
+      _quarantineExplicitInflight(continuationSid,!!opts._ignorePersistedInflight);
+    }
     _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,
+      expectedSessionId:continuationSid,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
@@ -2062,8 +2266,10 @@ async function loadSession(sid){
     Number(data.session.message_count || 0),
     Number(data.session.last_message_at || data.session.updated_at || 0)
   );
-  try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-  _setActiveSessionUrl(S.session.session_id);
+  if(!opts.expectedProfile&&!opts.clearProfileIntent&&currentSid===sid){
+    try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){ }
+    _setActiveSessionUrl(S.session.session_id);
+  }
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
 
 
@@ -2074,7 +2280,7 @@ async function loadSession(sid){
   // then merge the local INFLIGHT live tail. INFLIGHT is a recovery tail, not a
   // complete transcript; treating it as the full source makes long sessions look
   // like they lost history after switching away and back.
-  if(!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
+  if(!opts._ignorePersistedInflight&&!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
     const stored=loadInflightState(sid, activeStreamId);
     if(stored){
       INFLIGHT[sid]={
@@ -2119,6 +2325,7 @@ async function loadSession(sid){
   const serverLiveSnapshot=activeStreamId
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
+  let _messageLoadFailed=false;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
   if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
@@ -2135,17 +2342,24 @@ async function loadSession(sid){
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration,
+        expectedSessionId:opts.expectedSessionId,expectedProfile:opts.expectedProfile});
     } catch(e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return false;
+      }
+      if(e&&e.code==='session_payload_identity'){
+        _loadingSessionId=null;
+        _rearmActiveSessionStream();
+        return false;
       }
       S.messages=inflightMessages;
+      _messageLoadFailed=true;
     }
     if (!_isCurrentLoad()) {
       _rearmActiveSessionStream();
-      return;
+      return false;
     }
     const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
     if(liveTailPrepared){
@@ -2179,7 +2393,7 @@ async function loadSession(sid){
     let didReconnect=false;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
-      if (!_isCurrentLoad()) return;
+      if (!_isCurrentLoad()) return false;
       didReconnect=true;
       attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
@@ -2241,11 +2455,12 @@ async function loadSession(sid){
     // "messages already populated" early-return inside _ensureMessagesLoaded
     // does NOT skip the swap to the new transcript.
     try {
-      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
+      await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration,
+        expectedSessionId:opts.expectedSessionId,expectedProfile:opts.expectedProfile});
     } catch (e) {
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
-        return;
+        return false;
       }
       // Network errors, server failures, or SSE drops (Chrome error codes 4/5)
       // can cause _ensureMessagesLoaded to throw. Without a try/catch here the
@@ -2255,12 +2470,14 @@ async function loadSession(sid){
       if (_msgInner) {
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
-      if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      if (typeof showToast === 'function' && !(e&&e.code==='session_payload_identity')) {
+        showToast('Failed to load conversation messages', 3000, 'error');
+      }
       if (_isCurrentLoad()) _loadingSessionId = null;
-      return;
+      return false;
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) return false;
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
@@ -2412,10 +2629,30 @@ async function loadSession(sid){
   } else {
     _hideHandoffHint();
   }
+  const recoveryActiveStreamId=String(activeStreamId||'').trim();
+  const recoveryInflight=INFLIGHT[sid];
+  const recoveryStreamId=String(recoveryInflight&&recoveryInflight.streamId||'').trim();
+  if(_messageLoadFailed&&opts.expectedProfile&&!(recoveryActiveStreamId&&recoveryStreamId&&
+    recoveryStreamId===recoveryActiveStreamId&&_inflightHasVisibleLiveState(recoveryInflight))) return false;
   // Extension post-load hook
   if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
   }
+  try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){ }
+  if(opts._ignorePersistedInflight&&typeof clearInflightState==='function'){
+    clearInflightState(opts._acceptedSessionId&&opts._acceptedSessionId.sid||sid);
+  }
+  if(opts.expectedProfile){
+    S._verifiedSessionProfileIntent={sid,profile:opts.expectedProfile};
+    _setActiveSessionUrl(sid,opts.expectedProfile);
+  }else if(opts.clearProfileIntent||currentSid!==sid){
+    S._verifiedSessionProfileIntent=null;
+    _setActiveSessionUrl(sid,null);
+  }else{
+    if(S._verifiedSessionProfileIntent&&S._verifiedSessionProfileIntent.sid!==sid) S._verifiedSessionProfileIntent=null;
+    _setActiveSessionUrl(sid);
+  }
+  return true;
 }
 
 // ── Handoff hint logic ──────────────────────────────────────────────────────
@@ -2498,12 +2735,12 @@ async function _ensureSidebarSessionProfile(session){
 }
 
 async function _openSidebarSession(session, loadOpts={}){
-  if(!session||!session.session_id) return;
+  if(!session||!session.session_id) return false;
   // Extension pre-open hook — before any side-effects (external import, profile switching).
   // Handler returns {cancel:true} to prevent the open.
   if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
-    if(_preResult&&_preResult.cancel===true) return;
+    if(_preResult&&_preResult.cancel===true) return false;
   }
   // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
   if(typeof closeMobileSidebar==='function')closeMobileSidebar();
@@ -2511,10 +2748,16 @@ async function _openSidebarSession(session, loadOpts={}){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
-  await _ensureSidebarSessionProfile(session);
+  const profileSwitched=await _ensureSidebarSessionProfile(session);
+  if(_showAllProfiles&&_sidebarSessionProfileName(session)&&
+    !_profileMatchesActiveProfile(_sidebarSessionProfileName(session),S.activeProfile||'default')&&!profileSwitched) return false;
   // Tell loadSession to skip its pre-hook — we already ran it above.
-  await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
+  const options=Object.assign({},loadOpts,{_preloadNotified:true});
+  if(!Object.prototype.hasOwnProperty.call(options,'explicitProfile')) options.clearProfileIntent=true;
+  let loaded=false;
+  try{loaded=await loadSession(session.session_id,options);}catch(_){loaded=false;}
   renderSessionListFromCache();
+  return loaded===true;
 }
 
 function _isReadOnlySession(session) {
@@ -3181,7 +3424,21 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
+  const returnedSession=data&&data.session;
+  const expectedSid=opts.expectedSessionId?String(opts.expectedSessionId):'';
+  const returnedSid=returnedSession&&String(returnedSession.session_id||'');
+  const returnedProfile=opts.expectedProfile
+    ? _sessionPayloadProfileForExpected(returnedSession,opts.expectedProfile) : null;
+  if(!returnedSession&&(!expectedSid&&!opts.expectedProfile)) return;
+  if(!returnedSession || (expectedSid&&returnedSid!==expectedSid) ||
+    (opts.expectedProfile&&(
+      !returnedProfile||
+      !_sessionProfilesMatch(opts.expectedProfile,returnedProfile)||
+      !_sessionProfilesMatch(opts.expectedProfile,S.activeProfile||'default')))){
+    const identityError=new Error('session messages payload identity mismatch');
+    identityError.code='session_payload_identity';
+    throw identityError;
+  }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -4182,10 +4439,11 @@ function _profileQueryIntentFromLocation(){
   try{
     const qs=new URLSearchParams(window.location.search||'');
     if(!qs.has('profile')) return empty;
-    const name=String(qs.get('profile')||'');
+    const values=qs.getAll('profile');
+    const name=String(values[0]||'');
     return {
       hasParam:true,
-      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name),
+      valid:values.length===1&&/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name),
       name
     };
   }catch(_e){return empty;}
@@ -4193,6 +4451,7 @@ function _profileQueryIntentFromLocation(){
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
+    if(!_profileQueryIntentFromLocation().valid) return;
     const current=new URL(window.location.href);
     const before=current.searchParams.toString();
     current.searchParams.delete('profile');
@@ -4222,7 +4481,7 @@ function _appRootPath(){
     return base.pathname || '/';
   }catch(_e){return '/';}
 }
-function _sessionUrlForSid(sid){
+function _sessionUrlForSid(sid, explicitProfile){
   const encoded=encodeURIComponent(sid);
   let base;
   try{base=new URL(`session/${encoded}`, document.baseURI||window.location.origin+'/');}
@@ -4234,6 +4493,13 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
+    if(arguments.length>1){
+      current.searchParams.delete('profile');
+      if(explicitProfile!==null&&typeof explicitProfile!=='undefined'&&
+        _sessionReferenceProfileIsValid(String(explicitProfile))){
+        current.searchParams.set('profile',String(explicitProfile));
+      }
+    }
     const retained=new URLSearchParams();
     current.searchParams.forEach((value,key)=>{
       if(key!=='action'||value!=='new-chat') retained.append(key,value);
@@ -4243,9 +4509,34 @@ function _sessionUrlForSid(sid){
   }catch(_e){}
   return base.pathname+base.search+base.hash;
 }
-function _setActiveSessionUrl(sid){
+function _setActiveSessionUrl(sid, explicitProfile){
   if(typeof window==='undefined'||!window.history||!sid) return;
-  const next=_sessionUrlForSid(sid);
+  const state=typeof S!=='undefined'?S:null;
+  let hasExplicitProfile=arguments.length>1;
+  let profileForUrl=explicitProfile;
+  if(!hasExplicitProfile){
+    const verified=state&&state._verifiedSessionProfileIntent;
+    const session=state&&state.session;
+    const verifiedProfile=verified&&verified.profile;
+    const sessionProfile=session&&_sessionPayloadProfileForExpected(session,verifiedProfile);
+    if(state&&_sessionReferenceProfileIsValid(verifiedProfile)&&session&&String(session.session_id||'')===String(sid)&&
+      sessionProfile&&_sessionProfilesMatch(verifiedProfile,sessionProfile)&&
+      _sessionProfilesMatch(verifiedProfile,state.activeProfile||'default')){
+      hasExplicitProfile=true;
+      profileForUrl=verifiedProfile;
+      state._verifiedSessionProfileIntent={sid:String(sid),profile:verifiedProfile};
+    }else{
+      const locationIntent=typeof _profileQueryIntentFromLocation==='function'?_profileQueryIntentFromLocation():null;
+      if(locationIntent&&locationIntent.hasParam){
+        hasExplicitProfile=true;
+        profileForUrl=null;
+        if(state) state._verifiedSessionProfileIntent=null;
+      }
+    }
+  }else if(profileForUrl===null||typeof profileForUrl==='undefined'){
+    if(state) state._verifiedSessionProfileIntent=null;
+  }
+  const next=hasExplicitProfile?_sessionUrlForSid(sid,profileForUrl):_sessionUrlForSid(sid);
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
     try{
@@ -9033,23 +9324,48 @@ async function _handleShowAllProfilesStorageEvent(e){
   if(typeof renderSessionList==='function') await renderSessionList({deferWhileInteracting:false});
 }
 
+function _handleSessionPopstate(){
+  const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  const intent=(typeof _profileQueryIntentFromLocation==='function')
+    ? _profileQueryIntentFromLocation() : {hasParam:false,valid:false,name:''};
+  if(!sid) return false;
+  if(intent.hasParam&&!intent.valid){
+    if(typeof showToast==='function') showToast('Invalid session profile link.',3000,'error');
+    return false;
+  }
+  const currentSid=S.session&&S.session.session_id;
+  const sameSid=currentSid===sid;
+  if(sameSid&&intent.hasParam&&S._verifiedSessionProfileIntent&&
+    S._verifiedSessionProfileIntent.sid===sid&&S._verifiedSessionProfileIntent.profile===intent.name&&
+    _sessionProfilesMatch(intent.name,S.activeProfile||'default')&&
+    _sessionProfilesMatch(intent.name,S.session&&S.session.profile)) return true;
+  if(S.busy){
+    if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
+    return false;
+  }
+  if(intent.hasParam){
+    let rollbackUrl=null;
+    if(currentSid){
+      try{
+        const verified=S._verifiedSessionProfileIntent;
+        rollbackUrl=verified&&verified.sid===currentSid
+          ? _sessionUrlForSid(currentSid,verified.profile)
+          : _sessionUrlForSid(currentSid,null);
+      }catch(_){ }
+    }
+    return rollbackUrl
+      ? _openSessionReference(sid,intent.name,{rollbackUrl})
+      : _openSessionReference(sid,intent.name);
+  }
+  return loadSession(sid,{clearProfileIntent:true});
+}
+
 if(typeof window!=='undefined'){
   window.addEventListener('storage', (e) => {
     void _handleActiveSessionStorageEvent(e);
     void _handleShowAllProfilesStorageEvent(e);
   });
-  window.addEventListener('popstate', () => {
-    const sid=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-    if(!sid || (S.session && S.session.session_id===sid)) return;
-    // Refuse to switch sessions mid-stream — same UX guard the storage-event
-    // handler had. A user mid-turn who hits browser Back should NOT lose the
-    // active stream. They can hit Back again once the turn ends.
-    if(S.busy){
-      if(typeof showToast==='function') showToast('Finish the current turn before switching sessions.',3000);
-      return;
-    }
-    void loadSession(sid);
-  });
+  window.addEventListener('popstate', () => { void _handleSessionPopstate(); });
 }
 
 async function removeWorktree(session){
