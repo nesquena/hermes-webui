@@ -8,6 +8,7 @@ Covers:
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -490,6 +491,21 @@ class TestFrontendWiring:
         assert "meta.model||((S.session&&S.session.model)||'')" not in UI_JS
         assert ".live-run-status .lf-effort" in STYLE_CSS
 
+    def test_live_status_wraps_with_mobile_readability(self):
+        base = re.search(r"\.live-run-status\s*\{([^{}]+)\}", STYLE_CSS)
+        assert base is not None
+        base_rule = base.group(1)
+        assert re.search(r"flex-wrap\s*:\s*wrap", base_rule)
+        assert re.search(r"row-gap\s*:\s*(?!0(?:[;}]|px))[^;}]+", base_rule)
+
+        mobile = re.search(
+            r"@media\s*\(\s*max-width\s*:\s*600px\s*\)\s*\{\s*"
+            r"\.live-run-status\s*\{([^{}]+)\}",
+            STYLE_CSS,
+        )
+        assert mobile is not None
+        assert re.search(r"line-height\s*:\s*(?:1\.[1-9]\d*|[1-9]\d*px)", mobile.group(1))
+
     def test_new_run_call_sites_claim_stream_before_first_render(self):
         send = MESSAGES_JS.split("const startData = postStartData || {};", 1)[1].split(
             "async function startRegeneration", 1
@@ -528,3 +544,59 @@ def test_transparent_multi_segment_turn_renders_effort_exactly_once():
         "transparentCount": 1,
         "totalEffortLabels": 1,
     }
+
+
+def test_mobile_long_model_keeps_running_status_visible():
+    """Exercise the production CSS at the gate's <=600px long-model viewport."""
+    playwright_api = pytest.importorskip("playwright.sync_api")
+    with playwright_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": 600, "height": 400})
+        try:
+            page.set_content(
+                """
+                <div class="messages" id="messages" style="width:360px;height:160px">
+                  <div class="live-run-status live-footer" id="status">
+                    <span class="live-run-status-dot tool-card-running-dot"></span>
+                    <span class="live-run-status-text lf-time">00:42</span>
+                    <span class="lf-sep">·</span>
+                    <span class="lf-model">provider/answering-model-with-a-very-long-mobile-label-123456789</span>
+                    <span class="lf-sep">·</span>
+                    <span class="lf-effort">reasoning off</span>
+                    <span class="lf-sep">·</span>
+                    <span class="lf-status">Running</span>
+                  </div>
+                </div>
+                """
+            )
+            page.add_style_tag(path=str(REPO / "static" / "style.css"))
+            layout = page.eval_on_selector(
+                "#status",
+                """el => {
+                  const container = document.querySelector('#messages').getBoundingClientRect();
+                  const dot = el.querySelector('.live-run-status-dot').getBoundingClientRect();
+                  const running = el.querySelector('.lf-status').getBoundingClientRect();
+                  const style = getComputedStyle(el);
+                  return {
+                    flexWrap: style.flexWrap,
+                    rowGap: parseFloat(style.rowGap),
+                    lineHeight: parseFloat(style.lineHeight),
+                    fontSize: parseFloat(style.fontSize),
+                    wrapped: running.top > dot.top + 1,
+                    runningInside: running.left >= container.left - 1 && running.right <= container.right + 1,
+                    runningVisible: running.width > 0 && running.height > 0,
+                  };
+                }""",
+            )
+        finally:
+            browser.close()
+
+    assert layout["flexWrap"] == "wrap"
+    assert layout["rowGap"] > 0
+    assert layout["lineHeight"] > layout["fontSize"]
+    assert layout["wrapped"] is True
+    assert layout["runningInside"] is True
+    assert layout["runningVisible"] is True

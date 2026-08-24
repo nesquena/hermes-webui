@@ -92,7 +92,7 @@ def _event_pairs(subscriber):
 def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
     tmp_path, monkeypatch, runs_api
 ):
-    """Requested A/high must become answered B/C/off on every consumer surface."""
+    """Answer attribution follows B/C/off while the selected route remains A/provider-A."""
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -131,7 +131,14 @@ def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
         "HERMES_WEBUI_GATEWAY_USE_RUNS_API", "1" if runs_api else "0"
     )
 
+    gateway_requests = []
+
     def fake_urlopen(req, timeout=0):
+        if req.data and (
+            req.full_url.endswith("/v1/runs")
+            or req.full_url.endswith("/v1/chat/completions")
+        ):
+            gateway_requests.append(json.loads(req.data.decode("utf-8")))
         if runs_api and req.full_url.endswith("/v1/runs"):
             return _JsonResponse({"run_id": "run-effective-runtime"})
         return _SseResponse(_runtime_terminal_lines(runs_api=runs_api))
@@ -184,8 +191,8 @@ def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
     assert assistant["_reasoningEffort"] == "off"
     assert assistant["_gatewayRouting"]["used_model"] == "answered-model-b"
     assert assistant["_gatewayRouting"]["used_provider"] == "provider-c"
-    assert saved.model == "answered-model-b"
-    assert saved.model_provider == "provider-c"
+    assert saved.model == "requested-model-a"
+    assert saved.model_provider == "provider-a"
 
     done = [payload for event, payload in events if event == "done"]
     assert len(done) == 1
@@ -194,14 +201,38 @@ def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
     assert done[0]["usage"]["reasoning_effort"] == "off"
     assert "_effective_runtime" not in done[0]["usage"]
 
-    reloaded = models.Session.load(session.session_id)
-    assert reloaded is not None
-    assert reloaded.model == "answered-model-b"
-    assert reloaded.model_provider == "provider-c"
+    models.SESSIONS.clear()
+    reloaded = models.get_session(session.session_id)
+    assert reloaded.model == "requested-model-a"
+    assert reloaded.model_provider == "provider-a"
     reloaded_assistant = reloaded.messages[-1]
     assert reloaded_assistant["_usedModel"] == "answered-model-b"
     assert reloaded_assistant["_reasoningEffort"] == "off"
     assert reloaded_assistant["_gatewayRouting"]["used_provider"] == "provider-c"
+
+    # The next turn is built from the reloaded request-owned selection, not from
+    # the prior turn's effective runtime attribution.
+    next_stream_id = f"next-effective-runtime-{'runs' if runs_api else 'legacy'}"
+    reloaded.active_stream_id = next_stream_id
+    reloaded.pending_user_message = "ask again after fallback"
+    reloaded.pending_attachments = []
+    reloaded.pending_started_at = 456.0
+    reloaded.save()
+    next_channel = create_stream_channel()
+    STREAMS[next_stream_id] = next_channel
+    gateway_chat._run_gateway_chat_streaming(
+        reloaded.session_id,
+        "ask again after fallback",
+        reloaded.model,
+        str(tmp_path),
+        next_stream_id,
+        [],
+        model_provider=reloaded.model_provider,
+    )
+
+    assert len(gateway_requests) == 2
+    assert gateway_requests[1]["model"] == "requested-model-a"
+    assert gateway_requests[1]["provider"] == "provider-a"
 
 
 def test_gateway_does_not_treat_plain_terminal_model_as_effective_runtime():
