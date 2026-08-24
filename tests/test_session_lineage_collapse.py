@@ -499,6 +499,66 @@ console.log(JSON.stringify(rows));
     assert "_orphan_child_session" not in rows[0]["_child_sessions"][0]
 
 
+def test_cross_surface_subagents_stack_under_visible_messaging_parent():
+    """Delegated subagents stay nested even when their visible parent is external."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isExternalSession(s) {{ return !!(s && (s.is_cli_session || s.session_source === 'messaging')); }}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const collapsed = [{{
+  session_id:'messaging_parent',
+  title:'Messaging parent',
+  raw_source:'weixin',
+  source_tag:'weixin',
+  session_source:'messaging',
+  message_count:3,
+}}];
+const raw = [
+  collapsed[0],
+  ...['delegate_a', 'delegate_b', 'delegate_c'].map(session_id => ({{
+    session_id,
+    title:'Subagent Session',
+    parent_session_id:'messaging_parent',
+    relationship_type:'child_session',
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    _parent_lineage_root_id:'messaging_parent',
+    _cross_surface_child_session:true,
+  }})),
+];
+const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["messaging_parent"]
+    assert rows[0]["_child_session_count"] == 3
+    assert [child["session_id"] for child in rows[0]["_child_sessions"]] == [
+        "delegate_a",
+        "delegate_b",
+        "delegate_c",
+    ]
+    assert all("_orphan_child_session" not in child for child in rows[0]["_child_sessions"])
+
+
 
 def test_cross_surface_subagent_child_stacks_under_visible_fork_parent():
     """Forked WebUI conversations can still own subagent child rows."""
