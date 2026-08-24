@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 import api.models as models
+import api.streaming as streaming
 from api.models import (
     _normalize_wakeup_rows_for_display,
     merge_session_messages_append_only,
@@ -138,3 +139,87 @@ def test_non_gateway_rows_are_byte_identical():
 def test_empty_and_non_list_passthrough():
     assert _normalize_wakeup_rows_for_display([]) == []
     assert _normalize_wakeup_rows_for_display(None) is None
+
+
+def test_legacy_process_wakeup_turn_gets_durable_delivery_provenance():
+    kind, metadata = streaming._trusted_turn_display_persistence(
+        "process_wakeup",
+        "stream-123",
+    )
+
+    assert kind == "process_wakeup"
+    assert metadata == {"delivery_id": "stream-123"}
+
+
+def test_browser_turn_cannot_self_classify_as_process_wakeup():
+    assert streaming._trusted_turn_display_persistence(
+        "webui",
+        "stream-123",
+    ) == (None, None)
+
+
+def test_run_conversation_contract_forwards_supported_wakeup_provenance():
+    class ModernAgent:
+        def run_conversation(
+            self,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            persist_user_message,
+            persist_user_timestamp=None,
+            persist_user_display_kind=None,
+            persist_user_display_metadata=None,
+        ):
+            return None
+
+    kind, metadata = streaming._trusted_turn_display_persistence(
+        "process_wakeup",
+        "stream-123",
+    )
+    kwargs = streaming._build_run_conversation_kwargs(
+        ModernAgent().run_conversation,
+        user_message="model-facing prompt",
+        system_message="system",
+        conversation_history=[],
+        conversation_history_revision=None,
+        task_id="session-1",
+        persist_user_message=WAKE_TEXT,
+        persist_user_timestamp=1.0,
+        persist_user_display_kind=kind,
+        persist_user_display_metadata=metadata,
+    )
+
+    assert kwargs["persist_user_display_kind"] == "process_wakeup"
+    assert kwargs["persist_user_display_metadata"] == {
+        "delivery_id": "stream-123"
+    }
+
+
+def test_run_conversation_contract_omits_wakeup_fields_for_older_agent():
+    class LegacyAgent:
+        def run_conversation(
+            self,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            persist_user_message,
+        ):
+            return None
+
+    kwargs = streaming._build_run_conversation_kwargs(
+        LegacyAgent().run_conversation,
+        user_message="model-facing prompt",
+        system_message="system",
+        conversation_history=[],
+        conversation_history_revision=None,
+        task_id="session-1",
+        persist_user_message=WAKE_TEXT,
+        persist_user_timestamp=1.0,
+        persist_user_display_kind="process_wakeup",
+        persist_user_display_metadata={"delivery_id": "stream-123"},
+    )
+
+    assert "persist_user_display_kind" not in kwargs
+    assert "persist_user_display_metadata" not in kwargs
