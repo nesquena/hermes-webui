@@ -8,11 +8,15 @@ never scrolled. Before the fix that reflow was misread as an upward scroll
 a freshly-opened session — stranding portrait readers at the top, and the late
 ResizeObserver settle then self-cancelled because of the false unpin.
 
-These are source-level guards (the runtime behavior is iOS-Safari-specific and not
-reproducible in CI), mirroring the static-assertion style of
-test_issue1360_streaming_scroll_hardening.py.
+The listener transition is exercised in Node with the repository's existing
+scroll-listener runtime harness; source guards remain for the programmatic-write
+and ResizeObserver integration points.
 """
 import pathlib
+
+import pytest
+
+from tests.test_issue4295_scroll_pin_reentry import NODE, _run_scroll_listener
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
@@ -38,26 +42,21 @@ def test_client_height_growth_guard_declared():
     assert "let _lastMessageClientHeight=null;" in UI_JS
 
 
-def test_moved_up_ignores_container_growth():
-    """`movedUp` must be gated on `!grew` so a clientHeight increase (toolbar
-    collapse) can't be misread as an upward user scroll (#4702)."""
-    assert "const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;" in UI_JS
-    # The `!grew` gate is the #4702 contract. Additional artifact gates may be
-    # AND-ed in alongside it (e.g. the tail-jitter guard, which suppresses the
-    # browser's own sub-scroll drift at the bottom), so assert the gate itself
-    # rather than one exact spelling of the whole expression.
-    import re
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_portrait_history_open_stays_pinned_at_bottom_after_viewport_growth():
+    """A loaded long transcript remains pinned when portrait chrome settles.
 
-    m = re.search(r"const movedUp=([^;]+);", UI_JS)
-    assert m, "movedUp must be computed in the scroll listener"
-    expr = m.group(1)
-    assert expr.startswith("!grew&&"), (
-        f"movedUp must stay gated on !grew (#4702); got: {expr}"
-    )
-    assert "_lastScrollTop!==null" in expr
-    assert "top<_lastScrollTop-2" in expr
-    # The height must be sampled every scroll event (so the next delta compares fresh).
-    assert "_lastMessageClientHeight=el.clientHeight;" in UI_JS
+    The first frame models the history tail after opening; the second models
+    iOS increasing clientHeight and clamping scrollTop before the listener runs.
+    """
+    frames = [
+        {"scrollTop": 6500, "scrollHeight": 7000, "clientHeight": 500},
+        {"scrollTop": 6350, "scrollHeight": 7000, "clientHeight": 650},
+    ]
+    state = _run_scroll_listener(frames)
+    assert state["_scrollPinned"] is True
+    assert state["_messageUserUnpinned"] is False
+    assert frames[-1]["scrollHeight"] - frames[-1]["scrollTop"] - frames[-1]["clientHeight"] == 0
 
 
 def test_client_height_tracker_reset_on_session_switch():

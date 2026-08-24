@@ -1,140 +1,133 @@
-"""Non-regression: browser tail jitter must not unpin a pinned reader.
+"""Behavioral regressions for pinned-reader browser tail jitter."""
 
-Reproduction (long transcripts, desktop Chromium): on opening a long
-conversation the reader is placed AT the tail, then the browser itself moves
-scrollTop up by ~8px with NO scrollHeight/clientHeight change and with no
-scrollTop write from the app (verified against scrollTop, scrollIntoView,
-focus, scrollTo and scrollBy -- it is a layout-settle artifact).
-
-The scroll listener's direction test (`top < _lastScrollTop - 2`) read that
-artifact as an upward user scroll and latched `_messageUserUnpinned = true`
-on a reader who never touched anything. Auto-follow then stayed off for the
-whole session, and later renders restored the SEMANTIC viewport anchor
-instead of the tail -- landing the reader in the middle of the conversation.
-
-The guard ignores an upward delta only when ALL of these hold:
-  - the drift is small (<= MESSAGE_TAIL_JITTER_MAX_DELTA_PX),
-  - the reader is still visually AT the bottom
-    (<= MESSAGE_TAIL_JITTER_MAX_BOTTOM_PX),
-  - there is no real input intent (wheel / touch / key / scrollbar drag /
-    non-message scroll).
-
-A genuine scroll-up always carries input intent, so it still unpins.
-"""
-
+import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
+
+from tests.test_issue4295_scroll_pin_reentry import _scroll_listener_raf_body
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
-def _function_body(src: str, signature: str) -> str:
-    """Return a whole function body, brace-balanced from its signature."""
-    start = src.index(signature)
-    brace = src.index("{", start)
+def _function_source(name: str) -> str:
+    start = UI_JS.index(f"function {name}(")
+    brace = UI_JS.index("{", start)
     depth = 0
-    for i in range(brace, len(src)):
-        if src[i] == "{":
+    for index in range(brace, len(UI_JS)):
+        if UI_JS[index] == "{":
             depth += 1
-        elif src[i] == "}":
+        elif UI_JS[index] == "}":
             depth -= 1
             if depth == 0:
-                return src[start : i + 1]
-    raise AssertionError(f"function body not found: {signature}")
+                return UI_JS[start : index + 1]
+    raise AssertionError(f"function body not found: {name}")
 
 
-def _scroll_listener_block() -> str:
-    """Return the rAF callback inside the messages scroll listener."""
-    anchor = "el.addEventListener('scroll'"
-    start = UI_JS.index(anchor)
-    raf_start = UI_JS.index("requestAnimationFrame", start)
-    brace = UI_JS.index("{", raf_start)
-    depth = 0
-    for i in range(brace, len(UI_JS)):
-        ch = UI_JS[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return UI_JS[brace : i + 1]
-    raise AssertionError("scroll listener rAF callback not found")
-
-
-def test_tail_jitter_thresholds_are_defined():
-    """Both bounds must exist as explicit, reviewable constants."""
-    assert "const MESSAGE_TAIL_JITTER_MAX_BOTTOM_PX=" in UI_JS
-    assert "const MESSAGE_TAIL_JITTER_MAX_DELTA_PX=" in UI_JS
-
-
-def test_tail_jitter_thresholds_stay_sub_scroll():
-    """The window must stay far below a deliberate scroll gesture."""
-    import re
-
-    for name in (
-        "MESSAGE_TAIL_JITTER_MAX_BOTTOM_PX",
-        "MESSAGE_TAIL_JITTER_MAX_DELTA_PX",
-    ):
-        m = re.search(rf"const {name}=(\d+);", UI_JS)
-        assert m, f"{name} must be a plain integer constant"
-        value = int(m.group(1))
-        assert 0 < value <= 32, (
-            f"{name}={value} is too wide: the guard must only absorb browser "
-            "layout drift, never a real reader scroll."
-        )
-
-
-def test_moved_up_ignores_tail_jitter():
-    """The direction test must exclude the jitter artifact."""
-    block = _scroll_listener_block()
-    assert "_tailJitter" in block, (
-        "The scroll listener must compute a tail-jitter flag so browser "
-        "layout drift at the bottom is not read as an upward user scroll."
+def _run_scroll_frames(samples: list[dict]) -> dict:
+    constants = "\n".join(
+        line
+        for line in UI_JS.splitlines()
+        if line.startswith("const MESSAGE_TAIL_JITTER_MAX_")
     )
-    assert "const movedUp=!grew&&!_tailJitter&&" in block, (
-        "movedUp must exclude tail jitter, otherwise an ~8px browser nudge "
-        "at the tail latches _messageUserUnpinned and kills auto-follow."
+    payload = {
+        "body": _scroll_listener_raf_body(),
+        "guard": constants + "\n" + _function_source("_isMessageTailJitter"),
+        "samples": samples,
+    }
+    script = "const payload=" + json.dumps(payload) + ";\n" + r"""
+const step = new Function(
+  'el', '_lastScrollTop', '_lastMessageClientHeight', '_nearBottomCount',
+  '_scrollPinned', '_messageUserUnpinned', '_newMessageCueVisible',
+  '_scrollbarDragActive', '_recentMessageWheelIntent',
+  '_recentMessageTouchScrollIntent', '_recentMessageKeyScrollIntent',
+  '_recentNonMessageScrollIntent', '_recentMessageRenderArtifactWindow',
+  '_cancelBottomSettle', '_clearNewMessageScrollCue',
+  '_syncScrollToBottomCue', '_updateSessionStartJumpButton',
+  '_isSessionEndlessScrollEnabled', '_messagesTruncated',
+  '_loadOlderMessages', '_scheduleDeferredOlderMessagesLoad',
+  '_setMessageScrollToBottom', 'window',
+  payload.guard + '\n' + payload.body + `
+return {_lastScrollTop,_lastMessageClientHeight,_nearBottomCount,
+        _scrollPinned,_messageUserUnpinned};`
+);
+let state={_lastScrollTop:null,_lastMessageClientHeight:null,_nearBottomCount:0,
+           _scrollPinned:true,_messageUserUnpinned:false};
+const trace=[];
+const noop=()=>{};
+for(const el of payload.samples){
+  const intent=el.intent||{};
+  let cancels=0, writes=0;
+  state=step(
+    el, state._lastScrollTop, state._lastMessageClientHeight,
+    state._nearBottomCount, state._scrollPinned, state._messageUserUnpinned,
+    false, !!intent.scrollbar, ()=>!!intent.wheel, ()=>!!intent.touch,
+    ()=>!!intent.key, ()=>!!intent.nonMessage, ()=>false,
+    ()=>{cancels++;}, noop, noop, noop, ()=>false, false, noop, noop,
+    ()=>{writes++;el.scrollTop=el.scrollHeight-el.clientHeight;},
+    {_autoScrollFollow:true}
+  );
+  trace.push({state:{...state},cancels,writes,
+              bottomDistance:el.scrollHeight-el.scrollTop-el.clientHeight});
+}
+console.log(JSON.stringify({state,trace}));
+"""
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
+    return json.loads(result.stdout)
 
 
-def test_tail_jitter_requires_reader_at_bottom():
-    """Far from the tail, an upward scroll must always unpin."""
-    guard = _function_body(UI_JS, "function _isMessageTailJitter")
-    assert "bottomDistance>MESSAGE_TAIL_JITTER_MAX_BOTTOM_PX" in guard
-    assert "delta>0&&delta<=MESSAGE_TAIL_JITTER_MAX_DELTA_PX" in guard
-
-
-def test_tail_jitter_yields_to_every_real_input_intent():
-    """Any genuine reader input must bypass the guard and unpin normally."""
-    guard = _function_body(UI_JS, "function _isMessageTailJitter")
-    for intent in (
-        "_scrollbarDragActive",
-        "_recentMessageWheelIntent",
-        "_recentMessageTouchScrollIntent",
-        "_recentMessageKeyScrollIntent",
-        "_recentNonMessageScrollIntent",
-    ):
-        assert intent in guard, (
-            f"The tail-jitter guard must yield to {intent}: a real scroll-up "
-            "must keep unpinning the reader."
-        )
-
-
-def test_tail_jitter_helper_is_defined_outside_the_scroll_listener():
-    """Keep the helper at module scope.
-
-    Several existing harnesses slice the scroll listener by searching for the
-    first `})();` after its start. An inlined IIFE inside the listener
-    introduces an earlier `})();` and silently truncates that slice, breaking
-    unrelated assertions. Defining the helper at module scope keeps the
-    listener body extractable.
-    """
-    block = _scroll_listener_block()
-    assert "function _isMessageTailJitter" not in block, (
-        "_isMessageTailJitter must live at module scope, not inside the scroll "
-        "listener, so `})();`-based test harnesses keep slicing the full block."
+def test_stream_growth_and_no_input_tail_jitter_keep_runtime_pin_stable():
+    """Streaming growth re-anchors once; an 8px browser drift never unpins."""
+    growth = _run_scroll_frames(
+        [
+            {"scrollTop": 6500, "scrollHeight": 7000, "clientHeight": 500},
+            {"scrollTop": 6500, "scrollHeight": 7400, "clientHeight": 500},
+            {"scrollTop": 6500, "scrollHeight": 7000, "clientHeight": 500},
+        ]
     )
-    assert "_cancelBottomSettle();" in block, (
-        "Sanity check: the extracted listener block must still reach its tail; "
-        "if this fails the block was truncated by an early `})();`."
+    assert growth["trace"][1]["writes"] == 1
+    assert sum(frame["writes"] for frame in growth["trace"]) == 1
+    assert growth["trace"][-1]["bottomDistance"] == 0
+    assert growth["state"]["_scrollPinned"] is True
+    assert growth["state"]["_messageUserUnpinned"] is False
+
+    jitter = _run_scroll_frames(
+        [
+            {"scrollTop": 6500, "scrollHeight": 7000, "clientHeight": 500},
+            {"scrollTop": 6492, "scrollHeight": 7000, "clientHeight": 500},
+        ]
     )
+    assert jitter["trace"][1]["cancels"] == 0
+    assert jitter["state"]["_scrollPinned"] is True
+    assert jitter["state"]["_messageUserUnpinned"] is False
+
+
+@pytest.mark.parametrize("intent", ["wheel", "touch", "key", "scrollbar", "nonMessage"])
+def test_genuine_input_bypasses_tail_jitter_and_unpins_at_runtime(intent):
+    """Every real input detector must affect the observable listener state."""
+    result = _run_scroll_frames(
+        [
+            {"scrollTop": 6500, "scrollHeight": 7000, "clientHeight": 500},
+            {
+                "scrollTop": 6492,
+                "scrollHeight": 7000,
+                "clientHeight": 500,
+                "intent": {intent: True},
+            },
+        ]
+    )
+    assert result["trace"][1]["cancels"] == 1
+    assert result["state"]["_scrollPinned"] is False
+    assert result["state"]["_messageUserUnpinned"] is True
