@@ -11755,7 +11755,22 @@ def _handle_insights(handler, parsed) -> bool:
     if start_ts_v is not None or end_ts_v is not None:
         if end_ts_v is not None:
             end_ts = min(end_ts_v, now)
-            start_ts = start_ts_v if start_ts_v is not None else (end_ts - 30 * 86400)
+            if start_ts_v is not None:
+                start_ts = start_ts_v
+            else:
+                # End-only with a calendar-date end: default the start to
+                # 30 calendar days before the end's local midnight (DST-safe).
+                # Using `end_ts - 30*86400` drifts by the DST offset and can
+                # fall on the wrong calendar date (see gate repro:
+                # end=2026-03-10 in America/New_York → elapsed gives 2026-02-07
+                # instead of the calendar 2026-02-08).
+                if end_kind == "date":
+                    end_day_tmp = _datetime.fromtimestamp(end_ts).date()
+                    start_day_tmp = end_day_tmp - _timedelta(days=30)
+                    start_ts = _time.mktime(start_day_tmp.timetuple())
+                    start_kind = "date"
+                else:
+                    start_ts = end_ts - 30 * 86400
         else:
             start_ts = start_ts_v
             end_ts = now
