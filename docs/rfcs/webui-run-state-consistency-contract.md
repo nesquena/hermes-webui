@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Author:** @franksong2702
 - **Created:** 2026-05-16
-- **Updated:** 2026-07-16
+- **Updated:** 2026-08-22
 - **Tracking issue:** [#2361](https://github.com/nesquena/hermes-webui/issues/2361)
 - **Related architecture:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925), [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md), [`stable-assistant-turn-anchors.md`](stable-assistant-turn-anchors.md)
 
@@ -99,6 +99,16 @@ and 5; it does not mark every run-state boundary implemented.
    browser-facing timeline renderer as live SSE events so recovery does not
    downgrade a structured Thinking / progress / tool / compression turn into a
    separate flattened presentation.
+   When session loading combines a WebUI sidecar with Hermes Agent `state.db`, a
+   native-image user turn may appear as both rich multipart content and scalar
+   text that replaces each image part with `[screenshot]`. Reconciliation may
+   treat those rows as one turn only when the multipart value contains text and
+   recognized native-image parts, its exact scalar projection matches, role and
+   tool shape match, timestamps match exactly, stable IDs and provider metadata
+   do not conflict, and the pairing is unambiguous. Keep the rich sidecar row;
+   if any requirement is missing or contradictory, preserve both rows rather
+   than deduplicating. Literal scalar `[screenshot]` text alone is not identity
+   evidence.
    Visible interim assistant progress must remain visible timeline content; a
    compact Activity disclosure may summarize adjacent tool/debug detail, but it
    must not be the only place where the user can see emitted progress text.
