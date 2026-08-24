@@ -42,7 +42,20 @@ def test_moved_up_ignores_container_growth():
     """`movedUp` must be gated on `!grew` so a clientHeight increase (toolbar
     collapse) can't be misread as an upward user scroll (#4702)."""
     assert "const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;" in UI_JS
-    assert "const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;" in UI_JS
+    # The `!grew` gate is the #4702 contract. Additional artifact gates may be
+    # AND-ed in alongside it (e.g. the tail-jitter guard, which suppresses the
+    # browser's own sub-scroll drift at the bottom), so assert the gate itself
+    # rather than one exact spelling of the whole expression.
+    import re
+
+    m = re.search(r"const movedUp=([^;]+);", UI_JS)
+    assert m, "movedUp must be computed in the scroll listener"
+    expr = m.group(1)
+    assert expr.startswith("!grew&&"), (
+        f"movedUp must stay gated on !grew (#4702); got: {expr}"
+    )
+    assert "_lastScrollTop!==null" in expr
+    assert "top<_lastScrollTop-2" in expr
     # The height must be sampled every scroll event (so the next delta compares fresh).
     assert "_lastMessageClientHeight=el.clientHeight;" in UI_JS
 
