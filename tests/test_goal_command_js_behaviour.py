@@ -21,6 +21,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS_PATH = REPO_ROOT / "static" / "commands.js"
+PANELS_JS_PATH = REPO_ROOT / "static" / "panels.js"
 
 NODE = shutil.which("node")
 
@@ -30,7 +31,8 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const scenario = process.argv[3] || '';
+const panelsSrc = fs.readFileSync(process.argv[3], 'utf8');
+const scenario = process.argv[4] || '';
 
 // ---- mocked browser environment ----
 const _store = new Map();
@@ -113,23 +115,24 @@ async function api(url, opts) {
 }
 
 // ---- extract cmdGoal from the real file and evaluate it ----
-function extractFunc(name) {
+function extractFunc(source, name) {
   // Preserve a leading `async` keyword — dropping it would make the
   // extracted `await` statements a SyntaxError.
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const m = re.exec(src);
+  const m = re.exec(source);
   if (!m) throw new Error(name + ' not found');
   const start = m.index;
-  let i = src.indexOf('{', start);
+  let i = source.indexOf('{', start);
   let depth = 1; i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
+  while (depth > 0 && i < source.length) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') depth--;
     i++;
   }
-  return src.slice(start, i);
+  return source.slice(start, i);
 }
-eval(extractFunc('cmdGoal'));
+eval(extractFunc(src, 'cmdGoal'));
+eval(extractFunc(panelsSrc, '_hydrateContextBriefGoalFinish'));
 
 // ---- scenario state ----
 const SID = 'sid-6705-behaviour';
@@ -244,9 +247,39 @@ const S = {
     out.effects = _effects;
   } else if (scenario === 'missing_stream') {
     S.messages = [{role:'user', content:'goal owner prompt'}];
-    _nextResponse = () => ({ok:true});
+    _nextResponse = () => ({
+      ok:true, action:'set',
+      message:'⊙ Goal set (20-turn budget): ship it',
+    });
     out.result = await cmdGoal('ship it');
+    out.messages = S.messages;
     out.effects = _effects;
+  } else if (scenario === 'accepted_without_stream') {
+    S.messages = [{role:'assistant', content:'prior transcript'}];
+    rememberPending(SID, 'openai/gpt-5.4', 'openai');
+    INFLIGHT[SID] = {
+      streamId:'prior-stream',
+      messages:S.messages,
+      uploaded:['keep.txt'],
+      toolCalls:[{name:'keep-tool'}],
+    };
+    const host = {
+      id:'workspaceContextPanel', hidden:false, isConnected:true,
+      dataset:{briefSid:SID},
+    };
+    _nextResponse = () => {
+      // Simulate navigation snapshotting the optimistic Goal-finish prompt.
+      INFLIGHT[SID] = {...INFLIGHT[SID], messages:S.messages};
+      return {
+        ok:true, accepted:true, action:'queue',
+        message:'⊙ Goal request accepted: ship it',
+      };
+    };
+    out.result = await _hydrateContextBriefGoalFinish(SID, 'ship it', host);
+    out.messages = S.messages;
+    out.effects = _effects;
+    out.markerAfter = readPending(SID);
+    out.inflightAfter = INFLIGHT[SID];
   } else if (scenario === 'api_failure') {
     S.messages = [{role:'user', content:'goal owner prompt'}];
     _nextResponse = () => { throw new Error('kickoff unavailable'); };
@@ -274,7 +307,7 @@ def driver_path(tmp_path_factory):
 def _run_scenario(driver_path, scenario):
     """Run cmdGoal against the real commands.js with mocked browser state."""
     result = subprocess.run(
-        [NODE, driver_path, str(COMMANDS_JS_PATH), scenario],
+        [NODE, driver_path, str(COMMANDS_JS_PATH), str(PANELS_JS_PATH), scenario],
         capture_output=True,
         text=True,
         timeout=30,
@@ -393,8 +426,36 @@ def test_goal_reports_missing_stream_and_api_failure_to_callers(driver_path):
     failed = _run_scenario(driver_path, "api_failure")
 
     assert missing["result"] is False
+    assert missing["messages"] == [{"role": "user", "content": "goal owner prompt"}]
+    assert not any(effect["kind"] in {"renderMessages", "toast"} for effect in missing["effects"])
     assert failed["result"] is False
     assert any(
         effect["kind"] == "toast" and "kickoff unavailable" in effect["args"]
         for effect in failed["effects"]
     )
+
+
+def test_goal_accepted_response_without_stream_is_not_success(driver_path):
+    """Only stream ownership is success, regardless of accepted/action fields."""
+    accepted = _run_scenario(driver_path, "accepted_without_stream")
+
+    assert accepted["result"] is False
+    assert accepted["messages"] == [
+        {"role": "assistant", "content": "prior transcript"}
+    ]
+    assert not any(effect["kind"] == "toast" for effect in accepted["effects"])
+    assert [effect["kind"] for effect in accepted["effects"]] == [
+        "renderMessages",
+        "renderMessages",
+        "saveInflightState",
+    ]
+    assert accepted["markerAfter"] == {
+        "model": "openai/gpt-5.4",
+        "model_provider": "openai",
+    }
+    assert accepted["inflightAfter"] == {
+        "streamId": "prior-stream",
+        "messages": [{"role": "assistant", "content": "prior transcript"}],
+        "uploaded": ["keep.txt"],
+        "toolCalls": [{"name": "keep-tool"}],
+    }
