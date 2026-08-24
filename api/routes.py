@@ -14180,12 +14180,19 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/workspaces/suggest":
+        from api.profiles import get_active_profile_name
+
         qs = parse_qs(parsed.query)
         prefix = qs.get("prefix", [""])[0]
+        active_profile = get_active_profile_name()
+        try:
+            suggestions = list_workspace_suggestions(prefix, profile=active_profile)
+        except TypeError:
+            suggestions = list_workspace_suggestions(prefix)
         return j(
             handler,
             {
-                "suggestions": list_workspace_suggestions(prefix),
+                "suggestions": suggestions,
                 "prefix": prefix,
             },
         )
@@ -14862,26 +14869,41 @@ def _validate_session_toolsets_shape(toolsets):
     return toolsets
 
 
-def _resolve_new_session_workspace(body, visible_prev_session_id):
+def _resolve_new_session_workspace(body, visible_prev_session_id, profile=None):
     """Resolve a new-session workspace, recovering only verified inheritance."""
     candidate = body.get("workspace")
     if not candidate:
         return None
+
+    def _rtw(value):
+        # Legacy test doubles may predate the profile kwarg.
+        try:
+            return resolve_trusted_workspace(value, profile=profile)
+        except TypeError:
+            return resolve_trusted_workspace(value)
+
     if (
         body.get("workspace_inherited_from_prev_session") is not True
         or not visible_prev_session_id
     ):
-        return str(resolve_trusted_workspace(candidate))
+        return str(_rtw(candidate))
     try:
         previous_session = get_session(visible_prev_session_id, metadata_only=True)
     except KeyError:
-        return str(resolve_trusted_workspace(candidate))
+        return str(_rtw(candidate))
     if str(getattr(previous_session, "workspace", None) or "") != str(candidate):
-        return str(resolve_trusted_workspace(candidate))
-    workspace, _recovered = resolve_implicit_workspace_with_recovery(
-        candidate,
-        get_last_workspace,
-    )
+        return str(_rtw(candidate))
+    try:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            candidate,
+            get_last_workspace,
+            profile=profile,
+        )
+    except TypeError:
+        workspace, _recovered = resolve_implicit_workspace_with_recovery(
+            candidate,
+            get_last_workspace,
+        )
     return str(workspace)
 
 def handle_post(handler, parsed) -> bool:
@@ -15223,7 +15245,9 @@ def handle_post(handler, parsed) -> bool:
         ):
             workspace_prev_session_id = None
         try:
-            workspace = _resolve_new_session_workspace(body, workspace_prev_session_id)
+            workspace = _resolve_new_session_workspace(
+                body, workspace_prev_session_id, profile=body.get("profile") or None
+            )
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
         worktree_info = None
@@ -15252,7 +15276,17 @@ def handle_post(handler, parsed) -> bool:
                 from api.worktrees import create_worktree_for_workspace
                 base_workspace = workspace
                 if not base_workspace:
-                    base_workspace = str(resolve_trusted_workspace(get_last_workspace()))
+                    _new_profile = body.get("profile") or None
+                    try:
+                        _lw = get_last_workspace(profile=_new_profile)
+                    except TypeError:
+                        _lw = get_last_workspace()
+                    try:
+                        base_workspace = str(
+                            resolve_trusted_workspace(_lw, profile=_new_profile)
+                        )
+                    except TypeError:
+                        base_workspace = str(resolve_trusted_workspace(_lw))
                 worktree_info = create_worktree_for_workspace(base_workspace)
                 workspace = worktree_info["path"]
             except (TypeError, ValueError) as e:
@@ -18032,15 +18066,26 @@ def _handle_list_dir(handler, parsed):
         except Exception:
             return bad(handler, "Session not found", 404)
     try:
+        _list_profile = getattr(webui_session, "profile", None)
         if webui_session is None:
-            workspace = resolve_trusted_workspace(workspace)
+            try:
+                workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
+            except TypeError:
+                workspace = resolve_trusted_workspace(workspace)
             recovered = False
         else:
             stored_workspace = workspace
-            workspace, recovered = resolve_implicit_workspace_with_recovery(
-                stored_workspace,
-                get_last_workspace,
-            )
+            try:
+                workspace, recovered = resolve_implicit_workspace_with_recovery(
+                    stored_workspace,
+                    get_last_workspace,
+                    profile=_list_profile,
+                )
+            except TypeError:
+                workspace, recovered = resolve_implicit_workspace_with_recovery(
+                    stored_workspace,
+                    get_last_workspace,
+                )
             if recovered:
                 persisted = persist_recovered_workspace_binding(
                     webui_session,
@@ -24349,14 +24394,25 @@ def _handle_chat_start(handler, body, diag=None):
 
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
+    _session_profile = getattr(s, "profile", None)
     explicit = requested_workspace not in (None, "")
     if explicit:
-        return str(resolve_trusted_workspace(requested_workspace))
+        try:
+            return str(resolve_trusted_workspace(requested_workspace, profile=_session_profile))
+        except TypeError:
+            return str(resolve_trusted_workspace(requested_workspace))
     stored_workspace = getattr(s, "workspace", None)
-    workspace, recovered = resolve_implicit_workspace_with_recovery(
-        stored_workspace,
-        get_last_workspace,
-    )
+    try:
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+            profile=_session_profile,
+        )
+    except TypeError:
+        workspace, recovered = resolve_implicit_workspace_with_recovery(
+            stored_workspace,
+            get_last_workspace,
+        )
     if not recovered:
         return str(workspace)
     persisted = persist_recovered_workspace_binding(
@@ -25923,6 +25979,7 @@ def _handle_workspace_reorder(handler, body):
     try:
         save_workspaces(reordered, profile=active_profile)
     except TypeError:
+        # Legacy signature (test doubles with single-arg lambdas, older forks).
         save_workspaces(reordered)
     return j(handler, {"ok": True, "workspaces": reordered})
 

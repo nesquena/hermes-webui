@@ -745,7 +745,15 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _trusted_workspace_roots() -> list[Path]:
+def _trusted_workspace_roots(profile: str | Path | None = None) -> list[Path]:
+    """Return the host directories workspace suggestions may traverse.
+
+    Saved-workspace roots follow the same trust rule as
+    :func:`resolve_trusted_workspace`: with an explicit *profile*, only
+    workspaces saved under THAT profile widen the boundary (plus the ambient
+    home / boot-default carve-outs); ``None`` keeps the historical ambient /
+    global saved-list behaviour.
+    """
     roots: list[Path] = []
 
     def add(candidate: str | Path | None) -> None:
@@ -764,24 +772,26 @@ def _trusted_workspace_roots() -> list[Path]:
 
     add(_home_path())
     add(_BOOT_DEFAULT_WORKSPACE)
-    for w in load_workspaces():
+    for w in load_workspaces(profile=profile):
         add(w.get("path"))
     roots.sort(key=lambda p: len(str(p)))
     return roots
 
 
-def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
+def list_workspace_suggestions(
+    prefix: str = "", limit: int = 12, profile: str | Path | None = None
+) -> list[str]:
     """Return workspace path suggestions under trusted roots only.
 
     Suggestions are limited to directories under one of:
       - Path.home()
       - the boot default workspace
-      - already-saved workspace roots
+      - already-saved workspace roots (scoped to *profile* when given)
 
     Arbitrary system prefixes return an empty list rather than an error so the
     UI can safely autocomplete while the user types.
     """
-    roots = _trusted_workspace_roots()
+    roots = _trusted_workspace_roots(profile=profile)
     if not roots:
         return []
 
@@ -931,6 +941,11 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
+        saved = load_workspaces(profile=profile)
+        saved_paths = {_resolve_path(w["path"], profile) for w in saved if w.get("path")}
+        if candidate in saved_paths:
+            return candidate
+    except TypeError:
         saved = load_workspaces()
         saved_paths = {_resolve_path(w["path"]) for w in saved if w.get("path")}
         if candidate in saved_paths:
@@ -960,15 +975,22 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
 def resolve_implicit_workspace_with_recovery(
     candidate: str | Path | None,
     fallback: str | Path | None | Callable[[], str | Path | None],
+    profile: str | Path | None = None,
 ) -> tuple[Path, bool]:
     """Resolve an implicit workspace, recovering only a genuinely missing path.
 
     The fallback still passes through :func:`resolve_trusted_workspace`. Existing
     but untrusted, inaccessible, or non-directory candidates are not recovery
     cases: their original validation error is preserved so fallback cannot widen
-    the workspace trust boundary.
+    the workspace trust boundary. When *profile* is given, both the trust
+    resolution and the recovery fallback are scoped to that profile.
     """
     try:
+        if profile is not None:
+            try:
+                return resolve_trusted_workspace(candidate, profile=profile), False
+            except TypeError:
+                pass
         return resolve_trusted_workspace(candidate), False
     except ValueError as original_error:
         if candidate in (None, ""):
@@ -992,6 +1014,11 @@ def resolve_implicit_workspace_with_recovery(
             local_candidate.stat()
         except FileNotFoundError:
             fallback_value = fallback() if callable(fallback) else fallback
+            if profile is not None:
+                try:
+                    return resolve_trusted_workspace(fallback_value, profile=profile), True
+                except TypeError:
+                    pass
             return resolve_trusted_workspace(fallback_value), True
         except (OSError, RuntimeError, ValueError):
             raise original_error from None
