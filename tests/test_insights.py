@@ -1300,7 +1300,7 @@ def _py_bucket(rows):
     elif n <= 365:
         bucket_size = 8  # ≤52 bars for 365 days; shrink-safe with minmax(0,1fr)
     else:
-        bucket_size = 8  # fallback for >365 (shouldn't occur in practice)
+        bucket_size = __import__('math').ceil(n / 52)  # 5-year ~1826 → 36 → 51 bars, preserves ≤52 invariant
 
     result = []
     for i in range(0, n, bucket_size):
@@ -1379,6 +1379,98 @@ def test_insights_bucketing_helper_preserves_label_and_title_fields():
     assert 'title' in bucketed90[0], 'bucket row must have .title'
     assert '2026-01-01' in bucketed90[0]['title'], f'title should include start date, got {bucketed90[0]["title"]}'
     assert len(bucketed90[0]['label']) <= 12, f'label should be short, got {bucketed90[0]["label"]}'
+
+
+def test_insights_bucketing_helper_five_year_window_stays_bounded_and_lossless():
+    """5-year window (~1826 days) must stay <=52 bars, retain endpoints,
+    preserve sums, and keep label/title correct - mirrors
+    Math.ceil(len/52) production branch.  Gap: the stale helper hardcoded
+    bucket_size=8 and the suite only tested through 365 days, so the 5-year
+    headline feature silently clipped to 229 bars."""
+    import math, datetime
+    for n in (366, 400, 730, 1826, 1827):
+        rows = _make_daily_rows(n)
+        base = datetime.date(2021, 5, 4)
+        for i, r in enumerate(rows):
+            r['date'] = (base + datetime.timedelta(days=i)).isoformat()
+        bucketed = _py_bucket(rows)
+        assert len(bucketed) <= 52, f"n={n} must stay <=52 bars, got {len(bucketed)}"
+        assert len(bucketed) >= 1
+        expected_bs = math.ceil(n / 52) if n > 365 else (2 if n <= 90 else 3 if n <= 180 else 8)
+        if n > 365:
+            assert expected_bs == math.ceil(n / 52)
+            assert len(bucketed) == math.ceil(n / expected_bs)
+        assert bucketed[0]['date'] == rows[0]['date'], f"n={n} first bucket date must be first input date"
+        assert bucketed[-1]['date'] == rows[(len(bucketed) - 1) * expected_bs]['date']
+        assert sum(b['input_tokens'] for b in bucketed) == sum(r['input_tokens'] for r in rows)
+        assert sum(b['output_tokens'] for b in bucketed) == sum(r['output_tokens'] for r in rows)
+        assert sum(b['sessions'] for b in bucketed) == sum(r['sessions'] for r in rows)
+        assert abs(sum(b['cost'] for b in bucketed) - sum(r['cost'] for r in rows)) < 1e-9
+        first = bucketed[0]
+        assert 'label' in first and 'title' in first
+        assert first['date'] in first['title']
+        if n > 30:
+            assert '--' in first['label'] or first['label'] == rows[0]['date'][5:]
+            assert ' -- ' in first['title'] or first['title'] == rows[0]['date']
+
+
+def test_insights_period_change_preserves_custom_range_and_seeds_default_only_when_empty():
+    """insightsPeriodChange must preserve Custom(A/B) across preset detour
+    (seed trailing-30 only when BOTH inputs empty), and must seed a
+    default 30-day window when entering Custom with empty inputs.
+    Static guarantee of MUST-FIX 2 plus runtime probe of the real handler."""
+    import json, shutil, subprocess, textwrap
+    period_fn = _function_body(PANELS_JS, "insightsPeriodChange")
+    assert "!startEl.value && !endEl.value" in period_fn, "must guard seeding on both inputs empty"
+    assert "Math.ceil(len / 52)" in PANELS_JS, "panels.js must use Math.ceil(len/52) for >365"
+    assert 'min-width:106px' in INDEX_HTML, "date inputs must have min-width:106px to wrap before clipping"
+    assert INDEX_HTML.count('min-width:106px') >= 2
+    assert "insights_footer_range" in PANELS_JS
+    assert "t('insights_footer_range')" in PANELS_JS
+    node = shutil.which("node")
+    if not node:
+        import pytest as _pytest
+        _pytest.skip("node not available")
+    harness = textwrap.dedent(r"""
+        %(period_fn)s
+        function _toDateLocal(d){const pad=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;}
+        let periodVal = 'custom';
+        let startVal = '';
+        let endVal = '';
+        let loadCalls = 0;
+        let customWrap = {style:{display:'none'}};
+        global.$ = (id)=>{
+          if(id==='insightsPeriod') return {value: periodVal};
+          if(id==='insightsCustomRange') return customWrap;
+          if(id==='insightsStart') return {get value(){return startVal;}, set value(v){startVal=v;}};
+          if(id==='insightsEnd') return {get value(){return endVal;}, set value(v){endVal=v;}};
+          return null;
+        };
+        global.loadInsights = ()=>{loadCalls++;};
+        loadInsights = global.loadInsights;
+        periodVal='custom'; startVal=''; endVal=''; customWrap.style.display='none'; loadCalls=0;
+        insightsPeriodChange();
+        if(!startVal || !endVal) throw new Error('empty entries must be seeded, got '+startVal+'/'+endVal);
+        const today = _toDateLocal(new Date());
+        if(endVal !== today) throw new Error('seeded end must be today '+today+' got '+endVal);
+        const s = new Date(startVal+'T00:00:00'); const e = new Date(endVal+'T00:00:00');
+        const diff = Math.round((e - s)/86400000)+1;
+        if(diff!==30) throw new Error('seeded window must be 30 days, got '+diff);
+        if(customWrap.style.display!=='flex') throw new Error('custom wrap must be flex');
+        startVal='2026-01-10'; endVal='2026-02-20';
+        periodVal='30'; insightsPeriodChange();
+        if(customWrap.style.display!=='none') throw new Error('preset must hide custom wrap');
+        periodVal='custom'; insightsPeriodChange();
+        if(startVal!=='2026-01-10' || endVal!=='2026-02-20') throw new Error('Custom(A/B)->preset->Custom must preserve A/B, got '+startVal+'/'+endVal);
+        startVal='2026-01-10'; endVal=''; periodVal='30'; insightsPeriodChange();
+        periodVal='custom'; insightsPeriodChange();
+        if(startVal!=='2026-01-10' || endVal!=='') throw new Error('partial fill must not reseed, got '+startVal+'/'+endVal);
+        console.log(JSON.stringify({ok:true}));
+    """) % {"period_fn": period_fn}
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=10, check=False)
+    assert proc.returncode == 0, "node handler probe failed: " + proc.stdout + proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["ok"] is True
 
 
 def test_insights_render_loop_uses_bucket_helper():
