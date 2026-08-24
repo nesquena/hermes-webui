@@ -1533,6 +1533,64 @@ def test_unassigned_refill_stops_widening_on_an_exhausted_database(
     assert len(unassigned_queries) == 2
 
 
+def test_refill_handles_state_db_and_sidecar_assignments_together(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A mixed store, including a row the two stores DISAGREE about.
+
+    ``cli-29``/``cli-28`` are assigned in state.db (so the SQL filter already
+    excludes them), ``cli-10``/``cli-09`` only on their sidecars (so it does
+    not), and ``cli-27`` in BOTH, to different projects. state.db wins that
+    conflict — it is the agent's own record — but the classification that
+    matters to the window is the same either way: assigned, so it does not spend
+    an unassigned slot, and the widening must not double-count it either.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a", "project-b")
+
+    state_assigned = {"cli-29", "cli-28", "cli-27"}
+    rows = [
+        _session(
+            f"cli-{index:02d}",
+            BASE_TS + index,
+            project_id="project-a" if f"cli-{index:02d}" in state_assigned else None,
+        )
+        for index in range(30)
+    ]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    sidecar_assigned = {"cli-27", "cli-10", "cli-09"}
+    for sid in sorted(sidecar_assigned):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-b",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    sessions = models.get_cli_sessions()
+
+    # state.db wins for the conflicted row; the sidecar-only pair keeps its own
+    # project; nothing else is assigned.
+    assert {s["session_id"]: s["project_id"] for s in sessions if s["project_id"]} == {
+        "cli-29": "project-a",
+        "cli-28": "project-a",
+        "cli-27": "project-a",
+        "cli-10": "project-b",
+        "cli-09": "project-b",
+    }
+
+    # Every conversation with a sidecar is surfaced by the WebUI store, so the
+    # route sees all three of those as assigned rows.
+    kept = _sidebar_rows_after_route(
+        sessions, sidecar_assigned, project_id="project-b"
+    )
+    assert _unassigned_cli_ids(kept) == [
+        f"cli-{index:02d}" for index in list(range(26, 10, -1)) + [8, 7, 6, 5]
+    ]
+
+
 def test_unassigned_refill_boundary_is_the_documented_scan_ceiling(
     fake_hermes_home, tmp_path, monkeypatch
 ):
