@@ -56,7 +56,7 @@ def test_context_tab_hides_file_chrome_via_css():
 def test_goal_finish_button_and_handler():
     assert PANELS.count("context_goal_finish") >= 2  # both llm variants
     assert "async function _contextBriefGoalFinish(btn)" in PANELS
-    assert "async function _hydrateContextBriefGoalFinish(sid, goalText)" in PANELS
+    assert "async function _hydrateContextBriefGoalFinish(sid, goalText, host)" in PANELS
     assert "await cmdGoal(goalText)" in PANELS
     assert "it.status === 'pending' || it.status === 'in_progress'" in PANELS
     # non-blocking app dialog, never the browser-native confirm
@@ -75,7 +75,7 @@ def test_goal_finish_hydrates_via_cmd_goal_not_raw_post():
     # Raw POST /api/goal starts the server turn but leaves the open tab idle
     # until reload. Goal finish must reuse composer cmdGoal so SSE attaches.
     body = _goal_finish_handler_body()
-    assert "await _hydrateContextBriefGoalFinish(sid, goalText)" in body
+    assert "await _hydrateContextBriefGoalFinish(sid, goalText, host)" in body
     assert "await cmdGoal(goalText)" in body
     assert "api('/api/goal'" not in body
     assert "role:'user'" in body
@@ -291,6 +291,142 @@ vm.runInContext(fnSrc, ctx);
     )
 
 
+def test_goal_finish_failed_kickoff_after_navigation_does_not_survive_inflight():
+    """A failed Goal-finish kickoff must clean only its owning session.
+
+    Drive the production hydration function through the exact race: session A
+    already has live INFLIGHT state, the optimistic goal request is rendered,
+    navigation snapshots that state, and cmdGoal resolves false on session B.
+    Neither B nor A's reopen snapshot may retain the failed request.
+    """
+    fn_src = _extract_hydrate_fn()
+    script = f"""
+const vm = require('vm');
+const fnSrc = {json.dumps(fn_src)};
+const calls = [];
+const persisted = {{}};
+const ownerMessages = [{{role:'assistant', content:'owner live answer', _live:true}}];
+const INFLIGHT = {{
+  'sid-owner': {{
+    streamId:'owner-live-stream',
+    messages:ownerMessages,
+    uploaded:[],
+    toolCalls:[{{name:'owner-tool'}}],
+  }},
+}};
+const S = {{
+  session:{{session_id:'sid-owner', active_stream_id:'owner-live-stream'}},
+  messages:ownerMessages,
+  toolCalls:[{{name:'owner-tool'}}],
+  activeStreamId:'owner-live-stream',
+  busy:true,
+}};
+const host = {{
+  id:'workspaceContextPanel',
+  hidden:false,
+  isConnected:true,
+  dataset:{{briefSid:'sid-owner'}},
+}};
+let settleGoal;
+const goalResult = new Promise(resolve => {{ settleGoal = resolve; }});
+async function cmdGoal(args) {{
+  calls.push({{cmd:'cmdGoal', args}});
+  return goalResult;
+}}
+function saveInflightState(sid, state) {{
+  persisted[sid] = JSON.parse(JSON.stringify(state));
+  calls.push({{cmd:'saveInflightState', sid}});
+}}
+const ctx = {{
+  S, INFLIGHT, host, cmdGoal, saveInflightState, Date,
+  _loadSessionGeneration:41,
+  _contextBriefSid:() => S.session && S.session.session_id,
+  _contextBriefGoalHostCurrent:(candidate, sid) => !!(
+    candidate && candidate.dataset.briefSid === sid
+    && candidate.isConnected !== false && !candidate.hidden
+    && S.session && S.session.session_id === sid
+  ),
+  renderMessages:() => calls.push({{cmd:'renderMessages', sid:S.session.session_id}}),
+  showToast:msg => calls.push({{cmd:'toast', msg, sid:S.session.session_id}}),
+  t:key => key,
+}};
+vm.createContext(ctx);
+vm.runInContext(fnSrc, ctx);
+(async () => {{
+  const pending = vm.runInContext(
+    `_hydrateContextBriefGoalFinish('sid-owner', 'Finish remaining work', host)`,
+    ctx
+  );
+  await Promise.resolve();
+
+  // Navigation persists A's existing live state, then installs B's pane while
+  // the kickoff is unresolved. The production failure continuation must never
+  // search/restore through B's S.messages.
+  saveInflightState('sid-owner', INFLIGHT['sid-owner']);
+  ctx._loadSessionGeneration += 1;
+  host.hidden = true;
+  S.session = {{session_id:'sid-new', active_stream_id:'new-live-stream'}};
+  S.messages = [{{role:'user', content:'new pane prompt'}}];
+  S.toolCalls = [{{name:'new-pane-tool'}}];
+  S.activeStreamId = 'new-live-stream';
+  S.busy = true;
+
+  settleGoal(false);
+  const result = await pending;
+  process.stdout.write(JSON.stringify({{
+    result,
+    current:{{
+      sid:S.session.session_id,
+      messages:S.messages,
+      toolCalls:S.toolCalls,
+      activeStreamId:S.activeStreamId,
+    }},
+    ownerInflight:INFLIGHT['sid-owner'],
+    persistedOwner:persisted['sid-owner'],
+    inflightKeys:Object.keys(INFLIGHT),
+    calls,
+  }}));
+}})().catch(err => {{
+  console.error(err && err.stack || err);
+  process.exit(1);
+}});
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["node", str(script_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"node failed-kickoff navigation driver failed: {proc.stderr}")
+    finally:
+        script_path.unlink(missing_ok=True)
+
+    result = json.loads(proc.stdout)
+    assert result["result"] is False
+    assert result["current"] == {
+        "sid": "sid-new",
+        "messages": [{"role": "user", "content": "new pane prompt"}],
+        "toolCalls": [{"name": "new-pane-tool"}],
+        "activeStreamId": "new-live-stream",
+    }
+    expected_owner_messages = [
+        {"role": "assistant", "content": "owner live answer", "_live": True}
+    ]
+    assert result["ownerInflight"]["messages"] == expected_owner_messages
+    assert result["persistedOwner"]["messages"] == expected_owner_messages
+    assert result["inflightKeys"] == ["sid-owner"]
+    assert [call for call in result["calls"] if call["cmd"] == "renderMessages"] == [
+        {"cmd": "renderMessages", "sid": "sid-owner"}
+    ]
+    assert not any(call["cmd"] == "toast" for call in result["calls"])
+
+
 def test_goal_finish_dispatches_only_post_confirmation_todos():
     result = _run_goal_finish_case("mutate")
     loads = [call for call in result["calls"] if call["cmd"] == "load"]
@@ -347,7 +483,7 @@ def test_goal_finish_revalidates_session_after_confirm_dialog():
     dialog = body.index("await showConfirmDialog(")
     reval = body.index("_contextBriefGoalHostCurrent(host, sid)", dialog)
     reload = body.index("_preflightContextWorkspace(host, sid)", reval)
-    call = body.index("_hydrateContextBriefGoalFinish(sid, goalText)")
+    call = body.index("_hydrateContextBriefGoalFinish(sid, goalText, host)")
     assert dialog < reval < reload < call, "missing post-dialog workspace revalidation"
 
 
