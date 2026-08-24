@@ -9927,6 +9927,7 @@ from api.run_journal import (
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
     bound_run_journal_snapshot_args,
     find_run_summary,
+    journal_replay_visible,
     read_run_events,
     read_session_run_events,
     session_journal_fingerprint,
@@ -17717,6 +17718,10 @@ def _replay_run_journal(
         max_seq=max_seq,
     )
     for entry in journal.get("events") or []:
+        # Legacy journals contain metering rows (write-time skip landed
+        # later); never replay transient telemetry to a reconnecting client.
+        if not journal_replay_visible(entry):
+            continue
         _sse_with_id(
             handler,
             entry.get("event") or entry.get("type") or "message",
@@ -18252,6 +18257,10 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
     def emit_replay(events, stream_id, cutoff_seq):
         for entry in events:
+            # Legacy journals contain metering rows; never replay transient
+            # telemetry to a reconnecting client.
+            if not journal_replay_visible(entry):
+                continue
             event_id = str(entry.get("event_id") or "")
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
             if cutoff_seq is not None and event_seq is not None and event_seq > cutoff_seq:
