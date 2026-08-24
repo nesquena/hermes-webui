@@ -18,7 +18,14 @@ swing to the opposite failure, so these tests pin BOTH edges of the contract:
   any state.db cap — and that bound is spent by a fair per-project draw, so
   bounding the payload does not starve a quiet project;
 * assigned rows do not spend the unassigned sidebar quota: 20 unique unassigned
-  logical conversations survive after lineage/sidecar dedup;
+  logical conversations survive after lineage/sidecar dedup — including when the
+  assignment lives only on a WebUI sidecar, wherever the moved conversations sit
+  relative to the window, since the refill re-classifies its OWN result and
+  widens again instead of trusting one pre-computed allowance. The one honest
+  boundary is the refill's scan ceiling: conversations deeper than
+  ``UNASSIGNED_CLI_REFILL_SCAN_CEILING`` are not read, so a profile whose newest
+  200 state.db-unassigned conversations hold fewer than 20 still-unassigned ones
+  gets a shorter window (pinned below);
 * a deleted or cross-profile ``project_id`` cannot hide a session — it resolves
   to "unassigned" before either cap runs, instead of becoming a ``default_hidden``
   row with no chip left to reveal it;
@@ -1231,6 +1238,354 @@ def test_sidecar_carried_assignment_does_not_spend_an_unassigned_slot(
     # classification the route applied, which is what made the refill reachable.
     assert sum(1 for s in sessions if not s["project_id"]) == 20
     assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+
+
+def _sidebar_rows_after_route(sessions, moved, *, project_id="project-a"):
+    """Drive the real sidebar chain for WebUI-moved conversations.
+
+    ``/api/sessions`` merges the WebUI store's own rows (which carry the sidecar
+    ``project_id``) with the state.db projection, drops the state rows the WebUI
+    rows already represent, and then caps. Reproducing that here is what makes
+    these tests measure the payload the user actually sees rather than the
+    model's intermediate list.
+    """
+    deduped = routes._dedupe_cli_sidebar_sessions_for_api(sessions, set(moved))
+    # The WebUI row for a moved conversation carries the sidecar's own
+    # timestamp, which is the one the state projection reports for it too.
+    activity = {s["session_id"]: s.get("updated_at") for s in sessions}
+    webui_rows = [
+        {
+            "session_id": sid,
+            "is_cli_session": True,
+            "project_id": project_id,
+            "updated_at": activity.get(sid) or BASE_TS,
+        }
+        for sid in sorted(moved)
+    ]
+    merged = sorted(
+        webui_rows + deduped, key=lambda s: s.get("updated_at") or 0, reverse=True
+    )
+    return routes._cap_recent_cli_sessions(merged)
+
+
+def _unassigned_cli_ids(kept):
+    return [
+        row["session_id"]
+        for row in kept
+        if row.get("is_cli_session") and not row.get("project_id")
+    ]
+
+
+@pytest.mark.parametrize(
+    "total, moved_indexes, expected_unassigned_tail",
+    [
+        # (a) Three moves at the BOTTOM edge of the 20-row window (the window is
+        # cli-29..cli-10, so only cli-10 is inside it). The single pre-computed
+        # allowance saw ONE sidecar-only assignment, widened the refill to 21
+        # rows, and that 21st row (cli-09) turned out to be moved as well: 19
+        # unassigned rows in the payload and cli-07 never fetched at all.
+        (30, (8, 9, 10), "cli-07"),
+        # (b) Eleven moves straddling the window boundary (cli-25..cli-20 are
+        # inside it, cli-19..cli-15 are not): the refill widened by 6, fetched
+        # 26 rows, and 11 of them were moved -> 15 unassigned rows, with
+        # cli-09..cli-13 never fetched.
+        (40, tuple(range(15, 26)), "cli-09"),
+    ],
+    ids=["bottom-edge-of-the-window", "straddling-the-boundary"],
+)
+def test_sidecar_moves_below_the_window_still_deliver_the_full_window(
+    fake_hermes_home, tmp_path, monkeypatch, total, moved_indexes,
+    expected_unassigned_tail,
+):
+    """The unassigned window survives moves the FIRST refill could not see.
+
+    ``sidecar_only_assigned`` was computed once, from the pre-refill window, so
+    any conversation the refill itself brought back carrying a sidecar-only
+    assignment spent an unassigned slot again — the very failure the widening
+    exists to remove. Both arrangements below put moved conversations at or below
+    the window's bottom edge, where the first count cannot possibly know about
+    them.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(total)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:02d}" for index in moved_indexes}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    sessions = models.get_cli_sessions()
+
+    # The model has to FETCH the conversations the moved rows displaced; a cap
+    # applied to rows that were never read cannot invent them.
+    model_ids = {s["session_id"] for s in sessions}
+    assert expected_unassigned_tail in model_ids
+    # At LEAST the window: the proportional widening can over-read when the
+    # moved conversations cluster at the top of the window (it infers the moved
+    # share from what it has seen), and reading a few spare conversations is
+    # cheaper than another query. The sidebar cap below trims the surplus.
+    assert sum(1 for s in sessions if not s["project_id"]) >= 20
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+
+    kept = _sidebar_rows_after_route(sessions, moved)
+    unassigned_cli = _unassigned_cli_ids(kept)
+    assert len(unassigned_cli) == routes.CLI_VISIBLE_SESSION_CAP == 20
+    # Newest-first, skipping every moved conversation: the 20th unassigned
+    # conversation is exactly the tail row above.
+    expected = [
+        f"cli-{index:02d}"
+        for index in range(total - 1, -1, -1)
+        if index not in set(moved_indexes)
+    ][:20]
+    assert unassigned_cli == expected
+    assert expected[-1] == expected_unassigned_tail
+
+
+def test_refill_follows_recency_not_session_id_order(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The widening keys on RECENCY, which ids here deliberately contradict.
+
+    ``cli-00`` is the NEWEST conversation, so the window is cli-00..cli-19 and
+    the moved conversations at its bottom edge are cli-19/cli-20/cli-21. A loop
+    that reasoned about anything but the recency order the queries use would
+    widen in the wrong direction and miss cli-22.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    total = 30
+    rows = [
+        _session(f"cli-{index:02d}", BASE_TS + (total - index))
+        for index in range(total)
+    ]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {"cli-19", "cli-20", "cli-21"}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + (total - int(sid.split("-")[1])),
+        )
+
+    sessions = models.get_cli_sessions()
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+
+    kept = _sidebar_rows_after_route(sessions, moved)
+    unassigned_cli = _unassigned_cli_ids(kept)
+    # Newest first by TIMESTAMP: cli-00..cli-18, then cli-22 (cli-19..cli-21
+    # were moved).
+    assert unassigned_cli == [f"cli-{index:02d}" for index in range(19)] + ["cli-22"]
+
+
+def test_refill_stops_at_the_cap_when_the_cap_is_all_there_is(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """17 unassigned conversations exist and 17 is what the sidebar shows.
+
+    The loop must not keep widening after the database has handed over every
+    unassigned conversation it has — there is nothing left to find, so a wider
+    query would only re-read the same rows.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(20)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {"cli-19", "cli-18", "cli-17"}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+    kept = _sidebar_rows_after_route(sessions, moved)
+
+    assert _unassigned_cli_ids(kept) == [f"cli-{index:02d}" for index in range(16, -1, -1)]
+    assert len(unassigned_queries) == 1
+
+
+def test_unassigned_refill_query_count_is_bounded(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """The re-examination loop is bounded, and it is bounded where it says.
+
+    Every other conversation among the newest 40 is moved from the WebUI, which
+    is the shape that makes the precise widening converge slowest (each pass
+    discovers half as many new assignments as the last). The guarantee still
+    holds, and the whole refill pays at most
+    ``models.UNASSIGNED_CLI_REFILL_MAX_QUERIES`` unassigned queries.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(80)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:02d}" for index in range(40, 80) if index % 2 == 0}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+
+    assert sum(1 for s in sessions if not s["project_id"]) == 20
+    assert 1 < len(unassigned_queries) <= models.UNASSIGNED_CLI_REFILL_MAX_QUERIES
+    # Strictly widening, and never past the documented scan ceiling.
+    assert unassigned_queries == sorted(set(unassigned_queries))
+    assert max(unassigned_queries) <= models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+
+    kept = _sidebar_rows_after_route(sessions, moved)
+    assert len(_unassigned_cli_ids(kept)) == 20
+
+
+def test_unassigned_refill_stops_widening_on_an_exhausted_database(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """No unassigned conversations left to find means no further queries.
+
+    25 conversations, the 10 oldest moved from the WebUI, so only 15 unassigned
+    conversations exist and the window can never reach 20. The loop widens once
+    (that pass does reach new conversations — all of them moved), then must
+    notice the next pass would only re-read the same rows and stop, instead of
+    re-querying up to its iteration cap on every sidebar build.
+    """
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    rows = [_session(f"cli-{index:02d}", BASE_TS + index) for index in range(25)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:02d}" for index in range(10)}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+
+    # Every unassigned conversation in the database is delivered...
+    assert sum(1 for s in sessions if not s["project_id"]) == 15
+    assert {s["session_id"] for s in sessions if s["project_id"] == "project-a"} == moved
+    # ...and the loop stopped as soon as widening stopped paying, well short of
+    # its iteration cap.
+    assert len(unassigned_queries) == 2
+
+
+def test_unassigned_refill_boundary_is_the_documented_scan_ceiling(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Where the guarantee stops, and it stops exactly where the code says.
+
+    The refill will not read deeper than
+    ``UNASSIGNED_CLI_REFILL_SCAN_CEILING`` conversations, because a build must
+    not be turned into a full-table scan by moving conversations into projects.
+    So the window is filled whenever at least 20 of the newest
+    ``ceiling`` state.db-unassigned conversations are still unassigned once
+    sidecars are read. Here 195 of the newest 210 were moved from the WebUI, so
+    only 5 unassigned conversations exist inside the ceiling: the sidebar is
+    honestly short, and the 10 unassigned conversations older than the ceiling
+    stay out of the payload (they remain reachable through search/pagination).
+    """
+    ceiling = models.UNASSIGNED_CLI_REFILL_SCAN_CEILING
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    _register_projects(tmp_path, "project-a")
+
+    total = ceiling + 10
+    rows = [_session(f"cli-{index:03d}", BASE_TS + index) for index in range(total)]
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    moved = {f"cli-{index:03d}" for index in range(15, total)}
+    for sid in sorted(moved):
+        _write_webui_sidecar(
+            session_dir,
+            sid,
+            project_id="project-a",
+            updated_at=BASE_TS + int(sid.split("-")[1]),
+        )
+
+    unassigned_queries = []
+    real_reader = agent_sessions.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_assignment") == "unassigned":
+            unassigned_queries.append(kwargs.get("limit"))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(
+        models, "read_importable_agent_session_rows", _counting_reader
+    )
+
+    sessions = models.get_cli_sessions()
+
+    unassigned = {s["session_id"] for s in sessions if not s["project_id"]}
+    # The unassigned conversations that fit inside the ceiling — cli-010..cli-014
+    # are the newest 5 of the 15 — and nothing deeper.
+    assert unassigned == {f"cli-{index:03d}" for index in range(10, 15)}
+    assert len(unassigned_queries) <= models.UNASSIGNED_CLI_REFILL_MAX_QUERIES
+    assert max(unassigned_queries) == ceiling
 
 
 def test_unassigned_window_counts_logical_conversations_not_segments(

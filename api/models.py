@@ -75,6 +75,29 @@ PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
 # starved project is at most effective_limit * len(projects), which the scan
 # ceiling above already caps. Worst case per build: 1 global query + 1 GROUP BY
 # probe + one small project-scoped query per starved project.
+#
+# --- Bounds for the UNASSIGNED refill pass (see _load_cli_sessions_uncached).
+# The SQL 'unassigned' filter reads state.db.project_id, but a WebUI-side move
+# records the assignment on the session's sidecar ONLY, so that filter hands back
+# conversations this projection classifies as ASSIGNED. How many is not knowable
+# before the query runs, so the refill re-classifies its own result and widens
+# again while the window is still short. These two constants are what keep that
+# loop finite.
+#
+# At most this many unassigned queries per sidebar build (the first one included).
+# The widening below is proportional, not one row at a time, so 4 covers every
+# arrangement whose moved conversations are anywhere near uniformly distributed;
+# the last of the four abandons estimating and reads the ceiling in one go, which
+# is the widest read the loop is ever allowed to pay.
+UNASSIGNED_CLI_REFILL_MAX_QUERIES = 4
+# ...and no single refill query reads deeper than this many logical
+# conversations. It bounds both the I/O and the payload: a build cannot be made
+# to scan the whole of a large state.db by moving conversations into projects.
+# The unassigned window is filled whenever at least CLI_VISIBLE_SESSION_LIMIT of
+# the newest UNASSIGNED_CLI_REFILL_SCAN_CEILING state.db-unassigned conversations
+# are still unassigned once sidecars are read; past that (>180 of the newest 200
+# moved from the WebUI) the sidebar is honestly short rather than unbounded.
+UNASSIGNED_CLI_REFILL_SCAN_CEILING = 200
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -8170,15 +8193,29 @@ def _load_cli_sessions_uncached(
             visible_session_limit if visible_session_limit is not None
             else CLI_VISIBLE_SESSION_LIMIT
         )
-        unassigned_seen = sum(
-            1 for row in state_rows if _interactive_row_project_id(row) is None
-        )
+
+        def _count_unassigned() -> int:
+            """Conversations in the window this projection calls unassigned.
+
+            Recomputed after every refill query instead of trusted from before
+            it: the classification depends on the sidecar, so only the rows in
+            hand can answer it. Cheap to repeat — both inputs
+            (``_sidecar_row_project_id``, ``_known_project_ids``) are memoized
+            for the scan, so no pass re-reads a file (#4842).
+            """
+            return sum(
+                1 for row in state_rows if _interactive_row_project_id(row) is None
+            )
+
+        unassigned_seen = _count_unassigned()
         # A sidecar-carried assignment is invisible to the SQL 'unassigned'
         # filter (state.db still says NULL), so the refill query would spend
         # that many of its own slots re-fetching conversations this pass already
-        # classified as assigned and already represents. Widen the query by that
-        # count so it can actually reach the older unassigned conversations the
-        # moved rows displaced (#6659 review finding 2).
+        # classified as assigned and already represents. Widen the FIRST query by
+        # that count so it can actually reach the older unassigned conversations
+        # the moved rows displaced (#6659 review finding 2). It is only the first
+        # estimate — the moved conversations this window cannot see yet are what
+        # the re-examination loop below is for.
         sidecar_only_assigned = sum(
             1 for row in state_rows
             if _interactive_row_project_id(row) is not None
@@ -8196,14 +8233,94 @@ def _load_cli_sessions_uncached(
             )
         ):
             try:
-                for row in read_importable_agent_session_rows(
-                    db_path,
-                    limit=unassigned_target + sidecar_only_assigned,
-                    log=logger,
-                    exclude_sources=interactive_excluded,
-                    project_assignment='unassigned',
-                ):
-                    _merge_state_row(row)
+                # ONE pre-computed allowance is the wrong shape. It is derived
+                # from the rows fetched BEFORE the refill, but the refill reaches
+                # OLDER conversations, and those can carry sidecar-only
+                # assignments of their own — each of which spends an unassigned
+                # slot again, the exact failure the widening exists to remove.
+                # (Three moves at the bottom edge of a 30-conversation database
+                # delivered 19 rows and never fetched the 20th conversation;
+                # eleven straddling the boundary delivered 15.)
+                #
+                # So the refill re-classifies ITS OWN result and widens again
+                # while the window is short. Bounds, per sidebar build:
+                #   * at most UNASSIGNED_CLI_REFILL_MAX_QUERIES queries;
+                #   * none of them reading deeper than the scan ceiling;
+                #   * and it stops early the moment the window is full or the
+                #     filter has demonstrably nothing deeper to give.
+                # Guarantee: the window is filled whenever at least
+                # ``unassigned_target`` of the newest ceiling
+                # state.db-unassigned conversations are still unassigned once
+                # their sidecars are read — the last query reads exactly that
+                # band. Past that the sidebar is honestly short (a shortfall the
+                # database itself imposes) instead of unbounded work.
+                query_limit = unassigned_target + sidecar_only_assigned
+                # A caller-supplied window wider than the ceiling still gets its
+                # first query at full width — the ceiling bounds the WIDENING,
+                # it does not shrink the requested window.
+                scan_ceiling = max(UNASSIGNED_CLI_REFILL_SCAN_CEILING, query_limit)
+                queries_left = UNASSIGNED_CLI_REFILL_MAX_QUERIES
+                while queries_left > 0:
+                    queries_left -= 1
+                    if queries_left == 0:
+                        # Out of estimates: pay one query at the ceiling rather
+                        # than hand back a short window after guessing three
+                        # times. This is the only query allowed to over-read, and
+                        # the ceiling is what bounds it.
+                        query_limit = scan_ceiling
+                    refill_rows, refill_window_exhausted = cast(
+                        tuple[list[dict], bool],
+                        read_importable_agent_session_rows(
+                            db_path,
+                            limit=query_limit,
+                            log=logger,
+                            exclude_sources=interactive_excluded,
+                            project_assignment='unassigned',
+                            return_window_exhaustion=True,
+                        ),
+                    )
+                    for row in refill_rows:
+                        _merge_state_row(row)
+                    unassigned_seen = _count_unassigned()
+                    shortfall = unassigned_target - unassigned_seen
+                    if (
+                        shortfall <= 0
+                        or query_limit >= scan_ceiling
+                        # A short result from an UNFILLED raw candidate window has
+                        # already seen every conversation this filter can reach,
+                        # so a wider query would re-read the same rows for
+                        # nothing. A short result whose raw window WAS consumed
+                        # (by compression segments) is the opposite: widening the
+                        # limit re-widens that window, so it is worth another go.
+                        or (
+                            len(refill_rows) < query_limit
+                            and not refill_window_exhausted
+                        )
+                    ):
+                        break
+                    # Widen PROPORTIONALLY, not by one row at a time. Two
+                    # candidate widths, take the larger:
+                    #   * query_limit + shortfall — the exact width needed if
+                    #     every conversation deeper than the current one is
+                    #     unassigned. It is the FLOOR: always strictly wider, so
+                    #     the loop cannot stall, and it is exact (no over-read)
+                    #     when the moved conversations are clustered.
+                    #   * target * query_limit // unassigned_seen — the width
+                    #     implied by the moved share observed so far, for moves
+                    #     spread through the history. Without it, a database
+                    #     where every other conversation was moved would close
+                    #     the gap by halves and need ~log2(target) queries.
+                    # The estimate can over-read when moves cluster at the top of
+                    # the window; the surplus is bounded by the ceiling and
+                    # trimmed by the sidebar cap, which is cheaper than another
+                    # query.
+                    proportional_width = -(  # ceil(target * width / unassigned)
+                        -unassigned_target * query_limit // max(unassigned_seen, 1)
+                    )
+                    query_limit = min(
+                        scan_ceiling,
+                        max(query_limit + shortfall, proportional_width),
+                    )
             except Exception:
                 logger.debug("Unassigned CLI refill pass failed", exc_info=True)
 
