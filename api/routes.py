@@ -608,37 +608,37 @@ def _apply_project_auto_assign(proj) -> int:
         # concurrent /api/session/move or a parallel auto-assign may have
         # filed the session between reading _index.json and now. Recheck
         # the authoritative source under lock before writing (P1 — race).
+        assigned_via_stream = False
         try:
             if entry.get("active_stream_id") in active_ids:
                 # Canonical mutation order is per-session lock -> LOCK.
                 # Hold the session lock outer so we serialize with
                 # _persist_generated_session_title and streaming saves,
                 # and only take LOCK briefly to fetch the cached session.
+                # Assign+continue ONLY when the cached object is still the
+                # same active stream; otherwise fall through to the
+                # authoritative non-streaming load instead of skipping the
+                # session entirely (fixes stale-cache/ended-stream race).
                 with _get_session_agent_lock(sid):
                     with LOCK:
                         cached = SESSIONS.get(sid)
-                        if cached is None:
-                            continue
-                    # While still holding the session lock, recheck all
-                    # authoritative fields before mutating the live object.
-                    if getattr(cached, "project_id", None):
-                        continue
-                    if not _profiles_match(getattr(cached, "profile", None) or "default", profile):
-                        continue
-                    c_ws = getattr(cached, "workspace", None)
-                    if not c_ws or str(c_ws) not in bound:
-                        continue
-                    # Active-stream identity: ensure the cached session is
-                    # still considered streaming.
-                    c_active = getattr(cached, "active_stream_id", None)
-                    if c_active not in active_ids:
-                        # No longer streaming — let the non-streaming path
-                        # handle it authoritatively from disk.
-                        continue
-                    cached.project_id = pid
-                    changed += 1
-                    deferred_to_stream += 1
+                    if cached is not None:
+                        if not getattr(cached, "project_id", None):
+                            if _profiles_match(getattr(cached, "profile", None) or "default", profile):
+                                c_ws = getattr(cached, "workspace", None)
+                                if c_ws and str(c_ws) in bound:
+                                    c_active = getattr(cached, "active_stream_id", None)
+                                    if c_active in active_ids:
+                                        cached.project_id = pid
+                                        changed += 1
+                                        deferred_to_stream += 1
+                                        assigned_via_stream = True
+                if assigned_via_stream:
                     continue
+                # Stale/missing cache or ended stream — fall through to
+                # the authoritative non-streaming path below.  Do NOT
+                # `continue` the outer loop here; the snapshot race leaves
+                # the session unassigned otherwise.
             # Load authoritative session while holding the per-session lock
             # to close the move-vs-backfill TOCTOU.
             with _get_session_agent_lock(sid):
