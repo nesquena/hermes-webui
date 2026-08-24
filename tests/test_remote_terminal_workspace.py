@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -439,24 +440,24 @@ def test_isolated_profile_config_read_does_not_mutate_or_read_shared_cache(monke
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
     monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
 
-    # Active TLS profile is alice
-    profiles.set_request_profile("alice")
-    try:
-        # 1. alice resolves to remote cwd
-        assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
-        assert workspace._remote_terminal_cwd() == "/srv/remote-alice"
+    # NO ambient TLS profile: simulates a detached worker resolving an explicit
+    # session profile while the process-global active profile is 'default'
+    # (local). Alice diverges from the ambient target, so her on-disk
+    # config.yaml is authoritative — regardless of any concurrent reload.
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": "/Users/local"}})
 
-        # 2. bob resolves to None (local backend)
-        assert workspace._remote_terminal_cwd("bob") is None
+    # 1. alice resolves to remote cwd (divergent profile reads its own disk file)
+    assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
 
-        # 3. Simulate concurrent reload on global _cfg_cache pointing to bob or dirty state
-        monkeypatch.setattr(api_config, "_cfg_cache", {"terminal": {"backend": "local", "cwd": "/Users/polluted"}})
+    # 2. bob resolves to None (local backend)
+    assert workspace._remote_terminal_cwd("bob") is None
 
-        # Explicit lookup of alice still resolves to alice's on-disk terminal cwd, not polluted global cache
-        assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
-        assert workspace.validate_workspace_to_add("/srv/remote-alice/sub", profile="alice") == Path("/srv/remote-alice/sub")
-    finally:
-        profiles.clear_request_profile()
+    # 3. Simulate concurrent reload on global _cfg_cache pointing to dirty state
+    monkeypatch.setattr(api_config, "_cfg_cache", {"terminal": {"backend": "local", "cwd": "/Users/polluted"}})
+
+    # Explicit lookup of alice still resolves to alice's on-disk terminal cwd, not polluted global cache
+    assert workspace._remote_terminal_cwd("alice") == "/srv/remote-alice"
+    assert workspace.validate_workspace_to_add("/srv/remote-alice/sub", profile="alice") == Path("/srv/remote-alice/sub")
 
 
 def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
@@ -481,6 +482,21 @@ def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
 
+    # Ambient get_config() follows the per-request TLS profile exactly as
+    # production does (server.py sets the cookie context; the config loader
+    # resolves the active home). With the restored upstream authority rules,
+    # an ambient-target lookup delegates here — so each simulated request
+    # must see ITS OWN profile's terminal block.
+    def _ambient_cfg():
+        name = profiles.get_active_profile_name()
+        if name == "bob":
+            return {"terminal": {"backend": "ssh", "cwd": "/srv/remote-bob"}}
+        if name == "alice":
+            return {"terminal": {"backend": "ssh", "cwd": "/srv/remote-alice"}}
+        return {"terminal": {"backend": "local", "cwd": str(tmp_path)}}
+
+    monkeypatch.setattr(api_config, "get_config", _ambient_cfg)
+
     class MockHandler:
         def __init__(self):
             self.status = 200
@@ -494,7 +510,9 @@ def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
                 def write(inner_self, b): pass
             return W()
 
-    # Add workspace under Alice
+    # Add workspace under Alice — TLS profile is alice, so the route's
+    # get_active_profile_name() == 'alice' and the add writes into alice's
+    # profile-scoped workspaces.json.
     profiles.set_request_profile("alice")
     try:
         h1 = MockHandler()
@@ -529,8 +547,233 @@ def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
         profiles.clear_request_profile()
 
 
+def test_saved_workspace_trust_scoped_to_session_profile(monkeypatch, tmp_path):
+    """resolve_trusted_workspace's saved-workspace branch (B) must honor the explicit profile.
+
+    Greptile #3838260381: when a session profile differs from the ambient
+    profile, the saved-workspace authorization branch called load_workspaces()
+    and _resolve_path() WITHOUT the session profile — so a session-owned
+    external workspace was rejected and a path saved only by the ambient
+    profile was wrongly trusted instead.
+    """
+    from api import profiles
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path / "home")
+    (tmp_path / "home").mkdir(parents=True)
+
+    # Session profile 'carol': remote SSH with cwd /srv/remote-carol.
+    carol_home = tmp_path / "profiles" / "carol"
+    carol_home.mkdir(parents=True)
+    (carol_home / "config.yaml").write_text(
+        "terminal:\n  backend: ssh\n  cwd: /srv/remote-carol\n", encoding="utf-8"
+    )
+    # Ambient/default: local backend so nothing is remotely classified.
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": str(tmp_path)}})
+
+    # Carol's saved list includes an external (non-home, non-cwd) workspace dir.
+    external_dir = tmp_path / "data" / "carol-projects"
+    external_dir.mkdir(parents=True)
+    ws_file = tmp_path / "state"
+    monkeypatch.setattr(workspace, "_workspaces_file_for_profile", lambda p=None: ws_file)
+    ws_file.parent.mkdir(parents=True, exist_ok=True)
+    ws_file.write_text(
+        json.dumps([{"path": str(external_dir), "name": "Carol External"}]),
+        encoding="utf-8",
+    )
+
+    # With the session profile passed explicitly, the saved branch trusts it.
+    resolved = workspace.resolve_trusted_workspace(str(external_dir), profile="carol")
+    assert resolved == Path(str(external_dir)).resolve()
+
+    # Without the profile (ambient local), the same path is NOT trusted:
+    # it lives outside home/boot-default and the ambient profile has no such save.
+    monkeypatch.setattr(workspace, "_workspaces_file_for_profile", lambda p=None: tmp_path / "missing-workspaces.json")
+    with pytest.raises(ValueError, match="outside the user home directory"):
+        workspace.resolve_trusted_workspace(str(external_dir))
 
 
+def test_session_init_simulated_macos_resolution_is_red_on_master_shape(monkeypatch):
+    """Session.__init__ must preserve /home/<user> even when host resolve rewrites it.
 
+    Maintainer gate r4 item 3: this test simulates macOS synthetic firmlink
+    expansion on the HOST resolver. On origin/master's shape
+    (Path(workspace).expanduser().resolve()) the assertion fails because the
+    stored workspace becomes /System/Volumes/Data/home/rootson; on this head
+    (_resolve_path with profile-scoped remote preservation) it passes — i.e.
+    genuinely RED -> GREEN across the fix boundary.
+    """
+    monkeypatch.setattr(
+        api_config,
+        "get_config",
+        lambda: _remote_config(terminal={"backend": "ssh", "cwd": "/home/rootson"}),
+    )
+
+    real_resolve = workspace._safe_resolve
+
+    def fake_resolve(p):
+        p_str = str(p)
+        if p_str == "/home/rootson" or p_str.startswith("/home/rootson/"):
+            return Path(f"/System/Volumes/Data{p_str}")
+        return real_resolve(p)
+
+    monkeypatch.setattr(workspace, "_safe_resolve", fake_resolve)
+
+    from api.models import Session
+
+    s = Session(workspace="/home/rootson", created_workspace="/home/rootson")
+    assert s.workspace == "/home/rootson"
+    assert s.created_workspace == "/home/rootson"
+
+
+def test_local_tilde_and_relative_paths_still_host_resolve(monkeypatch, tmp_path):
+    """Control: local ~/ paths keep host resolution while remotes are preserved.
+
+    Guards the discriminator BOTH ways (maintainer gate r4): the remote-path
+    preservation must not swallow ordinary local path semantics — tilde
+    expansion and symlink normalization still run for local profiles.
+    """
+    real_home = tmp_path / "users" / "local"
+    projects = real_home / "projects"
+    projects.mkdir(parents=True)
+    # A symlink inside home pointing elsewhere-under-home must normalize.
+    linked = real_home / "linked-projects"
+    try:
+        linked.symlink_to(projects)
+    except OSError:
+        pytest.skip("Symlink creation requires permissions")
+
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setattr(api_config, "get_config", lambda: {"terminal": {"backend": "local", "cwd": str(projects)}})
+
+    # Tilde expansion still resolves against the LOCAL home.
+    resolved = workspace._resolve_path("~/projects")
+    assert resolved == projects.resolve()
+
+    # Symlinks under home still collapse to their real target.
+    resolved_link = workspace._resolve_path("~/linked-projects")
+    assert resolved_link == projects.resolve()
+
+
+def test_config_authority_active_home_with_external_override(monkeypatch, tmp_path):
+    """Maintainer blocker 1: an authoritative HERMES_CONFIG_PATH override wins
+    over target/config.yaml when resolving the ACTIVE profile home."""
+    from api import config as cfg, profiles as profiles_mod
+    import yaml
+
+    active_home = tmp_path / "active-home"
+    active_home.mkdir()
+    (active_home / "config.yaml").write_text(
+        yaml.safe_dump({"terminal": {"backend": "ssh", "cwd": "/srv/from-active-home"}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    override_dir = tmp_path / "override-dir"
+    override_dir.mkdir()
+    override_cfg = override_dir / "config.yaml"
+    override_cfg.write_text(
+        yaml.safe_dump({"terminal": {"backend": "docker", "cwd": "/srv/from-override"}}, sort_keys=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(override_cfg))
+    monkeypatch.setattr(profiles_mod, "get_active_hermes_home", lambda: active_home)
+    cfg.reload_config()
+
+    result = cfg.get_config_for_profile_home(active_home)
+    assert result.get("terminal", {}).get("cwd") == "/srv/from-override"
+    # NOTE: no manual delenv/reload here — monkeypatch restores
+    # HERMES_CONFIG_PATH at teardown, and the stale (_cfg_path vs pinned)
+    # check invalidates the cache on the next reader. A trailing
+    # reload_config() would bake this test's override into the global cache
+    # and pollute later tests (#7168 review triage).
+
+
+def test_divergent_profile_without_config_yaml_stays_isolated(monkeypatch, tmp_path):
+    """Maintainer blocker 2: an existing divergent named-profile directory with
+    NO config.yaml must NOT inherit the ambient default's terminal config."""
+    from api import config as cfg, profiles as profiles_mod
+
+    default_home = tmp_path / "default-home"
+    default_home.mkdir(parents=True)
+    (default_home / "config.yaml").write_text(
+        "terminal:\n  backend: ssh\n  cwd: /srv/remote-default\n",
+        encoding="utf-8",
+    )
+    # Fresh non-cloned named profile: exists on disk, no config.yaml yet.
+    fresh_profile_home = tmp_path / "profiles" / "fresh"
+    fresh_profile_home.mkdir(parents=True)
+
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(default_home / "config.yaml"))
+    monkeypatch.setattr(profiles_mod, "get_active_hermes_home", lambda: default_home)
+    cfg.reload_config()
+
+    result = cfg.get_config_for_profile_home(fresh_profile_home)
+    # Defaults applied, but crucially NOT the ambient default profile's terminal block.
+    assert result.get("terminal") != {"backend": "ssh", "cwd": "/srv/remote-default"}
+    assert not result.get("terminal", {}).get("cwd")
+
+    # And a divergent home that doesn't exist at all still returns {}.
+    assert cfg.get_config_for_profile_home(tmp_path / "profiles" / "ghost") == {}
+    # NOTE: no manual delenv/reload here (see test_config_authority_active_home_with_external_override) —
+    # monkeypatch teardown + path-change invalidation keep the global cache clean.
+
+
+def test_suggestions_scoped_to_explicit_profile_saved_roots(tmp_path):
+    """Sweep regression (#7168 review): list_workspace_suggestions with an
+    explicit profile must widen trust only via THAT profile's saved
+    workspaces — a workspace saved under a different profile stays out."""
+    other_dir = tmp_path / "other-profile-dir"
+    other_dir.mkdir(parents=True)
+    mine = tmp_path / "mine"
+    mine.mkdir()
+
+    ws_file = workspace._workspaces_file_for_profile("alice")
+    ws_file.parent.mkdir(parents=True, exist_ok=True)
+    ws_file.write_text(json.dumps([{"path": str(other_dir)}]), encoding="utf-8")
+
+    prefix = str(tmp_path) + "/"
+    suggestions = workspace.list_workspace_suggestions(prefix, profile="alice")
+    assert any(s.endswith("other-profile-dir") for s in suggestions)
+
+    # A different profile's saved list does NOT include alice's external dir.
+    suggestions_bob = workspace.list_workspace_suggestions(prefix, profile="bob")
+    assert not any(s.endswith("other-profile-dir") for s in suggestions_bob)
+    assert mine.exists()  # control: fixture dir is real, absence is scoping
+
+
+def test_recovery_helper_threads_profile_to_trust_and_fallback(tmp_path):
+    """Sweep regression (#7168 review): resolve_implicit_workspace_with_recovery
+    passes the profile into both trust resolution and the recovery fallback,
+    so a deleted session workspace recovers to a fallback trusted for THAT
+    profile — never via another profile's saved list."""
+    external = tmp_path / "external-carol"
+    external.mkdir()
+    stale = tmp_path / "stale-workspace"
+    fallback_dir = tmp_path / "fallback"
+    fallback_dir.mkdir()
+
+    ws_file = workspace._workspaces_file_for_profile("carol")
+    ws_file.parent.mkdir(parents=True, exist_ok=True)
+    ws_file.write_text(
+        json.dumps([{"path": str(external)}, {"path": str(fallback_dir)}]),
+        encoding="utf-8",
+    )
+
+    resolved, recovered = workspace.resolve_implicit_workspace_with_recovery(
+        str(stale),
+        lambda: str(fallback_dir),
+        profile="carol",
+    )
+    assert recovered is True
+    assert resolved == fallback_dir.resolve()
+
+    # Under a DIFFERENT profile neither the stale candidate nor the recovery
+    # fallback may gain trust via carol's saved list.
+    with pytest.raises(ValueError):
+        workspace.resolve_implicit_workspace_with_recovery(
+            str(stale),
+            lambda: str(fallback_dir),
+            profile="not-carol",
+        )
 
 
