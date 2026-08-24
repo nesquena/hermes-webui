@@ -285,11 +285,19 @@ def test_auth_401_classification_receives_stringified_probe_text(tmp_path, monke
     observed = {}
     real_classify = streaming._classify_provider_error
 
-    def _spy_classify_provider_error(err_str, exc=None, *, silent_failure=False):
+    def _spy_classify_provider_error(
+        err_str, exc=None, *, silent_failure=False, result=None
+    ):
         observed["err_str"] = err_str
         observed["exc"] = exc
         observed["silent_failure"] = silent_failure
-        return real_classify(err_str, exc, silent_failure=silent_failure)
+        observed["result"] = result
+        return real_classify(
+            err_str,
+            exc,
+            silent_failure=silent_failure,
+            result=result,
+        )
 
     with mock.patch.object(streaming, "_classify_provider_error", side_effect=_spy_classify_provider_error):
         _run_stream(monkeypatch, session, "stream_auth_probe_text", agent_cls, workspace=str(tmp_path))
@@ -413,6 +421,77 @@ def test_auth_retry_success_does_not_append_error_turn(tmp_path, monkeypatch):
     assert saved.messages[-1]["role"] == "assistant"
     assert saved.messages[-1]["content"] == "Recovered auth reply"
     assert not any(msg.get("_error") for msg in saved.messages)
+
+
+def test_auth_exception_retry_structured_failure_still_emits_error(
+    tmp_path,
+    monkeypatch,
+):
+    session = _prepare_session(
+        "auth_retry_structured_failure",
+        "stream_auth_retry_structured_failure",
+        pending_user_message="Please retry",
+    )
+
+    class ExceptionThenStructuredFailureAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            if type(self).runs == 1:
+                raise RuntimeError("401 unauthorized")
+            if self.stream_delta_callback is not None:
+                self.stream_delta_callback("partial retry output")
+            return {
+                "error": {
+                    "type": "authentication_error",
+                    "status_code": 401,
+                    "message": "retry returned a structured failure",
+                },
+                "messages": list(kwargs.get("conversation_history") or []),
+            }
+
+    fake_queue = queue.Queue()
+    streaming.STREAMS["stream_auth_retry_structured_failure"] = fake_queue
+    config.STREAM_PARTIAL_TEXT["stream_auth_retry_structured_failure"] = ""
+    heal_rt = {
+        "provider": "test-provider",
+        "api_key": "fresh-key",
+        "base_url": None,
+    }
+
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(
+             streaming,
+             "_get_ai_agent",
+             return_value=ExceptionThenStructuredFailureAgent,
+         ), \
+         mock.patch.object(
+             streaming,
+             "resolve_model_provider",
+             return_value=("test-model", "test-provider", None),
+         ), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(
+             streaming,
+             "_attempt_credential_self_heal",
+             return_value=heal_rt,
+         ):
+        streaming._run_agent_streaming(
+            session_id=session.session_id,
+            msg_text=session.pending_user_message,
+            model="test-model",
+            workspace=str(tmp_path),
+            stream_id="stream_auth_retry_structured_failure",
+        )
+
+    saved = Session.load("auth_retry_structured_failure")
+    assert saved is not None
+    events = _queue_events(fake_queue)
+    assert any(event == "apperror" for event, _ in events)
+    assert not any(event == "done" for event, _ in events)
+    assert saved.messages[-1]["_error"] is True
 
 
 def test_success_repeated_assistant_text_stays_successful_current_turn(tmp_path, monkeypatch):
