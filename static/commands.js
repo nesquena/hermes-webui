@@ -1364,7 +1364,10 @@ async function cmdGoal(args){
       return raw;
     })();
     const _goalStillCurrent=_goalPaneIsCurrent();
-    if(msg&&_goalStillCurrent){
+    // A goal-set message describes intent, not a started run. Only surface it
+    // after stream ownership is confirmed; otherwise Goal finish would roll
+    // back its optimistic user row while leaving a false success status/toast.
+    if(msg&&_goalStillCurrent&&r&&r.stream_id){
       S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
