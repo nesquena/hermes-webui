@@ -4184,26 +4184,71 @@ async function _contextBriefGoalFinish(btn){
   // idle: no user bubble, no busy state, no SSE. Reload then hydrates via
   // loadSession. Reuse cmdGoal (composer /goal) so the prompt and first
   // tokens appear live without a refresh.
-  await _hydrateContextBriefGoalFinish(sid, goalText);
+  await _hydrateContextBriefGoalFinish(sid, goalText, host);
 }
 
-async function _hydrateContextBriefGoalFinish(sid, goalText){
+async function _hydrateContextBriefGoalFinish(sid, goalText, host){
   if (typeof cmdGoal !== 'function') {
     if (typeof showToast === 'function') showToast(t('context_brief_error'));
     return false;
   }
+  const ownerSid = sid;
+  const ownerGeneration = typeof _loadSessionGeneration === 'number'
+    ? _loadSessionGeneration
+    : null;
+  const ownerSessionIsCurrent = () => !!(
+    typeof S !== 'undefined'
+    && S.session
+    && S.session.session_id === ownerSid
+    && (ownerGeneration === null
+      || typeof _loadSessionGeneration !== 'number'
+      || _loadSessionGeneration === ownerGeneration)
+  );
+  const ownerHostIsCurrent = () => !!(
+    ownerSessionIsCurrent()
+    && (!host
+      || typeof _contextBriefGoalHostCurrent !== 'function'
+      || _contextBriefGoalHostCurrent(host, ownerSid))
+  );
   let goalMessage = null;
-  if (typeof S !== 'undefined' && S.session && S.session.session_id === sid && Array.isArray(S.messages)) {
+  if (ownerHostIsCurrent() && Array.isArray(S.messages)) {
     goalMessage = {role:'user', content:goalText, _ts:Date.now()/1000};
-    S.messages.push(goalMessage);
+    // Do not append into an array that may also back INFLIGHT[ownerSid].messages.
+    // A failed kickoff must not contaminate the older live turn's recovery tail.
+    S.messages = [...S.messages, goalMessage];
     if (typeof renderMessages === 'function') renderMessages();
   }
+  const withoutGoalMessage = (messages) => {
+    if (!goalMessage || !Array.isArray(messages)) return messages;
+    const idx = messages.indexOf(goalMessage);
+    if (idx < 0) return messages;
+    const cleaned = messages.slice();
+    cleaned.splice(idx, 1);
+    return cleaned;
+  };
   const rollbackGoalMessage = () => {
-    if (!goalMessage || typeof S === 'undefined' || !Array.isArray(S.messages)) return;
-    const idx = S.messages.indexOf(goalMessage);
-    if (idx < 0) return;
-    S.messages.splice(idx, 1);
-    if (typeof renderMessages === 'function') renderMessages();
+    const hostCurrent = ownerHostIsCurrent();
+    if (ownerSessionIsCurrent() && Array.isArray(S.messages)) {
+      const cleaned = withoutGoalMessage(S.messages);
+      if (cleaned !== S.messages) {
+        S.messages = cleaned;
+        if (hostCurrent && typeof renderMessages === 'function') renderMessages();
+      }
+    }
+    // Navigation may have snapshotted the optimistic row into the owner's live
+    // recovery cache. Clean that owner explicitly; never search the new pane.
+    if (typeof INFLIGHT !== 'undefined' && INFLIGHT[ownerSid]
+        && Array.isArray(INFLIGHT[ownerSid].messages)) {
+      const inflight = INFLIGHT[ownerSid];
+      const cleaned = withoutGoalMessage(inflight.messages);
+      if (cleaned !== inflight.messages) {
+        INFLIGHT[ownerSid] = {...inflight, messages:cleaned};
+        if (typeof saveInflightState === 'function') {
+          saveInflightState(ownerSid, INFLIGHT[ownerSid]);
+        }
+      }
+    }
+    return hostCurrent;
   };
   try {
     const started = await cmdGoal(goalText);
@@ -4211,8 +4256,10 @@ async function _hydrateContextBriefGoalFinish(sid, goalText){
     rollbackGoalMessage();
     return false;
   } catch (e) {
-    rollbackGoalMessage();
-    if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
+    const hostCurrent = rollbackGoalMessage();
+    if (hostCurrent && typeof showToast === 'function') {
+      showToast((e && e.message) || t('context_brief_error'));
+    }
     return false;
   }
 }
