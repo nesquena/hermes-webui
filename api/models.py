@@ -82,13 +82,17 @@ PROJECT_ASSIGNED_CLI_SCAN_CEILING = 2000
 # conversations this projection classifies as ASSIGNED. How many is not knowable
 # before the query runs, so the refill re-classifies its own result and widens
 # again while the window is still short. These two constants are what keep that
-# loop finite.
+# loop finite. Both bound ONE profile context: get_cli_sessions(
+# all_profiles=1) runs the whole loader once per context, so an N-profile sidebar
+# pays N times the numbers below.
 #
-# At most this many unassigned queries per sidebar build (the first one included).
-# The widening below is proportional, not one row at a time, so 4 covers every
-# arrangement whose moved conversations are anywhere near uniformly distributed;
-# the last of the four abandons estimating and reads the ceiling in one go, which
-# is the widest read the loop is ever allowed to pay.
+# At most this many unassigned queries per profile context (the first included).
+# The widening below is geometric and proportional, not one row at a time, so 4
+# covers both moves spread through the history and moves clustered just under the
+# window edge; the last of the four abandons estimating and reads the ceiling in
+# one go, which is the widest read the loop is ever allowed to pay. It is also
+# what paces the geometric growth: each widening adds at least width // queries
+# still left, so the steps get bolder as the forced ceiling read gets closer.
 UNASSIGNED_CLI_REFILL_MAX_QUERIES = 4
 # ...and no single refill query reads deeper than this many logical
 # conversations. It bounds both the I/O and the payload: a build cannot be made
@@ -8243,7 +8247,9 @@ def _load_cli_sessions_uncached(
                 # eleven straddling the boundary delivered 15.)
                 #
                 # So the refill re-classifies ITS OWN result and widens again
-                # while the window is short. Bounds, per sidebar build:
+                # while the window is short. Bounds, per PROFILE CONTEXT (not per
+                # sidebar build: all_profiles=1 runs this loader once per context,
+                # so an N-profile view pays N times everything below):
                 #   * at most UNASSIGNED_CLI_REFILL_MAX_QUERIES queries;
                 #   * none of them reading deeper than the scan ceiling;
                 #   * and it stops early the moment the window is full or the
@@ -8254,6 +8260,32 @@ def _load_cli_sessions_uncached(
                 # their sidecars are read — the last query reads exactly that
                 # band. Past that the sidebar is honestly short (a shortfall the
                 # database itself imposes) instead of unbounded work.
+                #
+                # What that costs, stated at its WORST rather than its best. The
+                # window this loop must deliver is 20 rows; the best case is a
+                # single query carrying 24 of them, and quoting that as the
+                # trade-off understates it by an order of magnitude:
+                #   * PAYLOAD. Every refill row is merged into the projection and
+                #     travels on, so the surplus is trimmed by the sidebar cap
+                #     only AFTER it has been read, sidecar-stat()ed and (on
+                #     /api/sessions/gateway/stream, which snapshots the uncapped
+                #     list) serialised. A shape that keeps the window short
+                #     through all three estimates reaches the forced ceiling
+                #     query, and the model then carries the whole band — up to
+                #     scan_ceiling (200) conversations, nearly all of them
+                #     unassigned, to hand the sidebar 20. The widening below is
+                #     what keeps ordinary shapes off that path; it does not, and
+                #     cannot, remove it, because the ceiling read is exactly what
+                #     the guarantee above is made of.
+                #   * I/O. "No query deeper than 200 conversations" is a LOGICAL
+                #     depth. read_importable_agent_session_rows oversamples raw
+                #     rows by CANDIDATE_WINDOW_MULTIPLIERS = (8, 32) to survive
+                #     compression segments, so a ceiling-width query touches
+                #     200 * 8 = 1600 raw rows, and 200 * 32 = 6400 when the first
+                #     window is consumed and re-widened. Per profile context.
+                # Cheaper than any of it: project-filtered server pagination, or
+                # recording WebUI-side moves in state.db so the SQL filter stops
+                # lying to this pass.
                 query_limit = unassigned_target + sidecar_only_assigned
                 # A caller-supplied window wider than the ceiling still gets its
                 # first query at full width — the ceiling bounds the WIDENING,
@@ -8298,29 +8330,61 @@ def _load_cli_sessions_uncached(
                         )
                     ):
                         break
-                    # Widen PROPORTIONALLY, not by one row at a time. Two
-                    # candidate widths, take the larger:
+                    # Widen GEOMETRICALLY, not by one row at a time. Up to three
+                    # candidate widths; the widest of the ones that apply wins:
                     #   * query_limit + shortfall — the exact width needed if
                     #     every conversation deeper than the current one is
                     #     unassigned. It is the FLOOR: always strictly wider, so
                     #     the loop cannot stall, and it is exact (no over-read)
                     #     when the moved conversations are clustered.
-                    #   * target * query_limit // unassigned_seen — the width
-                    #     implied by the moved share observed so far, for moves
-                    #     spread through the history. Without it, a database
-                    #     where every other conversation was moved would close
-                    #     the gap by halves and need ~log2(target) queries.
-                    # The estimate can over-read when moves cluster at the top of
-                    # the window; the surplus is bounded by the ceiling and
-                    # trimmed by the sidebar cap, which is cheaper than another
-                    # query.
-                    proportional_width = -(  # ceil(target * width / unassigned)
-                        -unassigned_target * query_limit // max(unassigned_seen, 1)
+                    #   * query_limit + query_limit // queries_left — GEOMETRIC
+                    #     growth, paced by the budget that is left. The floor alone
+                    #     advances by only the shortfall, so a handful of moves
+                    #     clustered just below the window edge crawls (21, 23, 25)
+                    #     until every estimate is spent and the forced ceiling read
+                    #     does the job anyway: 200 rows fetched to deliver 20. The
+                    #     step grows as the budget shrinks (width/3, then width/2)
+                    #     because a too-narrow LAST estimate costs the whole ceiling
+                    #     read, while a too-wide one costs only its own surplus.
+                    #     Those eight clustered moves now finish at (21, 28).
+                    #   * ceil(target * query_limit / unassigned_seen) — the width
+                    #     implied by the moved SHARE observed so far, for moves
+                    #     spread through the history. Without it, a database where
+                    #     every other conversation was moved would close the gap
+                    #     by halves and need ~log2(target) queries.
+                    # That last term applies ONLY when this window found at least
+                    # one still-unassigned conversation. With zero, the share is
+                    # undefined, and guarding the divisor with max(seen, 1)
+                    # evaluated it as target * query_limit (20 * 40 = 800, clamped
+                    # to the ceiling): every profile that had moved >= 21 of its
+                    # newest conversations jumped straight to a full 200-row read
+                    # where the 60-row floor would have filled the window. Zero
+                    # unassigned rows is not evidence about density, so the
+                    # geometric step — not a degenerate ratio — is what carries it.
+                    # The price of escalating smoothly is that a profile whose
+                    # newest ceiling band is ENTIRELY moved now spends its whole
+                    # budget (40, 60, 90, 200) climbing to the ceiling it was
+                    # always going to need, instead of two queries. That is the
+                    # deliberate side of the trade: an extra narrow query costs SQL
+                    # only, while an early-and-wrong wide query costs payload — and
+                    # payload is read, sidecar-stat()ed and serialised. And a
+                    # cluster deeper than the last estimate can reach — measured at
+                    # 23+ moves sitting just under the window edge, where the three
+                    # estimates are 21, 28, 42 — still ends on the ceiling read, as
+                    # it did before: that is the guarantee doing its job, not the
+                    # estimate failing.
+                    next_query_limit = max(
+                        query_limit + shortfall,
+                        query_limit + query_limit // max(queries_left, 1),
                     )
-                    query_limit = min(
-                        scan_ceiling,
-                        max(query_limit + shortfall, proportional_width),
-                    )
+                    if unassigned_seen > 0:
+                        next_query_limit = max(
+                            next_query_limit,
+                            -(  # ceil(target * width / unassigned)
+                                -unassigned_target * query_limit // unassigned_seen
+                            ),
+                        )
+                    query_limit = min(scan_ceiling, next_query_limit)
             except Exception:
                 logger.debug("Unassigned CLI refill pass failed", exc_info=True)
 
