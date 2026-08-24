@@ -231,6 +231,34 @@ def _reset_password_hash_cache():
         _invalidate_password_hash_cache()
 
 
+def _strip_leaked_webui_password_env() -> None:
+    """Remove a leaked HERMES_WEBUI_PASSWORD between tests (#7168 review).
+
+    bootstrap.py runs _load_repo_dotenv() at import time, which copies values
+    from the developer's real repo .env straight into os.environ. When any
+    test imports bootstrap mid-session (e.g. tests/test_bootstrap_foreground.py
+    via its import_bootstrap fixture), a local .env containing
+    HERMES_WEBUI_PASSWORD leaks into the process environment OUTSIDE
+    monkeypatch's undo scope. Every later test then sees is_auth_enabled()
+    True and no-handler cookie helpers raise spurious
+    "build_profile_cookie requires a request handler" errors — exactly the
+    #5588 failure shape, but sourced from the repo .env instead of the hash
+    cache. Tests that legitimately enable auth set the var themselves AFTER
+    this strip; an intentionally-empty value ("") is preserved so
+    ctl.sh-style override semantics keep working.
+    """
+    if os.environ.get("HERMES_WEBUI_PASSWORD") == "":
+        return
+    os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+
+
+@pytest.fixture(autouse=True)
+def _strip_leaked_webui_password():
+    _strip_leaked_webui_password_env()
+    yield
+    _strip_leaked_webui_password_env()
+
+
 @pytest.fixture(autouse=True)
 def _invalidate_providers_cache():
     """Clear the /api/providers TTL cache around every test (#6010).
