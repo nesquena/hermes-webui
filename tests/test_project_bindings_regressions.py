@@ -487,3 +487,126 @@ def test_auto_assign_active_stream_respects_session_lock_first_ordering(tmp_path
     finally:
         with LOCK:
             SESSIONS.pop(sid, None)
+
+# ---------------------------------------------------------------------------
+# Required by 2026-08-24 review (head 24757a1614ee): stale active snapshot
+# falls through to authoritative load when cache is missing or stale.
+# ---------------------------------------------------------------------------
+
+
+def test_auto_assign_stale_active_snapshot_missing_cache_falls_through(tmp_path, monkeypatch):
+    """Index claims active_stream_id is streaming, but cache entry vanished.
+
+    The current runtime fix must NOT skip the outer iteration — it must fall
+    through to the authoritative get_session load, file the unowned persisted
+    session, and return 1. Previous buggy commit 4070def3 skipped (continue)
+    and returned 0.
+    """
+    import api.routes as routes
+    from api.config import SESSIONS, LOCK
+
+    ws = tmp_path / "ws-stale-missing"
+    ws.mkdir()
+    ws_str = str(ws)
+    sid = "sess_stale_missing"
+    active = "stream-stale-1"
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(json.dumps([
+        {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None,
+         "active_stream_id": active},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {active})
+    with LOCK:
+        SESSIONS.pop(sid, None)
+
+    class _Persisted:
+        def __init__(self):
+            self.session_id = sid
+            self.project_id = None
+            self.profile = "default"
+            self.workspace = ws_str
+            self._saved = False
+        def save(self):
+            self._saved = True
+
+    persisted = _Persisted()
+
+    def _fake_get_session(sid_arg, metadata_only=False):
+        if sid_arg != sid:
+            return None
+        if metadata_only:
+            return None  # no live meta yet — fall through to full load
+        return persisted
+
+    monkeypatch.setattr(routes, "get_session", _fake_get_session)
+
+    proj = {"project_id": "proj_target", "profile": "default", "workspaces": [ws_str]}
+    changed = routes._apply_project_auto_assign(proj)
+    assert changed == 1, "missing-cache stale snapshot must fall through to authoritative load"
+    assert persisted.project_id == "proj_target"
+    assert persisted._saved
+
+
+def test_auto_assign_stale_active_snapshot_ended_stream_falls_through(tmp_path, monkeypatch):
+    """Cached entry exists but its active_stream_id is no longer streaming."""
+    import api.routes as routes
+    from api.config import SESSIONS, LOCK
+
+    ws = tmp_path / "ws-stale-ended"
+    ws.mkdir()
+    ws_str = str(ws)
+    sid = "sess_stale_ended"
+    stale_active = "stream-ended"
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(json.dumps([
+        {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None,
+         "active_stream_id": stale_active},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {stale_active})
+
+    class _CachedStale:
+        def __init__(self):
+            self.session_id = sid
+            self.project_id = None
+            self.profile = "default"
+            self.workspace = ws_str
+            self.active_stream_id = "different-or-ended"
+
+    cached = _CachedStale()
+    with LOCK:
+        SESSIONS[sid] = cached
+
+    class _Persisted:
+        def __init__(self):
+            self.session_id = sid
+            self.project_id = None
+            self.profile = "default"
+            self.workspace = ws_str
+            self._saved = False
+        def save(self):
+            self._saved = True
+
+    persisted = _Persisted()
+
+    def _fake_get_session(sid_arg, metadata_only=False):
+        if sid_arg != sid:
+            return None
+        if metadata_only:
+            return None
+        return persisted
+
+    monkeypatch.setattr(routes, "get_session", _fake_get_session)
+
+    try:
+        proj = {"project_id": "proj_target", "profile": "default", "workspaces": [ws_str]}
+        changed = routes._apply_project_auto_assign(proj)
+        assert changed == 1
+        assert persisted.project_id == "proj_target"
+        assert persisted._saved
+        # Must not have mutated the stale cached object (it was stale).
+        assert cached.project_id is None
+    finally:
+        with LOCK:
+            SESSIONS.pop(sid, None)
