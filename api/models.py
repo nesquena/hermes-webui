@@ -5950,6 +5950,9 @@ def _read_state_db_sidebar_overrides(
         import sqlite3
     except ImportError:
         return {}
+    ids = list(wanted)
+    chunk_size = 500
+    overrides: dict[str, dict] = {}
     try:
         with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
@@ -5975,10 +5978,7 @@ def _read_state_db_sidebar_overrides(
                 messages_has_timestamp = 'timestamp' in message_cols
                 messages_has_title_fields = {'session_id', 'role', 'content', 'timestamp'}.issubset(message_cols)
 
-            overrides: dict[str, dict] = {}
             delegated_title_ids: set[str] = set()
-            ids = list(wanted)
-            chunk_size = 500
             for i in range(0, len(ids), chunk_size):
                 chunk = ids[i:i + chunk_size]
                 placeholders = ','.join('?' * len(chunk))
@@ -6072,7 +6072,38 @@ def _read_state_db_sidebar_overrides(
                             overrides.setdefault(sid, {})['_state_db_display_title'] = display_title
             return overrides
     except Exception:
-        return {}
+        missing_source_ids = [
+            sid for sid in ids
+            if not overrides.get(sid, {}).get('_state_db_source')
+        ]
+        if not missing_source_ids:
+            return overrides
+        try:
+            with closing(open_state_db_readonly(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                for i in range(0, len(missing_source_ids), chunk_size):
+                    chunk = missing_source_ids[i:i + chunk_size]
+                    placeholders = ','.join('?' * len(chunk))
+                    cur.execute(
+                        f"SELECT id, source FROM sessions WHERE id IN ({placeholders})",
+                        chunk,
+                    )
+                    for row in cur.fetchall():
+                        sid = str(row['id'])
+                        state_source = str(row['source'] or '').strip().lower()
+                        if not state_source:
+                            continue
+                        entry = overrides.setdefault(sid, {})
+                        entry['_state_db_source'] = state_source
+                        source_meta = normalize_agent_session_source(state_source)
+                        entry['_state_db_source_tag'] = state_source
+                        entry['_state_db_raw_source'] = source_meta.get('raw_source')
+                        entry['_state_db_session_source'] = source_meta.get('session_source')
+                        entry['_state_db_source_label'] = source_meta.get('source_label')
+                return overrides
+        except Exception:
+            return overrides
 
 
 def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
@@ -6125,12 +6156,14 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_message_count = entry.pop('_state_db_message_count', None)
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
-        if state_db_source == 'webui':
+        if state_db_source in ('webui', 'subagent'):
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
             session['session_source'] = state_db_session_source
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
+            if state_db_source == 'subagent':
+                session['read_only'] = True
         # Overlay the real state.db message count for WebUI-owned rows AND for
         # delegated subagent children (#5308). A subagent child
         # (state_db_source == 'subagent') is backed by the delegate runner's
@@ -6141,9 +6174,9 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         # session vanishes from the sidebar entirely (regression seam behind
         # #5308, same state.db-blind-metadata root as the #5307 transcript
         # recovery). The count overlay keeps the same conservative
-        # anti-resurrection guard used for WebUI rows. The source-tag / title
-        # reassignment above stays WebUI-only — a subagent child keeps its
-        # subagent classification.
+        # anti-resurrection guard used for WebUI rows. Source metadata is
+        # authoritative for WebUI rows and delegated subagent children;
+        # foreign CLI sources retain their existing flags.
         if state_db_source in ('webui', 'subagent'):
             try:
                 current_count = max(0, int(session.get('message_count') or 0))

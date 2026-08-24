@@ -132,6 +132,19 @@ def _large_timestamped_sidecar_messages(count=500):
     ]
 
 
+def _state_db_source_metadata(source):
+    from api.agent_sessions import normalize_agent_session_source
+
+    source_meta = normalize_agent_session_source(source)
+    return {
+        "_state_db_source": source,
+        "_state_db_source_tag": source,
+        "_state_db_raw_source": source_meta["raw_source"],
+        "_state_db_session_source": source_meta["session_source"],
+        "_state_db_source_label": source_meta["source_label"],
+    }
+
+
 def test_sidebar_state_db_overlay_preserves_numeric_actual_count():
     import api.models as models
 
@@ -160,6 +173,243 @@ def test_sidebar_state_db_overlay_preserves_numeric_actual_count():
 
     assert sessions[0]["message_count"] == 4
     assert sessions[0]["actual_message_count"] == 5
+
+
+def test_sidebar_state_db_overlay_reclassifies_authoritative_subagent_rows():
+    import api.models as models
+
+    def sidebar_row(sid, source=None, *, session_source=None, source_label=None, is_cli_session=True):
+        row = {"session_id": sid, "is_cli_session": is_cli_session, "read_only": False}
+        if source:
+            row.update(
+                source_tag=source,
+                raw_source=source,
+                session_source=session_source,
+                source_label=source_label,
+            )
+        return row
+
+    sessions = [
+        sidebar_row(
+            "row-01", "webui", session_source="webui", source_label="WebUI", is_cli_session=False
+        ),
+        sidebar_row("row-02", "fork", session_source="other", source_label="Fork"),
+        sidebar_row("row-03"),
+        sidebar_row("row-04", "tui", session_source="cli", source_label="TUI"),
+    ]
+    subagent_metadata = {
+        sid: _state_db_source_metadata("subagent")
+        for sid in ("row-01", "row-02", "row-03")
+    }
+    subagent_metadata["row-04"] = _state_db_source_metadata("tui")
+
+    models._apply_sidebar_state_db_override_metadata(sessions, subagent_metadata)
+
+    observed = [
+        (
+            session.get("source_tag"), session.get("raw_source"),
+            session.get("session_source"), session.get("source_label"),
+            session["is_cli_session"], session["read_only"],
+        )
+        for session in sessions
+    ]
+    assert observed[:3] == [("subagent", "subagent", "other", "Subagent", False, True)] * 3
+    assert observed[3] == ("tui", "tui", "cli", "TUI", True, False)
+
+
+def test_api_sessions_bulk_uses_batched_subagent_metadata_without_row_probes(
+    monkeypatch, tmp_path
+):
+    import api.models as models
+    import api.routes as routes
+
+    db_path = tmp_path / "state.db"
+    stale_rows = [
+        {
+            "session_id": f"row-{index:02d}",
+            "source_tag": "webui",
+            "raw_source": "webui",
+            "session_source": "webui",
+            "source_label": "WebUI",
+        }
+        for index in range(32)
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+        conn.executemany(
+            "INSERT INTO sessions (id, source) VALUES (?, 'subagent')",
+            ((row["session_id"],) for row in stale_rows),
+        )
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    def fake_all_sessions(**_kwargs):
+        rows = [
+            dict(row, is_cli_session=True, read_only=False, message_count=1)
+            for row in stale_rows
+        ]
+        models._apply_sidebar_state_db_overrides(rows)
+        return rows
+
+    monkeypatch.setattr(routes, "all_sessions", fake_all_sessions)
+    monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", lambda _rows: None)
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _rows: False)
+    monkeypatch.setattr(routes, "_prune_orphaned_webui_zero_message_sessions", lambda rows, **_kwargs: list(rows))
+    single_row_probes = []
+
+    def record_single_row_probe(sid):
+        single_row_probes.append(sid)
+        return True
+
+    monkeypatch.setattr(routes, "_is_subagent_child_session_id", record_single_row_probe)
+
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+        include_archived=False,
+    )
+
+    rows = {row["session_id"]: row for row in payload["sessions"]}
+    assert single_row_probes == []
+    assert set(rows) == {row["session_id"] for row in stale_rows}
+    for row in rows.values():
+        assert (
+            row["source_tag"],
+            row["raw_source"],
+            row["session_source"],
+            row["source_label"],
+        ) == ("subagent", "subagent", "other", "Subagent")
+        assert row["read_only"] is True
+        assert row["is_cli_session"] is False
+
+
+def test_sidebar_override_reader_uses_one_connection_and_500_id_chunks(
+    monkeypatch, tmp_path
+):
+    import api.models as models
+
+    db_path = tmp_path / "state.db"
+    session_ids = [f"row-{index:04d}" for index in range(1001)]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO sessions (id, source) VALUES (?, 'subagent')",
+            ((sid,) for sid in session_ids),
+        )
+
+    connections = []
+    session_queries = []
+    real_open = models.open_state_db_readonly
+
+    def tracked_open(path):
+        connection = real_open(path)
+        connections.append(connection)
+
+        def trace(statement):
+            if "FROM sessions s" in statement and "s.id IN" in statement:
+                session_queries.append(statement)
+
+        connection.set_trace_callback(trace)
+        return connection
+
+    monkeypatch.setattr(models, "open_state_db_readonly", tracked_open)
+    overrides = models._read_state_db_sidebar_overrides(db_path, set(session_ids))
+
+    assert len(connections) == 1
+    assert len(session_queries) == 3
+    assert set(overrides) == set(session_ids)
+    assert overrides[session_ids[0]] == _state_db_source_metadata("subagent")
+
+
+def test_sidebar_override_reader_recovers_sources_after_rich_reader_error(
+    monkeypatch, tmp_path
+):
+    import api.models as models
+
+    db_path = tmp_path / "state.db"
+    session_ids = [f"row-{index:04d}" for index in range(1001)]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
+        conn.executemany(
+            "INSERT INTO sessions (id, source) VALUES (?, 'subagent')",
+            ((sid,) for sid in session_ids),
+        )
+
+    class FailingCursor:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def execute(self, statement, parameters=()):
+            if "sqlite_master" in statement:
+                raise sqlite3.OperationalError("controlled optional schema failure")
+            self._cursor.execute(statement, parameters)
+            return self
+
+        def __getattr__(self, name):
+            return getattr(self._cursor, name)
+
+    first_closed = []
+
+    class FailingConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        @property
+        def row_factory(self):
+            return self._connection.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self._connection.row_factory = value
+
+        def cursor(self):
+            return FailingCursor(self._connection.cursor())
+
+        def close(self):
+            first_closed.append(True)
+            self._connection.close()
+
+    connections = []
+    source_only_queries = []
+    second_connection = None
+    real_open = models.open_state_db_readonly
+
+    def tracked_open(path):
+        nonlocal second_connection
+        connection = real_open(path)
+        connections.append(connection)
+        if len(connections) == 1:
+            return FailingConnection(connection)
+        second_connection = connection
+
+        def trace(statement):
+            normalized = " ".join(statement.split()).lower()
+            if normalized.startswith("select id, source from sessions where id in ("):
+                source_only_queries.append(statement)
+
+        connection.set_trace_callback(trace)
+        return connection
+
+    monkeypatch.setattr(models, "open_state_db_readonly", tracked_open)
+    overrides = models._read_state_db_sidebar_overrides(db_path, set(session_ids))
+
+    assert len(connections) == 2
+    assert first_closed == [True]
+    assert second_connection is not None
+    with pytest.raises(sqlite3.ProgrammingError):
+        second_connection.execute("SELECT 1")
+    assert len(source_only_queries) == 3
+    assert [
+        statement.split("IN (", 1)[1].split(")", 1)[0].count(",") + 1
+        for statement in source_only_queries
+    ] == [500, 500, 1]
+    assert set(overrides) == set(session_ids)
+    assert overrides[session_ids[0]] == _state_db_source_metadata("subagent")
+    assert overrides[session_ids[-1]] == _state_db_source_metadata("subagent")
 
 
 def test_sidebar_state_db_overlay_counts_subagent_child_5308():
@@ -191,7 +441,7 @@ def test_sidebar_state_db_overlay_counts_subagent_child_5308():
         sessions,
         {
             sid: {
-                "_state_db_source": "subagent",
+                **_state_db_source_metadata("subagent"),
                 "_state_db_message_count": 6,
                 "_state_db_last_message_at": 2002.0,
             }
@@ -203,10 +453,11 @@ def test_sidebar_state_db_overlay_counts_subagent_child_5308():
     assert sessions[0]["message_count"] == 6
     assert sessions[0]["actual_message_count"] == 6
     assert sessions[0]["last_message_at"] == 2002.0
-    # Subagent classification is preserved (source-tag reassignment stays
-    # WebUI-only) — the child does not get re-tagged as a webui session.
+    # Subagent classification is authoritative and view-only — the child does
+    # not get re-tagged as a WebUI or writable CLI session.
     assert sessions[0]["source_tag"] == "subagent"
-    assert sessions[0].get("is_cli_session") is not False
+    assert sessions[0]["is_cli_session"] is False
+    assert sessions[0]["read_only"] is True
 
 
 def test_sidebar_state_db_overlay_does_not_count_foreign_cli_source_5308():
