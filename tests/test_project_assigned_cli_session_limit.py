@@ -369,13 +369,12 @@ def test_route_cap_splits_the_merged_budget_fairly_between_projects(fake_hermes_
         assert f"{project}-{half:04d}" not in kept_ids
 
 
-def test_route_cap_never_starves_a_project_with_more_projects_than_slots(
-    fake_hermes_home,
-):
+def test_route_cap_shrinks_every_share_instead_of_dropping_projects(fake_hermes_home):
     """Every project with an assigned session keeps at least one row.
 
-    40 projects x 200 rows still fits the merged cap because 200 // 40 = 5 — the
-    draw shrinks each project's slice instead of dropping whole projects.
+    8,000 assigned rows over 40 projects still leaves every chip reachable: the
+    draw shrinks each project's slice to 200 // 40 = 5 rather than dropping whole
+    projects, which is the starvation greptile rejected as P1.
     """
     project_count = 40
     rows = []
@@ -396,6 +395,40 @@ def test_route_cap_never_starves_a_project_with_more_projects_than_slots(
     assert len(counts) == project_count
     assert min(counts.values()) >= 1
     assert set(counts.values()) == {routes.CLI_PROJECT_ASSIGNED_CAP // project_count}
+
+
+def test_route_cap_bound_wins_when_projects_outnumber_slots(fake_hermes_home):
+    """The documented edge of the draw: 200 rows cannot represent 250 projects.
+
+    Deliberate and pinned so it is not mistaken for a bug: past
+    ``CLI_PROJECT_ASSIGNED_CAP`` assigned projects the review's number is the
+    hard constraint, so the most recently active ``CLI_PROJECT_ASSIGNED_CAP``
+    projects get one row each. The draw still never gives one project two rows
+    while another has none.
+    """
+    project_count = 250
+    rows = []
+    for project in range(project_count):
+        rows.extend(
+            {
+                "session_id": f"project-{project:03d}-{index}",
+                "is_cli_session": True,
+                "project_id": f"project-{project:03d}",
+            }
+            for index in range(3)
+        )
+
+    kept = routes._cap_recent_cli_sessions(rows)
+
+    counts = _assigned_project_counts(kept)
+    assert len(kept) == routes.CLI_PROJECT_ASSIGNED_CAP
+    assert set(counts.values()) == {1}
+    assert len(counts) == routes.CLI_PROJECT_ASSIGNED_CAP
+    # The projects that keep a row are the ones with the most recent activity,
+    # i.e. the head of the newest-first merged list.
+    assert counts.keys() == {
+        f"project-{project:03d}" for project in range(routes.CLI_PROJECT_ASSIGNED_CAP)
+    }
 
 
 def test_route_cap_keeps_every_assigned_row_under_the_merged_cap(fake_hermes_home):
