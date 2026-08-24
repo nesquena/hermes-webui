@@ -2762,7 +2762,20 @@ function _mediaTokenParts(source, matchOffset, rawRef){
     }
   }
   const remoteValue=/^https?:\/\//i.test(ref);
-  const punctuation=remoteValue?null:ref.match(/[.,;:!?]+$/);
+  let punctuation=ref.match(/[.,;:!?]+$/);
+  if(remoteValue&&punctuation){
+    // Query/fragment values may legitimately end in punctuation (including
+    // signed URLs), so never trim them. For path-only URLs, detach sentence
+    // punctuation only when what precedes it already has a conventional file
+    // extension; this keeps arbitrary punctuation-bearing remote paths intact.
+    try{
+      const remoteUrl=new URL(ref);
+      const hasQueryOrFragment=remoteUrl.search!==''||remoteUrl.hash!=='';
+      const withoutPunctuation=ref.slice(0,-punctuation[0].length);
+      const looksLikeFile=/\.[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/.test(withoutPunctuation);
+      if(hasQueryOrFragment||!looksLikeFile) punctuation=null;
+    }catch(_){ punctuation=null; }
+  }
   if(punctuation&&ref.length>punctuation[0].length){
     ref=ref.slice(0,-punctuation[0].length);
     suffix=punctuation[0]+suffix;
