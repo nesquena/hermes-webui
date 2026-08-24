@@ -610,20 +610,35 @@ def _apply_project_auto_assign(proj) -> int:
         # the authoritative source under lock before writing (P1 — race).
         try:
             if entry.get("active_stream_id") in active_ids:
-                with LOCK:
-                    cached = SESSIONS.get(sid)
-                    if cached is None:
-                        continue
-                    # Must hold the per-session agent lock as well so we
-                    # serialize with session/move and streaming saves; SESSIONS
-                    # lock alone does not protect session.project_id.
-                    with _get_session_agent_lock(sid):
-                        if getattr(cached, "project_id", None):
+                # Canonical mutation order is per-session lock -> LOCK.
+                # Hold the session lock outer so we serialize with
+                # _persist_generated_session_title and streaming saves,
+                # and only take LOCK briefly to fetch the cached session.
+                with _get_session_agent_lock(sid):
+                    with LOCK:
+                        cached = SESSIONS.get(sid)
+                        if cached is None:
                             continue
-                        cached.project_id = pid
-                        changed += 1
-                        deferred_to_stream += 1
+                    # While still holding the session lock, recheck all
+                    # authoritative fields before mutating the live object.
+                    if getattr(cached, "project_id", None):
                         continue
+                    if not _profiles_match(getattr(cached, "profile", None) or "default", profile):
+                        continue
+                    c_ws = getattr(cached, "workspace", None)
+                    if not c_ws or str(c_ws) not in bound:
+                        continue
+                    # Active-stream identity: ensure the cached session is
+                    # still considered streaming.
+                    c_active = getattr(cached, "active_stream_id", None)
+                    if c_active not in active_ids:
+                        # No longer streaming — let the non-streaming path
+                        # handle it authoritatively from disk.
+                        continue
+                    cached.project_id = pid
+                    changed += 1
+                    deferred_to_stream += 1
+                    continue
             # Load authoritative session while holding the per-session lock
             # to close the move-vs-backfill TOCTOU.
             with _get_session_agent_lock(sid):

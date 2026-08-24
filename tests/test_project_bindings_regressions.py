@@ -153,6 +153,8 @@ def test_auto_assign_streaming_branch_skips_when_cached_already_owned(tmp_path, 
         def __init__(self):
             self.session_id = sid
             self.project_id = "already-owned"
+            self.profile = "default"
+            self.workspace = ws_str
             self.active_stream_id = active
 
     cached = _Cached()
@@ -189,6 +191,8 @@ def test_auto_assign_streaming_branch_files_unowned_when_idle(tmp_path, monkeypa
         def __init__(self):
             self.session_id = sid
             self.project_id = None
+            self.profile = "default"
+            self.workspace = ws_str
             self.active_stream_id = active
 
     cached = _Cached()
@@ -345,7 +349,14 @@ def test_auto_assign_bind_respects_shutdown_drain_guard(monkeypatch):
 
 
 def test_auto_assign_non_streaming_load_under_lock_survives_concurrent_move(tmp_path, monkeypatch):
-    """TOCTOU: concurrent move committed between index read and lock must win."""
+    """TOCTOU: concurrent move committed before auto-assign obtains the lock must win.
+
+    Instruments the per-session lock to prove every authoritative
+    get_session(sid, ...) happens while that lock is held, and that a
+    manual winner installed BEFORE the lock is acquired survives.
+    This is red on a7763ac327cb (which read get_session before locking)
+    and green after the fix.
+    """
     import api.routes as routes
 
     ws = tmp_path / "ws-toctou"
@@ -371,17 +382,108 @@ def test_auto_assign_non_streaming_load_under_lock_survives_concurrent_move(tmp_
             self._saved = True  # type: ignore[attr-defined]
 
     live = _LiveRow()
-    seen = {"n": 0}
+
+    # Track lock discipline: every get_session must occur while the
+    # per-session lock is held.
+    lock_held = {"v": False}
+    lock_calls = []
+
+    class _InstrumentedLock:
+        def __enter__(self):
+            assert not lock_held["v"], "non-reentrant session lock re-entered"
+            lock_held["v"] = True
+            lock_calls.append("enter")
+            return self
+        def __exit__(self, *a):
+            lock_held["v"] = False
+            lock_calls.append("exit")
+            return False
+
+    instrumented = _InstrumentedLock()
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: instrumented)
+
+    get_session_calls = []
 
     def racing_get_session(sid_arg, metadata_only=False):  # noqa: ARG001
-        if seen["n"] == 0:
-            seen["n"] += 1
-            live.project_id = winner
+        get_session_calls.append((sid_arg, metadata_only, lock_held["v"]))
+        assert lock_held["v"], "get_session must be called while per-session lock is held"
         return live
 
     monkeypatch.setattr(routes, "get_session", racing_get_session)
 
+    # Manual move wins BEFORE auto-assign acquires the lock.
+    live.project_id = winner
     proj = {"project_id": target, "profile": "default", "workspaces": [ws_str]}
     assert routes._apply_project_auto_assign(proj) == 0
     assert live.project_id == winner
     assert not live._saved
+    assert len(get_session_calls) >= 1, "must have called get_session under lock"
+    assert all(held for _, _, held in get_session_calls)
+    assert "enter" in lock_calls
+
+
+def test_auto_assign_active_stream_respects_session_lock_first_ordering(tmp_path, monkeypatch):
+    """Active-stream path must not deadlock: session lock outer, LOCK inner.
+
+    Drives the canonical session_lock -> LOCK mutation against active-stream
+    auto-assign concurrently and proves both complete (bounded join).
+    """
+    import api.routes as routes
+    from api.config import SESSIONS, LOCK
+
+    ws = tmp_path / "ws-deadlock"
+    ws.mkdir()
+    ws_str = str(ws)
+    sid = "sess_deadlock"
+    active = "stream-dl"
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(json.dumps([
+        {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None, "active_stream_id": active},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {active})
+
+    class _Cached:
+        def __init__(self):
+            self.session_id = sid
+            self.project_id = None
+            self.profile = "default"
+            self.workspace = ws_str
+            self.active_stream_id = active
+
+    cached = _Cached()
+    with LOCK:
+        SESSIONS[sid] = cached
+    try:
+        # Thread A: canonical session -> LOCK order (like title persist).
+        done_a = []
+        def title_like():
+            from api.config import _get_session_agent_lock as _lock
+            with _lock(sid):
+                with LOCK:
+                    c = SESSIONS.get(sid)
+                    if c is not None:
+                        c.workspace = ws_str
+            done_a.append(True)
+
+        proj = {"project_id": "proj_target", "profile": "default", "workspaces": [ws_str]}
+
+        # Thread B: active-stream auto-assign (also session -> LOCK after fix).
+        done_b = []
+        def auto_assign():
+            routes._apply_project_auto_assign(proj)
+            done_b.append(True)
+
+        ta = threading.Thread(target=title_like)
+        tb = threading.Thread(target=auto_assign)
+        ta.start()
+        tb.start()
+        ta.join(timeout=5)
+        tb.join(timeout=5)
+        assert done_a, "title-like session->LOCK path must complete (no deadlock)"
+        assert done_b, "active-stream auto-assign must complete (no deadlock)"
+        # Either thread may have filed the session, but it must be done.
+        assert cached.project_id in (None, "proj_target")
+    finally:
+        with LOCK:
+            SESSIONS.pop(sid, None)
