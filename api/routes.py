@@ -624,21 +624,28 @@ def _apply_project_auto_assign(proj) -> int:
                         changed += 1
                         deferred_to_stream += 1
                         continue
-            # Non-streaming: recheck via the authoritative metadata before writing.
-            # get_session(metadata_only=True) reads the live full session row,
-            # not the stale index snapshot.
-            try:
-                live = get_session(sid, metadata_only=True)
-            except Exception:
-                live = None
-            if live is not None and getattr(live, "project_id", None):
-                continue
-            s = get_session(sid)
-            if s is None:
-                continue
-            # Serialize with any in-flight session mutation.
+            # Load authoritative session while holding the per-session lock
+            # to close the move-vs-backfill TOCTOU.
             with _get_session_agent_lock(sid):
-                if getattr(s, "project_id", None):
+                try:
+                    live = get_session(sid, metadata_only=True)  # noqa: B009 - defensive getattr below
+                except Exception:
+                    live = None
+                if live is not None and getattr(live, "project_id", None):  # noqa: B009
+                    continue
+                if live is not None:
+                    if not _profiles_match(getattr(live, "profile", None) or "default", profile):  # noqa: B009
+                        continue
+                    live_ws = getattr(live, "workspace", None)  # noqa: B009
+                    if not live_ws or str(live_ws) not in bound:
+                        continue
+                s = get_session(sid)
+                if s is None or getattr(s, "project_id", None):  # noqa: B009
+                    continue
+                if not _profiles_match(getattr(s, "profile", None) or "default", profile):  # noqa: B009
+                    continue
+                s_ws = getattr(s, "workspace", None)  # noqa: B009
+                if not s_ws or str(s_ws) not in bound:
                     continue
                 s.project_id = pid
                 s.save()

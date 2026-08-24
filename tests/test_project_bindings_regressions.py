@@ -342,3 +342,46 @@ def test_auto_assign_bind_respects_shutdown_drain_guard(monkeypatch):
         assert not t.is_alive()
     finally:
         sl._draining = orig
+
+
+def test_auto_assign_non_streaming_load_under_lock_survives_concurrent_move(tmp_path, monkeypatch):
+    """TOCTOU: concurrent move committed between index read and lock must win."""
+    import api.routes as routes
+
+    ws = tmp_path / "ws-toctou"
+    ws.mkdir()
+    ws_str = str(ws)
+    sid = "sess_toctou"
+    index_file = tmp_path / "_index.json"
+    index_file.write_text(json.dumps([
+        {"session_id": sid, "workspace": ws_str, "profile": "default", "project_id": None},
+    ]))
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+
+    winner, target = "manual-winner", "proj_target"
+
+    class _LiveRow:
+        session_id = sid
+        project_id = None
+        profile = "default"
+        workspace = ws_str
+        _saved = False
+        def save(self):  # type: ignore[no-redef]
+            self._saved = True  # type: ignore[attr-defined]
+
+    live = _LiveRow()
+    seen = {"n": 0}
+
+    def racing_get_session(sid_arg, metadata_only=False):  # noqa: ARG001
+        if seen["n"] == 0:
+            seen["n"] += 1
+            live.project_id = winner
+        return live
+
+    monkeypatch.setattr(routes, "get_session", racing_get_session)
+
+    proj = {"project_id": target, "profile": "default", "workspaces": [ws_str]}
+    assert routes._apply_project_auto_assign(proj) == 0
+    assert live.project_id == winner
+    assert not live._saved

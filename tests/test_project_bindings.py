@@ -334,12 +334,20 @@ def test_apply_project_auto_assign_files_existing_sessions(tmp_path, monkeypatch
         def __init__(self, sid):
             self.session_id = sid
             self.project_id = None
+            # Live row must carry the same profile/workspace the index entry
+            # had, otherwise the new authoritative recheck under lock would
+            # (correctly) reject it. Keep the fake minimal but realistic.
+            self.profile = "other" if sid == "sess_ddd" else "default"
+            self.workspace = HOME_WS if sid == "sess_ccc" else ws_str
         def save(self):
             saved[self.session_id] = self.project_id
 
-    monkeypatch.setattr(routes, "get_session",
-                        lambda sid: _FakeSession(sid) if sid in (
-                            "sess_aaa", "sess_bbb", "sess_ccc", "sess_ddd") else None)
+    def _fake_get_session(sid, metadata_only=False):  # noqa: ARG001 — signature mirrors real get_session
+        if sid not in ("sess_aaa", "sess_bbb", "sess_ccc", "sess_ddd"):
+            return None
+        return _FakeSession(sid)
+
+    monkeypatch.setattr(routes, "get_session", _fake_get_session)
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     proj = {"project_id": "proj_xyz", "profile": "default",
@@ -381,12 +389,20 @@ def test_apply_project_auto_assign_named_profile_never_sweeps_default(tmp_path, 
         def __init__(self, sid):
             self.session_id = sid
             self.project_id = None
+            # Mirror the index row's profile/workspace so the new
+            # live-row check under lock does not (correctly) reject
+            # the fake. None profile coalesces to "default" in prod.
+            self.profile = {"sess_def": "default", "sess_none": None, "sess_haku": "haku"}[sid]
+            self.workspace = ws_str
         def save(self):
             saved[self.session_id] = self.project_id
 
-    monkeypatch.setattr(routes, "get_session",
-                        lambda sid: _FakeSession(sid) if sid in (
-                            "sess_def", "sess_none", "sess_haku") else None)
+    def _fake_get_session_named(sid, metadata_only=False):  # noqa: ARG001
+        if sid not in ("sess_def", "sess_none", "sess_haku"):
+            return None
+        return _FakeSession(sid)
+
+    monkeypatch.setattr(routes, "get_session", _fake_get_session_named)
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
 
     proj = {"project_id": "proj_named", "profile": "haku",
