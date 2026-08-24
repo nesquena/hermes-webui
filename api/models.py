@@ -6796,8 +6796,14 @@ def _profile_has_user_projects() -> bool:
     return False
 
 
-def profile_scoped_project_ids() -> frozenset[str]:
-    """Project IDs that currently exist for the active profile.
+# Sentinel for profile_scoped_project_ids(): "no profile given, use the active
+# one". A bare None cannot mean that, because None is a legitimate profile value
+# (_profiles_match reads it as the root profile).
+_ACTIVE_PROFILE = object()
+
+
+def profile_scoped_project_ids(profile=_ACTIVE_PROFILE) -> frozenset[str]:
+    """Project IDs that currently exist for ``profile`` (default: the active one).
 
     A state.db ``project_id`` is an opaque string the agent wrote; the project
     it names can since have been deleted, or can belong to a different profile.
@@ -6805,6 +6811,13 @@ def profile_scoped_project_ids() -> frozenset[str]:
     assignment can never HIDE a session: an unresolved id would otherwise drop
     the row out of "Unassigned" and turn it into a ``default_hidden`` row with no
     project chip left to reveal it (#6659 review finding 3).
+
+    ``profile`` must be the SESSION's profile, not the process-wide active one,
+    wherever the two can differ. The all-profiles sidebar view scans one state.db
+    per profile in a single request, so resolving every context against the active
+    profile made another profile's LIVE assignment look unresolvable and dropped
+    the row from the payload entirely — while its chip stayed selectable in that
+    same view (#6659 review finding 3).
 
     Profile/alias matching is delegated to ``api.profiles._profiles_match``,
     the canonical helper every other profile-scoped read already uses, so this
@@ -6814,7 +6827,7 @@ def profile_scoped_project_ids() -> frozenset[str]:
     """
     from api.profiles import get_active_profile_name, _profiles_match
 
-    active = get_active_profile_name()
+    active = get_active_profile_name() if profile is _ACTIVE_PROFILE else profile
     resolved: set[str] = set()
     for p in load_projects():
         project_id = str(p.get('project_id') or '').strip()
@@ -7810,15 +7823,22 @@ def _load_cli_sessions_uncached(
             _webhook_pid_cache[0] = ensure_webhook_project()
         return _webhook_pid_cache[0]
 
-    # The live project catalog for this profile, read lazily and at most once per
-    # scan (same [resolved, value] cell pattern as _cron_pid above, for the same
-    # #4842 reason: a per-row load_projects() is a cold-sidebar I/O blowup).
+    # The live project catalog for THIS SCAN'S profile, read lazily and at most
+    # once per scan (same [resolved, value] cell pattern as _cron_pid above, for
+    # the same #4842 reason: a per-row load_projects() is a cold-sidebar I/O
+    # blowup).
+    #
+    # Scoped to ``_cli_profile`` — the profile whose state.db this scan is
+    # reading — not to the process-wide active profile. The all-profiles view
+    # calls this loader once per profile context in a single request, so the
+    # active-profile catalog would misread another profile's LIVE assignment as
+    # unresolvable and drop the row from the payload (#6659 review finding 3).
     _known_project_ids_cache: list = [False, frozenset()]
     def _known_project_ids() -> frozenset[str]:
         if not _known_project_ids_cache[0]:
             _known_project_ids_cache[0] = True
             try:
-                _known_project_ids_cache[1] = profile_scoped_project_ids()
+                _known_project_ids_cache[1] = profile_scoped_project_ids(_cli_profile)
             except Exception:
                 logger.debug("Project catalog read failed for CLI projection", exc_info=True)
         return _known_project_ids_cache[1]

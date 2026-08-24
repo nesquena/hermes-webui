@@ -1695,3 +1695,61 @@ def test_all_profiles_view_recovers_project_assigned_sessions(
     assert [s["session_id"] for s in sessions].count("older-assigned") == 1
     # The unassigned window is still bounded — the recovery pass is additive.
     assert sum(1 for s in sessions if s["project_id"] is None) == 5
+
+
+def test_all_profiles_view_resolves_each_context_against_its_own_profile(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """Review finding 3 asked for "the SESSION's profile", not the active one.
+
+    ``_load_cli_sessions_uncached`` runs once per profile context here, but the
+    project catalog it resolved against came from ``get_active_profile_name()``.
+    So a LIVE assignment owned by another profile was misread as unresolvable:
+    coerced to None, skipped by the assigned recovery pass, and unreachable by the
+    unassigned refill too (its state.db row DOES carry a ``project_id``, which the
+    "unassigned" SQL filter excludes) — the row left the payload entirely. Its
+    chip is selectable in this very view (``/api/projects`` returns every project
+    when ``all_profiles=1``), so selecting it showed nothing: exactly the
+    "assignment exists but the session is unreachable" failure finding 3 named.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    _register_projects(tmp_path, "project-a")
+    _register_projects(tmp_path, "project-b", profile="other")
+
+    home_a = fake_hermes_home
+    db_a = home_a / "state.db"
+    rows_a = [_session(f"a-recent-{index:02d}", BASE_TS + 100 + index) for index in range(25)]
+    rows_a.append(_session("older-assigned-a", BASE_TS, project_id="project-a"))
+    _write_state_db(db_a, rows_a)
+
+    home_b = tmp_path / "hermes-other"
+    home_b.mkdir()
+    db_b = home_b / "state.db"
+    rows_b = [_session(f"b-recent-{index:02d}", BASE_TS + 100 + index) for index in range(25)]
+    rows_b.append(_session("older-assigned-b", BASE_TS, project_id="project-b"))
+    # The safe direction, in the same scan: project-a belongs to the OTHER
+    # profile as far as this context is concerned, so it must still coerce to
+    # None instead of gaining a chip that cannot reveal it.
+    rows_b.append(_session("newest-foreign-b", BASE_TS + 900, project_id="project-a"))
+    _write_state_db(db_b, rows_b)
+
+    # Enumerating real profiles shells out to the agent CLI; pin the two contexts.
+    monkeypatch.setattr(
+        models,
+        "_all_profiles_cli_contexts",
+        lambda: (
+            [(home_a, db_a, "default"), (home_b, db_b, "other")],
+            (("home-a", "default", 1), ("home-b", "other", 1)),
+        ),
+    )
+
+    sessions = models.get_cli_sessions(all_profiles=True)
+    by_id = {session["session_id"]: session for session in sessions}
+
+    # The active profile's own context is unaffected.
+    assert by_id["older-assigned-a"]["project_id"] == "project-a"
+    # The other profile's LIVE assignment survives, with its own chip.
+    assert "older-assigned-b" in by_id
+    assert by_id["older-assigned-b"]["project_id"] == "project-b"
+    # A foreign id is still not an assignment.
+    assert by_id["newest-foreign-b"]["project_id"] is None
