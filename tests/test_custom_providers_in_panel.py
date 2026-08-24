@@ -104,12 +104,14 @@ class TestCustomProvidersInGetProviders:
         finally:
             self._restore_cfg(old_cfg, old_mtime)
 
-    def test_providers_panel_renders_config_yaml_custom_providers(self):
-        """Settings → Providers must not filter out read-only custom providers."""
+    def test_providers_panel_manages_config_yaml_custom_providers(self):
+        """Settings → Providers routes custom entries through the editable manager."""
         src = open("static/panels.js", encoding="utf-8").read()
-        assert "filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted)" in src
-        assert "Custom provider loaded from config.yaml / hermes model" in src
-        assert "if(p.configurable){" in src
+        assert "api('/api/providers/custom-models')" in src
+        assert "customProviderIds.has(p.id)" in src
+        assert "_buildCustomModelsSection(_customModelData)" in src
+        assert 'data-provider-action="edit"' in src
+        assert 'data-provider-action="delete"' in src
 
     def test_custom_provider_with_multi_models(self, monkeypatch, tmp_path):
         """Custom provider with `models` list should expose all entries."""

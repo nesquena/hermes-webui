@@ -5,6 +5,16 @@ from email.message import Message
 from api import config
 
 
+def _patch_probe_opener(monkeypatch, fake_open):
+    from api import provider_endpoint_probe
+
+    class FakeOpener:
+        def open(self, req, timeout=10):
+            return fake_open(req, timeout=timeout)
+
+    monkeypatch.setattr(provider_endpoint_probe, "DEFAULT_OPENER", FakeOpener())
+
+
 class _ConfigState:
     def __enter__(self):
         self.old_cfg = config.cfg
@@ -66,7 +76,7 @@ def test_named_custom_provider_models_endpoint_401_surfaces_error(monkeypatch, t
             fp=None,
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _patch_probe_opener(monkeypatch, fake_urlopen)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch, model="broken/manual")
@@ -85,7 +95,7 @@ def test_named_custom_provider_models_endpoint_network_error_surfaces_empty_grou
     def fake_urlopen(req, timeout=10):
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _patch_probe_opener(monkeypatch, fake_urlopen)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch)
@@ -108,7 +118,7 @@ def test_named_custom_provider_models_endpoint_5xx_preserves_status(monkeypatch,
             fp=None,
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _patch_probe_opener(monkeypatch, fake_urlopen)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch, model="broken/manual")
@@ -133,7 +143,7 @@ def test_named_custom_provider_models_endpoint_network_error_uses_short_timeout(
             observed_timeouts.append(timeout)
         raise urllib.error.URLError("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _patch_probe_opener(monkeypatch, fake_urlopen)
 
     with _ConfigState():
         _configure_named_custom_provider(tmp_path, monkeypatch)

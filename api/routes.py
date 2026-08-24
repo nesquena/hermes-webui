@@ -1883,24 +1883,30 @@ _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
-def _active_profile_for_live_models_cache() -> str:
+def _active_profile_for_live_models_cache() -> str | None:
     try:
         from api.profiles import get_active_profile_name
 
         return get_active_profile_name() or "default"
-    except Exception as _e:
-        # A transient profile-resolution error mis-scopes the cache for up to
-        # 60s ("default" gets the wrong payload). Log so we can detect it; the
-        # blast radius stays small because the TTL caps the bad-cache window.
-        logger.debug("_active_profile_for_live_models_cache fell back to 'default': %s", _e)
-        return "default"
+    except Exception:
+        # Profile identity is part of the cache ownership boundary. If it cannot
+        # be resolved, bypass both cache reads and writes rather than borrowing
+        # the shared default-profile namespace.
+        logger.warning(
+            "Live-model cache bypassed because active Profile resolution failed",
+            exc_info=True,
+        )
+        return None
 
 
-def _live_models_cache_key(provider: str) -> tuple[str, str]:
-    return (_active_profile_for_live_models_cache(), provider)
+def _live_models_cache_key(provider: str) -> tuple[str, str] | None:
+    profile = _active_profile_for_live_models_cache()
+    return (profile, provider) if profile is not None else None
 
 
-def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
+def _get_cached_live_models(key: tuple[str, str] | None) -> dict | None:
+    if key is None:
+        return None
     now = time.monotonic()
     with _LIVE_MODELS_CACHE_LOCK:
         cached = _LIVE_MODELS_CACHE.get(key)
@@ -1913,7 +1919,9 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
         return copy.deepcopy(payload)
 
 
-def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+def _set_cached_live_models(key: tuple[str, str] | None, payload: dict) -> None:
+    if key is None:
+        return
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
@@ -13260,7 +13268,12 @@ def handle_get(handler, parsed) -> bool:
     # ── Auxiliary models (GET/POST) ──
     if parsed.path == "/api/model/auxiliary":
         from api.config import get_auxiliary_models
-        return j(handler, get_auxiliary_models())
+        from api.profiles import profile_env_for_active_request_readonly
+
+        with profile_env_for_active_request_readonly(
+            "/api/model/auxiliary", logger_override=logger
+        ):
+            return j(handler, get_auxiliary_models())
 
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
@@ -13278,7 +13291,23 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     # ── Providers (GET) ──
+    if parsed.path == "/api/providers/custom-models":
+        from api.custom_models import CustomModelError, list_custom_models
+        from api.profiles import profile_env_for_active_request_readonly
+
+        try:
+            with profile_env_for_active_request_readonly(
+                "/api/providers/custom-models", logger_override=logger
+            ):
+                return j(handler, list_custom_models())
+        except CustomModelError as exc:
+            return bad(handler, str(exc), status=exc.status)
+
     if parsed.path == "/api/providers":
+        query = parse_qs(parsed.query)
+        summary = (query.get("summary", [""])[0] or "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
         # Apply the active per-request profile's env so provider auth probes
         # resolve against that profile's credentials, not the process-default
         # profile's (#3957). Without this, get_auth_status() probes on a
@@ -13286,7 +13315,7 @@ def handle_get(handler, parsed) -> bool:
         # the 30s frontend timeout. No-op for the default profile.
         from api.profiles import profile_env_for_active_request_readonly
         with profile_env_for_active_request_readonly("/api/providers", logger_override=logger):
-            return j(handler, get_providers())
+            return j(handler, get_providers(include_live=not summary))
 
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
@@ -15467,7 +15496,12 @@ def handle_post(handler, parsed) -> bool:
             provider = body.get("provider") if isinstance(body, dict) else None
             if str(provider or "").strip().lower() == "auto":
                 provider = None
-            return j(handler, set_hermes_default_model(body.get("model"), provider=provider, advanced=advanced))
+            return j(
+                handler,
+                set_hermes_default_model(
+                    body.get("model"), provider=provider, advanced=advanced
+                ),
+            )
         except ValueError as e:
             return bad(handler, str(e))
         except RuntimeError as e:
@@ -15483,18 +15517,62 @@ def handle_post(handler, parsed) -> bool:
         if scope == "auxiliary":
             from api.config import set_auxiliary_model
             try:
-                return j(handler, set_auxiliary_model(task, provider, model, advanced=advanced))
+                return j(
+                    handler,
+                    set_auxiliary_model(task, provider, model, advanced=advanced),
+                )
             except Exception as exc:
                 return bad(handler, str(exc), status=400)
         if scope == "main":
             try:
                 main_provider = provider if provider != "auto" else None
-                return j(handler, set_hermes_default_model(model, provider=main_provider, advanced=advanced))
+                return j(
+                    handler,
+                    set_hermes_default_model(
+                        model, provider=main_provider, advanced=advanced
+                    ),
+                )
             except ValueError as exc:
                 return bad(handler, str(exc), status=400)
         return bad(handler, f"unknown scope: {scope}", status=400)
 
     # ── Providers (POST) ──
+    if parsed.path.startswith("/api/providers/custom-models"):
+        from api.custom_models import (
+            CustomModelError,
+            activate_custom_model,
+            delete_custom_model,
+            discover_custom_models,
+            test_custom_model,
+            upsert_custom_model,
+        )
+        from api.profiles import (
+            profile_env_for_active_request,
+            profile_env_for_active_request_readonly,
+        )
+
+        try:
+            if parsed.path in {
+                "/api/providers/custom-models/test",
+                "/api/providers/custom-models/discover",
+            }:
+                with profile_env_for_active_request_readonly(
+                    parsed.path, logger_override=logger
+                ):
+                    if parsed.path.endswith("/discover"):
+                        return j(handler, discover_custom_models(body))
+                    return j(handler, test_custom_model(body))
+            with profile_env_for_active_request(parsed.path, logger_override=logger):
+                if parsed.path == "/api/providers/custom-models":
+                    return j(handler, upsert_custom_model(body))
+                if parsed.path == "/api/providers/custom-models/activate":
+                    return j(handler, activate_custom_model(body))
+                if parsed.path == "/api/providers/custom-models/delete":
+                    return j(handler, delete_custom_model(body))
+        except CustomModelError as exc:
+            return bad(handler, str(exc), status=exc.status)
+        return bad(handler, "Unknown custom model action", status=404)
+
     if parsed.path == "/api/providers":
         provider_id = (body.get("provider") or "").strip().lower()
         api_key = body.get("api_key")
@@ -15513,6 +15591,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         result = remove_provider_key(provider_id)
         if not result.get("ok"):
+            if result.get("persisted"):
+                return j(handler, result, status=500)
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
 
@@ -16933,8 +17013,9 @@ def handle_post(handler, parsed) -> bool:
         api_key = str((body or {}).get("api_key") or "").strip() or None
         try:
             return j(handler, probe_provider_endpoint(provider, base_url, api_key))
-        except Exception as e:
-            return bad(handler, f"probe failed: {e}", 500)
+        except Exception:
+            logger.exception("Unexpected onboarding probe failure")
+            return bad(handler, "probe failed safely", 500)
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":
@@ -21394,8 +21475,11 @@ def _handle_live_models(handler, parsed):
         if cached is not None:
             return j(handler, cached)
 
+        cache_result = True
+
         def _finish(payload: dict):
-            _set_cached_live_models(cache_key, payload)
+            if cache_result:
+                _set_cached_live_models(cache_key, payload)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
@@ -21413,6 +21497,7 @@ def _handle_live_models(handler, parsed):
             ids = _pmi(provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
+            cache_result = False
             ids = []
 
         if not ids:
@@ -21423,10 +21508,20 @@ def _handle_live_models(handler, parsed):
                     return []
                 try:
                     from api.config import _custom_provider_slug_from_name
+                    from api.custom_models import _modern_custom_entries
+
+                    _matches = []
+                    # Modern providers use an immutable storage key whose
+                    # runtime identity is custom:<key>.  Reuse the manager's
+                    # canonical classifier so live discovery agrees with CRUD.
+                    if provider.startswith("custom:"):
+                        for _uid, _source, _provider_id, _entry in _modern_custom_entries(cfg):
+                            if _provider_id == provider:
+                                _matches.append(_entry)
+
                     _cp_entries = cfg.get("custom_providers", [])
                     if not isinstance(_cp_entries, list):
-                        return []
-                    _matches = []
+                        return _matches
                     for _cp in _cp_entries:
                         if not isinstance(_cp, dict):
                             continue
@@ -21438,6 +21533,7 @@ def _handle_live_models(handler, parsed):
                             _matches.append(_cp)
                     return _matches
                 except Exception:
+                    logger.debug("Failed to resolve custom provider entries", exc_info=True)
                     return []
 
             def _custom_provider_model_ids(_cp):
@@ -21449,6 +21545,7 @@ def _handle_live_models(handler, parsed):
                         _ids.append(_mid)
 
                 _append(_cp.get("model", ""))
+                _append(_cp.get("default_model", ""))
                 _models = _cp.get("models")
                 if isinstance(_models, dict):
                     for _mid in _models:
@@ -21494,7 +21591,7 @@ def _handle_live_models(handler, parsed):
                 _base_url = None
                 _api_key = None
                 if custom_provider_entry:
-                    _base_url = custom_provider_entry.get("base_url")
+                    _base_url = custom_provider_entry.get("base_url") or custom_provider_entry.get("api")
                     _api_key = _custom_provider_api_key(custom_provider_entry)
                 else:
                     _model_cfg = cfg.get("model", {})
@@ -21519,42 +21616,36 @@ def _handle_live_models(handler, parsed):
                     except ImportError:
                         pass
                 if _base_url and _api_key:
-                    try:
-                        import urllib.request
-                        import json
-                        
-                        # Build the models endpoint URL
-                        # AxonHub and similar OpenAI-compat endpoints serve /v1/models
-                        _ep = _base_url.rstrip("/")
-                        # If base_url already ends with /v1, use /models; otherwise add /v1/models
-                        if _ep.endswith("/v1"):
-                            _models_url = f"{_ep}/models"
-                        else:
-                            _models_url = f"{_ep}/v1/models"
-                        
-                        _req = urllib.request.Request(
-                            _models_url,
-                            headers={"Authorization": f"Bearer {_api_key}"},
+                    # Reuse the bounded, no-redirect onboarding probe rather
+                    # than forwarding provider credentials through bare
+                    # urllib.  Configured private/self-hosted endpoints remain
+                    # supported, but redirects and oversized responses fail
+                    # closed before a credential can cross origins.
+                    _ep = str(_base_url).rstrip("/")
+                    _probe_base = _ep if _ep.endswith("/v1") else f"{_ep}/v1"
+                    _probe = probe_provider_endpoint(
+                        provider,
+                        _probe_base,
+                        _api_key,
+                        timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
+                    )
+                    if _probe.get("ok"):
+                        ids = [
+                            str(_item.get("id") or "").strip()
+                            for _item in (_probe.get("models") or [])
+                            if isinstance(_item, dict) and str(_item.get("id") or "").strip()
+                        ]
+                    else:
+                        cache_result = False
+                        logger.debug(
+                            "Live fetch from custom provider failed (%s, status=%s)",
+                            _probe.get("error"),
+                            _probe.get("status"),
                         )
-                        
-                        with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
-                            _body = json.loads(_resp.read())
-                        
-                        # Parse response: {"data": [{"id": "model1", ...}, ...]}
-                        if isinstance(_body, dict):
-                            _data = _body.get("data", [])
-                            if isinstance(_data, list):
-                                ids = [m.get("id", "") for m in _data if m.get("id")]
-                        elif isinstance(_body, list):
-                            ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
-
-                        if ids:
-                            logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
-                        else:
-                            logger.debug("Custom provider returned no models from %s", _base_url)
-
-                    except Exception as _fetch_err:
-                        logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
+                    if ids:
+                        logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
+                    else:
+                        logger.debug("Custom provider returned no models from %s", _base_url)
 
                 # If live fetch succeeded, merge with config entries (live takes
                 # priority).  If live fetch failed, fall back to config-only list.
@@ -21580,35 +21671,39 @@ def _handle_live_models(handler, parsed):
         if not ids:
             _ep = _OPENAI_COMPAT_ENDPOINTS.get(provider)
             if _ep:
-                try:
-                    import urllib.request
-                    _providers_cfg = cfg.get("providers") or {}
-                    _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
-                    # Only use a provider-scoped key.  A top-level model.api_key
-                    # is safe here only when it belongs to the requested provider;
-                    # otherwise /api/models/live?provider=<other> could forward
-                    # the active provider's credential to the wrong third party.
-                    _key = _prov.get("api_key") if isinstance(_prov, dict) else None
-                    if not _key:
-                        _model_cfg = cfg.get("model", {})
-                        if isinstance(_model_cfg, dict):
-                            _active_provider = _resolve_provider_alias(
-                                (_model_cfg.get("provider") or "").strip().lower()
-                            )
-                            if _active_provider == provider:
-                                _key = _model_cfg.get("api_key")
-                    if _key:
-                        _req = urllib.request.Request(
-                            f"{_ep}/models",
-                            headers={"Authorization": f"Bearer {_key}"},
+                _providers_cfg = cfg.get("providers") or {}
+                _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
+                # Only use a provider-scoped key.  A top-level model.api_key
+                # is safe here only when it belongs to the requested provider;
+                # otherwise /api/models/live?provider=<other> could forward
+                # the active provider's credential to the wrong third party.
+                _key = _prov.get("api_key") if isinstance(_prov, dict) else None
+                if not _key:
+                    _model_cfg = cfg.get("model", {})
+                    if isinstance(_model_cfg, dict):
+                        _active_provider = _resolve_provider_alias(
+                            (_model_cfg.get("provider") or "").strip().lower()
                         )
-                        with urllib.request.urlopen(_req, timeout=8) as _resp:
-                            _body = json.loads(_resp.read())
-                        ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
+                        if _active_provider == provider:
+                            _key = _model_cfg.get("api_key")
+                if _key:
+                    _probe = probe_provider_endpoint(provider, _ep, _key, timeout=8)
+                    if _probe.get("ok"):
+                        ids = [
+                            str(_item.get("id") or "").strip()
+                            for _item in (_probe.get("models") or [])
+                            if isinstance(_item, dict) and str(_item.get("id") or "").strip()
+                        ]
                         logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
-                except Exception as _fetch_err:
-                    logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
-                    # Fall through to static list below
+                    else:
+                        cache_result = False
+                        logger.debug(
+                            "Live fetch from %s failed (%s, status=%s)",
+                            provider,
+                            _probe.get("error"),
+                            _probe.get("status"),
+                        )
+                    # Fall through to static list below on probe failure.
 
         # Static fallback — only reached when live fetch also failed.
         if not ids:

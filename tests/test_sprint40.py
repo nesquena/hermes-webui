@@ -69,30 +69,23 @@ class TestBuildSetupCatalog(unittest.TestCase):
 
 class TestApplyOnboardingOAuthPath(unittest.TestCase):
 
-    def test_unsupported_provider_skips_to_complete(self):
-        """apply_onboarding_setup with an OAuth provider just marks onboarding done."""
-        saved = {}
-
-        def _save(d):
-            saved.update(d)
-
-        mock_status = {"completed": True, "system": {"chat_ready": True}}
-
-        with patch.object(mod, "save_settings", side_effect=_save), \
-             patch.object(mod, "get_onboarding_status", return_value=mock_status):
-            result = mod.apply_onboarding_setup({"provider": "openai-codex", "model": "gpt-5.4"})
-
-        self.assertTrue(saved.get("onboarding_completed"),
-                        "save_settings must set onboarding_completed=True for OAuth provider")
-        self.assertEqual(result, mock_status)
+    def test_unsupported_provider_fails_closed(self):
+        """Unsupported OAuth aliases must not silently complete onboarding."""
+        with patch.object(mod, "save_settings") as mock_save_settings:
+            with self.assertRaisesRegex(ValueError, "unsupported onboarding provider"):
+                mod.apply_onboarding_setup(
+                    {"provider": "openai-codex", "model": "gpt-5.4"}
+                )
+        mock_save_settings.assert_not_called()
 
     def test_unsupported_provider_does_not_write_config_yaml(self):
-        """OAuth path must not call _save_yaml_config — no config mutation."""
-        with patch.object(mod, "save_settings"), \
-             patch.object(mod, "get_onboarding_status", return_value={}), \
+        """Unsupported providers must not mutate config or completion state."""
+        with patch.object(mod, "save_settings") as mock_save_settings, \
              patch.object(mod, "_save_yaml_config") as mock_save_yaml:
-            mod.apply_onboarding_setup({"provider": "copilot", "model": "gpt-4o"})
+            with self.assertRaisesRegex(ValueError, "unsupported onboarding provider"):
+                mod.apply_onboarding_setup({"provider": "copilot", "model": "gpt-4o"})
 
+        mock_save_settings.assert_not_called()
         mock_save_yaml.assert_not_called()
 
 

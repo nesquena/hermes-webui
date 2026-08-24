@@ -71,10 +71,15 @@ def _stub_hermes_cli(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_models_cache(tmp_path, monkeypatch):
+    restore = _RestoreCfg()
+    restore.__enter__()
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     config.invalidate_models_cache()
-    yield
-    config.invalidate_models_cache()
+    try:
+        yield
+    finally:
+        config.invalidate_models_cache()
+        restore.__exit__(None, None, None)
 
 
 def test_get_provider_base_url_finds_explicit_providers_entry():
@@ -255,17 +260,29 @@ providers:
         config.invalidate_models_cache()
 
         class _ModelsResponse:
+            status = 200
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *args):
                 pass
 
-            def read(self):
+            def read(self, _size=-1):
                 return _json.dumps(
                     {"data": [{"id": "qwen3.6-35b-a3b@q6_k"}, {"id": "another-model"}]}
                 ).encode()
 
+        from api import provider_endpoint_probe
+
+        class _ProbeOpener:
+            def open(self, *_args, **_kwargs):
+                return _ModelsResponse()
+
+        monkeypatch.setattr(
+            provider_endpoint_probe, "DEFAULT_OPENER", _ProbeOpener()
+        )
+        # Keep unrelated provider-catalog probes deterministic and offline too.
         monkeypatch.setattr(_urlreq, "urlopen", lambda *_a, **_kw: _ModelsResponse())
         monkeypatch.setattr(
             _socket,
@@ -331,17 +348,29 @@ providers:
         config.invalidate_models_cache()
 
         class _ModelsResponse:
+            status = 200
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *args):
                 pass
 
-            def read(self):
+            def read(self, _size=-1):
                 return _json.dumps(
                     {"data": [{"id": "qwen3.6-35b-a3b@q6_k"}, {"id": "another-model"}]}
                 ).encode()
 
+        from api import provider_endpoint_probe
+
+        class _ProbeOpener:
+            def open(self, *_args, **_kwargs):
+                return _ModelsResponse()
+
+        monkeypatch.setattr(
+            provider_endpoint_probe, "DEFAULT_OPENER", _ProbeOpener()
+        )
+        # Keep unrelated provider-catalog probes deterministic and offline too.
         monkeypatch.setattr(_urlreq, "urlopen", lambda *_a, **_kw: _ModelsResponse())
         monkeypatch.setattr(
             _socket,

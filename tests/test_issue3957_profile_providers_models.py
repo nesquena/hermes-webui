@@ -567,6 +567,29 @@ def test_detached_worker_scope_scrubs_absent_custom_provider_key_env(monkeypatch
     assert os.environ.get("ISSUE_3957_CUSTOM_KEY") == "from-process-env"
 
 
+def test_detached_worker_scope_scrubs_absent_modern_provider_key_env(monkeypatch, tmp_path):
+    """Modern providers mapping must not inherit a process-default custom key."""
+    base = tmp_path / ".hermes"
+    work_home = base / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    (work_home / "config.yaml").write_text(
+        "providers:\n"
+        "  custom:team:\n"
+        "    name: Team\n"
+        "    base_url: https://example.invalid/v1\n"
+        "    key_env: ISSUE_3957_MODERN_CUSTOM_KEY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("ISSUE_3957_MODERN_CUSTOM_KEY", "from-process-env")
+
+    with profiles.profile_scope_for_detached_worker("work", "test-worker"):
+        assert os.environ.get("ISSUE_3957_MODERN_CUSTOM_KEY") is None
+        assert config._thread_local_env_value("ISSUE_3957_MODERN_CUSTOM_KEY") == ""
+
+    assert os.environ.get("ISSUE_3957_MODERN_CUSTOM_KEY") == "from-process-env"
+
+
 def test_account_usage_subprocess_env_blocks_process_default_key(monkeypatch, tmp_path):
     """Readonly quota probes must not inherit process-default provider keys."""
     from api.providers import _account_usage_subprocess_env

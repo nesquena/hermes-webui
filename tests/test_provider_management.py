@@ -5,7 +5,10 @@ Part of #604 — multi-provider model picker support.
 """
 
 import json
+import multiprocessing
+import os
 import sys
+import time
 import types
 import urllib.error
 import urllib.request
@@ -67,6 +70,19 @@ def _install_fake_hermes_cli(monkeypatch):
         pass
 
 
+def _increment_under_profile_transaction(home_text, start_event):
+    from pathlib import Path
+    from api.provider_transactions import active_profile_transaction
+
+    home = Path(home_text)
+    start_event.wait(5)
+    with active_profile_transaction(lambda: home):
+        counter_path = home / "counter.txt"
+        current = int(counter_path.read_text(encoding="utf-8"))
+        time.sleep(0.15)
+        counter_path.write_text(str(current + 1), encoding="utf-8")
+
+
 # ── Unit tests (api/providers.py functions directly) ──────────────────────
 
 
@@ -101,6 +117,68 @@ class TestGetProviders:
         finally:
             if hasattr(prov, "invalidate_providers_cache"):
                 prov.invalidate_providers_cache()
+
+    def test_summary_mode_skips_live_auth_and_model_probes(
+        self, monkeypatch, tmp_path
+    ):
+        """Settings summary must stay local and never wait on provider networks."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        from api import providers as prov
+
+        monkeypatch.setattr(
+            prov,
+            "_PROVIDER_DISPLAY",
+            {"nous": "Nous", "lmstudio": "LM Studio", "pluginx": "Plugin X"},
+        )
+        monkeypatch.setattr(
+            prov,
+            "_PROVIDER_MODELS",
+            {"nous": [], "lmstudio": [], "pluginx": []},
+        )
+        monkeypatch.setattr(prov, "_OAUTH_PROVIDERS", frozenset({"nous"}))
+        monkeypatch.setattr(prov, "plugin_model_provider_ids", lambda: {"pluginx"})
+        monkeypatch.setattr(
+            prov, "is_plugin_model_provider", lambda pid: pid == "pluginx"
+        )
+        monkeypatch.setattr(prov, "get_config", lambda: {"model": {}, "providers": {}})
+        monkeypatch.setattr(prov, "_provider_has_key", lambda _pid: False)
+        auth_calls = []
+        model_calls = []
+
+        def live_model_ids(pid):
+            model_calls.append(("live", pid))
+            return []
+
+        def auth_status(pid):
+            auth_calls.append(pid)
+            return {"logged_in": False}
+
+        def provider_model_ids(pid):
+            model_calls.append(("provider", pid))
+            return []
+
+        monkeypatch.setattr(prov, "_read_live_provider_model_ids", live_model_ids)
+        sys.modules["hermes_cli.auth"].get_auth_status = auth_status
+        sys.modules["hermes_cli.models"].provider_model_ids = provider_model_ids
+
+        try:
+            result = prov.get_providers(include_live=False)
+            assert {item["id"] for item in result["providers"]} == {
+                "nous",
+                "lmstudio",
+                "pluginx",
+            }
+            assert auth_calls == []
+            assert model_calls == []
+
+            # Summary and rich responses use distinct cache identities.
+            prov.get_providers(include_live=True)
+            assert auth_calls
+            assert model_calls
+        finally:
+            prov.invalidate_providers_cache()
 
     def test_provider_cache_is_scoped_by_profile_home(self, monkeypatch, tmp_path):
         """Provider cache entries must not leak across profile homes (#3957/#6010)."""
@@ -236,7 +314,7 @@ class TestGetProviders:
         try:
             result = get_providers()
             for p in result["providers"]:
-                assert "id" in p, f"Missing 'id' in provider entry"
+                assert "id" in p, "Missing 'id' in provider entry"
                 assert "display_name" in p, f"Missing 'display_name' for {p['id']}"
                 assert "has_key" in p, f"Missing 'has_key' for {p['id']}"
                 assert "configurable" in p, f"Missing 'configurable' for {p['id']}"
@@ -528,8 +606,8 @@ class TestRemoveProviderKey:
         assert custom_provider["name"] == "Local (127.0.0.1:15721)"
         assert "api_key" not in custom_provider
 
-    def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
-        """remove_provider_key should delegate to set_provider_key(id, None)."""
+    def test_remove_provider_key_succeeds_when_no_yaml_key_exists(self, monkeypatch, tmp_path):
+        """Transactional removal is idempotent when no YAML key exists."""
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
@@ -553,6 +631,269 @@ class TestRemoveProviderKey:
             config._cfg_mtime = old_mtime
 
 
+class TestProviderCredentialTransactions:
+    def test_conditional_env_restore_holds_lock_across_compare_and_restore(
+        self, monkeypatch, tmp_path
+    ):
+        from api import provider_transactions, streaming
+
+        state = {"depth": 0, "compared": False, "restored": False}
+
+        class TrackingLock:
+            def __enter__(self):
+                state["depth"] += 1
+
+            def __exit__(self, *_args):
+                state["depth"] -= 1
+
+        published = provider_transactions.FileSnapshot(True, b"published", 0o600)
+        original = provider_transactions.FileSnapshot(True, b"original", 0o600)
+
+        def snapshot_under_lock(_path):
+            assert state["depth"] == 1
+            state["compared"] = True
+            return published
+
+        def restore_under_same_lock(_path, snapshot):
+            assert state["depth"] == 1
+            assert snapshot is original
+            state["restored"] = True
+
+        monkeypatch.setattr(streaming, "_ENV_LOCK", TrackingLock())
+        monkeypatch.setattr(provider_transactions, "snapshot_file", snapshot_under_lock)
+        monkeypatch.setattr(provider_transactions, "restore_file", restore_under_same_lock)
+
+        assert provider_transactions.restore_file_if_unchanged(
+            tmp_path / ".env", published, original
+        ) is True
+        assert state == {"depth": 0, "compared": True, "restored": True}
+
+    def test_env_writer_fails_closed_when_existing_file_is_unreadable(
+        self, monkeypatch, tmp_path
+    ):
+        from pathlib import Path
+
+        import pytest
+
+        from api.providers import _write_env_file
+
+        env_path = tmp_path / ".env"
+        original = b"OPENAI_API_KEY=original-secret\n"
+        env_path.write_bytes(original)
+        real_read_text = Path.read_text
+
+        def fail_target_read(path, *args, **kwargs):
+            if path == env_path:
+                raise PermissionError("simulated unreadable credential file")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_target_read)
+        with pytest.raises(RuntimeError, match="could not be read safely"):
+            _write_env_file(env_path, {"OPENAI_API_KEY": "replacement-secret"})
+        assert env_path.read_bytes() == original
+
+    def test_env_writer_never_mutates_process_environment(self, monkeypatch, tmp_path):
+        from api.providers import _write_env_file
+
+        env_path = tmp_path / ".env"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "process-owned-value")
+        _write_env_file(env_path, {"ANTHROPIC_API_KEY": "file-owned-value"})
+        assert os.environ["ANTHROPIC_API_KEY"] == "process-owned-value"
+        assert "ANTHROPIC_API_KEY=file-owned-value" in env_path.read_text(
+            encoding="utf-8"
+        )
+        _write_env_file(env_path, {"ANTHROPIC_API_KEY": None})
+        assert os.environ["ANTHROPIC_API_KEY"] == "process-owned-value"
+
+    def test_default_profile_reads_new_key_without_process_env_mutation(
+        self, monkeypatch, tmp_path
+    ):
+        from api import providers
+        from api.config import _thread_local_env_value
+        from api.profiles import profile_env_for_active_request_readonly
+
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        result = providers.set_provider_key(
+            "anthropic", "sk-ant-default-profile-test-12345678"
+        )
+        assert result["ok"] is True
+        assert os.environ.get("ANTHROPIC_API_KEY") is None
+        with profile_env_for_active_request_readonly("test default profile key"):
+            assert (
+                _thread_local_env_value("ANTHROPIC_API_KEY")
+                == "sk-ant-default-profile-test-12345678"
+            )
+        assert os.environ.get("ANTHROPIC_API_KEY") is None
+
+    def test_remove_reports_persisted_partial_failure_when_runtime_reload_fails(
+        self, monkeypatch, tmp_path
+    ):
+        from api import providers
+
+        monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+        (tmp_path / ".env").write_text(
+            "ANTHROPIC_API_KEY=profile-secret\n", encoding="utf-8"
+        )
+        (tmp_path / "config.yaml").write_text(
+            "model:\n  provider: anthropic\n  default: claude-test\n  api_key: ${ANTHROPIC_API_KEY}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            providers,
+            "reload_config",
+            lambda: (_ for _ in ()).throw(RuntimeError("reload failed")),
+        )
+
+        result = providers.remove_provider_key("anthropic")
+
+        assert result == {
+            "ok": False,
+            "persisted": True,
+            "provider": "anthropic",
+            "error": "Credential was removed, but runtime configuration could not be refreshed.",
+        }
+        assert "ANTHROPIC_API_KEY" not in (
+            tmp_path / ".env"
+        ).read_text(encoding="utf-8")
+        assert "api_key" not in (
+            tmp_path / "config.yaml"
+        ).read_text(encoding="utf-8")
+
+    def test_remove_route_preserves_persisted_partial_failure_payload(
+        self, monkeypatch
+    ):
+        from urllib.parse import urlparse
+
+        from api import routes
+
+        expected = {
+            "ok": False,
+            "persisted": True,
+            "provider": "anthropic",
+            "error": "Credential was removed, but runtime configuration could not be refreshed.",
+        }
+        captured = {}
+        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+        monkeypatch.setattr(
+            routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False
+        )
+        monkeypatch.setattr(routes, "read_body", lambda _handler: {"provider": "anthropic"})
+        monkeypatch.setattr(
+            routes,
+            "_guard_request_session_visibility",
+            lambda *_a, **_k: True,
+        )
+        monkeypatch.setattr(routes, "remove_provider_key", lambda _provider: expected)
+
+        def capture_json(_handler, payload, status=200, **_kwargs):
+            captured.update(payload=payload, status=status)
+            return True
+
+        monkeypatch.setattr(routes, "j", capture_json)
+        result = routes.handle_post(
+            object(), urlparse("/api/providers/delete")
+        )
+
+        assert result is True
+        assert captured == {"payload": expected, "status": 500}
+
+    def test_remove_rolls_back_env_and_yaml_when_yaml_save_fails(
+        self, monkeypatch, tmp_path
+    ):
+        from api import providers
+
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        env_path = tmp_path / ".env"
+        config_path = tmp_path / "config.yaml"
+        env_path.write_text("ANTHROPIC_API_KEY=original-secret\n", encoding="utf-8")
+        config_path.write_text(
+            "providers:\n  anthropic:\n    api_key: ${ANTHROPIC_API_KEY}\n",
+            encoding="utf-8",
+        )
+        before_env = env_path.read_bytes()
+        before_config = config_path.read_bytes()
+        monkeypatch.setattr(
+            providers,
+            "_save_yaml_config_file",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("boom")),
+        )
+
+        result = providers.remove_provider_key("anthropic")
+
+        assert result["ok"] is False
+        assert "transactionally" in result["error"]
+        assert env_path.read_bytes() == before_env
+        assert config_path.read_bytes() == before_config
+
+    def test_profile_switch_before_write_fails_closed(self, monkeypatch, tmp_path):
+        from api import providers
+
+        other_home = tmp_path / "other"
+        homes = iter((tmp_path, tmp_path, other_home))
+        monkeypatch.setattr(providers, "_get_hermes_home", lambda: next(homes))
+        result = providers.set_provider_key(
+            "anthropic", "sk-ant-profile-race-test-12345678"
+        )
+        assert result["ok"] is False
+        assert not (tmp_path / ".env").exists()
+        assert not (other_home / ".env").exists()
+
+    def test_two_processes_serialize_same_profile_mutation(self, tmp_path):
+        if sys.platform == "win32":
+            import pytest
+
+            pytest.skip("test-only file lock uses fcntl")
+        counter_path = tmp_path / "counter.txt"
+        counter_path.write_text("0", encoding="utf-8")
+        ctx = multiprocessing.get_context("spawn")
+        start = ctx.Event()
+        workers = [
+            ctx.Process(
+                target=_increment_under_profile_transaction,
+                args=(str(tmp_path), start),
+            )
+            for _ in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        start.set()
+        for worker in workers:
+            worker.join(10)
+            assert worker.exitcode == 0
+        assert counter_path.read_text(encoding="utf-8") == "2"
+
+    def test_shared_profile_lock_is_outermost_for_key_write(
+        self, monkeypatch, tmp_path
+    ):
+        from contextlib import contextmanager
+        from api import provider_transactions, providers
+
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        events = []
+
+        @contextmanager
+        def fake_transaction(resolver=None):
+            events.append("lock-enter")
+            yield tmp_path
+            events.append("lock-exit")
+
+        def fake_env_write(path, updates):
+            assert events == ["lock-enter"]
+            events.append("env-write")
+
+        monkeypatch.setattr(
+            provider_transactions, "active_profile_transaction", fake_transaction
+        )
+        monkeypatch.setattr(providers, "_write_env_file", fake_env_write)
+        result = providers.set_provider_key(
+            "anthropic", "sk-ant-transaction-test-12345678"
+        )
+        assert result["ok"] is True
+        assert events == ["lock-enter", "env-write", "lock-exit"]
+
+
 # ── Integration tests (via HTTP endpoints) ───────────────────────────────
 
 
@@ -563,6 +904,12 @@ class TestProvidersEndpoints:
         """GET /api/providers should return 200 with provider list."""
         result = _get("/api/providers")
         assert "providers" in result
+
+    def test_get_provider_summary_returns_200(self):
+        """The Settings summary route keeps the provider response shape."""
+        result = _get("/api/providers?summary=1")
+        assert "providers" in result
+        assert "active_provider" in result
         assert isinstance(result["providers"], list)
 
     def test_post_provider_set_key(self):

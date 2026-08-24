@@ -1857,6 +1857,19 @@ FAIL: User message gone, blank chat, response lands in wrong session.
 The following features were added in Sprints 11-19 and need manual browser testing.
 Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
+### Settings → Providers: custom model manager
+
+Use an isolated `HERMES_HOME` or a disposable local inference endpoint for destructive checks.
+
+- Add a custom endpoint with at least one model. Confirm the credential field is blank after save and the card only reports whether a credential exists.
+- Run **Test model** and verify it performs inference, reports latency, and shows a useful sanitized failure when the endpoint or protocol is wrong.
+- Edit the display name, model list, default model, context length, and same-origin URL path. Confirm unknown provider fields and retained model metadata remain in `config.yaml`.
+- Change the endpoint origin while leaving a stored credential blank. Confirm save/test fails until the credential is re-entered or explicitly removed.
+- Make the model default, then confirm delete and disable are blocked until another provider is selected.
+- Delete a non-default disposable provider. Confirm its WebUI-owned credential is removed, but imported/shared environment variables remain.
+- Switch profiles while Providers is open. Confirm cards reload for the new profile and stale controls cannot mutate it.
+- Verify desktop, 390 px, and 320 px layouts have no horizontal overflow and all phone actions are at least 44 px tall.
+
 ### Sprint 11: Multi-Provider Models
 - Open model dropdown. Verify models grouped by provider (OpenAI, Anthropic, Google, etc.)
 - If custom `base_url` configured in config.yaml, verify local models appear in dropdown.

@@ -28,6 +28,7 @@ discovered data was indistinguishable from user-entered data after persist).
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 import time
@@ -254,6 +255,55 @@ class TestIssue1499OnboardingProbe:
         assert r["error"] == "http_5xx"
         assert r.get("status") == 500
 
+    def test_http_error_body_is_never_reflected(self, monkeypatch):
+        from api import onboarding
+
+        secret = "upstream-secret-body-must-not-leak"
+
+        class FakeOpener:
+            def open(self, request, timeout=None):
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    500,
+                    "failure",
+                    {},
+                    io.BytesIO(secret.encode("utf-8")),
+                )
+
+        monkeypatch.setattr(onboarding, "_PROBE_OPENER", FakeOpener())
+        result = onboarding.probe_provider_endpoint(
+            "lmstudio", "http://model-server.example:1234/v1"
+        )
+        assert result["error"] == "http_5xx"
+        assert result["detail"] == "HTTP 500"
+        assert secret not in json.dumps(result)
+
+    def test_raw_urlerror_detail_is_sanitized(self, monkeypatch):
+        from api import onboarding
+
+        secret = "token=raw-network-secret"
+
+        class FakeOpener:
+            def open(self, *_args, **_kwargs):
+                raise urllib.error.URLError(OSError(secret))
+
+        monkeypatch.setattr(onboarding, "_PROBE_OPENER", FakeOpener())
+        result = onboarding.probe_provider_endpoint(
+            "lmstudio", "http://model-server.internal:1234/v1"
+        )
+        assert result["error"] == "unreachable"
+        assert result["detail"] == "connection failed"
+        assert secret not in json.dumps(result)
+
+    def test_embedded_url_credentials_are_rejected_without_echo(self):
+        from api.onboarding import probe_provider_endpoint
+
+        result = probe_provider_endpoint(
+            "lmstudio", "http://user:super-secret@example.com:1234/v1"
+        )
+        assert result["error"] == "invalid_url"
+        assert "super-secret" not in json.dumps(result)
+
     def test_parse_non_json(self, mock_models_server):
         from api.onboarding import probe_provider_endpoint
         r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/v1/parse")
@@ -386,6 +436,57 @@ class TestIssue1499OnboardingProbe:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_cross_host_redirect_never_receives_bearer_credential(self):
+        from api.onboarding import probe_provider_endpoint
+
+        received_authorization = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                received_authorization.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"data":[{"id":"must-not-arrive"}]}')
+
+            def log_message(self, *_args):
+                pass
+
+        target = HTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+        target_thread.start()
+        target_url = f"http://127.0.0.1:{target.server_address[1]}/v1/models"
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(302)
+                self.send_header("Location", target_url)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        redirect = HTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_thread = threading.Thread(
+            target=redirect.serve_forever, daemon=True
+        )
+        redirect_thread.start()
+        try:
+            result = probe_provider_endpoint(
+                "custom",
+                f"http://127.0.0.1:{redirect.server_address[1]}/v1",
+                api_key="redirect-secret-value",
+            )
+            assert result["ok"] is False
+            assert result.get("status") == 302
+            assert received_authorization == []
+            assert "redirect-secret-value" not in json.dumps(result)
+        finally:
+            redirect.shutdown()
+            redirect.server_close()
+            target.shutdown()
+            target.server_close()
 
     def test_probe_error_codes_set_is_documented(self):
         """The PROBE_ERROR_CODES tuple is the public contract for the frontend.

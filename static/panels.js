@@ -6588,6 +6588,10 @@ function _openProfileDropdownShell(){
 }
 
 async function _profileSwitchPanelLoad(){
+  _providersLoadGeneration++;
+  _customModelEditorUid=null;
+  _customModelEditorDirty=false;
+  _customModelData={providers:[],active_provider:null,active_model:null,profile:_customModelProfile()};
   // Cross-profile cron visibility is an active-profile opt-in; never carry it
   // into the next profile when the Tasks panel wasn't the visible panel.
   _showAllCronProfiles = false;
@@ -6602,6 +6606,7 @@ async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'kanban') await loadKanban();
   if (_currentPanel === 'profiles') await loadProfilesPanel();
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
+  if (_currentPanel === 'settings' && _settingsSection === 'providers') await loadProvidersPanel();
 }
 
 function _refreshProfileSwitchBackground(gen){
@@ -9758,7 +9763,8 @@ async function loadSettingsPanel(){
     }
     _syncHermesPanelSessionActions();
     if(typeof loadDashboardSettings==='function') loadDashboardSettings();
-    loadProvidersPanel(); // load provider cards in background
+    // Providers stay lazy because live provider discovery can be expensive;
+    // switchSettingsSection() loads them only when that pane is actually open.
     loadPluginsPanel(); // load plugin/hook visibility in background
     loadExtensionsPanel(); // load extension diagnostics in background
     switchSettingsSection(_settingsSection);
@@ -10955,6 +10961,57 @@ const _SELF_HOSTED_DEFAULT_BASE_URLS = Object.freeze({
   ollama: 'http://localhost:11434/v1',
   lmstudio: 'http://localhost:1234/v1',
 });
+let _customModelData={providers:[],active_provider:null,active_model:null};
+let _customModelEditorUid=null;
+let _customModelEditorDirty=false;
+let _providersLoadGeneration=0;
+
+function _customModelProfile(){
+  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+}
+
+function _customModelProfileMatches(owner){
+  return owner===_customModelProfile();
+}
+
+function _confirmDiscardCustomModelEditor(){
+  if(!_customModelEditorDirty) return true;
+  return confirm(t('providers_custom_discard_confirm'));
+}
+
+function _renderCustomModelsSectionInPlace(){
+  const list=$('providersList');
+  if(!list) return;
+  const next=_buildCustomModelsSection(_customModelData);
+  const current=list.querySelector('.custom-model-section');
+  if(current){
+    current.replaceWith(next);
+  }else if(list.firstChild){
+    list.insertBefore(next,list.firstChild);
+  }else{
+    list.appendChild(next);
+  }
+  const empty=$('providersEmpty');
+  if(empty) empty.style.display='none';
+  list.style.display='';
+}
+
+function _openCustomModelEditor(uid){
+  if(!_confirmDiscardCustomModelEditor()) return;
+  // Invalidate a cold panel request so a late response cannot replace fields
+  // the user starts typing into immediately after clicking Add/Edit.
+  ++_providersLoadGeneration;
+  _customModelEditorDirty=false;
+  _customModelEditorUid=uid||'new';
+  _customModelData.profile=_customModelProfile();
+  _renderCustomModelsSectionInPlace();
+}
+
+function _wireProvidersAddCustomButton(){
+  const addBtn=$('providersAddCustomBtn');
+  if(!addBtn) return;
+  addBtn.onclick=()=>_openCustomModelEditor('new');
+}
 
 async function _fetchProviderQuotaStatus(force=false){
   const endpoint=force?`/api/provider/quota?refresh=1&ts=${Date.now()}`:'/api/provider/quota';
@@ -10967,20 +11024,32 @@ async function loadProvidersPanel(){
   const list=$('providersList');
   const empty=$('providersEmpty');
   if(!list) return;
+  _wireProvidersAddCustomButton();
+  if(_customModelEditorDirty&&list.querySelector('[data-provider-editor]')) return;
+  const generation=++_providersLoadGeneration;
+  const ownerProfile=_customModelProfile();
   try{
-    const data=await api('/api/providers');
-    const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted);
+    const [data,customData,quota]=await Promise.all([
+      api('/api/providers?summary=1'),
+      api('/api/providers/custom-models').catch(error=>({providers:[],error:error&&error.message||'Custom models unavailable'})),
+      _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()})),
+    ]);
+    if(generation!==_providersLoadGeneration||!_customModelProfileMatches(ownerProfile)) return;
+    _customModelData=customData&&typeof customData==='object'?customData:{providers:[]};
+    _customModelData.profile=ownerProfile;
+    const customProviderIds=new Set((_customModelData.providers||[]).map(p=>p.provider_id));
+    const providers=(data.providers||[]).filter(p=>(p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted)&&!customProviderIds.has(p.id));
     list.innerHTML='';
     _providerCardEls.clear();
+    list.appendChild(_buildCustomModelsSection(_customModelData));
     const quotaCard=_buildProviderQuotaCard(quota);
     if(quotaCard){
       list.appendChild(quotaCard);
       renderProviderCostChart(quotaCard); // async, fire-and-forget
     }
     if(providers.length===0){
-      list.style.display='none';
-      if(empty) empty.style.display='';
+      list.style.display='';
+      if(empty) empty.style.display='none';
       return;
     }
     if(empty) empty.style.display='none';
@@ -10989,6 +11058,7 @@ async function loadProvidersPanel(){
       list.appendChild(_buildProviderCard(p));
     }
   }catch(e){
+    if(generation!==_providersLoadGeneration||!_customModelProfileMatches(ownerProfile)) return;
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+esc(e.message||String(e))+'</div>';
   }
 }
@@ -11382,6 +11452,479 @@ function _attachBudgetControls(wrap,history,card,paceNum){
   clearBtn.addEventListener('click',()=>{
     _saveBudget(null);
   });
+}
+
+function _customModelPayload(editor){
+  const models=[];
+  let defaultModel='';
+  for(const row of editor.modelRows||[]){
+    const modelId=(row.input&&row.input.value||'').trim();
+    if(!modelId||models.includes(modelId)) continue;
+    models.push(modelId);
+    if(row.defaultInput&&row.defaultInput.checked) defaultModel=modelId;
+  }
+  if(!defaultModel&&models.length) defaultModel=models[0];
+  const payload={
+    uid:editor.uid||undefined,
+    profile:editor.profile||_customModelProfile(),
+    name:(editor.nameInput&&editor.nameInput.value||'').trim(),
+    base_url:(editor.baseUrlInput&&editor.baseUrlInput.value||'').trim(),
+    api_mode:(editor.apiModeSelect&&editor.apiModeSelect.value||'chat_completions').trim(),
+    models,
+    default_model:defaultModel,
+    clear_api_key:!!(editor.clearKeyInput&&editor.clearKeyInput.checked),
+    make_default:!!(editor.makeDefaultInput&&editor.makeDefaultInput.checked),
+    enabled:editor.enabledInput?!!editor.enabledInput.checked:true,
+  };
+  if(editor.initialApiModeExplicit===false&&payload.api_mode==='auto') delete payload.api_mode;
+  const contextRaw=(editor.contextLengthInput&&editor.contextLengthInput.value||'').trim();
+  const initialContext=editor.initialContextLength;
+  if(initialContext===undefined||contextRaw!==String(initialContext||'').trim()){
+    payload.context_length=null;
+    if(contextRaw){
+      const parsed=Number.parseInt(contextRaw,10);
+      if(Number.isFinite(parsed)) payload.context_length=parsed;
+    }
+  }
+  const key=(editor.apiKeyInput&&editor.apiKeyInput.value||'').trim();
+  if(key) payload.api_key=key;
+  if(!payload.uid) delete payload.uid;
+  return payload;
+}
+
+function _appendCustomModelRow(editor,modelId='',isDefault=false){
+  const row=document.createElement('div');
+  row.className='custom-model-row';
+  row.setAttribute('data-provider-model-row','');
+  const rowNumber=editor.modelRows.length+1;
+  const inputId='custom-model-'+editor.key+'-'+rowNumber;
+  const radio=document.createElement('input');
+  radio.type='radio';
+  radio.name='custom-model-default-'+editor.key;
+  radio.checked=!!isDefault;
+  radio.title=t('providers_custom_default_model');
+  radio.setAttribute('aria-label',t('providers_custom_default_model')+' '+rowNumber);
+  radio.setAttribute('data-provider-model-default','');
+  const label=document.createElement('label');
+  label.className='sr-only';
+  label.htmlFor=inputId;
+  label.textContent=t('providers_custom_model_id')+' '+rowNumber;
+  const input=document.createElement('input');
+  input.id=inputId;
+  input.type='text';
+  input.className='provider-card-input';
+  input.value=modelId||'';
+  input.placeholder=t('providers_custom_model_id');
+  input.autocomplete='off';
+  input.setAttribute('data-provider-model-id','');
+  const remove=document.createElement('button');
+  remove.type='button';
+  remove.className='provider-card-btn provider-card-btn-ghost custom-model-remove';
+  remove.textContent='×';
+  remove.setAttribute('aria-label',t('providers_remove'));
+  row.appendChild(radio);
+  row.appendChild(label);
+  row.appendChild(input);
+  row.appendChild(remove);
+  const syncRadioLabel=()=>{
+    radio.setAttribute('aria-label',t('providers_custom_default_model')+' '+(input.value.trim()||rowNumber));
+  };
+  input.addEventListener('input',syncRadioLabel);
+  syncRadioLabel();
+  editor.modelList.appendChild(row);
+  const entry={row,input,defaultInput:radio};
+  editor.modelRows.push(entry);
+  remove.addEventListener('click',()=>{
+    _customModelEditorDirty=true;
+    const index=editor.modelRows.indexOf(entry);
+    if(index>=0) editor.modelRows.splice(index,1);
+    row.remove();
+    if(!editor.modelRows.length){
+      _appendCustomModelRow(editor,'',true);
+    }else if(!editor.modelRows.some(item=>item.defaultInput.checked)){
+      editor.modelRows[0].defaultInput.checked=true;
+    }
+  });
+  return entry;
+}
+
+function _customModelStatus(statusEl,message,ok){
+  if(!statusEl) return;
+  statusEl.textContent=message||'';
+  statusEl.classList.toggle('ok',ok===true);
+  statusEl.classList.toggle('err',ok===false);
+}
+
+function _useDiscoveredCustomModel(editor){
+  const modelId=(editor.discoverySelect&&editor.discoverySelect.value||'').trim();
+  if(!modelId) return;
+  let target=(editor.modelRows||[]).find(row=>(row.input&&row.input.value||'').trim()===modelId);
+  if(!target){
+    target=(editor.modelRows||[]).find(row=>!(row.input&&row.input.value||'').trim());
+    if(target) target.input.value=modelId;
+    else target=_appendCustomModelRow(editor,modelId,false);
+  }
+  for(const row of editor.modelRows||[]) row.defaultInput.checked=row===target;
+  _customModelEditorDirty=true;
+  target.input.dispatchEvent(new Event('input',{bubbles:true}));
+}
+
+async function _discoverCustomModelsEditor(editor){
+  if(!_customModelProfileMatches(editor.profile)){loadProvidersPanel();return;}
+  const payload=_customModelPayload(editor);
+  if(!payload.base_url){
+    _customModelStatus(editor.statusEl,t('providers_custom_discover_url_required'),false);
+    return;
+  }
+  const button=editor.discoverBtn;
+  const original=button.textContent;
+  button.disabled=true;
+  button.textContent=t('providers_custom_discovering');
+  _customModelStatus(editor.statusEl,t('providers_custom_discovering'),null);
+  try{
+    const result=await api('/api/providers/custom-models/discover',{
+      method:'POST',body:JSON.stringify(payload),
+    });
+    if(!_customModelProfileMatches(editor.profile)) return;
+    const models=Array.isArray(result&&result.models)?result.models.filter(Boolean):[];
+    if(!models.length) throw new Error(t('providers_custom_discover_empty'));
+    editor.discoverySelect.innerHTML='';
+    const current=payload.default_model||'';
+    for(const modelId of models){
+      const option=document.createElement('option');
+      option.value=modelId;
+      option.textContent=modelId;
+      editor.discoverySelect.appendChild(option);
+    }
+    if(current&&models.includes(current)) editor.discoverySelect.value=current;
+    editor.discoveryWrap.hidden=false;
+    editor.discoveryCount.textContent=t('providers_custom_discover_success',models.length);
+    _customModelStatus(editor.statusEl,t('providers_custom_discover_success',models.length),true);
+    if(models.length===1) _useDiscoveredCustomModel(editor);
+  }catch(error){
+    _customModelStatus(editor.statusEl,t('providers_custom_discover_failed',error&&error.message||'Request failed'),false);
+  }finally{
+    button.disabled=false;
+    button.textContent=original;
+  }
+}
+
+async function _testCustomModelEditor(editor){
+  if(!_customModelProfileMatches(editor.profile)){loadProvidersPanel();return;}
+  const payload=_customModelPayload(editor);
+  if(!payload.base_url||!payload.default_model){
+    _customModelStatus(editor.statusEl,t('providers_custom_required'),false);
+    return;
+  }
+  const button=editor.testBtn;
+  const original=button.textContent;
+  button.disabled=true;
+  button.textContent=t('providers_custom_testing');
+  _customModelStatus(editor.statusEl,t('providers_custom_testing'),null);
+  try{
+    const result=await api('/api/providers/custom-models/test',{
+      method:'POST',body:JSON.stringify({...payload,model:payload.default_model}),
+    });
+    if(!_customModelProfileMatches(editor.profile)) return;
+    if(result&&result.ok){
+      _customModelStatus(editor.statusEl,t('providers_custom_test_success',result.latency_ms),true);
+    }else{
+      _customModelStatus(editor.statusEl,t('providers_custom_test_failed',(result&&result.error)||'Unknown error'),false);
+    }
+  }catch(error){
+    _customModelStatus(editor.statusEl,t('providers_custom_test_failed',error&&error.message||'Request failed'),false);
+  }finally{
+    button.disabled=false;
+    button.textContent=original;
+  }
+}
+
+async function _saveCustomModelEditor(editor){
+  if(!_customModelProfileMatches(editor.profile)){loadProvidersPanel();return;}
+  const payload=_customModelPayload(editor);
+  if(!payload.name||!payload.base_url||!payload.models.length){
+    _customModelStatus(editor.statusEl,t('providers_custom_required'),false);
+    return;
+  }
+  const original=editor.saveBtn.textContent;
+  editor.saveBtn.disabled=true;
+  editor.saveBtn.textContent=t('providers_saving');
+  try{
+    const result=await api('/api/providers/custom-models',{
+      method:'POST',body:JSON.stringify(payload),
+    });
+    if(!_customModelProfileMatches(editor.profile)) return;
+    if(!result||!result.ok) throw new Error(result&&result.error||'Save failed');
+    if(editor.apiKeyInput) editor.apiKeyInput.value='';
+    _customModelEditorDirty=false;
+    _customModelEditorUid=null;
+    showToast(t('providers_custom_saved'));
+    _refreshModelDropdownsAfterProviderChange();
+    await loadProvidersPanel();
+  }catch(error){
+    _customModelStatus(editor.statusEl,error&&error.message||'Save failed',false);
+    editor.saveBtn.disabled=false;
+    editor.saveBtn.textContent=original;
+  }
+}
+
+async function _activateCustomModel(provider,button){
+  if(!_customModelProfileMatches(provider._profile)){loadProvidersPanel();return;}
+  const previous=button.textContent;
+  button.disabled=true;
+  try{
+    const result=await api('/api/providers/custom-models/activate',{
+      method:'POST',body:JSON.stringify({uid:provider.uid,model:provider.default_model,profile:provider._profile}),
+    });
+    if(!_customModelProfileMatches(provider._profile)) return;
+    if(!result||!result.ok) throw new Error(result&&result.error||'Activation failed');
+    showToast(t('providers_custom_default_set'));
+    _refreshModelDropdownsAfterProviderChange();
+    await loadProvidersPanel();
+  }catch(error){
+    showToast(error&&error.message||'Activation failed',5000,'error');
+    button.disabled=false;
+    button.textContent=previous;
+  }
+}
+
+async function _deleteCustomModel(provider,button){
+  if(!_customModelProfileMatches(provider._profile)){loadProvidersPanel();return;}
+  if(provider.is_active){showToast(t('providers_custom_delete_active_help'),5000,'error');return;}
+  if(!confirm(t('providers_custom_delete_confirm'))) return;
+  const previous=button.textContent;
+  button.disabled=true;
+  button.textContent=t('providers_removing');
+  try{
+    const result=await api('/api/providers/custom-models/delete',{
+      method:'POST',body:JSON.stringify({uid:provider.uid,profile:provider._profile}),
+    });
+    if(!_customModelProfileMatches(provider._profile)) return;
+    if(!result||!result.ok) throw new Error(result&&result.error||'Delete failed');
+    showToast(t('providers_custom_deleted'));
+    _customModelEditorDirty=false;
+    _customModelEditorUid=null;
+    _refreshModelDropdownsAfterProviderChange();
+    await loadProvidersPanel();
+  }catch(error){
+    showToast(error&&error.message||'Delete failed',6000,'error');
+    button.disabled=false;
+    button.textContent=previous;
+  }
+}
+
+function _buildCustomModelEditor(provider){
+  const draft=provider||{uid:null,name:'',base_url:'',api_mode:'chat_completions',models:[''],default_model:'',context_length:'',has_api_key:false,is_active:false,enabled:true,test_supported:true,_profile:_customModelProfile()};
+  const card=document.createElement('div');
+  card.className='provider-card custom-model-card open';
+  card.dataset.provider=draft.provider_id||'new';
+  card.innerHTML=`
+    <div class="custom-model-editor" data-provider-editor>
+      <div class="custom-model-editor-title">${esc(draft.uid?t('providers_custom_edit'):t('providers_custom_add'))}</div>
+      <div class="custom-model-editor-grid">
+        <label class="provider-card-field"><span class="provider-card-label">${esc(t('providers_custom_name'))}</span><input type="text" class="provider-card-input" data-provider-field="name"></label>
+        <label class="provider-card-field"><span class="provider-card-label">${esc(t('providers_custom_base_url'))}</span><input type="url" class="provider-card-input" data-provider-field="base-url" placeholder="https://example.com/v1"></label>
+        <label class="provider-card-field"><span class="provider-card-label">${esc(t('providers_custom_api_mode'))}</span><select class="provider-card-input" data-provider-field="api-mode"><option value="chat_completions">OpenAI Chat Completions</option><option value="codex_responses">OpenAI Responses</option><option value="anthropic_messages">Anthropic Messages</option></select></label>
+        <label class="provider-card-field"><span class="provider-card-label">${esc(t('providers_custom_context_length'))}</span><input type="number" min="1" class="provider-card-input" data-provider-field="context-length" placeholder="128000"></label>
+        <label class="provider-card-field custom-model-key-field"><span class="provider-card-label">${esc(t('providers_custom_api_key'))}</span><input type="password" class="provider-card-input" data-provider-field="api-key" autocomplete="new-password" placeholder="${esc(draft.has_api_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new'))}"><span class="custom-model-secret-state" data-provider-secret-state>${draft.has_api_key?esc(t('providers_custom_key_configured')):''}</span></label>
+      </div>
+      <label class="custom-model-clear-key" ${draft.has_api_key?'':'hidden'}><input type="checkbox" data-provider-field="clear-key"> <span>${esc(t('providers_custom_clear_key'))}</span></label>
+      <div class="provider-card-field custom-model-models">
+        <div class="custom-model-field-head"><span class="provider-card-label">${esc(t('providers_custom_models'))}</span><span class="custom-model-field-actions"><button type="button" class="provider-card-btn provider-card-btn-ghost" data-provider-action="discover-models">${esc(t('providers_custom_discover'))}</button><button type="button" class="provider-card-btn provider-card-btn-ghost" data-provider-action="add-model">${esc(t('providers_custom_add_model'))}</button></span></div>
+        <div class="custom-model-discovery" data-provider-discovery hidden><select class="provider-card-input" data-provider-discovery-select aria-label="${esc(t('providers_custom_discovered_models'))}"></select><button type="button" class="provider-card-btn provider-card-btn-primary" data-provider-action="use-discovered">${esc(t('providers_custom_use_model'))}</button><span class="provider-card-hint" data-provider-discovery-count></span></div>
+        <div class="custom-model-list" data-provider-model-list></div>
+      </div>
+      <label class="custom-model-make-default"><input type="checkbox" data-provider-field="enabled" ${draft.enabled!==false||draft.is_active?'checked':''} ${draft.is_active?'disabled aria-describedby="custom-model-active-enabled-help"':''}> <span>${esc(t('providers_custom_enabled'))}</span></label>
+      ${draft.is_active?`<div id="custom-model-active-enabled-help" class="provider-card-hint">${esc(t('providers_custom_enabled_active_help'))}</div>`:''}
+      <label class="custom-model-make-default"><input type="checkbox" data-provider-field="make-default" ${draft.is_active?'checked':''}> <span>${esc(t('providers_custom_make_default'))}</span></label>
+      <div class="provider-test-status" role="status" aria-live="polite" data-provider-test-status></div>
+      <div class="custom-model-actions">
+        <button type="button" class="provider-card-btn provider-card-btn-ghost" data-provider-action="test">${esc(t('providers_custom_test'))}</button>
+        <span class="custom-model-actions-spacer"></span>
+        <button type="button" class="provider-card-btn provider-card-btn-ghost" data-provider-action="cancel">${esc(t('providers_custom_cancel'))}</button>
+        <button type="button" class="provider-card-btn provider-card-btn-primary" data-provider-action="save">${esc(t('providers_custom_save'))}</button>
+      </div>
+    </div>`;
+  const editor={
+    uid:draft.uid||null,
+    profile:draft._profile||_customModelProfile(),
+    key:(draft.provider_id||'new').replace(/[^a-z0-9_-]/gi,'-'),
+    initialContextLength:String(draft.context_length??''),
+    initialApiModeExplicit:draft.api_mode_explicit!==false,
+    nameInput:card.querySelector('[data-provider-field="name"]'),
+    baseUrlInput:card.querySelector('[data-provider-field="base-url"]'),
+    apiModeSelect:card.querySelector('[data-provider-field="api-mode"]'),
+    apiKeyInput:card.querySelector('[data-provider-field="api-key"]'),
+    clearKeyInput:card.querySelector('[data-provider-field="clear-key"]'),
+    contextLengthInput:card.querySelector('[data-provider-field="context-length"]'),
+    makeDefaultInput:card.querySelector('[data-provider-field="make-default"]'),
+    enabledInput:card.querySelector('[data-provider-field="enabled"]'),
+    modelList:card.querySelector('[data-provider-model-list]'),
+    discoveryWrap:card.querySelector('[data-provider-discovery]'),
+    discoverySelect:card.querySelector('[data-provider-discovery-select]'),
+    discoveryCount:card.querySelector('[data-provider-discovery-count]'),
+    discoverBtn:card.querySelector('[data-provider-action="discover-models"]'),
+    statusEl:card.querySelector('[data-provider-test-status]'),
+    testBtn:card.querySelector('[data-provider-action="test"]'),
+    saveBtn:card.querySelector('[data-provider-action="save"]'),
+    modelRows:[],
+  };
+  editor.nameInput.value=draft.name||'';
+  editor.baseUrlInput.value=draft.base_url||'';
+  const selectedMode=draft.api_mode||'chat_completions';
+  if(!Array.from(editor.apiModeSelect.options).some(option=>option.value===selectedMode)){
+    const preserved=document.createElement('option');
+    preserved.value=selectedMode;
+    preserved.textContent=selectedMode+' ('+t('providers_custom_preserved_protocol')+')';
+    editor.apiModeSelect.appendChild(preserved);
+  }
+  editor.apiModeSelect.value=selectedMode;
+  editor.contextLengthInput.value=draft.context_length||'';
+  const initialModels=Array.isArray(draft.models)&&draft.models.length?draft.models:[''];
+  for(const modelId of initialModels){
+    _appendCustomModelRow(editor,modelId,modelId===draft.default_model||(!draft.default_model&&editor.modelRows.length===0));
+  }
+  card.querySelector('[data-provider-action="add-model"]').onclick=()=>{
+    _customModelEditorDirty=true;
+    const row=_appendCustomModelRow(editor,'',false);
+    row.input.focus();
+  };
+  editor.discoverBtn.onclick=()=>_discoverCustomModelsEditor(editor);
+  card.querySelector('[data-provider-action="use-discovered"]').onclick=()=>_useDiscoveredCustomModel(editor);
+  const clearDiscovered=()=>{
+    if(editor.discoveryWrap) editor.discoveryWrap.hidden=true;
+    if(editor.discoverySelect) editor.discoverySelect.innerHTML='';
+    if(editor.discoveryCount) editor.discoveryCount.textContent='';
+  };
+  editor.baseUrlInput.addEventListener('input',clearDiscovered);
+  editor.apiKeyInput.addEventListener('input',clearDiscovered);
+  editor.apiModeSelect.addEventListener('change',clearDiscovered);
+  if(editor.clearKeyInput&&editor.apiKeyInput){
+    editor.clearKeyInput.addEventListener('change',()=>{
+      if(editor.clearKeyInput.checked) editor.apiKeyInput.value='';
+      editor.apiKeyInput.disabled=editor.clearKeyInput.checked;
+    });
+    editor.apiKeyInput.addEventListener('input',()=>{
+      if(editor.apiKeyInput.value&&editor.clearKeyInput.checked){
+        editor.clearKeyInput.checked=false;
+        editor.apiKeyInput.disabled=false;
+      }
+    });
+  }
+  if(draft.test_supported===false){
+    editor.testBtn.setAttribute('aria-disabled','true');
+    editor.testBtn.title=t('providers_custom_test_unsupported');
+  }
+  editor.testBtn.onclick=()=>{
+    if(draft.test_supported===false){_customModelStatus(editor.statusEl,t('providers_custom_test_unsupported'),false);return;}
+    _testCustomModelEditor(editor);
+  };
+  editor.saveBtn.onclick=()=>_saveCustomModelEditor(editor);
+  card.querySelector('[data-provider-action="cancel"]').onclick=()=>{
+    if(!_confirmDiscardCustomModelEditor()) return;
+    _customModelEditorDirty=false;
+    _customModelEditorUid=null;
+    _renderCustomModelsSectionInPlace();
+  };
+  const editorRoot=card.querySelector('[data-provider-editor]');
+  const markDirty=()=>{_customModelEditorDirty=true;};
+  editorRoot.addEventListener('input',markDirty);
+  editorRoot.addEventListener('change',markDirty);
+  setTimeout(()=>editor.nameInput.focus(),0);
+  return card;
+}
+
+function _buildCustomModelSummary(provider){
+  const card=document.createElement('div');
+  card.className='provider-card custom-model-card';
+  card.dataset.provider=provider.provider_id;
+  const host=(()=>{try{return new URL(provider.base_url).host;}catch(_e){return provider.base_url;}})();
+  const modelCount=Array.isArray(provider.models)?provider.models.length:0;
+  const summaryId=(provider.uid||provider.provider_id).replace(/[^a-z0-9_-]/gi,'-');
+  card.innerHTML=`
+    <div class="custom-model-summary">
+      <div class="provider-card-info">
+        <div class="provider-card-name">${esc(provider.name)}</div>
+        <div class="provider-card-meta">${esc(host)} · ${modelCount} ${modelCount===1?'model':'models'} · ${esc(provider.api_mode)}</div>
+      </div>
+      ${provider.is_active?`<span class="provider-card-badge">${esc(t('providers_custom_active'))}</span>`:provider.enabled===false?`<span class="provider-card-badge provider-card-badge-muted">${esc(t('providers_custom_disabled'))}</span>`:''}
+    </div>
+    <div class="custom-model-summary-body">
+      <div class="custom-model-summary-model"><span>${esc(t('providers_custom_default_model'))}</span><strong>${esc(provider.default_model||'—')}</strong></div>
+      <div class="custom-model-summary-key">${esc(provider.has_api_key?t('providers_status_configured'):t('providers_status_not_configured'))}</div>
+      <div class="provider-test-status" role="status" aria-live="polite" data-provider-test-status></div>
+      <div class="custom-model-actions">
+        <button type="button" class="provider-card-btn provider-card-btn-ghost" data-provider-action="test" ${provider.test_supported===false?'aria-disabled="true" title="'+esc(t('providers_custom_test_unsupported'))+'"':''}>${esc(t('providers_custom_test'))}</button>
+        <button type="button" class="provider-card-btn provider-card-btn-ghost" data-provider-action="edit">${esc(t('providers_custom_edit'))}</button>
+        ${provider.is_active?'':`<button type="button" class="provider-card-btn provider-card-btn-ghost" data-provider-action="default" ${provider.enabled===false?'aria-disabled="true" title="'+esc(t('providers_custom_disabled'))+'"':''}>${esc(t('providers_custom_set_default'))}</button>`}
+        <span class="custom-model-actions-spacer"></span>
+        <button type="button" class="provider-card-btn provider-card-btn-danger" data-provider-action="delete" ${provider.is_active?'aria-disabled="true" aria-describedby="custom-model-delete-help-'+summaryId+'"':''}>${esc(t('providers_custom_delete'))}</button>
+      </div>
+      ${provider.is_active?`<div class="provider-card-hint" id="custom-model-delete-help-${summaryId}">${esc(t('providers_custom_delete_active_help'))}</div>`:''}
+    </div>`;
+  const testBtn=card.querySelector('[data-provider-action="test"]');
+  const status=card.querySelector('[data-provider-test-status]');
+  testBtn.onclick=async()=>{
+    if(!_customModelProfileMatches(provider._profile)){loadProvidersPanel();return;}
+    if(provider.test_supported===false){_customModelStatus(status,t('providers_custom_test_unsupported'),false);return;}
+    const original=testBtn.textContent;
+    testBtn.disabled=true;
+    testBtn.textContent=t('providers_custom_testing');
+    _customModelStatus(status,t('providers_custom_testing'),null);
+    try{
+      const result=await api('/api/providers/custom-models/test',{
+        method:'POST',body:JSON.stringify({uid:provider.uid,model:provider.default_model,profile:provider._profile}),
+      });
+      if(!_customModelProfileMatches(provider._profile)) return;
+      _customModelStatus(status,result&&result.ok?t('providers_custom_test_success',result.latency_ms):t('providers_custom_test_failed',(result&&result.error)||'Unknown error'),!!(result&&result.ok));
+    }catch(error){
+      _customModelStatus(status,t('providers_custom_test_failed',error&&error.message||'Request failed'),false);
+    }finally{
+      testBtn.disabled=false;
+      testBtn.textContent=original;
+    }
+  };
+  card.querySelector('[data-provider-action="edit"]').onclick=()=>{
+    if(!_customModelProfileMatches(provider._profile)){loadProvidersPanel();return;}
+    _openCustomModelEditor(provider.uid);
+  };
+  const defaultBtn=card.querySelector('[data-provider-action="default"]');
+  if(defaultBtn) defaultBtn.onclick=()=>{
+    if(provider.enabled===false){showToast(t('providers_custom_disabled'),4000,'error');return;}
+    _activateCustomModel(provider,defaultBtn);
+  };
+  const deleteBtn=card.querySelector('[data-provider-action="delete"]');
+  deleteBtn.onclick=()=>_deleteCustomModel(provider,deleteBtn);
+  return card;
+}
+
+function _buildCustomModelsSection(data){
+  const section=document.createElement('section');
+  section.className='custom-model-section';
+  section.innerHTML=`<div class="custom-model-section-head"><div><div class="provider-card-label">${esc(t('providers_custom_title'))}</div><div class="provider-card-hint">${esc(t('onboarding_base_url_help'))}</div></div><span class="custom-model-count">${Array.isArray(data.providers)?data.providers.length:0}</span></div>`;
+  const list=document.createElement('div');
+  list.className='custom-model-cards';
+  if(data.error){
+    const warning=document.createElement('div');
+    warning.className='provider-test-status err custom-model-load-error';
+    warning.setAttribute('role','alert');
+    warning.textContent=t('providers_custom_load_failed')+': '+data.error;
+    list.appendChild(warning);
+  }
+  const providers=Array.isArray(data.providers)?data.providers:[];
+  if(_customModelEditorUid==='new') list.appendChild(_buildCustomModelEditor(null));
+  for(const providerData of providers){
+    const provider={...providerData,_profile:data.profile||_customModelProfile()};
+    list.appendChild(_customModelEditorUid===provider.uid?_buildCustomModelEditor(provider):_buildCustomModelSummary(provider));
+  }
+  if(!providers.length&&_customModelEditorUid!=='new'){
+    const empty=document.createElement('div');
+    empty.className='custom-model-empty';
+    empty.textContent=t('providers_custom_empty');
+    list.appendChild(empty);
+  }
+  section.appendChild(list);
+  return section;
 }
 
 function _buildProviderCard(p){
@@ -12502,7 +13045,8 @@ function _openAuxAdvancedOptions(taskCfg,cfg){
     advanced.max_concurrency=$('auxAdvancedMaxConcurrency')?.value||'';
    }
    try{
-    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:isMain?'main':'auxiliary',task:isMain?'':taskKey,provider,model,advanced})});
+    const result=await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:isMain?'main':'auxiliary',task:isMain?'':taskKey,provider,model,advanced})});
+     if(isMain) _notifyModelOverride(result);
     if(typeof showToast==='function') showToast(isMain?(t('settings_main_advanced_saved')||'Main model options saved'):(t('settings_aux_advanced_saved')||'Auxiliary options saved'));
     overlay.style.display='none';
     _loadAuxiliaryModels();
@@ -12571,6 +13115,31 @@ function _bindMainAdvancedOptionsButton(){
  btn.addEventListener('click',()=>{if(_mainAdvancedConfig!==null)_openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});});
 }
 
+function _renderModelOverrideWarning(main){
+ const warning=$('settingsModelOverrideWarning');
+ if(!warning) return;
+ const configured=String((main&&main.configured_model)||'').trim();
+ const effective=String((main&&main.effective_model)||'').trim();
+ const source=String((main&&main.model_override_source)||'').trim();
+ if(!source||!effective||effective===configured){
+  warning.hidden=true;
+  warning.textContent='';
+  return;
+ }
+ warning.textContent=(t('settings_model_override_warning')||'Saved model {0} is currently overridden by {1}={2}. New chats continue using the override.')
+  .replace('{0}',configured||'—').replace('{1}',source).replace('{2}',effective);
+ warning.hidden=false;
+}
+
+function _notifyModelOverride(result){
+ if(!result||!result.model_override_source||result.effective_model===result.configured_model) return;
+ _renderModelOverrideWarning(result);
+ if(typeof showToast==='function'){
+  showToast((t('settings_model_override_toast')||'Saved, but {0} still overrides the default model.')
+   .replace('{0}',String(result.model_override_source)));
+ }
+}
+
 async function _loadAuxiliaryModels(){
  const container=$('auxModelsContainer');
  if(!container) return;
@@ -12596,6 +13165,7 @@ async function _loadAuxiliaryModels(){
    _mainAdvancedConfig=null;
   }
   _bindMainAdvancedOptionsButton();
+  _renderModelOverrideWarning(auxData&&auxData.main);
   _auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[]);
   // Build a quick lookup: taskKey → config
   const taskMap={};
@@ -12810,9 +13380,10 @@ async function saveSettings(andClose){
       const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
-        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
-        body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+          const modelResult=await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+          _notifyModelOverride(modelResult);
+          body.default_model=model;
+          body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
         }catch(_modelErr){
           // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
           // one provider) is user-fixable, not a partial success. Surface the
@@ -12846,7 +13417,8 @@ async function saveSettings(andClose){
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
     if(modelChanged && model){
       try{
-        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+        const modelResult=await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+        _notifyModelOverride(modelResult);
         body.default_model=model;
         body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
         }catch(_modelErr){

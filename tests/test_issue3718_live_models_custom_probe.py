@@ -9,11 +9,121 @@ config entries as a fallback after the fetch.
 """
 import json
 import pathlib
+import sys
+import types
 import unittest
+from urllib.parse import urlparse
 from unittest import mock
 
 REPO = pathlib.Path(__file__).parent.parent
 ROUTES_PY = REPO / "api" / "routes.py"
+
+
+def test_modern_custom_provider_live_models_use_shared_bounded_probe(monkeypatch):
+    import api.config as config
+    import api.profiles as profiles
+    import api.routes as routes
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    models_module = types.ModuleType("hermes_cli.models")
+    models_module.provider_model_ids = lambda _provider: []
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", models_module)
+
+    cfg = {
+        "model": {"provider": "custom:acme-route-x", "model": "configured-model"},
+        "providers": {
+            "acme-route-x": {
+                "name": "Acme Route X",
+                "api": "https://router.example/v1",
+                "transport": "chat_completions",
+                "default_model": "configured-model",
+                "models": {"configured-model": {}},
+                "api_key": "test-secret",
+            }
+        },
+    }
+    calls = []
+
+    def fake_probe(provider, base_url, api_key, timeout):
+        calls.append((provider, base_url, api_key, timeout))
+        return {"ok": True, "models": [{"id": "live-model", "label": "Live"}]}
+
+    routes._clear_live_models_cache()
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(routes, "probe_provider_endpoint", fake_probe)
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(config, "_resolve_provider_alias", lambda provider: provider)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    result = routes._handle_live_models(
+        object(), urlparse("/api/models/live?provider=custom:acme-route-x")
+    )
+
+    assert calls == [
+        (
+            "custom:acme-route-x",
+            "https://router.example/v1",
+            "test-secret",
+            routes.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
+        )
+    ]
+    assert {row["id"] for row in result["models"]} == {
+        "live-model",
+        "configured-model",
+    }
+
+
+def test_transient_custom_probe_failure_is_not_cached(monkeypatch):
+    import api.config as config
+    import api.profiles as profiles
+    import api.routes as routes
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    models_module = types.ModuleType("hermes_cli.models")
+    models_module.provider_model_ids = lambda _provider: []
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", models_module)
+
+    cfg = {
+        "model": {"provider": "custom:retry-route", "model": "configured-model"},
+        "providers": {
+            "retry-route": {
+                "api": "https://retry.example/v1",
+                "transport": "chat_completions",
+                "default_model": "configured-model",
+                "models": {"configured-model": {}},
+                "api_key": "test-secret",
+            }
+        },
+    }
+    attempts = []
+
+    def fake_probe(*_args, **_kwargs):
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            return {"ok": False, "error": "timeout"}
+        return {"ok": True, "models": [{"id": "recovered-model", "label": "Recovered"}]}
+
+    routes._clear_live_models_cache()
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(routes, "probe_provider_endpoint", fake_probe)
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(config, "_resolve_provider_alias", lambda provider: provider)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    parsed = urlparse("/api/models/live?provider=custom:retry-route")
+
+    first = routes._handle_live_models(object(), parsed)
+    second = routes._handle_live_models(object(), parsed)
+
+    assert attempts == [1, 2]
+    assert {row["id"] for row in first["models"]} == {"configured-model"}
+    assert {row["id"] for row in second["models"]} == {
+        "configured-model",
+        "recovered-model",
+    }
 
 
 class TestLiveModelsCustomProviderProbe(unittest.TestCase):

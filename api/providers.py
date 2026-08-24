@@ -38,12 +38,12 @@ from api.config import (
     _coerce_provider_cost_budget,
     _configured_model_ids,
     _custom_provider_slug_from_name,
-    _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
+    _serialize_yaml_config_file,
     _thread_local_env_value,
     get_config,
     invalidate_models_cache,
@@ -1016,7 +1016,9 @@ def _providers_config_fingerprint(cfg: Any) -> str:
         return repr(cfg)
 
 
-def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
+def _providers_cache_key(
+    cfg: Any, *, include_live: bool = True
+) -> tuple[Any, ...]:
     """Return a profile-scoped cache key for ``get_providers()`` (#6010).
 
     The endpoint reads provider state from the active Hermes home plus the
@@ -1034,6 +1036,7 @@ def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
         _providers_file_mtime_ns(home / ".env"),
         _providers_file_mtime_ns(home / "config.yaml"),
         _providers_config_fingerprint(cfg),
+        bool(include_live),
     )
 
 
@@ -1179,7 +1182,8 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
     Holds ``_ENV_LOCK`` from ``api.streaming`` for the entire load → modify →
     write cycle to prevent TOCTOU races between concurrent POST /api/providers
     calls (each reading the same file baseline and overwriting the other's key).
-    Also serialises os.environ mutations with streaming sessions.
+    This helper is deliberately file-only: request-scoped profile readers load
+    the selected profile's values later without contaminating process globals.
     """
     from api.streaming import _ENV_LOCK
     import stat as _stat
@@ -1190,8 +1194,10 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
         if env_path.exists():
             try:
                 existing_lines = env_path.read_text(encoding="utf-8").splitlines()
-            except Exception:
-                existing_lines = []
+            except Exception as exc:
+                raise RuntimeError(
+                    "Existing profile credential file could not be read safely."
+                ) from exc
 
         # Map each existing key to its line index so we can update in-place.
         existing_key_indices: dict[str, int] = {}
@@ -1206,8 +1212,7 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
 
         for key, value in updates.items():
             if value is None:
-                # Mark the line for removal (None sentinel) and clear env.
-                os.environ.pop(key, None)
+                # Mark the line for removal (None sentinel).
                 if key in existing_key_indices:
                     output_lines[existing_key_indices[key]] = None  # type: ignore[assignment]
                 continue
@@ -1217,8 +1222,6 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             # Reject embedded newlines/carriage returns to prevent .env injection
             if "\n" in clean or "\r" in clean:
                 raise ValueError("API key must not contain newline characters.")
-            os.environ[key] = clean
-
             if key in existing_key_indices:
                 output_lines[existing_key_indices[key]] = f"{key}={clean}"
             else:
@@ -2546,8 +2549,13 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
-def get_providers() -> dict[str, Any]:
-    """Return a list of all known providers with their configuration status.
+def get_providers(*, include_live: bool = True) -> dict[str, Any]:
+    """Return known providers with local status and optional live enrichment.
+
+    ``include_live=False`` is the fast Settings summary path: it never invokes
+    provider auth/model discovery that may perform network or metadata-service
+    I/O. Static/configured models and locally persisted credentials remain
+    available, while the default preserves the richer historical API response.
 
     Each entry contains:
     - ``id``: canonical provider slug
@@ -2564,7 +2572,7 @@ def get_providers() -> dict[str, Any]:
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
-    cache_key = _providers_cache_key(cfg)
+    cache_key = _providers_cache_key(cfg, include_live=include_live)
     cached = _get_cached_providers(cache_key)
     if cached is not None:
         return cached
@@ -2582,7 +2590,7 @@ def get_providers() -> dict[str, Any]:
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
         plugin_auth_status: dict[str, Any] | None = None
-        if not has_key and is_plugin_model_provider(pid):
+        if include_live and not has_key and is_plugin_model_provider(pid):
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin
                 _plugin_status = _gas_plugin(pid)
@@ -2599,30 +2607,34 @@ def get_providers() -> dict[str, Any]:
         auth_error = None
         if is_oauth:
             key_source = "oauth"
-            # Check if actually authenticated via hermes_cli.
-            # IMPORTANT: do not unconditionally overwrite has_key from _provider_has_key().
-            # A token in config.yaml is a valid credential even when get_auth_status()
-            # returns logged_in=False (e.g. token not in the hermes credential pool,
-            # or refresh token consumed by native Codex CLI / VS Code extension).
-            try:
-                from hermes_cli.auth import get_auth_status as _gas
-                status = _gas(pid)
-                if isinstance(status, dict) and status.get("logged_in"):
-                    has_key = True
-                    key_source = status.get("key_source", "oauth")
-                elif has_key:
-                    # _provider_has_key() found a token in config.yaml — respect it
-                    # rather than hiding a working credential from the Settings UI.
-                    key_source = "config_yaml"
-                    auth_error = status.get("error") if isinstance(status, dict) else None
-                else:
-                    has_key = False
-                    auth_error = status.get("error") if isinstance(status, dict) else None
-            except Exception:
-                # Import failed or auth check errored — don't override a known-good
-                # key just because the hermes_cli auth module is unavailable.
-                logger.debug("hermes_cli auth check failed for %s", pid, exc_info=True)
-                # keep has_key from _provider_has_key()
+            # Rich callers retain the historical live auth probe. The Settings
+            # summary deliberately stays local: some providers consult cloud
+            # metadata or refresh endpoints here and can block the whole panel.
+            if include_live:
+                # IMPORTANT: do not unconditionally overwrite has_key from
+                # _provider_has_key(). A token in config.yaml is valid even when
+                # get_auth_status() returns logged_in=False.
+                try:
+                    from hermes_cli.auth import get_auth_status as _gas
+
+                    status = _gas(pid)
+                    if isinstance(status, dict) and status.get("logged_in"):
+                        has_key = True
+                        key_source = status.get("key_source", "oauth")
+                    elif has_key:
+                        key_source = "config_yaml"
+                        auth_error = (
+                            status.get("error") if isinstance(status, dict) else None
+                        )
+                    else:
+                        has_key = False
+                        auth_error = (
+                            status.get("error") if isinstance(status, dict) else None
+                        )
+                except Exception:
+                    logger.debug(
+                        "hermes_cli auth check failed for %s", pid, exc_info=True
+                    )
         elif has_key:
             env_var = _provider_env_var_for(pid)
             if env_var:
@@ -2661,7 +2673,7 @@ def get_providers() -> dict[str, Any]:
                     else ""
                 )
                 key_source = _plugin_ks or "config_yaml"
-        elif not _provider_env_var_for(pid):
+        elif include_live and not _provider_env_var_for(pid):
             # Fallback: provider is not a known API-key provider and not in
             # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
             # newly-added OAuth provider (e.g. Anthropic connected via OAuth).
@@ -2701,7 +2713,7 @@ def get_providers() -> dict[str, Any]:
         # exactly. Static entries remain the offline fallback when live
         # discovery and the local Codex cache are both unavailable. (#1807
         # follow-up to v0.51.19 #1812.)
-        if pid == "openai-codex":
+        if include_live and pid == "openai-codex":
             live_ids = _read_live_provider_model_ids("openai-codex")
             live_id_set = set(live_ids)
             for mid in _read_visible_codex_cache_model_ids():
@@ -2712,7 +2724,7 @@ def get_providers() -> dict[str, Any]:
             if live_models:
                 models = live_models
                 models_total = len(models)
-        if pid == "xai-oauth":
+        if include_live and pid == "xai-oauth":
             live_models = _models_from_live_provider_ids(
                 pid,
                 _read_live_provider_model_ids("xai-oauth"),
@@ -2732,7 +2744,7 @@ def get_providers() -> dict[str, Any]:
         # "396 models · OAuth" by static/panels.js — so the user knows the
         # complete catalog is reachable (via /model autocomplete or a future
         # "show all" disclosure if added).
-        if pid == "nous":
+        if include_live and pid == "nous":
             try:
                 from hermes_cli.models import provider_model_ids as _provider_model_ids
 
@@ -2751,7 +2763,7 @@ def get_providers() -> dict[str, Any]:
                 logger.debug("Failed to load Nous Portal models from hermes_cli")
         # LM Studio: fetch live locally-loaded models so the providers card
         # matches what's actually available on the user's server (#WebUI).
-        if pid == "lmstudio":
+        if include_live and pid == "lmstudio":
             try:
                 from hermes_cli.models import provider_model_ids as _pmi
 
@@ -2761,7 +2773,7 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(models)
             except Exception:
                 logger.debug("Failed to load LM Studio models from hermes_cli")
-        if is_plugin_model_provider(pid):
+        if include_live and is_plugin_model_provider(pid):
             try:
                 live_models = _models_from_live_provider_ids(
                     pid,
@@ -2937,14 +2949,20 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
         if len(api_key) < 8:
             return {"ok": False, "error": "API key appears too short."}
 
-    env_path = _get_hermes_home() / ".env"
     try:
-        _write_env_file(env_path, {env_var: api_key})
+        from api.provider_transactions import (
+            active_profile_transaction,
+            assert_profile_home,
+        )
+
+        with active_profile_transaction(_get_hermes_home) as profile_home:
+            assert_profile_home(profile_home, _get_hermes_home)
+            _write_env_file(profile_home / ".env", {env_var: api_key})
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to write env file for provider %s", provider_id)
-        return {"ok": False, "error": f"Failed to save API key: {exc}"}
+        return {"ok": False, "error": "Failed to save provider credential."}
 
     # Invalidate the model cache so the dropdown refreshes on next request.
     # Using invalidate_models_cache() instead of reload_config() to avoid
@@ -2961,99 +2979,156 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     }
 
 
+def _remove_provider_key_from_config_data(provider_id: str, cfg: dict) -> bool:
+    """Plan provider-key cleanup in one owned raw config mapping."""
+    changed = False
+    providers_cfg = cfg.get("providers") or {}
+    if isinstance(providers_cfg, dict):
+        provider_cfg = providers_cfg.get(provider_id, {})
+        if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
+            del provider_cfg["api_key"]
+            changed = True
+
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
+        from api.config import _resolve_provider_alias
+
+        active_provider = _resolve_provider_alias(
+            str(model_cfg.get("provider") or "").strip().lower()
+        )
+        if active_provider == _resolve_provider_alias(provider_id):
+            del model_cfg["api_key"]
+            changed = True
+
+    custom_providers = cfg.get("custom_providers", [])
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if (
+                isinstance(entry, dict)
+                and _custom_provider_name_matches(provider_id, entry.get("name"))
+                and entry.get("api_key")
+            ):
+                del entry["api_key"]
+                changed = True
+    return changed
+
+
 def remove_provider_key(provider_id: str) -> dict[str, Any]:
-    """Remove the API key for a provider.
+    """Remove one built-in credential from .env and YAML transactionally."""
+    provider_id = str(provider_id or "").strip().lower()
+    env_var = _provider_env_var_for(provider_id)
+    if not provider_id or not env_var:
+        return {"ok": False, "error": "Provider does not have a removable credential."}
+    if _provider_is_oauth(provider_id):
+        return {"ok": False, "error": "OAuth credentials cannot be removed here."}
 
-    Removes the key from ``~/.hermes/.env`` (via ``set_provider_key``)
-    and also cleans up ``config.yaml`` if the key is stored there
-    (``providers.<id>.api_key`` or top-level ``model.api_key`` when this
-    provider is the active one).
+    from api.config import _cfg_lock
+    from api.provider_transactions import (
+        active_profile_transaction,
+        assert_profile_home,
+        load_yaml_mapping_strict,
+        restore_file_if_unchanged,
+        snapshot_file,
+    )
 
-    Returns a status dict with the operation result.
-    """
-    result = set_provider_key(provider_id, None)
+    try:
+        with active_profile_transaction(_get_hermes_home) as profile_home:
+            env_path = profile_home / ".env"
+            config_path = profile_home / "config.yaml"
+            env_snapshot = snapshot_file(env_path)
+            config_snapshot = snapshot_file(config_path)
+            cfg = load_yaml_mapping_strict(config_path)
+            changed = _remove_provider_key_from_config_data(provider_id, cfg)
+            intended_config_bytes = (
+                _serialize_yaml_config_file(cfg) if changed else config_snapshot.data
+            )
+            env_published = None
+            save_attempted = False
+            try:
+                assert_profile_home(profile_home, _get_hermes_home)
+                _write_env_file(env_path, {env_var: None})
+                env_published = snapshot_file(env_path)
+                if changed:
+                    with _cfg_lock:
+                        if snapshot_file(config_path) != config_snapshot:
+                            raise RuntimeError(
+                                "config.yaml changed during provider credential removal"
+                            )
+                        save_attempted = True
+                        _save_yaml_config_file(config_path, cfg)
+            except Exception:
+                if env_published is not None:
+                    try:
+                        current_config = snapshot_file(config_path)
+                        config_published = (
+                            current_config.existed
+                            and current_config.data == intended_config_bytes
+                        )
+                        rollback_env = not config_published and (
+                            not save_attempted or current_config == config_snapshot
+                        )
+                        if rollback_env and not restore_file_if_unchanged(
+                            env_path, env_published, env_snapshot
+                        ):
+                            logger.error(
+                                "Skipped provider env rollback because .env changed concurrently"
+                            )
+                        elif not rollback_env:
+                            logger.error(
+                                "Kept provider env update because config publication could not be safely reversed"
+                            )
+                    except Exception:
+                        logger.exception("Failed to evaluate provider credential rollback")
+                raise
+    except Exception:
+        logger.exception("Failed to remove provider credential for %s", provider_id)
+        return {"ok": False, "error": "Failed to remove provider credential transactionally."}
 
-    # Even if the .env removal succeeded, the key might also live in
-    # config.yaml (e.g. providers.<id>.api_key or model.api_key).
-    # Clean those up so _provider_has_key() returns False after removal.
-    if result.get("ok"):
-        _clean_provider_key_from_config(provider_id)
+    if changed:
+        try:
+            from api.profiles import profile_env_for_active_request_readonly
 
-    return result
+            with profile_env_for_active_request_readonly(
+                "provider credential removal"
+            ):
+                reload_config()
+        except Exception:
+            logger.exception("Failed to reload config after provider key removal")
+            invalidate_models_cache()
+            invalidate_account_usage_status_cache(provider_id)
+            invalidate_providers_cache()
+            return {
+                "ok": False,
+                "persisted": True,
+                "provider": provider_id,
+                "error": "Credential was removed, but runtime configuration could not be refreshed.",
+            }
+    invalidate_models_cache()
+    invalidate_account_usage_status_cache(provider_id)
+    invalidate_providers_cache()
+    return {
+        "ok": True,
+        "provider": provider_id,
+        "display_name": _PROVIDER_DISPLAY.get(provider_id, provider_id),
+        "action": "removed",
+    }
 
 
 def _clean_provider_key_from_config(provider_id: str) -> None:
-    """Remove provider API key entries from config.yaml.
-
-    Handles three storage locations:
-    1. ``providers.<id>.api_key`` — per-provider key
-    2. ``model.api_key`` — top-level key (only if provider is active)
-    3. ``custom_providers[].api_key`` — custom provider entries
-
-    Writes back to config.yaml only if something was actually removed.
-    Uses ``_cfg_lock`` to prevent TOCTOU races.
-    """
+    """Compatibility helper: clean only YAML under the shared Profile lock."""
+    import api.config as config_module
     from api.config import _cfg_lock
+    from api.provider_transactions import active_profile_transaction, load_yaml_mapping_strict
 
-    try:
-        # Resolve through api.config at call time instead of the function imported
-        # at module load. Several tests (and some profile flows) monkeypatch the
-        # config module's path resolver after api.providers has already been
-        # imported; using the stale imported reference can clean the wrong
-        # config.yaml.
-        import api.config as _config
-        config_path = _config._get_config_path()
-    except Exception:
-        return
-
-    if not config_path.exists():
-        return
-
-    try:
-        import yaml as _yaml
-
-        changed = False
-
-        with _cfg_lock:
-            raw = config_path.read_text(encoding="utf-8")
-            cfg = _yaml.safe_load(raw)
-            if not isinstance(cfg, dict):
-                return
-
-            # 1. Clean providers.<id>.api_key
-            providers_cfg = cfg.get("providers") or {}
-            if isinstance(providers_cfg, dict):
-                provider_cfg = providers_cfg.get(provider_id, {})
-                if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
-                    del provider_cfg["api_key"]
-                    changed = True
-
-            # 2. Clean model.api_key — only if this provider is the active one
-            model_cfg = cfg.get("model", {})
-            if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
-                active_provider = model_cfg.get("provider")
-                if active_provider and str(active_provider).strip().lower() == provider_id.lower():
-                    del model_cfg["api_key"]
-                    changed = True
-
-            # 3. Clean custom_providers[].api_key
-            custom_providers = cfg.get("custom_providers", [])
-            if isinstance(custom_providers, list):
-                for cp in custom_providers:
-                    if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, cp.get("name")):
-                            if cp.get("api_key"):
-                                del cp["api_key"]
-                                changed = True
-
-            if changed:
-                _save_yaml_config_file(config_path, cfg)
-        # Sync in-memory cache and bust model TTL cache
-        # MUST be called outside _cfg_lock to avoid deadlock:
-        # _cfg_lock is a threading.Lock (non-reentrant) and
-        # reload_config() also acquires _cfg_lock internally.
+    with active_profile_transaction(
+        lambda: config_module._get_config_path().parent
+    ):
+        config_path = config_module._get_config_path()
+        cfg = load_yaml_mapping_strict(config_path)
+        changed = _remove_provider_key_from_config_data(provider_id, cfg)
         if changed:
-            reload_config()
-            invalidate_providers_cache()
-    except Exception:
-        logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)
+            with _cfg_lock:
+                _save_yaml_config_file(config_path, cfg)
+    if changed:
+        reload_config()
+        invalidate_providers_cache()
