@@ -1550,8 +1550,11 @@ def _run_gateway_chat_streaming(
             s.pending_started_at = None
             s.pending_user_source = None
             s.workspace = str(workspace)
-            s.model = effective_model or model
-            s.model_provider = effective_provider or model_provider
+            # Runtime attribution belongs to the completed assistant row.  Keep
+            # the session's selected route request-owned so a Gateway fallback
+            # does not silently redirect the next turn to the fallback runtime.
+            s.model = model
+            s.model_provider = model_provider
 
             def _restore_cancelled_success_writeback():
                 if pending_source == "process_wakeup":
