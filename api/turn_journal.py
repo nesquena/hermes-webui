@@ -7,6 +7,7 @@ reason about submitted turns without depending on in-memory stream state.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -23,6 +24,21 @@ except ImportError:  # pragma: no cover
 TURN_JOURNAL_DIR_NAME = "_turn_journal"
 _TERMINAL_EVENTS = {"completed", "interrupted"}
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _turn_journal_timestamp(value) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _turn_journal_timestamp_order_key(value) -> tuple[bool, float]:
+    timestamp = _turn_journal_timestamp(value)
+    return timestamp is not None, timestamp if timestamp is not None else 0.0
 
 
 def _default_session_dir() -> Path:
@@ -144,12 +160,7 @@ def read_turn_journal(session_id: str, *, session_dir: Path | None = None) -> di
                 events.append(event)
             else:
                 malformed.append({"line": line_no, "raw": raw, "shard": shard.name})
-    def _safe_ts(e):
-        try:
-            return float(e.get("created_at") or 0)
-        except (ValueError, TypeError):
-            return 0.0
-    events.sort(key=_safe_ts)
+    events.sort(key=lambda e: _turn_journal_timestamp_order_key(e.get("created_at")))
     return {"session_id": str(session_id), "events": events, "malformed": malformed}
 
 
@@ -178,14 +189,33 @@ def derive_turn_journal_states(events: Iterable[dict]) -> tuple[dict[str, dict],
         # Track terminal events for collision detection
         if is_terminal_turn_event(event):
             terminal_events.setdefault(turn_id, []).append(event)
-        # Existing latest-by-timestamp derivation
+        # Invalid nonterminal events stay pending unless a terminal event has
+        # already been recorded; valid timestamps keep the old ordering.
         previous = states.get(turn_id)
-        if previous is None or float(event.get('created_at') or 0) >= float(previous.get('created_at') or 0):
+        timestamp = _turn_journal_timestamp(event.get("created_at"))
+        previous_timestamp = _turn_journal_timestamp(
+            previous.get("created_at") if previous is not None else None
+        )
+        if previous is None:
+            states[turn_id] = event
+        elif timestamp is None:
+            if not is_terminal_turn_event(previous):
+                states[turn_id] = event
+        elif previous_timestamp is None:
+            if is_terminal_turn_event(event):
+                states[turn_id] = event
+        elif timestamp >= previous_timestamp:
             states[turn_id] = event
 
     # Build collision list: turn_ids with more than one terminal event
     collisions = [
-        {'turn_id': tid, 'events': sorted(evts, key=lambda e: float(e.get('created_at') or 0))}
+        {
+            'turn_id': tid,
+            'events': sorted(
+                evts,
+                key=lambda e: _turn_journal_timestamp_order_key(e.get("created_at")),
+            ),
+        }
         for tid, evts in terminal_events.items()
         if len(evts) > 1
     ]

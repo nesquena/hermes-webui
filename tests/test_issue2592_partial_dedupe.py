@@ -85,3 +85,71 @@ def test_session_load_collapses_adjacent_duplicate_partials(tmp_path, monkeypatc
     assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1
     assert persisted["updated_at"] == 200.0
     assert (session_dir / f"{sid}.json.bak").exists()
+
+
+def test_session_load_decodes_encoded_content_without_rewriting_sidecar(tmp_path, monkeypatch):
+    import api.models as models
+
+    sid = "content_projection"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    content = [
+        {"type": "text", "text": "describe this image"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    encoded = '\x00json:' + json.dumps(content, separators=(",", ":"))
+    payload = {
+        "session_id": sid,
+        "title": "content projection",
+        "workspace": str(tmp_path),
+        "messages": [{"role": "user", "content": encoded}],
+    }
+    path = session_dir / f"{sid}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+
+    loaded = models.Session.load(sid)
+
+    assert loaded.messages[0]["content"] == content
+    assert path.read_bytes() == before
+
+
+def test_session_load_collapses_raw_partials_before_content_projection(tmp_path, monkeypatch):
+    import api.models as models
+
+    sid = "content_projection_partial"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+
+    content = [
+        {"type": "text", "text": "describe this image"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    encoded = '\x00json:' + json.dumps(content, separators=(",", ":"))
+    payload = {
+        "session_id": sid,
+        "title": "content projection partial",
+        "workspace": str(tmp_path),
+        "updated_at": 200.0,
+        "messages": [
+            {"role": "user", "content": encoded},
+            _tool_partial(timestamp=123),
+            _tool_partial(timestamp=123),
+        ],
+        "tool_calls": [],
+    }
+    path = session_dir / f"{sid}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = models.Session.load(sid)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.messages[0]["content"] == content
+    assert sum(1 for message in loaded.messages if message.get("_partial")) == 1
+    assert persisted["messages"][0]["content"] == encoded
+    assert sum(1 for message in persisted["messages"] if message.get("_partial")) == 1

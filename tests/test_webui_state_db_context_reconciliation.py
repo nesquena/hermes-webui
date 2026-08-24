@@ -1,3 +1,4 @@
+import json
 import queue
 import sqlite3
 from collections import OrderedDict
@@ -194,6 +195,31 @@ def test_state_db_delta_after_context_does_not_promote_unrelated_prefix_as_recov
     delta = state_db_delta_after_context(sidecar_context, state_messages)
 
     assert [m.get("content") for m in delta] == ["hello", "response"]
+
+
+def test_state_db_delta_keeps_rich_row_when_scalar_json_is_only_a_shape_mirror():
+    from api.models import state_db_delta_after_context
+
+    rich_content = [
+        {"type": "text", "text": "describe"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]
+    sidecar_context = [
+        {
+            "role": "user",
+            "content": json.dumps(rich_content, ensure_ascii=False, sort_keys=True),
+        },
+        {"role": "assistant", "content": "old answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": rich_content},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new prompt"},
+    ]
+
+    delta = state_db_delta_after_context(sidecar_context, state_messages)
+
+    assert delta == state_messages
 
 
 def test_webui_streaming_normalizes_trailing_prefill_user_before_current_turn(monkeypatch, tmp_path):

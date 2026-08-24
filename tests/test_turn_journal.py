@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 import api.turn_journal as turn_journal
 from api.session_recovery import audit_session_recovery
 from api.turn_journal import (
@@ -153,7 +155,11 @@ def test_audit_reports_pending_turn_journal_entry_when_user_message_absent(tmp_p
 
 
 def test_audit_ignores_completed_or_already_materialized_turn_journal_entry(tmp_path):
-    _write_session(tmp_path, "sid-1", messages=[{"role": "user", "content": "already there"}])
+    _write_session(
+        tmp_path,
+        "sid-1",
+        messages=[{"role": "user", "content": "already there", "timestamp": 1}],
+    )
     append_turn_journal_event(
         "sid-1",
         {
@@ -161,18 +167,197 @@ def test_audit_ignores_completed_or_already_materialized_turn_journal_entry(tmp_
             "turn_id": "turn-1",
             "role": "user",
             "content": "already there",
+            "created_at": 1.0,
         },
         session_dir=tmp_path,
     )
     append_turn_journal_event(
         "sid-1",
-        {"event": "completed", "turn_id": "turn-1"},
+        {
+            "event": "submitted",
+            "turn_id": "turn-terminal",
+            "role": "user",
+            "content": "terminal turn",
+            "created_at": 2,
+        },
+        session_dir=tmp_path,
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {"event": "completed", "turn_id": "turn-terminal"},
+        session_dir=tmp_path,
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-terminal",
+            "role": "user",
+            "content": "terminal turn",
+            "created_at": "malformed",
+        },
         session_dir=tmp_path,
     )
 
     report = audit_session_recovery(tmp_path)
 
     assert report["status"] == "ok"
+    assert report["items"] == []
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    ["not-a-timestamp", True, float("nan"), float("inf"), None],
+    ids=["malformed-string", "boolean", "nan", "infinity", "missing"],
+)
+def test_audit_keeps_invalid_created_at_turn_pending(tmp_path, created_at):
+    _write_session(
+        tmp_path,
+        "sid-1",
+        messages=[{"role": "user", "content": "already there", "timestamp": 1}],
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {"event": "worker_started", "turn_id": "turn-1", "created_at": 1},
+        session_dir=tmp_path,
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "already there",
+            "created_at": created_at,
+        },
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "warn"
+    assert report["summary"]["repairable"] == 1
+    assert report["items"][0]["turn_id"] == "turn-1"
+
+
+def test_audit_uses_submitted_content_when_empty_worker_wins_state(tmp_path):
+    _write_session(tmp_path, "sid-1", messages=[])
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "recover me",
+            "created_at": 2,
+        },
+        session_dir=tmp_path,
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {"event": "worker_started", "turn_id": "turn-1", "created_at": "malformed"},
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "warn"
+    assert report["summary"]["repairable"] == 1
+    assert report["items"][0]["event"] == "submitted"
+
+
+def test_audit_reports_repeated_prompt_when_turn_timestamp_differs(tmp_path):
+    _write_session(
+        tmp_path,
+        "sid-1",
+        messages=[{"role": "user", "content": "repeat", "timestamp": 1}],
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-2",
+            "role": "user",
+            "content": "repeat",
+            "created_at": 2,
+        },
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "warn"
+    assert report["summary"]["repairable"] == 1
+    assert report["items"][0]["kind"] == "turn_journal_pending_turn"
+    assert report["items"][0]["turn_id"] == "turn-2"
+
+
+def test_audit_reports_pending_when_materialized_turn_has_no_timestamp(tmp_path):
+    _write_session(
+        tmp_path,
+        "sid-1",
+        messages=[{"role": "user", "content": "already there"}],
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "already there",
+            "created_at": 1,
+        },
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "warn"
+    assert report["summary"]["repairable"] == 1
+    assert report["items"][0]["kind"] == "turn_journal_pending_turn"
+
+
+def test_audit_ignores_empty_pending_turn(tmp_path):
+    _write_session(tmp_path, "sid-1", messages=[])
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-empty",
+            "content": "  ",
+            "created_at": 1,
+        },
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "ok"
+    assert report["items"] == []
+
+
+def test_audit_decodes_encoded_sidecar_user_turn_before_pending_check(tmp_path):
+    _write_session(
+        tmp_path,
+        "sid-1",
+        messages=[{"role": "user", "content": '\x00json:["recover me"]', "timestamp": 1}],
+    )
+    append_turn_journal_event(
+        "sid-1",
+        {
+            "event": "submitted",
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "recover me",
+            "created_at": 1,
+        },
+        session_dir=tmp_path,
+    )
+
+    report = audit_session_recovery(tmp_path)
+
+    assert report["status"] == "ok"
+    assert report["summary"]["repairable"] == 0
     assert report["items"] == []
 
 

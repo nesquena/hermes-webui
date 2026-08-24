@@ -45,6 +45,7 @@ def test_visible_messages_for_anchor_preserves_auto_compression_text_part_filter
 
 
 def test_visible_messages_for_anchor_keeps_manual_user_messages_simple():
+    ordinary_text_list = {"role": "user", "content": ["ordinary"]}
     user_tool_metadata = {"role": "user", "content": [], "tool_calls": [{"id": "call_1"}]}
     user_attachment = {"role": "user", "content": [], "attachments": [{"name": "screenshot.png"}]}
     assistant_tool_metadata = {"role": "assistant", "content": [], "tool_calls": [{"id": "call_2"}]}
@@ -53,6 +54,9 @@ def test_visible_messages_for_anchor_keeps_manual_user_messages_simple():
         [user_tool_metadata, user_attachment, assistant_tool_metadata],
         auto_compression=False,
     ) == [user_attachment, assistant_tool_metadata]
+    assert visible_messages_for_anchor(
+        [ordinary_text_list], auto_compression=False,
+    ) == []
 
     assert visible_messages_for_anchor(
         [user_tool_metadata, user_attachment, assistant_tool_metadata],
@@ -69,6 +73,10 @@ def test_context_compression_marker_detection_is_prefix_and_role_scoped():
         "role": "user",
         "content": "[Your active task list was preserved across context compression] - [ ] follow up",
     }
+    string_list_marker = {
+        "role": "assistant",
+        "content": ["[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted."],
+    }
     tool_noise = {
         "role": "tool",
         "content": "{\"description\": \"Troubleshoot frequent context compression indicators\"}",
@@ -80,6 +88,7 @@ def test_context_compression_marker_detection_is_prefix_and_role_scoped():
 
     assert is_context_compression_marker(real_marker)
     assert is_context_compression_marker(preserved_tasks_marker)
+    assert is_context_compression_marker(string_list_marker)
     assert _is_context_compression_marker(real_marker)
     assert not is_context_compression_marker(tool_noise)
     assert not is_context_compression_marker(user_discussion)

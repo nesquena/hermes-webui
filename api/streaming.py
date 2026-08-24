@@ -72,6 +72,8 @@ from api.models import (
     get_state_db_session_messages,
     record_process_wakeup_provider_unavailable_pause,
     reconciled_state_db_messages_for_session,
+    _session_message_visible_key,
+    _visible_duplicate_text_part,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
 from api.process_event_utils import (
@@ -3750,12 +3752,15 @@ def _message_text(value) -> str:
     if isinstance(value, list):
         parts = []
         for p in value:
+            if isinstance(p, str):
+                parts.append(p)
+                continue
             if not isinstance(p, dict):
                 continue
             ptype = str(p.get('type') or '').lower()
             if ptype in ('', 'text', 'input_text', 'output_text'):
                 parts.append(_message_content_part_text(p))
-        return _strip_thinking_markup('\n'.join(parts).strip())
+        return _strip_thinking_markup(''.join(parts).strip())
     return _strip_thinking_markup(str(value or '').strip())
 
 
@@ -5963,6 +5968,15 @@ def _message_identity(msg):
         return None
     role = str(msg.get('role') or '')
     content = msg.get('content', '')
+    if not isinstance(content, (str, list, dict)):
+        return (
+            role,
+            '',
+            str(msg.get('tool_call_id') or ''),
+            json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
+            type(content).__name__,
+            repr(content),
+        )
     text = _message_text(content)
     if role == 'user':
         # WebUI sends the model a workspace-prefixed user_message while the
@@ -5996,6 +6010,17 @@ def _message_identity(msg):
     )
 
 
+def _message_replay_content_is_text_only(content):
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if isinstance(part, str):
+            continue
+        if _visible_duplicate_text_part(part) is None:
+            return False
+    return True
+
+
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
@@ -6008,6 +6033,16 @@ def _messages_have_prefix(messages, prefix, *, key_fn=None):
 
 def _message_replay_key(msg):
     """Return a stable comparison key for replay/overlap de-duplication."""
+    if (
+        isinstance(msg, dict)
+        and not msg.get("_partial")
+        and isinstance(msg.get("content"), (list, dict))
+        and not _message_replay_content_is_text_only(msg.get("content"))
+    ):
+        return (
+            *_session_message_visible_key(msg, normalize_workspace_prefix=True),
+            str(msg.get("tool_call_id") or ""),
+        )
     identity = _message_identity(msg)
     # ``api_content`` is a provider-facing replay sidecar.  It must participate
     # in context/replay overlap identity or two same-visible turns can collapse

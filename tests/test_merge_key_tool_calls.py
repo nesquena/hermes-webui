@@ -10,9 +10,12 @@ a single key, losing tool calls during merge.
 """
 from __future__ import annotations
 
+import json
+
 from api import models
 from api.models import (
     _matching_visible_duplicate,
+    _session_message_content_key,
     _session_message_dedup_key,
     _session_message_merge_key,
     _session_message_visible_key,
@@ -60,6 +63,33 @@ class TestMergeKeyToolCalls:
         with_tc = _assistant_tc("call_1", "read_file")
         assert _session_message_merge_key(empty) != _session_message_merge_key(with_tc)
 
+    def test_scalar_json_and_structured_content_use_distinct_exact_keys(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+            "timestamp": 1000,
+        }
+        structured = {"role": "user", "content": json.loads(json.dumps(rich, sort_keys=True)), "timestamp": 1000}
+        scalar_mirror = dict(scalar)
+        structured_mirror = {"role": "user", "content": json.loads(scalar["content"]), "timestamp": 1000}
+
+        for key_fn in (_session_message_merge_key,):
+            assert key_fn(scalar) != key_fn(structured)
+            assert key_fn(scalar) == key_fn(scalar_mirror)
+            assert key_fn(structured) == key_fn(structured_mirror)
+
+    def test_stable_id_merge_key_behavior_is_unchanged_by_content_shape(self):
+        rich = [{"type": "text", "text": "same turn"}]
+        scalar = {"id": "message-1", "role": "user", "content": json.dumps(rich)}
+        structured = {"id": "message-1", "role": "user", "content": rich}
+
+        assert _session_message_merge_key(scalar) == _session_message_merge_key(structured)
+        assert _session_message_dedup_key(scalar) == _session_message_dedup_key(structured)
+
 
 # ── _session_message_dedup_key ──────────────────────────────────────────────
 
@@ -74,6 +104,24 @@ class TestDedupKeyToolCalls:
         a = _assistant_tc("call_1", "read_file")
         b = _assistant_tc("call_2", "terminal")
         assert _session_message_dedup_key(a) != _session_message_dedup_key(b)
+
+    def test_scalar_json_and_structured_content_use_distinct_exact_keys(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+            "timestamp": 1000,
+        }
+        structured = {"role": "user", "content": json.loads(json.dumps(rich, sort_keys=True)), "timestamp": 1000}
+        scalar_mirror = dict(scalar)
+        structured_mirror = {"role": "user", "content": json.loads(scalar["content"]), "timestamp": 1000}
+
+        assert _session_message_dedup_key(scalar) != _session_message_dedup_key(structured)
+        assert _session_message_dedup_key(scalar) == _session_message_dedup_key(scalar_mirror)
+        assert _session_message_dedup_key(structured) == _session_message_dedup_key(structured_mirror)
 
 
 # ── _session_message_visible_key + _matching_visible_duplicate ──────────────
@@ -96,11 +144,113 @@ class TestVisibleKeyToolCalls:
         assert ka != kb
         assert _matching_visible_duplicate(ka, {kb}) is None
 
+    def test_scalar_canonical_json_does_not_collide_with_structured_content(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+        }
+        structured = {"role": "user", "content": json.loads(json.dumps(rich, sort_keys=True))}
+
+        scalar_key = _session_message_visible_key(scalar)
+        structured_key = _session_message_visible_key(structured)
+
+        assert scalar_key != structured_key
+        merged = merge_session_messages_append_only([scalar], [structured])
+        assert merged == [scalar, structured]
+
+    def test_scalar_json_and_structured_content_use_distinct_content_and_visible_keys(self):
+        rich = [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ]
+        scalar = {
+            "role": "user",
+            "content": json.dumps(rich, ensure_ascii=False, sort_keys=True),
+        }
+        structured = {"role": "user", "content": rich}
+        scalar_mirror = dict(scalar)
+        structured_mirror = {"role": "user", "content": json.loads(scalar["content"])}
+
+        for key_fn in (_session_message_content_key, _session_message_visible_key):
+            assert key_fn(scalar) != key_fn(structured)
+            assert key_fn(scalar) == key_fn(scalar_mirror)
+            assert key_fn(structured) == key_fn(structured_mirror)
+
+    def test_text_only_structured_fuzzy_match_requires_equal_visible_text(self):
+        structured = {
+            "role": "user",
+            "content": [{"type": "text", "text": "describe"}],
+        }
+        structured_key = _session_message_visible_key(structured)
+        equal_scalar_key = _session_message_visible_key(
+            {"role": "user", "content": "describe"}
+        )
+        longer_scalar_key = _session_message_visible_key(
+            {"role": "user", "content": "describe with details"}
+        )
+        scalar_key = _session_message_visible_key(
+            {"role": "user", "content": "describe"}
+        )
+
+        assert _matching_visible_duplicate(equal_scalar_key, {structured_key}) == structured_key
+        assert _matching_visible_duplicate(longer_scalar_key, {structured_key}) is None
+        assert _matching_visible_duplicate(
+            _session_message_visible_key({"role": "user", "content": "describe with details"}),
+            {scalar_key},
+        ) == scalar_key
+
+    def test_unknown_structured_part_survives_alongside_scalar_text(self):
+        structured = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "document", "document": {"id": "d"}},
+            ],
+        }
+        scalar = {"role": "user", "content": "hello"}
+
+        assert merge_session_messages_append_only([structured], [scalar]) == [structured, scalar]
+
+    def test_supported_text_only_structured_forms_match_scalar_text(self):
+        scalar = {"role": "user", "content": "hello"}
+        for content in (
+            ["hello"],
+            [{"type": "text", "text": "hello"}],
+            [{"type": "input_text", "input_text": "hello"}],
+            [{"type": "output_text", "output_text": "hello"}],
+        ):
+            structured = {"role": "user", "content": content}
+            assert _matching_visible_duplicate(
+                _session_message_visible_key(scalar),
+                {_session_message_visible_key(structured)},
+            ) == _session_message_visible_key(structured)
+
 
 # ── merge_session_messages_append_only end-to-end ───────────────────────────
 
 
 class TestMergeToolCallsEndToEnd:
+    def test_falsy_scalar_content_keeps_merge_and_replay_identity(self):
+        from api.streaming import _message_replay_key
+
+        empty = {"role": "user", "content": "", "timestamp": 1000}
+        string_zero = {"role": "user", "content": "0", "timestamp": 1000}
+        zero = {"role": "user", "content": 0, "timestamp": 1000}
+        false = {"role": "user", "content": False, "timestamp": 1000}
+
+        merged = merge_session_messages_append_only([empty], [zero, false])
+        zero_merge = merge_session_messages_append_only([string_zero], [zero])
+
+        assert [message["content"] for message in merged] == ["", 0, False]
+        assert zero_merge == [string_zero, zero]
+        assert _message_replay_key(empty) != _message_replay_key(zero)
+        assert _message_replay_key(empty) != _message_replay_key(false)
+        assert _message_replay_key(zero) != _message_replay_key(false)
+
     def test_same_tool_calls_sidecar_and_state_merge_to_one(self):
         """Sidecar and state.db have the same assistant message with identical
         tool_calls → merge must produce exactly one message (deduplicated)."""

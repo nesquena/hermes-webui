@@ -37,7 +37,7 @@ from contextlib import closing
 from pathlib import Path
 
 from api.turn_journal import (
-    derive_turn_journal_states,
+    _turn_journal_timestamp,
     is_terminal_turn_event,
     iter_turn_journal_session_ids,
     read_turn_journal,
@@ -213,8 +213,19 @@ def _backup_predates_intentional_shrink(session_path: Path, bak_path: Path) -> b
     # post-dates the compression (the marker persists across saves) → it is a
     # recoverable post-compression snapshot, never a shrink-undoing one.
     try:
-        from api.models import _context_messages_include_compression_marker
-        if _context_messages_include_compression_marker(bak_ctx):
+        from api.models import (
+            _context_messages_include_compression_marker,
+            _decode_state_db_content,
+        )
+        decoded_bak_ctx = [
+            {
+                **message,
+                'content': _decode_state_db_content(message.get('content')),
+            }
+            if isinstance(message, dict) else message
+            for message in bak_ctx
+        ]
+        if _context_messages_include_compression_marker(decoded_bak_ctx):
             return False
     except Exception:
         # If the marker check is unavailable, fall through to the length guard.
@@ -549,6 +560,8 @@ def _read_state_db_missing_sidecar_rows(
                     continue
                 message_rows: list[dict] = []
                 if {'session_id', 'role', 'content'}.issubset(message_cols):
+                    from api.models import _decode_state_db_content
+
                     order = "timestamp, id" if 'timestamp' in message_cols and 'id' in message_cols else "rowid"
                     ts_expr = 'timestamp' if 'timestamp' in message_cols else 'NULL AS timestamp'
                     for msg in conn.execute(
@@ -557,7 +570,7 @@ def _read_state_db_missing_sidecar_rows(
                     ).fetchall():
                         message = {
                             'role': msg['role'],
-                            'content': msg['content'] or '',
+                            'content': _decode_state_db_content(msg['content']),
                         }
                         if msg['timestamp'] is not None:
                             message['timestamp'] = msg['timestamp']
@@ -953,23 +966,63 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
 
     for session_id in iter_turn_journal_session_ids(session_dir):
         journal = read_turn_journal(session_id, session_dir=session_dir)
-        states, _ = derive_turn_journal_states(journal.get('events') or [])
+        events = journal.get('events') or []
+        terminal_turn_ids = {
+            str(event.get('turn_id') or '').strip()
+            for event in events
+            if isinstance(event, dict)
+            and is_terminal_turn_event(event)
+            and str(event.get('turn_id') or '').strip()
+        }
         live_path = session_dir / f"{session_id}.json"
         live_messages = _msg_count(live_path)
-        existing_user_messages: set[str] = set()
+        existing_user_messages: set[tuple[str, float]] = set()
         try:
+            from api.models import (
+                _decode_state_db_content,
+                _message_content_text,
+                _message_exact_timestamp_details,
+            )
+
             payload = json.loads(live_path.read_text(encoding='utf-8'))
             if isinstance(payload, dict):
                 for message in payload.get('messages') or []:
                     if isinstance(message, dict) and message.get('role') == 'user':
-                        existing_user_messages.add(str(message.get('content') or '').strip())
+                        content = _decode_state_db_content(message.get('content'))
+                        timestamp, timestamp_valid = _message_exact_timestamp_details(message)
+                        if timestamp_valid and timestamp is not None:
+                            existing_user_messages.add((
+                                _message_content_text({'content': content}).strip(),
+                                timestamp,
+                            ))
         except (OSError, json.JSONDecodeError, ValueError):
             pass
-        for turn_id, event in sorted(states.items()):
-            if is_terminal_turn_event(event):
+        pending_events = {}
+        for event in events:
+            if not isinstance(event, dict) or is_terminal_turn_event(event):
                 continue
-            content = str(event.get('content') or '').strip()
-            if not content or content in existing_user_messages:
+            turn_id = str(event.get('turn_id') or '').strip()
+            if not turn_id:
+                continue
+            content = _message_content_text({'content': event.get('content')}).strip()
+            if not content:
+                continue
+            previous = pending_events.get(turn_id)
+            if previous is None or (
+                str(event.get('event') or '') == 'submitted'
+                and str(previous.get('event') or '') != 'submitted'
+            ):
+                pending_events[turn_id] = event
+        for turn_id, event in sorted(pending_events.items()):
+            if turn_id in terminal_turn_ids:
+                continue
+            content = _message_content_text({'content': event.get('content')}).strip()
+            event_timestamp = _turn_journal_timestamp(event.get('created_at'))
+            if (
+                content
+                and event_timestamp is not None
+                and (content, event_timestamp) in existing_user_messages
+            ):
                 continue
             items.append(_new_audit_item(
                 session_id,

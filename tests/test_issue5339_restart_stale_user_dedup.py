@@ -161,7 +161,7 @@ def test_content_key_is_idempotent_for_bare_user_message():
     bare = {"role": "user", "content": "just a plain message"}
     assert _session_message_content_key(bare) == (
         "user",
-        "just a plain message",
+        "scalar:just a plain message",
         "",
         "",
     )
@@ -225,6 +225,110 @@ def test_native_multimodal_sidecar_reconciles_with_agent_text_projection():
     assert merged[0]["content"] is sidecar["content"]
     assert merged[0]["attachments"] is sidecar["attachments"]
     assert merged[0]["api_content"] == "trusted provider wire content"
+
+
+def test_input_text_multimodal_sidecar_reconciles_with_scalar_mirror():
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    sidecar = {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "input_text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    state = {
+        "role": "user",
+        "content": "describe this image\n[screenshot]",
+        "timestamp": timestamp,
+        "api_content": "input-text provider wire content",
+    }
+
+    merged = merge_session_messages_append_only([sidecar], [state])
+
+    assert merged == [sidecar]
+    assert sidecar["api_content"] == "input-text provider wire content"
+
+
+@pytest.mark.parametrize(
+    ("part_type", "text_key"),
+    (
+        ("text", "text"),
+        ("", "content"),
+        ("input_text", "input_text"),
+        ("output_text", "output_text"),
+        (None, None),
+    ),
+)
+def test_multimodal_mirror_normalizes_escaped_workspace_prefix_for_text_shapes(
+    part_type,
+    text_key,
+):
+    from api.models import merge_session_messages_append_only
+
+    timestamp = 1766352000.123456
+    workspace_prompt = "[Workspace::v1: /tmp/a\\]b]\nhello"
+    text_part = (
+        workspace_prompt
+        if text_key is None
+        else {"type": part_type, text_key: workspace_prompt}
+    )
+    sidecar = {
+        "role": "user",
+        "content": [
+            text_part,
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    state = {
+        "role": "user",
+        "content": "hello\n[screenshot]",
+        "timestamp": timestamp,
+        "api_content": "escaped-workspace provider wire content",
+    }
+
+    merged = merge_session_messages_append_only([sidecar], [state])
+
+    assert merged == [sidecar]
+    assert sidecar["api_content"] == "escaped-workspace provider wire content"
+
+
+def test_multimodal_mirror_does_not_match_rich_rows_or_copy_rich_sidecars():
+    from api.models import (
+        _copy_api_content_sidecar,
+        _session_message_multimodal_mirror_key,
+        merge_session_messages_append_only,
+    )
+
+    timestamp = 1766352000.123456
+    rich_a = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+        ],
+        "timestamp": timestamp,
+    }
+    rich_b = {
+        **rich_a,
+        "content": [
+            {"type": "text", "text": "describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AQ=="}},
+        ],
+    }
+
+    assert _session_message_multimodal_mirror_key(rich_a) is None
+    assert _session_message_multimodal_mirror_key(rich_b) is None
+    rich_b["api_content"] = "rich provider wire content"
+    assert merge_session_messages_append_only([rich_a], [rich_b]) == [rich_a, rich_b]
+    assert "api_content" not in rich_a
+
+    target = dict(rich_a)
+    assert _copy_api_content_sidecar(target, rich_b) is False
+    assert "api_content" not in target
 
 
 def test_ordinary_reconciliation_preserves_conflicting_provider_sidecars():
@@ -298,6 +402,7 @@ def test_multimodal_mirror_requires_exact_timestamp_and_image_parts():
     ]
     text_only_parts = [{"type": "text", "text": "not an image-bearing list"}]
     malformed_text_parts = [
+        {"type": 0, "text": "describe this image"},
         {"type": "text", "text": 7},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
     ]
