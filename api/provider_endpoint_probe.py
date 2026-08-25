@@ -18,6 +18,10 @@ from urllib.parse import urlparse
 
 MAX_RESPONSE_BYTES = 256 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
+# Keep discovery aligned with real WebUI inference requests. Some API-edge WAFs
+# reject probe-specific bot identifiers before the bearer credential reaches the
+# OpenAI-compatible endpoint, while accepting this truthful product identifier.
+MODEL_REQUEST_USER_AGENT = "Hermes-WebUI/1.0"
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -85,7 +89,7 @@ def probe_models_endpoint(
 
     headers = {
         "Accept": "application/json",
-        "User-Agent": "hermes-webui-model-probe",
+        "User-Agent": MODEL_REQUEST_USER_AGENT,
     }
     key = str(api_key or "").strip()
     if key:

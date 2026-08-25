@@ -75,3 +75,19 @@ def test_configured_private_endpoint_has_no_separate_dns_check_use_gap(monkeypat
         "ok": True,
         "models": [{"id": "local-model", "label": "local-model"}],
     }
+
+
+def test_probe_uses_inference_compatible_product_user_agent():
+    response = _Response(b'{"data":[{"id":"remote-model"}]}')
+    opener = _Opener(response)
+
+    result = probe.probe_models_endpoint(
+        "custom",
+        "https://models.example.invalid/v1",
+        opener=opener,
+    )
+
+    request, _timeout = opener.requests[0]
+    headers = {name.lower(): value for name, value in request.header_items()}
+    assert headers["user-agent"] == "Hermes-WebUI/1.0"
+    assert result["ok"] is True
