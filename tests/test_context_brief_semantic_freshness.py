@@ -589,3 +589,30 @@ def test_conflicted_provenance_component_is_fail_open_for_all_permutations():
         contents = [message["content"] for _idx, message in unique]
         assert len(contents) == 5
         assert set(contents) == {"A", "B", "C", "D", "E"}
+
+
+def test_state_db_lineage_read_is_scoped_to_the_session_profile():
+    base_rows = [
+        {"id": "base", "role": "user", "content": "DEMANDE DU BON PROFIL"}
+    ]
+    foreign_row = {
+        "id": "foreign",
+        "role": "assistant",
+        "content": "CONTENU D'UN AUTRE PROFIL",
+    }
+    session = SimpleNamespace(session_id="shared-session-id", profile="work")
+    calls = []
+
+    def fake_state_db_read(sid, *, stitch_continuations, profile=None):
+        calls.append((sid, stitch_continuations, profile))
+        return [] if profile == "work" else [foreign_row]
+
+    with patch(
+        "api.models.get_state_db_session_messages",
+        side_effect=fake_state_db_read,
+    ):
+        merged = context_brief._merge_lineage_with_state_db(session, base_rows)
+
+    assert calls == [("shared-session-id", True, "work")]
+    assert merged == base_rows
+    assert all(row.get("id") != "foreign" for row in merged)

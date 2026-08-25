@@ -921,7 +921,11 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
     try:
         from api.models import get_state_db_session_messages
 
-        db_rows = get_state_db_session_messages(sid, stitch_continuations=True) or []
+        db_rows = get_state_db_session_messages(
+            sid,
+            stitch_continuations=True,
+            profile=getattr(session, "profile", None),
+        ) or []
     except Exception:
         logger.debug("context brief: state.db lineage read failed for %s", sid, exc_info=True)
         return base
