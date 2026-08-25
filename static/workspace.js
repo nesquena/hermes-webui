@@ -1205,8 +1205,6 @@ function _prismLanguageForPath(path){
   return _PRISM_LANG_MAP[ext]!==undefined?_PRISM_LANG_MAP[ext]:'plaintext';
 }
 
-let _previewInFlightGen = 0;
-
 async function openFile(path, opts={}){
   if(!S.session)return;
   
