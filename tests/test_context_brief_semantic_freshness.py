@@ -562,3 +562,17 @@ def test_provenance_alias_chain_propagates_without_merging_conflicts():
     unique = context_brief._dedupe_brief_messages(list(enumerate(messages)))
 
     assert [message["content"] for _idx, message in unique] == ["A", "D", "E"]
+
+
+def test_provenance_alias_bridge_merges_components_regardless_of_order():
+    messages = [
+        {"id": "x", "role": "user", "content": "A"},
+        {"_row_id": 1, "role": "user", "content": "C"},
+        {"id": "x", "_row_id": 1, "role": "user", "content": "B"},
+        {"id": "y", "_row_id": 1, "role": "user", "content": "D"},
+        {"id": "x", "_row_id": 2, "role": "user", "content": "E"},
+    ]
+
+    unique = context_brief._dedupe_brief_messages(list(enumerate(messages)))
+
+    assert [message["content"] for _idx, message in unique] == ["A", "D", "E"]

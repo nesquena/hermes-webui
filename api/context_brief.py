@@ -435,52 +435,89 @@ def _messages_have_compatible_provenance(target: dict, source: dict) -> bool:
     return models._message_private_identity_compatible(target, source)
 
 
-def _provenance_index_match(
-    by_token: dict[tuple[str, str], list[list[dict]]],
-    message: dict,
-) -> list[dict] | None:
-    components = []
-    component_ids = set()
-    for token in _message_provenance_tokens(message):
-        for component in by_token.get(token, []):
-            if id(component) not in component_ids:
-                components.append(component)
-                component_ids.add(id(component))
-    for component in components:
-        if all(
-            _messages_have_compatible_provenance(witness, message)
-            for witness in component
-        ):
-            return component
-    return None
+def _components_have_compatible_provenance(left: dict, right: dict) -> bool:
+    return all(
+        _messages_have_compatible_provenance(left_msg, right_msg)
+        for left_msg in left["witnesses"]
+        for right_msg in right["witnesses"]
+    )
 
 
-def _provenance_index_add(
-    by_token: dict[tuple[str, str], list[list[dict]]],
-    message: dict,
-    component: list[dict] | None = None,
-) -> list[dict]:
-    component = component if component is not None else []
-    component.append(message)
-    for token in _message_provenance_tokens(message):
-        entries = by_token.setdefault(token, [])
-        if not any(existing is component for existing in entries):
-            entries.append(component)
-    return component
+def _provenance_components(rows: list[tuple[object, dict]]) -> list[dict]:
+    """Build order-independent compatible identity components."""
+    by_token: dict[tuple[str, str], list[dict]] = {}
+    active: list[dict] = []
+
+    for sequence, row in enumerate(rows):
+        message = row[1]
+        candidates = []
+        candidate_ids = set()
+        for token in _message_provenance_tokens(message):
+            for component in by_token.get(token, []):
+                if id(component) not in candidate_ids:
+                    candidates.append(component)
+                    candidate_ids.add(id(component))
+
+        mergeable = []
+        for component in candidates:
+            if not all(
+                _messages_have_compatible_provenance(witness, message)
+                for witness in component["witnesses"]
+            ):
+                continue
+            if all(
+                _components_have_compatible_provenance(component, other)
+                for other in mergeable
+            ):
+                mergeable.append(component)
+
+        if mergeable:
+            canonical = min(mergeable, key=lambda item: item["order"])
+            for other in mergeable:
+                if other is canonical:
+                    continue
+                for witness in other["witnesses"]:
+                    for token in _message_provenance_tokens(witness):
+                        entries = by_token.get(token, [])
+                        entries[:] = [
+                            canonical if entry is other else entry
+                            for entry in entries
+                        ]
+                        deduped_entries = []
+                        deduped_ids = set()
+                        for entry in entries:
+                            if id(entry) not in deduped_ids:
+                                deduped_entries.append(entry)
+                                deduped_ids.add(id(entry))
+                        entries[:] = deduped_entries
+                canonical["witnesses"].extend(other["witnesses"])
+                canonical["rows"].extend(other["rows"])
+                active.remove(other)
+        else:
+            canonical = {
+                "order": sequence,
+                "witnesses": [],
+                "rows": [],
+            }
+            active.append(canonical)
+
+        canonical["witnesses"].append(message)
+        canonical["rows"].append(row)
+        for token in _message_provenance_tokens(message):
+            entries = by_token.setdefault(token, [])
+            if not any(entry is canonical for entry in entries):
+                entries.append(canonical)
+
+    return active
 
 
 def _dedupe_brief_messages(rows: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
     """Keep the first canonical occurrence of each explicit provenance token."""
-    by_token: dict[tuple[str, str], list[list[dict]]] = {}
-    unique = []
-    for row in rows:
-        component = _provenance_index_match(by_token, row[1])
-        if component is not None:
-            _provenance_index_add(by_token, row[1], component)
-            continue
-        unique.append(row)
-        _provenance_index_add(by_token, row[1])
-    return unique
+    representatives = [
+        min(component["rows"], key=lambda row: row[0])
+        for component in _provenance_components(rows)
+    ]
+    return sorted(representatives, key=lambda row: row[0])
 
 
 def _distill_context_brief(
@@ -946,32 +983,47 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
             decoded_rows.append(decoded)
         decoded_ts = _effective_ts(decoded_rows)
 
-        by_token: dict[tuple[str, str], list[list[dict]]] = {}
-        for message in base:
-            component = _provenance_index_match(by_token, message)
-            _provenance_index_add(by_token, message, component)
-        added: list[dict] = []
-        added_ts: list[float] = []
-        for decoded, effective_ts in zip(decoded_rows, decoded_ts, strict=True):
-            component = _provenance_index_match(by_token, decoded)
-            if component is not None:
-                _provenance_index_add(by_token, decoded, component)
+        base_ts_all = _effective_ts(base)
+        component_rows = [
+            (("base", idx), message)
+            for idx, message in enumerate(base)
+        ] + [
+            (("db", idx), message)
+            for idx, message in enumerate(decoded_rows)
+        ]
+        components = _provenance_components(component_rows)
+
+        kept_base = []
+        added = []
+        for component in components:
+            base_candidates = [
+                row for row in component["rows"] if row[0][0] == "base"
+            ]
+            if base_candidates:
+                key, message = min(base_candidates, key=lambda row: row[0][1])
+                kept_base.append((key[1], message, base_ts_all[key[1]]))
                 continue
-            _provenance_index_add(by_token, decoded)
-            added.append(decoded)
-            added_ts.append(effective_ts)
-        if not added:
-            return base
-        base_ts = _effective_ts(base)
+            db_candidates = [
+                row for row in component["rows"] if row[0][0] == "db"
+            ]
+            key, message = min(db_candidates, key=lambda row: row[0][1])
+            added.append((key[1], message, decoded_ts[key[1]]))
+
+        kept_base.sort(key=lambda item: item[0])
+        added.sort(key=lambda item: item[0])
+        base_messages = [item[1] for item in kept_base]
+        base_ts = [item[2] for item in kept_base]
+        added_messages = [item[1] for item in added]
+        added_ts = [item[2] for item in added]
         merged: list[dict] = []
         i = j = 0
-        while i < len(base) and j < len(added):
+        while i < len(base_messages) and j < len(added_messages):
             if base_ts[i] <= added_ts[j]:
-                merged.append(base[i]); i += 1
+                merged.append(base_messages[i]); i += 1
             else:
-                merged.append(added[j]); j += 1
-        merged.extend(base[i:])
-        merged.extend(added[j:])
+                merged.append(added_messages[j]); j += 1
+        merged.extend(base_messages[i:])
+        merged.extend(added_messages[j:])
         return merged
     except Exception:  # pragma: no cover - merge must never break the brief
         logger.debug("context brief: state.db lineage merge failed for %s", sid, exc_info=True)
