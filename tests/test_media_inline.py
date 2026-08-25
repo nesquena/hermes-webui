@@ -738,6 +738,92 @@ class TestMediaEndpointUnit(unittest.TestCase):
             self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
             self.assertIn(b"Report", handler.body)
 
+    def test_handle_media_session_authorizes_safe_text_artifacts_outside_roots(self):
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        cases = {
+            "sample.csv": ("name,value\nalpha,1\n", "text/csv"),
+            "sample.diff": ("--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n", "text/x-diff"),
+            "sample.patch": ("--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n", "text/x-diff"),
+            "board.excalidraw": (
+                '{"type":"excalidraw","version":2,"elements":[],"appState":{},"files":{}}',
+                "application/vnd.excalidraw+json",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            outside_root = pathlib.Path(outside)
+            files = []
+            for name, (content, _mime) in cases.items():
+                target = outside_root / name
+                target.write_text(content, encoding="utf-8")
+                files.append(target)
+            session = SimpleNamespace(
+                messages=[
+                    {
+                        "role": "assistant",
+                        "content": "\n".join(f"MEDIA:{target}" for target in files),
+                    }
+                ]
+            )
+
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                for target in files:
+                    handler = _Handler()
+                    routes._handle_media(
+                        handler,
+                        SimpleNamespace(
+                            query=(
+                                f"path={urllib.parse.quote(str(target.resolve()))}"
+                                "&session_id=s-media&inline=1"
+                            ),
+                            path="/api/media",
+                        ),
+                    )
+                    with self.subTest(suffix=target.suffix):
+                        self.assertEqual(handler.status, 200)
+                        self.assertIn(cases[target.name][1], handler.headers.get("content-type", ""))
+                        self.assertIn(cases[target.name][0].encode("utf-8"), handler.body)
+
+                    denied = _Handler()
+                    routes._handle_media(
+                        denied,
+                        SimpleNamespace(
+                            query=f"path={urllib.parse.quote(str(target.resolve()))}&inline=1",
+                            path="/api/media",
+                        ),
+                    )
+                    with self.subTest(suffix=target.suffix, mode="without_session"):
+                        self.assertEqual(denied.status, 403)
+
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
 # No collection-time skip guard — conftest.py starts the server via its
