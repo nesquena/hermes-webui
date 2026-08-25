@@ -518,3 +518,47 @@ def test_session_revision_hashes_the_single_resolved_snapshot():
     assert resolved.call_count == 1
     assert revision["message_count"] == 1
     assert revision["transcript"] == context_brief._messages_revision(first)
+
+
+def test_lineage_merge_preserves_timestamp_inheritance_across_removed_mirror():
+    base_rows = [
+        {
+            "id": "mirror",
+            "role": "assistant",
+            "content": "BASE SIDECAR",
+            "timestamp": 100.0,
+        }
+    ]
+    db_rows = [
+        {
+            "id": "mirror",
+            "role": "assistant",
+            "content": "MIROIR DB",
+            "timestamp": 100.0,
+        },
+        {
+            "id": "distinct-after-mirror",
+            "role": "assistant",
+            "content": "LIGNE DISTINCTE NON DATÉE",
+        },
+    ]
+    session = SimpleNamespace(session_id="lineage-timestamp")
+
+    with patch("api.models.get_state_db_session_messages", return_value=db_rows):
+        merged = context_brief._merge_lineage_with_state_db(session, base_rows)
+
+    assert [row["content"] for row in merged] == ["BASE SIDECAR", "LIGNE DISTINCTE NON DATÉE"]
+
+
+def test_provenance_alias_chain_propagates_without_merging_conflicts():
+    messages = [
+        {"id": "x", "role": "user", "content": "A"},
+        {"id": "x", "_row_id": 1, "role": "user", "content": "B"},
+        {"_row_id": 1, "role": "user", "content": "C"},
+        {"id": "y", "_row_id": 1, "role": "user", "content": "D"},
+        {"id": "x", "_row_id": 2, "role": "user", "content": "E"},
+    ]
+
+    unique = context_brief._dedupe_brief_messages(list(enumerate(messages)))
+
+    assert [message["content"] for _idx, message in unique] == ["A", "D", "E"]
