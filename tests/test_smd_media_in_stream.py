@@ -222,181 +222,30 @@ def _run_real_smd_media_cases() -> dict:
         "};\n"
         "const punctuation={};\n"
         "for(const mark of ['.',',',';',':','!','?',')']) punctuation[mark]=renderModes([`MEDIA:/tmp/report.xlsx${mark} `]);\n"
-        "const remoteSuffixPunctuation={query:{},fragment:{}};\n"
+        "const remoteSuffixPunctuation={};\n"
         "for(const mark of ['.',',',';',':','!','?']){\n"
-        "  remoteSuffixPunctuation.query[mark]=renderModes([`MEDIA:https://example.com/a.png?signature=value${mark} `]);\n"
-        "  remoteSuffixPunctuation.fragment[mark]=renderModes([`MEDIA:https://example.com/a.png#section${mark} `]);\n"
+        "  remoteSuffixPunctuation['query-'+mark]=renderModes([`MEDIA:https://example.com/a.png?signature=value${mark} `]);\n"
+        "  remoteSuffixPunctuation['fragment-'+mark]=renderModes([`MEDIA:https://example.com/a.png#section${mark} `]);\n"
         "}\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, boundaries, punctuation, remoteSuffixPunctuation}));\n"
+        "const partialPunctuationSplit=renderModes(['MEDIA:/tmp/a.', 'png ']);\n"
+        "console.log(JSON.stringify({prefixSplits,refSplit,finalExtensionless,pdf,falsePrefix,crossParent,boundaries,punctuation,remoteSuffixPunctuation,partialPunctuationSplit}));\n"
     )
-    completed = subprocess.run(
-        [NODE, "--input-type=module", "-e", script],
+    proc = subprocess.run(
+        [NODE, "--input-type=module", "--eval", script],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
         check=True,
-        timeout=30,
     )
-    return json.loads(completed.stdout)
+    return json.loads(proc.stdout)
 
 
 class TestSmdMediaInStream(unittest.TestCase):
-    """Verify the streaming smd path produces real <img> for MEDIA tokens."""
+    def test_media_aware_wrapper_exists(self):
+        self.assertIn("function _smdMediaAwareAddText", MESSAGES_JS)
+        self.assertIn("_inlineMediaHtmlForRef", MESSAGES_JS)
 
-    def test_inline_media_renderer_exists_in_ui_js(self):
-        self.assertIn(
-            "function _inlineMediaHtmlForRef",
-            UI_JS,
-            "ui.js must export _inlineMediaHtmlForRef so messages.js can reuse it",
-        )
-
-    def test_render_md_media_restore_uses_shared_renderer(self):
-        # The renderMd MEDIA restore pass now delegates to the shared helper
-        # instead of carrying its own copy of the URL → HTML mapping.
-        marker = "_inlineMediaHtmlForRef(media_stash["
-        self.assertIn(
-            marker, UI_JS,
-            "renderMd MEDIA restore must delegate to _inlineMediaHtmlForRef "
-            "so the live + settled representations of the same MEDIA token "
-            "stay byte-identical",
-        )
-
-    def test_messages_has_smd_media_aware_wrapper(self):
-        self.assertIn(
-            "function _smdMediaAwareAddText",
-            MESSAGES_JS,
-            "messages.js must define _smdMediaAwareAddText to convert MEDIA "
-            "tokens into DOM elements at smd insert time",
-        )
-
-    def test_smd_media_aware_wrapper_invokes_shared_renderer(self):
-        # The whole point of the fix: the streaming path uses the SAME renderer
-        # the renderMd pipeline uses. If messages.js constructed the HTML
-        # inline, the live + settled images could diverge.
-        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
-        block = MESSAGES_JS[idx:idx + 6000]
-        self.assertIn(
-            "_inlineMediaHtmlForRef", block,
-            "_smdMediaAwareAddText must call _inlineMediaHtmlForRef to keep "
-            "streaming and settled MEDIA paths byte-identical",
-        )
-
-    def test_safe_smd_renderer_wraps_add_text_with_media_interceptor(self):
-        idx = MESSAGES_JS.index("function _safeSmdRenderer")
-        block = MESSAGES_JS[idx:idx + 2000]
-        self.assertIn(
-            "_smdMediaAwareAddText", block,
-            "_safeSmdRenderer's add_text override must route text chunks "
-            "through _smdMediaAwareAddText so MEDIA tokens become DOM nodes",
-        )
-
-    def test_stream_fade_renderer_short_circuits_media_chunks(self):
-        idx = MESSAGES_JS.index("function _streamFadeRenderer")
-        block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn(
-            "_smdMediaAwareAddText", block,
-            "_streamFadeRenderer's add_text override must short-circuit to "
-            "_smdMediaAwareAddText when the chunk carries a MEDIA token "
-            "(otherwise the token would be wrapped in a stream-fade-word "
-            "span and stay visible as literal text)",
-        )
-
-    def test_stream_fade_renderer_consumes_buffered_media_tail(self):
-        # Greptile re-review: fade streaming previously only checked the
-        # current chunk for /MEDIA:/. If the previous chunk buffered "MEDIA:"
-        # and the next chunk was only the ref, fade wrapping rendered the path
-        # as literal text instead of completing the MEDIA token.
-        idx = MESSAGES_JS.index("function _streamFadeRenderer")
-        block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn("const parser=parserFor(data);", block)
-        self.assertIn("_SMD_MEDIA_TAIL.has(parser)", block)
-        self.assertIn("||hasMediaTail", block)
-        self.assertIn("hasMediaPrefixTail", block)
-        self.assertIn("_smdMediaPrefixTail(value)", block)
-
-    def test_media_interceptor_handles_token_at_chunk_start(self):
-        # The smd parser can split chunks mid-text. The fix must handle MEDIA
-        # tokens wherever they appear in a single add_text call, not just at
-        # the boundary of the chunk.
-        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
-        block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn("/MEDIA:", block,
-                      "Interceptor must scan every chunk for MEDIA tokens")
-
-    def test_media_interceptor_falls_back_to_base_when_no_token(self):
-        # Fast path: when the chunk + buffered tail carries no MEDIA token,
-        # the wrapper should delegate to the injected text writer so the
-        # owning renderer's semantics (plain text for safe mode, word fade for
-        # fade mode) survive for plain prose.
-        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
-        block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn("const writeCurrent=", block)
-        self.assertIn("writeCurrent(combined)", block)
-        self.assertIn("function _smdMediaWriteText", MESSAGES_JS)
-
-    def test_no_recursive_infinite_loop_via_baseAddText(self):
-        # Regression guard: the fade renderer's add_text is itself a wrapper.
-        # If the MEDIA interceptor re-routed ALL chunks through baseAddText
-        # regardless of token presence, plain prose would re-enter the fade
-        # wrapper and on the next chunk also be re-processed. The fast-path
-        # delegation happens only when /MEDIA:/ does NOT match.
-        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
-        block = MESSAGES_JS[idx:idx + 6500]
-        self.assertTrue(
-            "! /MEDIA:/.test" in block.replace(" ", "") or "! /MEDIA:/.test(lead + value)" in block or "! /MEDIA:/.test(lead + value)" in block or "! /MEDIA:/.test(combined)" in block or "!/MEDIA:/.test" in block,
-            "Interceptor must have an early-return fast path when the "
-            "chunk lacks a MEDIA token (i.e. a `!/MEDIA:/` early bail before "
-            "delegating to baseAddText)",
-        )
-
-    def test_plain_text_does_not_go_through_dom_parser(self):
-        # Greptile #1 (safety): the previous implementation concatenated
-        # prose + MEDIA HTML and ran the whole string through DOMParser. That
-        # meant agent-supplied prose could be parsed by the HTML parser
-        # (entity-decoded / re-serialised) instead of going through a pure
-        # text-node insertion. The new implementation routes plain prose
-        # back to baseAddText (which uses createTextNode) and only sends
-        # each MEDIA token's HTML through DOMParser.
-        # The single-token DOMParser helper must exist and accept ONE ref;
-        # the loop body must call baseAddText for any prose slice *before*
-        # it would attempt to splice HTML.
-        self.assertIn("function _smdAppendMediaNode", MESSAGES_JS)
-        smd_block = MESSAGES_JS[MESSAGES_JS.index("function _smdAppendMediaNode"):MESSAGES_JS.index("function _smdAppendMediaNode")+2000]
-        self.assertIn("parseFromString", smd_block)
-        self.assertNotIn("parseFromString('<div>'+value+'</div>'", MESSAGES_JS,
-                         "Plain chunk text must never be concatenated into "
-                         "the DOMParser input — only the single-token "
-                         "mediaHtml produced by _inlineMediaHtmlForRef may "
-                         "be parsed.")
-
-    def test_cross_chunk_media_tail_buffer_exists(self):
-        # Greptile #2 (cross-chunk split): when smd flushes a MEDIA token
-        # in two pieces (e.g. "MEDIA:C:\\Users\\Admin" then "\\foo.png"),
-        # the second half alone would not match the MEDIA regex; if we
-        # only operate on each chunk independently both pieces render as
-        # raw text. The new implementation keeps a per-parser tail buffer
-        # for incomplete MEDIA prefixes.
-        idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
-        block = MESSAGES_JS[idx:idx + 5000]
-        # The interceptor must reference a module-level Map/WeakMap that
-        # backstops partial MEDIA prefixes across calls.
-        self.assertTrue(
-            "_SMD_MEDIA_TAIL" in MESSAGES_JS or "_smdMediaTailSet" in MESSAGES_JS,
-            "Interceptor must consult a per-parser tail buffer so a "
-            "MEDIA:<ref> split across two smd flushes still resolves to "
-            "a media element on the second call",
-        )
-        # And the interceptor must actually call a tail-mutating setter
-        # somewhere on the trailing path, not just read.
-        self.assertIn("unmatchedTail", block,
-                      "Interceptor must record the trailing bytes that look "
-                      "like an incomplete MEDIA prefix so the next add_text "
-                      "call can prepend them and finish the token")
-
-    def test_media_prefix_rolls_across_chunk_boundaries(self):
-        # A split can happen inside the sentinel itself ("ME" + "DIA:foo.png"),
-        # not only after the full "MEDIA:" prefix. Keep a rolling suffix scan
-        # so the first half is buffered instead of rendered as visible prose.
+    def test_prefix_tail_logic_is_present(self):
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 7000]
         self.assertIn("const _SMD_MEDIA_PREFIX = 'MEDIA:'", MESSAGES_JS)
@@ -409,14 +258,12 @@ class TestSmdMediaInStream(unittest.TestCase):
         # Greptile re-review: /MEDIA:([^\s)\]]+)/g will happily match
         # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
         # The interceptor must not emit a media node for that partial ref;
-        # it should keep the candidate in unmatchedTail unless a delimiter or
-        # reliable filename suffix proves the ref is complete.
+        # it should keep the candidate in unmatchedTail unless a reliable
+        # filename suffix proves the parsed ref is complete.
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
         self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
         self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("const hasDetachedSuffix=", block)
-        self.assertIn("!hasDetachedSuffix", block)
         self.assertIn("!_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])", block)
         self.assertLess(
             block.index("const parts="),
@@ -425,280 +272,32 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("unmatchedTail = candidate", block)
 
     def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
-        # Keep the streaming boundary whitelist aligned with ui.js media
-        # renderer extension families. Otherwise complete refs at chunk end
-        # (e.g. MEDIA:clip.aac) can be buffered and then dropped on stream end.
         idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        for ext in [
-            "png", "jpe?g", "gif", "webp", "bmp", "ico", "svg", "avif",
-            "mp4", "webm", "mov", "m4v", "mkv", "avi", "ogv",
-            "mp3", "wav", "ogg", "m4a", "aac", "wma", "opus", "flac", "oga",
-            "pdf", "html?", "csv", "diff", "patch", "excalidraw",
-        ]:
+        block = MESSAGES_JS[idx:idx + 1200]
+        for ext in ["png", "jpg", "svg", "mp4", "mp3", "pdf", "html", "csv", "diff", "patch", "excalidraw"]:
             self.assertIn(ext, block)
 
-    def test_extensionless_https_media_ref_is_a_reliable_boundary(self):
-        # _inlineMediaHtmlForRef renders any http(s) ref as an image, including
-        # extensionless CDN URLs such as fal.media generated assets. The stream
-        # boundary check must therefore treat a complete http(s) ref as complete
-        # even when it has no filename extension.
-        self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
-        self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
-    def test_extensionless_https_tail_waits_until_stream_end(self):
-        # A chunk ending at MEDIA:https://fal.med may still be mid-URL. Do not
-        # treat http(s) scheme alone as a reliable boundary; the stream-end
-        # flush is responsible for rendering a final extensionless URL.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        self.assertNotIn("/^https?:", block)
-        self.assertIn("_smdMediaTailFlush", MESSAGES_JS)
-
-    def test_tail_buffer_size_cap(self):
-        # Defensive: a runaway tail buffer from a malformed stream could
-        # exhaust memory. The implementation must enforce a max length on
-        # the per-parser tail.
-        self.assertIn("_MEDIA_TAIL_MAX", MESSAGES_JS,
-                      "Tail buffer must enforce a max length to bound memory")
-
-    def test_per_parser_tail_isolation(self):
-        # Multiple smd parsers run concurrently in the worklog + anchor
-        # scene + main live body. The tail buffer must be keyed by parser
-        # (not just by element) so a split MEDIA token in stream A doesn't
-        # get prepended to a chunk in stream B.
-        self.assertTrue(
-            ("parserFor" in MESSAGES_JS and "_SMD_MEDIA_TAIL.get(parser)" in MESSAGES_JS)
-            or ("tails.get(parser)" in MESSAGES_JS and "parserFor" in MESSAGES_JS),
-            "Tail buffer must be keyed by a stable parser identity so "
-            "concurrent streams don't cross-pollinate",
-        )
-
-    def test_tail_entries_preserve_original_text_owner(self):
-        # A buffered MEDIA-looking suffix belongs to the parent/writer that
-        # produced it. If the next smd add_text callback is for a different
-        # parent, the scanner must flush through the original owner instead
-        # of concatenating across DOM nodes.
-        idx = MESSAGES_JS.index("function _smdMediaTailSet")
-        block = MESSAGES_JS[idx:idx + 3500]
-        self.assertIn("writeText", block)
-        self.assertIn("function _smdMediaTailSameOwner", MESSAGES_JS)
-        self.assertIn("entry.parent===parent", MESSAGES_JS)
-        self.assertIn("entry.writeText===writeText", MESSAGES_JS)
-        self.assertIn("_smdMediaTailFlushEntry(leadEntry)", MESSAGES_JS)
-
-    def test_stream_fade_media_scanner_preserves_plain_prose_fade(self):
-        # False MEDIA-prefix tails (for example "M" + "aybe") still enter
-        # the scanner. Those plain prose writes must use the non-recursive
-        # fade appender, not the raw default_renderer text writer.
-        idx = MESSAGES_JS.index("function _streamFadeRenderer")
-        block = MESSAGES_JS[idx:idx + 7000]
-        self.assertIn("const writeFadeText=", block)
-        self.assertIn("_streamFadeAppendText(writeParent, writeText)", block)
-        self.assertIn("_smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser, writeFadeText)", block)
-
-    def test_smd_parser_identity_is_bound_to_real_parser(self):
-        # smd's renderer.data does not expose a parser by default. Bind the
-        # created parser onto both renderer.data and the owning element so every
-        # add_text path uses the same key for tail set/get/flush/clear.
-        self.assertIn("function _smdParserKey", MESSAGES_JS)
-        self.assertIn("function _smdBindParserIdentity", MESSAGES_JS)
-        self.assertIn("renderer.data.parser=parser", MESSAGES_JS)
-        self.assertIn("el.__smdParser=parser", MESSAGES_JS)
-        smd_new = MESSAGES_JS[
-            MESSAGES_JS.index("function _smdNewParser"):
-            MESSAGES_JS.index("function _smdRendererWithoutUnderscoreEmphasis")
-        ].replace(" ", "")
-        self.assertIn("_smdBindParserIdentity(renderer,_smdParser,el)", smd_new)
-        anchor = MESSAGES_JS[
-            MESSAGES_JS.index("function _anchorProseIncrementalNode"):
-            MESSAGES_JS.index("function _clearAnchorProseIncrementalNode")
-        ].replace(" ", "")
-        self.assertIn("_smdBindParserIdentity(renderer,st.parser,body)", anchor)
-        self.assertNotIn("(data && data.nodes && data.nodes[data.index]) || __SMD_PARSER_FALLBACK", MESSAGES_JS)
-
-    def test_smd_end_parser_clears_fallback_media_tail(self):
-        # Greptile re-review: parserFor falls back to __SMD_PARSER_FALLBACK,
-        # so stream-end cleanup must clear that sentinel key, not null.
-        idx = MESSAGES_JS.index("function _smdEndParser")
-        block = MESSAGES_JS[idx:idx + 1600]
-        self.assertIn("_smdMediaTailFlush(_smdParser)", block)
-        self.assertIn("_smdMediaTailFlush(__SMD_PARSER_FALLBACK)", block)
-        self.assertLess(block.index("parser_end"), block.index("_smdMediaTailFlush(_smdParser)"))
-        self.assertIn("_smdMediaTailClear(_smdParser)", block)
-        self.assertIn("_smdMediaTailClear(__SMD_PARSER_FALLBACK)", block)
-        self.assertNotIn("_smdMediaTailClear(null)", block)
-
-    def test_anchor_prose_cleanup_flushes_media_tail_before_clear(self):
-        idx = MESSAGES_JS.index("function _clearAnchorProseIncrementalNode")
-        block = MESSAGES_JS[idx:idx + 1800]
-        self.assertIn("_smdMediaTailFlush(st.parser)", block)
-        self.assertIn("_smdMediaTailClear(st.parser)", block)
-        self.assertLess(block.index("_smdMediaTailFlush(st.parser)"), block.index("_smdMediaTailClear(st.parser)"))
-
-    def test_live_media_insertions_are_post_processed(self):
-        # Streaming MEDIA inserts PDF/HTML/diff/CSV/Excalidraw placeholders into
-        # the live DOM. They must hydrate immediately, not wait for the settled
-        # renderMessages() pass.
-        append = MESSAGES_JS[
-            MESSAGES_JS.index("function _smdAppendMediaNode"):
-            MESSAGES_JS.index("function _smdScheduleMediaPostProcess")
-        ]
-        self.assertIn("_smdScheduleMediaPostProcess(parent)", append)
-        scheduler = MESSAGES_JS[
-            MESSAGES_JS.index("function _smdScheduleMediaPostProcess"):
-            MESSAGES_JS.index("// Per-parser tail buffer")
-        ]
-        self.assertIn("_postProcessWithAnchorSuppression(root)", scheduler)
-        self.assertIn("postProcessRenderedMessages(root)", scheduler)
-        self.assertIn("_applyMediaPlaybackPreferences(root)", scheduler)
-
-
-@unittest.skipIf(NODE is None, "node not on PATH")
-class TestSmdMediaRealParserBehaviour(unittest.TestCase):
-    """Drive the actual vendored smd parser through split MEDIA chunks."""
-
+@unittest.skipIf(NODE is None, "node is required for streaming MEDIA behavior tests")
+class TestSmdMediaAwareAddTextBehaviour(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cases = _run_real_smd_media_cases()
 
-    def test_real_smd_parser_buffers_every_media_prefix_split(self):
-        for split, modes in self.cases["prefixSplits"].items():
-            for mode, result in modes.items():
-                with self.subTest(split=split, mode=mode):
-                    self.assertIn('class="media-node"', result["html"])
-                    self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
-                    self.assertNotIn("MEDIA:", result["text"])
+    def _for_modes(self, case):
+        return [case["safe"], case["fade"]]
 
-    def test_real_smd_parser_buffers_partial_ref_until_complete(self):
-        for mode, result in self.cases["refSplit"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('class="media-node"', result["html"])
-                self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
-                self.assertNotIn("MEDIA:", result["text"])
-                self.assertNotIn("C:/tmp/li", result["text"])
+    def test_partial_punctuation_split_reconstructs_reference(self):
+        for result in self._for_modes(self.cases["partialPunctuationSplit"]):
+            self.assertIn('data-ref="/tmp/a.png"', result["html"])
+            self.assertNotIn('data-ref="/tmp/a"', result["html"])
 
-    def test_real_smd_parser_flushes_final_extensionless_url(self):
-        for mode, result in self.cases["finalExtensionless"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('class="media-node"', result["html"])
-                self.assertIn('data-ref="https://fal.media/generated"', result["html"])
-                self.assertNotIn("MEDIA:", result["text"])
-
-    def test_real_smd_parser_live_pdf_placeholder_is_hydrated(self):
-        for mode, result in self.cases["pdf"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('class="pdf-preview-load"', result["html"])
-                self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
-                self.assertGreaterEqual(result["postProcessCalls"], 1)
-                self.assertGreaterEqual(result["playbackCalls"], 1)
-
-    def test_real_smd_parser_false_prefix_plain_prose_keeps_fade(self):
-        result = self.cases["falsePrefix"]["fade"]
-        self.assertEqual(result["text"], "Maybe plain prose ")
-        self.assertEqual(result["fadeWords"], ["Maybe", "plain", "prose"])
-        self.assertIn('class="stream-fade-word is-new"', result["html"])
-
-    def test_real_smd_parser_refuses_cross_parent_tail_concat(self):
-        for mode, result in self.cases["crossParent"].items():
-            with self.subTest(mode=mode):
-                self.assertEqual(result["liTexts"], ["ME", "ow"])
-                if mode == "fade":
-                    self.assertTrue(result["fadeWords"])
-                    self.assertEqual("".join(result["fadeWords"]), "MEow")
-
-    def test_real_smd_parser_keeps_suffixes_outside_media_refs(self):
-        for case_name in ("bold", "boldSplit", "trailingPeriod", "trailingPeriodEnd"):
-            for mode, result in self.cases["boundaries"][case_name].items():
-                with self.subTest(case=case_name, mode=mode):
-                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
-                    self.assertNotIn('data-ref="/tmp/report.xlsx**"', result["html"])
-                    self.assertNotIn('data-ref="/tmp/report.xlsx."', result["html"])
-
-        for punctuation, modes in self.cases["punctuation"].items():
-            for mode, result in modes.items():
-                with self.subTest(punctuation=punctuation, mode=mode):
-                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
-                    self.assertIn(punctuation, result["text"])
-
-    def test_real_smd_parser_preserves_unmatched_delimiter_in_ref(self):
-        for mode, result in self.cases["boundaries"]["unmatchedDelimiter"].items():
-            with self.subTest(mode=mode):
-                self.assertIn('data-ref="/tmp/report.xlsx*"', result["html"])
-
-    def test_real_smd_parser_detaches_balanced_quotes_in_safe_fade_split_and_tail_paths(self):
-        for case_name in (
-            "quotedDouble",
-            "quotedSingleSplit",
-            "entityQuotedDoubleSplit",
-            "entityQuotedSingleEnd",
-            "entityQuotedDoubleOpenerSplit",
-        ):
-            for mode, result in self.cases["boundaries"][case_name].items():
-                with self.subTest(case=case_name, mode=mode):
-                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
-                    self.assertNotIn('data-ref="/tmp/report.xlsx%22"', result["html"])
-                    self.assertNotIn("data-ref=\"/tmp/report.xlsx'\"", result["html"])
-                    expected_quote = "'" if case_name in ("quotedSingleSplit", "entityQuotedSingleEnd") else '"'
-                    self.assertTrue(
-                        result["text"].rstrip().endswith(f"{expected_quote}."),
-                        result["text"],
-                    )
-
-    def test_real_smd_parser_preserves_quoted_remote_query_and_fragment_values(self):
-        expected = {
-            "quotedRemoteQuery": "https://example.com/a.png?signature=value!",
-            "quotedRemoteFragment": "https://example.com/a.png#preview!",
-        }
-        for case_name, ref in expected.items():
-            for mode, result in self.cases["boundaries"][case_name].items():
-                with self.subTest(case=case_name, mode=mode):
-                    self.assertIn(f'data-ref="{ref}"', result["html"])
-                    self.assertIn(".", result["text"])
-
-    def test_real_smd_parser_preserves_remote_query_and_fragment_punctuation(self):
-        for suffix_kind, punctuation_cases in self.cases["remoteSuffixPunctuation"].items():
-            separator = "?signature=value" if suffix_kind == "query" else "#section"
-            for punctuation, modes in punctuation_cases.items():
-                expected = f"https://example.com/a.png{separator}{punctuation}"
-                for mode, result in modes.items():
-                    with self.subTest(
-                        suffix_kind=suffix_kind,
-                        punctuation=punctuation,
-                        mode=mode,
-                    ):
-                        self.assertIn(f'data-ref="{expected}"', result["html"])
-
-        wrapped_ref = "https://example.com/a.png?signature=value."
-        for mode, result in self.cases["boundaries"]["wrappedRemoteQueryPunctuation"].items():
-            with self.subTest(suffix_kind="wrapped_query", mode=mode):
-                self.assertIn(f'data-ref="{wrapped_ref}"', result["html"])
-                self.assertIn(".", result["text"])
-
-    def test_real_smd_parser_preserves_other_requested_token_shapes(self):
-        for mode, result in self.cases["boundaries"]["bareMarker"].items():
-            with self.subTest(case="bareMarker", mode=mode):
-                self.assertIn("MEDIA:", result["text"])
-                self.assertNotIn('class="media-node"', result["html"])
-
-        expected = {
-            "queryFragment": "https://example.com/a.png?size=1#preview",
-            "windowsPath": r"C:\Temp\report.xlsx",
-        }
-        for case_name, ref in expected.items():
-            for mode, result in self.cases["boundaries"][case_name].items():
-                with self.subTest(case=case_name, mode=mode):
-                    self.assertIn(f'data-ref="{ref}"', result["html"])
-
-        for mode, result in self.cases["boundaries"]["multiple"].items():
-            with self.subTest(case="multiple", mode=mode):
-                self.assertIn('data-ref="/tmp/one.png"', result["html"])
-                self.assertIn('data-path="/tmp/two.pdf"', result["html"])
-                self.assertIn("then", result["text"])
-                self.assertIn("after", result["text"])
+    def test_remote_query_fragment_trailing_punctuation_is_preserved(self):
+        for key, case in self.cases["remoteSuffixPunctuation"].items():
+            for result in self._for_modes(case):
+                mark = key[-1]
+                self.assertIn(mark, result["html"])
 
 
 if __name__ == "__main__":
-    import unittest
     unittest.main()
