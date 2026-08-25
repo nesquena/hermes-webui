@@ -1,8 +1,8 @@
 # Auto end-of-turn brief regeneration (validated 2026-08-14): worker guards,
 # canonical auxiliary routing, and route payload.
-import threading
+import sys
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -65,13 +65,17 @@ class TestAutoConfig:
 
 class TestAuxiliaryRouting:
     def _fake_call_llm(self, monkeypatch, captured):
-        import agent.auxiliary_client as aux
-
         def fake(**kwargs):
             captured.update(kwargs)
             return {"choices": [{"message": {"content": "x" * 300}}]}
 
-        monkeypatch.setattr(aux, "call_llm", fake)
+        agent_module = ModuleType("agent")
+        agent_module.__path__ = []
+        auxiliary_module = ModuleType("agent.auxiliary_client")
+        auxiliary_module.call_llm = fake
+        agent_module.auxiliary_client = auxiliary_module
+        monkeypatch.setitem(sys.modules, "agent", agent_module)
+        monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary_module)
         monkeypatch.setattr(cb, "_distill_context_brief", lambda s: "distilled")
         monkeypatch.setattr(cb, "_extract_llm_content", lambda r: "x" * 300)
 
@@ -336,6 +340,7 @@ class TestWorkerGuards:
             "job_id": "j-admission",
             "session_id": sid,
             "_automatic": True,
+            "_generation": cb._SID_GENERATIONS.get(sid, 0),
             "status": "running",
         }
 
@@ -371,7 +376,11 @@ class TestWorkerGuards:
             "_save_llm_brief",
             lambda *_args, **_kwargs: saved.append(True),
         )
-        job = {"session_id": sid, "_automatic": True}
+        job = {
+            "session_id": sid,
+            "_automatic": True,
+            "_generation": cb._SID_GENERATIONS.get(sid, 0),
+        }
 
         cb._run_brief_job(job)
 
@@ -461,7 +470,12 @@ class TestWorkerGuards:
         monkeypatch.setattr(cb, "_generate_llm_brief", lambda *_args, **_kwargs: ("x" * 300, "test"))
         saved = []
         monkeypatch.setattr(cb, "_save_llm_brief", lambda *_args, **_kwargs: saved.append(True))
-        job = {"session_id": sid, "status": "running", "_automatic": True}
+        job = {
+            "session_id": sid,
+            "status": "running",
+            "_automatic": True,
+            "_generation": cb._SID_GENERATIONS.get(sid, 0),
+        }
 
         cb._run_brief_job(job)
 
@@ -484,7 +498,12 @@ class TestWorkerGuards:
         monkeypatch.setattr(cb, "_generate_llm_brief", lambda *_args, **_kwargs: ("x" * 300, "test"))
         saved = []
         monkeypatch.setattr(cb, "_save_llm_brief", lambda *_args, **_kwargs: saved.append(True))
-        job = {"session_id": sid, "status": "running", "_automatic": True}
+        job = {
+            "session_id": sid,
+            "status": "running",
+            "_automatic": True,
+            "_generation": cb._SID_GENERATIONS.get(sid, 0),
+        }
 
         cb._run_brief_job(job)
 

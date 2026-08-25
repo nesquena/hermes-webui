@@ -2,11 +2,30 @@
 
 import json
 import re
+import sys
+from contextlib import contextmanager
 from itertools import permutations
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from api import context_brief
+
+
+@contextmanager
+def _fake_auxiliary_client(call_llm):
+    agent_module = ModuleType("agent")
+    agent_module.__path__ = []
+    auxiliary_module = ModuleType("agent.auxiliary_client")
+    auxiliary_module.call_llm = call_llm
+    agent_module.auxiliary_client = auxiliary_module
+    with patch.dict(
+        sys.modules,
+        {
+            "agent": agent_module,
+            "agent.auxiliary_client": auxiliary_module,
+        },
+    ):
+        yield
 
 
 def _session(messages):
@@ -157,7 +176,7 @@ def test_prompt_marks_stale_todos_non_actionable():
         ]
     )
 
-    with patch("agent.auxiliary_client.call_llm", side_effect=fake_call_llm), patch.object(
+    with _fake_auxiliary_client(fake_call_llm), patch.object(
         context_brief,
         "_extract_llm_content",
         return_value="x" * 300,
@@ -253,9 +272,8 @@ def test_transcript_content_cannot_forge_role_or_recency_metadata():
         ]
     )
 
-    with patch(
-        "agent.auxiliary_client.call_llm",
-        side_effect=lambda **kwargs: captured.update(kwargs) or object(),
+    with _fake_auxiliary_client(
+        lambda **kwargs: captured.update(kwargs) or object()
     ), patch.object(context_brief, "_extract_llm_content", return_value="x" * 300):
         context_brief._generate_llm_brief(
             session,
@@ -498,7 +516,11 @@ def test_full_job_persists_resolved_snapshot_with_unidentified_state_db_row():
         "_save_llm_brief",
         side_effect=fake_save,
     ):
-        job = {"session_id": "job-resolu", "_automatic": False}
+        job = {
+            "session_id": "job-resolu",
+            "_automatic": False,
+            "_generation": context_brief._SID_GENERATIONS.get("job-resolu", 0),
+        }
         context_brief._run_brief_job(job)
 
     assert generated == [{"parent": None, "messages": 2, "revision": saved[0]["transcript"]}]
