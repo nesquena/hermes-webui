@@ -2,6 +2,7 @@
 
 import json
 import re
+from itertools import permutations
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -555,13 +556,11 @@ def test_provenance_alias_chain_propagates_without_merging_conflicts():
         {"id": "x", "role": "user", "content": "A"},
         {"id": "x", "_row_id": 1, "role": "user", "content": "B"},
         {"_row_id": 1, "role": "user", "content": "C"},
-        {"id": "y", "_row_id": 1, "role": "user", "content": "D"},
-        {"id": "x", "_row_id": 2, "role": "user", "content": "E"},
     ]
 
     unique = context_brief._dedupe_brief_messages(list(enumerate(messages)))
 
-    assert [message["content"] for _idx, message in unique] == ["A", "D", "E"]
+    assert [message["content"] for _idx, message in unique] == ["A"]
 
 
 def test_provenance_alias_bridge_merges_components_regardless_of_order():
@@ -569,10 +568,24 @@ def test_provenance_alias_bridge_merges_components_regardless_of_order():
         {"id": "x", "role": "user", "content": "A"},
         {"_row_id": 1, "role": "user", "content": "C"},
         {"id": "x", "_row_id": 1, "role": "user", "content": "B"},
-        {"id": "y", "_row_id": 1, "role": "user", "content": "D"},
-        {"id": "x", "_row_id": 2, "role": "user", "content": "E"},
     ]
 
     unique = context_brief._dedupe_brief_messages(list(enumerate(messages)))
 
-    assert [message["content"] for _idx, message in unique] == ["A", "D", "E"]
+    assert [message["content"] for _idx, message in unique] == ["A"]
+
+
+def test_conflicted_provenance_component_is_fail_open_for_all_permutations():
+    witnesses = [
+        {"id": "x", "role": "user", "content": "A"},
+        {"_row_id": 1, "role": "user", "content": "B"},
+        {"id": "x", "_row_id": 2, "role": "user", "content": "C"},
+        {"id": "y", "_row_id": 1, "role": "user", "content": "D"},
+        {"id": "x", "_row_id": 1, "role": "user", "content": "E"},
+    ]
+
+    for ordered in permutations(witnesses):
+        unique = context_brief._dedupe_brief_messages(list(enumerate(ordered)))
+        contents = [message["content"] for _idx, message in unique]
+        assert len(contents) == 5
+        assert set(contents) == {"A", "B", "C", "D", "E"}
