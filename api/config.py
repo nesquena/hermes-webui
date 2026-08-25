@@ -7341,6 +7341,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     or _is_plugin_model_provider(_canonical)
                 )
                 _is_provider_config = isinstance(_provider_cfg, dict)
+                if (
+                    _is_provider_config
+                    and _canonical.startswith("custom:")
+                    and _provider_cfg.get("enabled") is False
+                ):
+                    continue
                 _has_provider_route = False
                 if _is_provider_config:
                     _has_provider_route = any(
@@ -7752,7 +7758,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             auto_detected_models.append({"id": _cp_model, "label": _cp_label})
                             detected_providers.add("custom")
 
-        _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
+        _modern_custom_slugs = {
+            provider_id
+            for provider_id in _canonical_to_raw_provider_key
+            if provider_id.startswith("custom:")
+        }
+        _has_custom_providers = (
+            isinstance(_custom_providers_cfg, list)
+            and len(_custom_providers_cfg) > 0
+        ) or bool(_modern_custom_slugs)
         if active_provider and active_provider != "custom" and not _has_custom_providers:
             detected_providers.discard("custom")
             for _slug in list(detected_providers):
@@ -7767,11 +7781,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
+        _authoritative_custom_slugs = _named_custom_slugs | _modern_custom_slugs
         _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
-                if _pid_norm.startswith("custom:") and _pid_norm not in _named_custom_slugs:
+                if (
+                    _pid_norm.startswith("custom:")
+                    and _pid_norm not in _authoritative_custom_slugs
+                ):
                     detected_providers.discard(_pid)
 
         # Filter providers if providers.only_configured is set
@@ -7903,6 +7921,49 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 pid,
                                 _nc_models,
                                 models_endpoint_error=_named_custom_errors.get(pid),
+                                apply_prefix=False,
+                            )
+                    elif pid in _canonical_to_raw_provider_key:
+                        # Settings → Providers stores new custom endpoints in the
+                        # modern providers mapping. They are just as authoritative
+                        # as legacy custom_providers entries and must populate the
+                        # chat picker from their configured model allowlist.
+                        _raw_key = _canonical_to_raw_provider_key[pid]
+                        _modern_cfg = _get_provider_cfg(_raw_key)
+                        _modern_models = _configured_model_options(
+                            _modern_cfg.get("models")
+                        )
+                        _modern_default = str(
+                            _modern_cfg.get("default_model")
+                            or _modern_cfg.get("model")
+                            or ""
+                        ).strip()
+                        if _modern_default and not any(
+                            model.get("id") == _modern_default
+                            for model in _modern_models
+                        ):
+                            _modern_models.insert(
+                                0,
+                                {"id": _modern_default, "label": _modern_default},
+                            )
+                        if _modern_models:
+                            if active_provider != pid:
+                                for model in _modern_models:
+                                    model_id = str(model.get("id") or "").strip()
+                                    if model_id and not model_id.startswith("@"):
+                                        # Prefix slash-qualified ids too: the
+                                        # custom endpoint owns the full id and a
+                                        # built-in provider must not steal it.
+                                        model["id"] = f"@{pid}:{model_id}"
+                            _modern_display = str(
+                                _modern_cfg.get("name") or ""
+                            ).strip() or _effective_provider_display_name(
+                                pid, _PROVIDER_DISPLAY
+                            )
+                            _append_picker_group(
+                                _modern_display,
+                                pid,
+                                _modern_models,
                                 apply_prefix=False,
                             )
                     continue
