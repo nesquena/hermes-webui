@@ -986,7 +986,7 @@ def _session_revision(session) -> dict:
     return {
         "message_count": len(messages),
         "updated_at": updated_at or None,
-        "transcript": _transcript_revision(session),
+        "transcript": _messages_revision(messages),
     }
 
 

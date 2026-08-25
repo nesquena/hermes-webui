@@ -505,3 +505,16 @@ def test_full_job_persists_resolved_snapshot_with_unidentified_state_db_row():
     assert job["status"] == "done"
     assert job["result"]["persisted"] is True
     assert job["result"]["llm_brief"]["stale"] is False
+
+
+def test_session_revision_hashes_the_single_resolved_snapshot():
+    first = [{"role": "user", "content": "premier état"}]
+    second = [*first, {"role": "assistant", "content": "état concurrent"}]
+    session = SimpleNamespace(updated_at=1.0)
+
+    with patch.object(context_brief, "_session_messages", side_effect=[first, second]) as resolved:
+        revision = context_brief._session_revision(session)
+
+    assert resolved.call_count == 1
+    assert revision["message_count"] == 1
+    assert revision["transcript"] == context_brief._messages_revision(first)
