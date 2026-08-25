@@ -34,25 +34,20 @@ jobs:
 
           p = Path('tests/test_smd_media_in_stream.py')
           s = p.read_text()
-          old = '        "const partialPunctuationSplit=renderModes([\'MEDIA:/tmp/a.\', \'png \']);\\n"\n        "console.log(JSON.stringify({prefixSplits,refSplit,finalExtensionless,pdf,falsePrefix,crossParent,boundaries,punctuation,remoteSuffixPunctuation,partialPunctuationSplit}));\\n"'
-          new = '        "const partialPunctuationSplit=renderModes([\'MEDIA:/tmp/a.\', \'png \']);\\n"\n        "const partialExtensionContinuation=renderModes([\'MEDIA:/tmp/a.png.\', \'bak \']);\\n"\n        "console.log(JSON.stringify({prefixSplits,refSplit,finalExtensionless,pdf,falsePrefix,crossParent,boundaries,punctuation,remoteSuffixPunctuation,partialPunctuationSplit,partialExtensionContinuation}));\\n"'
-          if s.count(old) != 1:
-              raise SystemExit(f'script target count={s.count(old)}')
-          s = s.replace(old, new, 1)
           old = '        self.assertIn("!_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])", block)'
           new = '        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)'
           if s.count(old) != 1:
               raise SystemExit(f'assert target count={s.count(old)}')
           s = s.replace(old, new, 1)
           marker = '''    def test_remote_query_fragment_trailing_punctuation_is_preserved(self):\n'''
-          insert = '''    def test_extension_like_prefix_does_not_complete_before_following_suffix(self):\n        for result in self._for_modes(self.cases["partialExtensionContinuation"]):\n            self.assertIn('data-ref="/tmp/a.png.bak"', result["html"])\n            self.assertNotIn('data-ref="/tmp/a.png"', result["html"])\n\n'''
+          insert = '''    def test_extension_like_prefix_does_not_complete_before_following_suffix(self):\n        result = _run_media_aware_chunks(["MEDIA:/tmp/a.png.", "bak "])\n        self.assertIn('data-ref="/tmp/a.png.bak"', result["html"])\n        self.assertNotIn('data-ref="/tmp/a.png"', result["html"])\n        self.assertNotIn("MEDIA:", result["text"])\n\n'''
           if s.count(marker) != 1:
               raise SystemExit(f'marker count={s.count(marker)}')
           s = s.replace(marker, insert + marker, 1)
           p.write_text(s)
           PY
       - name: Focused regression
-        run: python -m pytest -q tests/test_smd_media_in_stream.py
+        run: python -m unittest -q tests.test_smd_media_in_stream
       - name: Commit fix and remove helper workflow
         run: |
           git config user.name github-actions[bot]
