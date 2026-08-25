@@ -85,6 +85,53 @@ def test_named_custom_provider_routing_id_does_not_duplicate_picker_row(tmp_path
     assert results == [True, True]
 
 
+def test_plain_provider_prefix_slash_model_id_does_not_duplicate_picker_row(tmp_path):
+    """#7290: a `provider/model` badge key for a slash-bearing model id
+    (e.g. commandcode/deepseek/deepseek-v4-flash) must dedupe against the bare
+    model row of the same provider, instead of leaking as a duplicate entry."""
+    ui = UI_JS_PATH.read_text(encoding="utf-8")
+
+    assert "const slashPrefix=provider?`${provider}/`:'';" in ui, (
+        "_isEquivalentConfiguredModelEntry must route plain `provider/model` "
+        "badge keys like the @-prefixed spelling (#7290)"
+    )
+
+    entries = [{"value": "deepseek/deepseek-v4-flash", "providerId": "commandcode"}]
+    results = _equivalent_cases(
+        tmp_path,
+        [
+            {
+                "modelId": "commandcode/deepseek/deepseek-v4-flash",
+                "badge": {"provider": "commandcode"},
+                "entries": entries,
+            },
+            {
+                "modelId": "@commandcode:deepseek/deepseek-v4-flash",
+                "badge": {"provider": "commandcode"},
+                "entries": entries,
+            },
+        ],
+    )
+    assert results == [True, True]
+
+
+def test_plain_provider_prefix_same_model_other_provider_remains_distinct(tmp_path):
+    """#7290 guard: the plain `provider/model` routing dedup must NOT collapse
+    the same model id from a different provider (#3360 family)."""
+    entries = [{"value": "deepseek/deepseek-v4-flash", "providerId": "other-provider"}]
+    results = _equivalent_cases(
+        tmp_path,
+        [
+            {
+                "modelId": "commandcode/deepseek/deepseek-v4-flash",
+                "badge": {"provider": "commandcode"},
+                "entries": entries,
+            },
+        ],
+    )
+    assert results == [False]
+
+
 def test_same_model_id_from_another_provider_remains_distinct(tmp_path):
     entries = [{"value": "model-a", "providerId": "custom:primary"}]
     results = _equivalent_cases(

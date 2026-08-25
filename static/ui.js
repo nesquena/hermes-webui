@@ -3940,12 +3940,29 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // different providers.
   const rawId=String(modelId||'');
   const prefix=provider?`@${provider}:`:'';
-  if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
-  const routedId=rawId.slice(prefix.length);
-  return (entries||[]).some(entry=>
-    String(entry.providerId||'').toLowerCase()===provider
-    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
-  );
+  if(prefix&&rawId.toLowerCase().startsWith(prefix)){
+    const routedId=rawId.slice(prefix.length);
+    return (entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    );
+  }
+  // Plain `provider/model` badge keys (produced by the backend alongside
+  // `@provider:model`) must dedupe the same way when an existing picker row
+  // belongs to that provider. For single-slash model ids the primary
+  // normalization already strips the prefix; this branch matters for
+  // slash-bearing model ids where the prefixed key keeps vendor hierarchy
+  // (e.g. commandcode/deepseek/deepseek-v4-flash vs deepseek/deepseek-v4-flash)
+  // and would otherwise leak as a duplicate selectable entry (#7290).
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const routedId=rawId.slice(slashPrefix.length);
+    return (entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    );
+  }
+  return false;
 }
 
 function _getConfiguredModelBadge(modelId,badgeMap,providerId){
