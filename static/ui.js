@@ -23,6 +23,26 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+
+// ── Kaomoji busy indicator (ported from hermes-cli TUI) ──────────────────
+// Animated faces that cycle during S.busy (turn in progress), replacing
+// the static lightbulb / running-dot with the same kaomoji the CLI shows.
+const _KAOMOJI_FACES=['(｡•́︿•̀｡)','(◔_◔)','(¬‿¬)','( •_•)>⌐■-■','(⌐■_■)','(´･_･`)','◉_◉','(°ロ°)','( ˘⌣˘)♡','ヽ(>∀<☆)☆','٩(๑❛ᴗ❛๑)۶','(⊙_⊙)','(¬_¬)','( ͡° ͜ʖ ͡°)','ಠ_ಠ'];
+let _kaomojiTick=0;
+let _kaomojiTimer=null;
+function _kaomojiTickFn(){
+  _kaomojiTick++;
+  const face=_KAOMOJI_FACES[_kaomojiTick%_KAOMOJI_FACES.length];
+  document.querySelectorAll('[data-kaomoji="1"]').forEach(el=>{el.textContent=face;});
+}
+function _kaomojiStart(){
+  if(_kaomojiTimer)return;
+  _kaomojiTickFn();
+  _kaomojiTimer=setInterval(_kaomojiTickFn,800);
+}
+function _kaomojiStop(){
+  if(_kaomojiTimer){clearInterval(_kaomojiTimer);_kaomojiTimer=null;}
+}
 const OFFLINE_RECHECK_MS=2500;
 const OFFLINE_HEALTH_TIMEOUT_MS=10000;
 const OFFLINE_FETCH_FAILURES_BEFORE_BANNER=2;
@@ -6702,7 +6722,7 @@ function _activityStatusNode({kind='info',label='',detail='',status='done',ts=nu
   row.className=`agent-activity-status agent-activity-status-${kind} agent-activity-status-${status}`;
   if(id) row.setAttribute('data-activity-event-id',id);
   if(ts) row.setAttribute('data-activity-at',String(ts));
-  const iconMap={run:li('play',13),model:li('bot',13),waiting:'<span class="tool-card-running-dot"></span>',thinking:li('lightbulb',13),tool:li('wrench',13),done:li('check',13),warning:li('alert-triangle',13)};
+  const iconMap={run:li('play',13),model:li('bot',13),waiting:'<span class="kaomoji-busy agent-kaomoji" data-kaomoji="1">'+_KAOMOJI_FACES[0]+'</span>',thinking:'<span class="kaomoji-busy agent-kaomoji" data-kaomoji="1">'+_KAOMOJI_FACES[0]+'</span>',tool:li('wrench',13),done:li('check',13),warning:li('alert-triangle',13)};
   row.innerHTML=`<span class="agent-activity-status-icon">${iconMap[kind]||li('clock',13)}</span><span class="agent-activity-status-copy"><span class="agent-activity-status-label">${esc(label)}</span>${detail?`<span class="agent-activity-status-detail">${esc(detail)}</span>`:''}</span><span class="agent-activity-status-time">${esc(_activityClockLabel(ts))}</span>`;
   return row;
 }
@@ -8351,6 +8371,7 @@ async function handleComposerPrimaryAction(){
 
 function setBusy(v){
   S.busy=v;
+  if(v)_kaomojiStart();else _kaomojiStop();
   updateSendBtn();
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
@@ -11559,7 +11580,7 @@ function _thinkingCardHtml(text, open){
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon kaomoji-busy" data-kaomoji="1">${_KAOMOJI_FACES[0]}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
@@ -18744,7 +18765,7 @@ function buildToolCard(tc){
   const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
-  const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
+  const runIndicator=tc.done===false?'<span class="kaomoji-busy tool-card-kaomoji" data-kaomoji="1">'+_KAOMOJI_FACES[0]+'</span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
   const openClass='';
@@ -20090,7 +20111,7 @@ function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon kaomoji-busy" data-kaomoji="1">${_KAOMOJI_FACES[0]}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function _renderThinkingInto(row,text=''){
