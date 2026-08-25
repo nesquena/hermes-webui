@@ -21026,12 +21026,61 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     very fresh pending turn must also block duplicate chat_start requests. If we
     only check STREAMS here, a second request can race through the registration
     gap and overwrite the sidecar owner.
+
+    FIX 23-Ago-2026 (Gemma Jr./Hermes): un stream HUÉRFANO (pestaña cerrada sin
+    teardown limpio, worker que terminó sin limpiar STREAMS) bloqueaba todo
+    chat/start de la sesión con 409 "session already has an active stream"
+    durante horas (el reaper no lo tocaba). Ahora: si el stream está en STREAMS
+    pero NO hay worker vivo en ACTIVE_RUNS y NO hay pending_user_message fresco,
+    se limpia del dict STREAMS y NO bloquea. La micro-ventana de registro
+    (stream creado, worker aún no registrado) queda protegida por el guard de
+    pending fresco.
     """
     if not stream_id:
         return False
     with STREAMS_LOCK:
         if stream_id in STREAMS:
-            return True
+            try:
+                from api import config as _live_config
+                with _live_config.ACTIVE_RUNS_LOCK:
+                    worker_alive = stream_id in (_live_config.ACTIVE_RUNS or {})
+            except Exception:
+                worker_alive = True  # fail-closed: ante duda, bloquear
+            if worker_alive:
+                return True
+            # Sin worker vivo: comprobar pending fresco (micro-ventana de registro).
+            pending_fresh = False
+            if getattr(session, "pending_user_message", None):
+                try:
+                    from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
+                    grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
+                except Exception:
+                    grace_seconds = 30.0
+                try:
+                    pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
+                except Exception:
+                    pending_started_at = 0.0
+                if pending_started_at and time.time() - pending_started_at < grace_seconds:
+                    pending_fresh = True
+            if pending_fresh:
+                return True
+            # Huérfano confirmado: limpiar del dict STREAMS (y owner) y no
+            # bloquear; el caller limpiará el active_stream_id de la sesión.
+            # OJO: YA tenemos STREAMS_LOCK adquirido (es el mismo objeto que
+            # _live_config.STREAMS_LOCK en runtime) — NO re-adquirirlo aquí
+            # (threading.Lock no es reentrante → deadlock). El pop de STREAMS
+            # se hace directo bajo el lock ya tomado; STREAM_SESSION_OWNERS
+            # tiene su propio lock distinto.
+            try:
+                _live_config.STREAMS.pop(stream_id, None)
+            except Exception:
+                pass
+            try:
+                with _live_config.STREAM_SESSION_OWNERS_LOCK:
+                    _live_config.STREAM_SESSION_OWNERS.pop(stream_id, None)
+            except Exception:
+                pass
+            return False
     try:
         from api import config as _live_config
         with _live_config.ACTIVE_RUNS_LOCK:

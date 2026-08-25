@@ -9026,7 +9026,7 @@ DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
 # constant is the idle-cap before the reaper collects an unsubscribed
 # channel. 4h is a defensive ceiling against zombie connections; the
 # subscribers-empty grace path (60s) handles ordinary tab-close traffic.
-SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
+SESSION_CHANNEL_IDLE_TTL_SECS: int = 3600  # 1 hour — FIX 23-Ago-2026 (Gemma Jr./Hermes): ventana de zombie acortada (antes 4h)
 SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather

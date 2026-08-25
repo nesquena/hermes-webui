@@ -188,8 +188,7 @@ class SessionChannel:
         Two collection conditions (per Option X spec):
           1. Subscribers empty AND last_subscriber_drop_at is older than
              SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS (normal teardown).
-          2. created_at older than SESSION_CHANNEL_IDLE_TTL_SECS AND
-             subscribers empty (zombie cap — survived too long).
+          2. created_at older than SESSION_CHANNEL_IDLE_TTL_SECS (zombie cap).
         """
         from api import config as _cfg
 
@@ -198,9 +197,19 @@ class SessionChannel:
             drop_at = self.last_subscriber_drop_at
             created_at = self.created_at
 
+        ttl = float(getattr(_cfg, "SESSION_CHANNEL_IDLE_TTL_SECS", 14400))
+
         if sub_count > 0:
-            # Live subscriber — never collect, even past idle TTL (a tab is
-            # genuinely listening). The browser will close on its own.
+            # FIX 23-Ago-2026 (Gemma Jr./Hermes): un suscriptor fantasma (tab
+            # half-open, TCP sin detección de peer muerto) bloqueaba el reaper
+            # PARA SIEMPRE — el canal zombi quedaba en SESSION_CHANNELS y, con
+            # sub_count > 0, los wakes de la sesión podían quedar atrapados en
+            # el 409 "active stream". Tras el TTL, recolectar también canales
+            # con suscriptores: el EventSource del navegador reconecta
+            # automáticamente al recibir EOF (sin pérdida de eventos; los
+            # process_complete se recuperan por polling/self-heal del frontend).
+            if (now - created_at) >= ttl:
+                return True
             return False
         # No subscribers — check grace period.
         grace = float(getattr(_cfg, "SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS", 60))
@@ -208,7 +217,6 @@ class SessionChannel:
             return True
         # Hard cap on lifetime (even if subscribers oscillated): if created
         # long ago AND nobody's subscribed right now, sweep.
-        ttl = float(getattr(_cfg, "SESSION_CHANNEL_IDLE_TTL_SECS", 14400))
         if (now - created_at) >= ttl:
             return True
         return False
