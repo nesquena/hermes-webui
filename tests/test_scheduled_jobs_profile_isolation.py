@@ -552,7 +552,7 @@ def test_streaming_profile_home_mutation_avoids_long_lived_cron_cache_patch():
 
 def test_sessiondb_on_threadpool_executor_in_cron_scope(tmp_path, monkeypatch):
     """Regression test for #6857: SessionDB() on a fresh ThreadPoolExecutor inside a cron scope must respect the profile home."""
-    sqlite_mod = pytest.importorskip("hermes_agent.db.sqlite")  # auto-skip when hermes-agent is unavailable
+    sqlite_mod = pytest.importorskip("hermes_state")  # auto-skip when hermes-agent is unavailable
     SessionDB = sqlite_mod.SessionDB
 
     default_home = tmp_path / "default_home"
