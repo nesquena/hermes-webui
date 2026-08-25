@@ -465,9 +465,6 @@ def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
     from api import profiles
     from api.routes import (
         _handle_workspace_add,
-        _handle_workspace_remove,
-        _handle_workspace_rename,
-        _handle_workspace_reorder,
     )
 
     alice_home = tmp_path / "profiles" / "alice"
