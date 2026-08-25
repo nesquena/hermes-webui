@@ -365,3 +365,143 @@ def test_lineage_merge_preserves_equal_text_with_distinct_provenance():
     rows = _rendered_rows(distilled)
     assert [row["id"] for row in merged] == ["sidecar-distinct", "db-distinct"]
     assert [row["content"] for row in rows].count("DEMANDE IDENTIQUE MAIS DISTINCTE") == 2
+
+
+def test_resolved_snapshot_does_not_remerge_lineage_state_db_rows():
+    sidecar_row = {
+        "role": "user",
+        "content": "DEMANDE SIDECAR",
+        "timestamp": 1.0,
+    }
+    state_db_row = {
+        "role": "assistant",
+        "content": "RÉPONSE STATE DB SANS IDENTITÉ",
+        "timestamp": 2.0,
+    }
+    session = SimpleNamespace(
+        session_id="snapshot-resolu",
+        messages=[sidecar_row],
+        parent_session_id="snapshot-parent",
+        updated_at=3.0,
+    )
+
+    with patch(
+        "api.routes._webui_sidecar_lineage_messages_for_display",
+        return_value=[sidecar_row],
+    ), patch(
+        "api.models.get_state_db_session_messages",
+        return_value=[state_db_row],
+    ):
+        source_revision = context_brief._session_revision(session)
+        snapshot = context_brief._snapshot_session(session)
+        snapshot_messages_again = context_brief._session_messages(snapshot)
+        snapshot_revision = context_brief._session_revision(snapshot)
+
+    assert snapshot.parent_session_id is None
+    assert snapshot_messages_again == snapshot.messages
+    assert len(snapshot.messages) == 2
+    assert snapshot_revision == source_revision
+
+
+def test_flat_dedup_requires_compatible_complete_provenance():
+    messages = [
+        {"id": "stable-a", "_row_id": 1, "role": "user", "content": "CONFLIT ROW A"},
+        {"id": "stable-b", "_row_id": 1, "role": "user", "content": "CONFLIT ROW B"},
+        {"id": "stable-shared", "_row_id": 2, "role": "user", "content": "CONFLIT ID A"},
+        {"id": "stable-shared", "_row_id": 3, "role": "user", "content": "CONFLIT ID B"},
+        {"id": "alias-a", "message_id": "alias-b", "role": "user", "content": "ALIAS MALFORMÉ"},
+        {"id": "alias-a", "message_id": "alias-b", "role": "user", "content": "ALIAS MALFORMÉ"},
+        {"id": "mirror", "_row_id": 4, "role": "user", "content": "MIROIR COMPATIBLE"},
+        {"id": "mirror", "_row_id": 4, "role": "user", "content": "MIROIR COMPATIBLE"},
+    ]
+
+    unique = context_brief._dedupe_brief_messages(list(enumerate(messages)))
+    contents = [message["content"] for _idx, message in unique]
+
+    assert "CONFLIT ROW B" in contents
+    assert "CONFLIT ID B" in contents
+    assert contents.count("ALIAS MALFORMÉ") == 2
+    assert contents.count("MIROIR COMPATIBLE") == 1
+
+
+def test_lineage_merge_keeps_partially_conflicting_provenance():
+    base_rows = [
+        {"id": "stable-a", "_row_id": 1, "role": "user", "content": "BASE ROW", "timestamp": 1.0},
+        {"id": "stable-shared", "_row_id": 2, "role": "user", "content": "BASE ID", "timestamp": 3.0},
+    ]
+    db_rows = [
+        {"id": "stable-b", "_row_id": 1, "role": "user", "content": "DB ROW", "timestamp": 2.0},
+        {"id": "stable-shared", "_row_id": 3, "role": "user", "content": "DB ID", "timestamp": 4.0},
+    ]
+    session = SimpleNamespace(session_id="lineage-conflictuelle")
+
+    with patch("api.models.get_state_db_session_messages", return_value=db_rows):
+        merged = context_brief._merge_lineage_with_state_db(session, base_rows)
+
+    assert [row["content"] for row in merged] == ["BASE ROW", "DB ROW", "BASE ID", "DB ID"]
+
+
+def test_full_job_persists_resolved_snapshot_with_unidentified_state_db_row():
+    sidecar_row = {"role": "user", "content": "DEMANDE SIDECAR", "timestamp": 1.0}
+    state_db_row = {
+        "role": "assistant",
+        "content": "# CONCLUSION\n---\n> RÉPONSE DB SANS IDENTITÉ",
+        "timestamp": 2.0,
+    }
+    session = SimpleNamespace(
+        session_id="job-resolu",
+        messages=[sidecar_row],
+        parent_session_id="snapshot-parent",
+        updated_at=3.0,
+        archived=False,
+    )
+    generated = []
+    saved = []
+
+    def fake_generate(snapshot, _sid, deterministic):
+        generated.append(
+            {
+                "parent": snapshot.parent_session_id,
+                "messages": len(context_brief._session_messages(snapshot)),
+                "revision": deterministic["meta"]["transcript_revision"],
+            }
+        )
+        return "brief intégré " * 30, "test-aux"
+
+    def fake_save(_session, _sid, *, text, source, message_count, revision):
+        saved.append(revision)
+        return {
+            "generated_at": 1.0,
+            "source": source,
+            "message_count_at_generation": message_count,
+            "transcript_revision_at_generation": revision["transcript"],
+            "text": text,
+        }
+
+    with patch.object(context_brief, "_resolve_session", return_value=(session, "webui")), patch(
+        "api.routes._webui_sidecar_lineage_messages_for_display",
+        return_value=[sidecar_row],
+    ), patch(
+        "api.models.get_state_db_session_messages",
+        return_value=[state_db_row],
+    ), patch.object(
+        context_brief,
+        "_session_has_active_run",
+        return_value=False,
+    ), patch.object(
+        context_brief,
+        "_generate_llm_brief",
+        side_effect=fake_generate,
+    ), patch.object(
+        context_brief,
+        "_save_llm_brief",
+        side_effect=fake_save,
+    ):
+        job = {"session_id": "job-resolu", "_automatic": False}
+        context_brief._run_brief_job(job)
+
+    assert generated == [{"parent": None, "messages": 2, "revision": saved[0]["transcript"]}]
+    assert len(saved) == 1
+    assert job["status"] == "done"
+    assert job["result"]["persisted"] is True
+    assert job["result"]["llm_brief"]["stale"] is False

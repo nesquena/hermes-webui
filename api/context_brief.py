@@ -429,16 +429,49 @@ def _message_provenance_tokens(msg: dict) -> tuple[tuple[str, str], ...]:
     return tuple(tokens)
 
 
+def _messages_share_compatible_provenance(target: dict, source: dict) -> bool:
+    target_tokens = set(_message_provenance_tokens(target))
+    if not target_tokens.intersection(_message_provenance_tokens(source)):
+        return False
+    from api import models
+
+    return models._message_private_identity_compatible(target, source)
+
+
+def _provenance_index_contains(
+    by_token: dict[tuple[str, str], list[dict]],
+    message: dict,
+) -> bool:
+    candidates = []
+    candidate_ids = set()
+    for token in _message_provenance_tokens(message):
+        for candidate in by_token.get(token, []):
+            if id(candidate) not in candidate_ids:
+                candidates.append(candidate)
+                candidate_ids.add(id(candidate))
+    return any(
+        _messages_share_compatible_provenance(candidate, message)
+        for candidate in candidates
+    )
+
+
+def _provenance_index_add(
+    by_token: dict[tuple[str, str], list[dict]],
+    message: dict,
+) -> None:
+    for token in _message_provenance_tokens(message):
+        by_token.setdefault(token, []).append(message)
+
+
 def _dedupe_brief_messages(rows: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
     """Keep the first canonical occurrence of each explicit provenance token."""
-    seen: set[tuple[str, str]] = set()
+    by_token: dict[tuple[str, str], list[dict]] = {}
     unique = []
     for row in rows:
-        tokens = _message_provenance_tokens(row[1])
-        if tokens and any(token in seen for token in tokens):
+        if _provenance_index_contains(by_token, row[1]):
             continue
         unique.append(row)
-        seen.update(tokens)
+        _provenance_index_add(by_token, row[1])
     return unique
 
 
@@ -880,9 +913,9 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
     if not db_rows:
         return base
     try:
-        seen: set[tuple[str, str]] = set()
+        by_token: dict[tuple[str, str], list[dict]] = {}
         for message in base:
-            seen.update(_message_provenance_tokens(message))
+            _provenance_index_add(by_token, message)
         added: list[dict] = []
         for row in db_rows:
             if not isinstance(row, dict):
@@ -892,10 +925,9 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
             if isinstance(content, str) and content.startswith(_STATE_DB_JSON_PREFIX):
                 decoded = dict(row)
                 decoded["content"] = _decode_state_db_content(content)
-            tokens = _message_provenance_tokens(decoded)
-            if tokens and any(token in seen for token in tokens):
+            if _provenance_index_contains(by_token, decoded):
                 continue
-            seen.update(tokens)
+            _provenance_index_add(by_token, decoded)
             added.append(decoded)
         if not added:
             return base
@@ -959,9 +991,10 @@ def _session_revision(session) -> dict:
 
 
 def _snapshot_session(session):
-    """Freeze mutable transcript state before the auxiliary-model call."""
+    """Freeze one fully resolved transcript before the auxiliary-model call."""
     snapshot = copy.copy(session)
     snapshot.messages = copy.deepcopy(_session_messages(session))
+    snapshot.parent_session_id = None
     return snapshot
 
 
