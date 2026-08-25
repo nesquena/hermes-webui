@@ -11,7 +11,6 @@ duplicate, status polling, fallback when the auxiliary model is absent).
 import json
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -507,7 +506,7 @@ def test_brief_job_refuses_duplicate_and_empty(tmp_path):
     sess = _make_session(tmp_path)
 
     # Force the job to stay running so the duplicate check triggers.
-    started = threading_event = __import__("threading").Event()
+    started = __import__("threading").Event()
 
     def _slow_generate(session, sid, deterministic, **_kwargs):
         started.wait(timeout=5)
