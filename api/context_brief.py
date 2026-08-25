@@ -429,46 +429,54 @@ def _message_provenance_tokens(msg: dict) -> tuple[tuple[str, str], ...]:
     return tuple(tokens)
 
 
-def _messages_share_compatible_provenance(target: dict, source: dict) -> bool:
-    target_tokens = set(_message_provenance_tokens(target))
-    if not target_tokens.intersection(_message_provenance_tokens(source)):
-        return False
+def _messages_have_compatible_provenance(target: dict, source: dict) -> bool:
     from api import models
 
     return models._message_private_identity_compatible(target, source)
 
 
-def _provenance_index_contains(
-    by_token: dict[tuple[str, str], list[dict]],
+def _provenance_index_match(
+    by_token: dict[tuple[str, str], list[list[dict]]],
     message: dict,
-) -> bool:
-    candidates = []
-    candidate_ids = set()
+) -> list[dict] | None:
+    components = []
+    component_ids = set()
     for token in _message_provenance_tokens(message):
-        for candidate in by_token.get(token, []):
-            if id(candidate) not in candidate_ids:
-                candidates.append(candidate)
-                candidate_ids.add(id(candidate))
-    return any(
-        _messages_share_compatible_provenance(candidate, message)
-        for candidate in candidates
-    )
+        for component in by_token.get(token, []):
+            if id(component) not in component_ids:
+                components.append(component)
+                component_ids.add(id(component))
+    for component in components:
+        if all(
+            _messages_have_compatible_provenance(witness, message)
+            for witness in component
+        ):
+            return component
+    return None
 
 
 def _provenance_index_add(
-    by_token: dict[tuple[str, str], list[dict]],
+    by_token: dict[tuple[str, str], list[list[dict]]],
     message: dict,
-) -> None:
+    component: list[dict] | None = None,
+) -> list[dict]:
+    component = component if component is not None else []
+    component.append(message)
     for token in _message_provenance_tokens(message):
-        by_token.setdefault(token, []).append(message)
+        entries = by_token.setdefault(token, [])
+        if not any(existing is component for existing in entries):
+            entries.append(component)
+    return component
 
 
 def _dedupe_brief_messages(rows: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
     """Keep the first canonical occurrence of each explicit provenance token."""
-    by_token: dict[tuple[str, str], list[dict]] = {}
+    by_token: dict[tuple[str, str], list[list[dict]]] = {}
     unique = []
     for row in rows:
-        if _provenance_index_contains(by_token, row[1]):
+        component = _provenance_index_match(by_token, row[1])
+        if component is not None:
+            _provenance_index_add(by_token, row[1], component)
             continue
         unique.append(row)
         _provenance_index_add(by_token, row[1])
@@ -913,10 +921,20 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
     if not db_rows:
         return base
     try:
-        by_token: dict[tuple[str, str], list[dict]] = {}
-        for message in base:
-            _provenance_index_add(by_token, message)
-        added: list[dict] = []
+        def _effective_ts(rows: list[dict]) -> list[float]:
+            last = 0.0
+            out = []
+            for message in rows:
+                ts = message.get("timestamp")
+                try:
+                    if ts is not None:
+                        last = float(ts)
+                except (TypeError, ValueError):
+                    pass
+                out.append(last)
+            return out
+
+        decoded_rows = []
         for row in db_rows:
             if not isinstance(row, dict):
                 continue
@@ -925,26 +943,26 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
             if isinstance(content, str) and content.startswith(_STATE_DB_JSON_PREFIX):
                 decoded = dict(row)
                 decoded["content"] = _decode_state_db_content(content)
-            if _provenance_index_contains(by_token, decoded):
+            decoded_rows.append(decoded)
+        decoded_ts = _effective_ts(decoded_rows)
+
+        by_token: dict[tuple[str, str], list[list[dict]]] = {}
+        for message in base:
+            component = _provenance_index_match(by_token, message)
+            _provenance_index_add(by_token, message, component)
+        added: list[dict] = []
+        added_ts: list[float] = []
+        for decoded, effective_ts in zip(decoded_rows, decoded_ts, strict=True):
+            component = _provenance_index_match(by_token, decoded)
+            if component is not None:
+                _provenance_index_add(by_token, decoded, component)
                 continue
             _provenance_index_add(by_token, decoded)
             added.append(decoded)
+            added_ts.append(effective_ts)
         if not added:
             return base
-        def _effective_ts(rows: list[dict]) -> list[float]:
-            last = 0.0
-            out = []
-            for m in rows:
-                ts = m.get("timestamp")
-                try:
-                    if ts is not None:
-                        last = float(ts)
-                except (TypeError, ValueError):
-                    pass
-                out.append(last)
-            return out
         base_ts = _effective_ts(base)
-        added_ts = _effective_ts(added)
         merged: list[dict] = []
         i = j = 0
         while i < len(base) and j < len(added):
