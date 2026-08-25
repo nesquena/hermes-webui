@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import pathlib
 
 import pytest
 
@@ -1044,3 +1045,194 @@ def test_new_session_binds_explicit_profile_not_ambient_last_workspace(monkeypat
         "import_cli_session under profile='alice' must bind ALICE's last "
         f"workspace, got {imported.workspace!r}"
     )
+
+
+# ── Re-gate round 4 (#7168): malformed names, aliases, unwired boundaries ────
+
+
+class TestRound4ProfileIsolation:
+    """Re-gate round 4: the four remaining profile-isolation instances."""
+
+    def test_invalid_profile_name_never_reads_default_state(self, monkeypatch, tmp_path):
+        """A malformed name must NOT be clamped onto the default home.
+
+        Old behavior: _resolve_profile_home_param('bad name') returned
+        _DEFAULT_HERMES_HOME, so get_last_workspace(profile='bad name') read
+        (and could fall back to) the DEFAULT profile's global state file.
+        """
+        import api.models as models  # noqa: F401  (import parity with R3 tests)
+        from api import profiles
+
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir(parents=True)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", default_home)
+        monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: default_home)
+
+        global_lw = tmp_path / "global-state"
+        global_lw.mkdir(parents=True)
+        poisoned = tmp_path / "poisoned-workspace"
+        poisoned.mkdir()
+        (global_lw / "last_workspace.txt").write_text(str(poisoned), encoding="utf-8")
+        monkeypatch.setattr(workspace, "_GLOBAL_LW_FILE", global_lw / "last_workspace.txt")
+
+        # The invalid name resolves to NOTHING state-like and raises on resolve.
+        with pytest.raises(ValueError):
+            workspace._resolve_profile_home_param("bad name")
+
+        # Getter: never returns the poisoned default/global binding.
+        got = workspace.get_last_workspace(profile="bad name")
+        assert str(got) != str(poisoned)
+
+        # Setter: writes no file anywhere under the default home.
+        workspace.set_last_workspace(str(poisoned), profile="bad name")
+        assert not (default_home / "webui_state").exists()
+
+        # save_workspaces refuses outright.
+        with pytest.raises(ValueError):
+            workspace.save_workspaces([{"path": str(poisoned)}], profile="bad name")
+
+    def test_symlink_alias_of_default_home_keeps_legacy_fallback(self, monkeypatch, tmp_path):
+        """A symlink alias of _DEFAULT_HERMES_HOME is canonically the DEFAULT.
+
+        Old behavior compared lexically: alias != _DEFAULT_HERMES_HOME, so the
+        default profile accessed through its alias wrongly LOST the legacy
+        global fallback. With canonical identity it keeps it.
+        """
+        from api import profiles
+
+        real_home = tmp_path / "real-hermes"
+        real_home.mkdir(parents=True)
+        alias = tmp_path / "alias-hermes"
+        try:
+            alias.symlink_to(real_home, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable in this environment")
+
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", real_home)
+        monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: real_home)
+
+        shared_ws = tmp_path / "shared-workspace"
+        shared_ws.mkdir()
+        # The default profile's state dir IS the global STATE_DIR — pin both
+        # the legacy global fallback file and the profile-scoped file path so
+        # no real ~/.hermes state leaks into the assertion.
+        global_state = tmp_path / "global-state"
+        global_state.mkdir(parents=True)
+        (global_state / "last_workspace.txt").write_text(str(shared_ws), encoding="utf-8")
+        monkeypatch.setattr(workspace, "_GLOBAL_LW_FILE", global_state / "last_workspace.txt")
+        monkeypatch.setattr(
+            workspace,
+            "_GLOBAL_WS_FILE",
+            global_state / "workspaces.json",
+        )
+        monkeypatch.setattr(workspace, "_STATE_DIR_OVERRIDE", str(global_state), raising=False)
+        monkeypatch.setattr(
+            workspace,
+            "_last_workspace_file_for_profile",
+            lambda p=None: (
+                global_state / "last_workspace.txt"
+                if p is None or workspace._is_default_profile_home(
+                    workspace._resolve_profile_home_param(p)
+                )
+                else tmp_path / "other" / "webui_state" / "last_workspace.txt"
+            ),
+            raising=False,
+        )
+
+        assert workspace._is_default_profile_home(alias), (
+            "symlink alias must compare canonically equal to the default home"
+        )
+
+        # No profile-local last_workspace.txt exists → legacy global fallback applies.
+        got = workspace.get_last_workspace(profile=str(alias))
+        assert str(got) == str(shared_ws)
+
+    def test_set_last_workspace_threads_session_profile(self, monkeypatch, tmp_path):
+        """set_last_workspace call sites write the SESSION's profile state file.
+
+        Repro of review finding #1: a server-initiated turn for named-profile
+        session Alice wrote only the GLOBAL file, so Alice fell back to her
+        configured workspace while default incorrectly read Alice's selection.
+        """
+        alice_state = tmp_path / "profiles" / "alice" / "webui_state"
+        alice_state.mkdir(parents=True)
+
+        lw_paths = {}
+        real_set = workspace.set_last_workspace
+
+        def spy(path, profile=None):
+            lw = workspace._last_workspace_file_for_profile(profile)
+            lw_paths["profile"] = profile
+            lw_paths["file"] = str(lw)
+            return real_set(path, profile=profile)
+
+        # Pin the resolver so 'alice' maps into the fixture tree (the product
+        # code path under test is the routes.py call shape, not profiles lookup).
+        monkeypatch.setattr(
+            workspace,
+            "_resolve_profile_home_param",
+            lambda p: tmp_path / "profiles" / (p or "default"),
+            raising=False,
+        )
+
+        # Simulate exactly what the three routes.py sites now do:
+        s_like = type("S", (), {"profile": "alice"})()
+        spy("/srv/alice-ws", profile=getattr(s_like, "profile", None))
+
+        assert lw_paths["profile"] == "alice"
+        assert pathlib.PurePath(lw_paths["file"]).name == "last_workspace.txt"
+        assert "alice" in lw_paths["file"], (
+            f"session-profile write must land in ALICE's webui_state, got {lw_paths['file']!r}"
+        )
+        assert not (tmp_path / "global").exists()
+
+    def test_cli_projection_uses_own_cli_profile(self, monkeypatch, tmp_path):
+        """The all-profile CLI sidebar projection scopes its workspace probe.
+
+        Review finding #3: _load_cli_sessions_uncached had _cli_profile in
+        scope but called get_last_workspace() ambiently, producing
+        profile='alice', workspace='<default's workspace>'.
+        """
+        import api.models as models
+
+        calls = []
+
+        def fake_getlw(profile=None):
+            calls.append(profile)
+            return f"workspace-for:{profile}"
+
+        monkeypatch.setattr(models, "get_last_workspace", fake_getlw)
+        monkeypatch.setattr(models, "get_claude_code_sessions", lambda: [])
+        monkeypatch.setattr(models, "read_importable_agent_session_rows", lambda *a, **k: [
+            {
+                "id": "tui-row-alice",
+                "title": "TUI Session",
+                "model": "test-model",
+                "source": "tui",
+                "raw_source": "tui",
+                "message_count": 1,
+                "actual_message_count": 1,
+                "actual_user_message_count": 1,
+                "last_activity": 10.0,
+                "started_at": 9.0,
+            }
+        ])
+        monkeypatch.setattr(models, "_profile_has_user_projects", lambda: False)
+        monkeypatch.setattr(models, "ensure_cron_project", lambda **_: None)
+        monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: None)
+
+        db = tmp_path / "state.db"
+        db.write_text("", encoding="utf-8")
+        rows = models._load_cli_sessions_uncached(
+            tmp_path, db, _cli_profile="alice"
+        )
+        assert any(r.get("session_id") == "tui-row-alice" for r in rows), rows
+        assert calls and calls[0] == "alice", (
+            f"_cli_workspace() must consult get_last_workspace(profile=_cli_profile); "
+            f"profiles seen: {calls}"
+        )
+        alice_rows = [r for r in rows if r.get("workspace") == "workspace-for:alice"]
+        assert alice_rows, (
+            f"projected row must carry the ALICE-scoped workspace; got "
+            f"{[r.get('workspace') for r in rows]}"
+        )

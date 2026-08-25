@@ -7722,7 +7722,10 @@ def _load_cli_sessions_uncached(
     _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
     def _cli_workspace():
         if _cli_workspace_cache[0] is None:
-            _cli_workspace_cache[0] = str(get_last_workspace())
+            try:
+                _cli_workspace_cache[0] = str(get_last_workspace(profile=_cli_profile))
+            except TypeError:
+                _cli_workspace_cache[0] = str(get_last_workspace())
         return _cli_workspace_cache[0]
 
     _webhook_pid_cache: list[str | None] = [None]
@@ -7936,7 +7939,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': str(get_last_workspace()),
+                    'workspace': str(get_last_workspace(profile=_cli_profile)),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],

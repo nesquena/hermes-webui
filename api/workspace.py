@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import secrets
 import shutil
 import stat
@@ -40,6 +41,12 @@ from api.subprocess_utils import windows_hide_flags
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
 
+# Logical profile-name grammar — mirrors api.profiles._PROFILE_ID_RE. Kept as
+# a local copy so workspace-layer validation does not import profiles at module
+# load time (profiles may not be importable in every embedding context).
+_PROFILE_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
+
+
 def _profile_state_dir(profile: str | Path | None = None) -> Path:
     """Return the webui_state directory for the active or given profile.
 
@@ -48,10 +55,10 @@ def _profile_state_dir(profile: str | Path | None = None) -> Path:
     For named profiles, returns {profile_home}/webui_state/.
     """
     try:
-        from api.profiles import get_active_profile_name, get_active_hermes_home, _DEFAULT_HERMES_HOME
+        from api.profiles import get_active_profile_name, get_active_hermes_home
         if profile is not None:
             profile_home = _resolve_profile_home_param(profile)
-            if profile_home != _DEFAULT_HERMES_HOME:
+            if not _is_default_profile_home(profile_home):
                 d = profile_home / 'webui_state'
                 d.mkdir(parents=True, exist_ok=True)
                 return d
@@ -77,18 +84,31 @@ def _last_workspace_file(profile: str | Path | None = None) -> Path:
     return _profile_state_dir(profile=profile) / 'last_workspace.txt'
 
 
-def _workspaces_file_for_profile(profile: str | Path | None = None) -> Path:
+def _workspaces_file_for_profile(profile: str | Path | None = None) -> Path | None:
+    """Profile-scoped workspaces.json path, or None for an INVALID profile.
+
+    ``None`` is the fail-closed contract (#7168 re-gate round 4): a malformed
+    profile name must not be clamped onto the default/global state files, so
+    callers treat it as "no readable/writable profile-local state".
+    """
     try:
         return _workspaces_file(profile=profile) if profile is not None else _workspaces_file()
     except TypeError:
         return _workspaces_file()
+    except ValueError:
+        logger.debug("Ignoring invalid profile name %r for workspaces file", profile)
+        return None
 
 
-def _last_workspace_file_for_profile(profile: str | Path | None = None) -> Path:
+def _last_workspace_file_for_profile(profile: str | Path | None = None) -> Path | None:
+    """Profile-scoped last_workspace.txt path, or None for an INVALID profile."""
     try:
         return _last_workspace_file(profile=profile) if profile is not None else _last_workspace_file()
     except TypeError:
         return _last_workspace_file()
+    except ValueError:
+        logger.debug("Ignoring invalid profile name %r for last-workspace file", profile)
+        return None
 
 
 def _expanduser_path(path: str | Path) -> Path:
@@ -174,24 +194,51 @@ def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
 
 
 def _resolve_profile_home_param(profile: str | Path | None) -> Path:
-    """Resolve a profile parameter (name string, directory path string, or Path) to a profile home Path."""
+    """Resolve a profile parameter (name string, directory path string, or Path) to a profile home Path.
+
+    Logical profile names are validated strictly (#7168 re-gate round 4): a
+    name that fails the profile-id grammar raises ValueError instead of being
+    silently clamped onto the default home — the old clamp let a malformed
+    name such as ``"bad name"`` read/write the DEFAULT profile's state.
+    Path-shaped values and Path objects are honored as explicit homes and
+    canonicalized so identity comparisons never depend on lexical spelling
+    (e.g. a symlink alias of the default home must compare equal to it).
+    """
     if profile is None or str(profile).strip() == "":
         from api.profiles import get_active_hermes_home
         return get_active_hermes_home()
 
-    if str(profile).strip() == "default":
+    raw = str(profile).strip()
+    if raw == "default":
         from api.profiles import _DEFAULT_HERMES_HOME
         return _DEFAULT_HERMES_HOME
 
     if isinstance(profile, Path):
-        return profile.expanduser()
+        return _safe_resolve(profile.expanduser())
 
-    raw = str(profile).strip()
     if "/" in raw or "\\" in raw:
-        return Path(raw).expanduser()
+        # Explicit path-shaped home (tests construct tmp_path homes directly).
+        return _safe_resolve(Path(raw).expanduser())
+
+    if not _PROFILE_NAME_RE.fullmatch(raw):
+        raise ValueError(f"invalid profile name: {raw!r}")
 
     from api.profiles import get_hermes_home_for_profile
-    return get_hermes_home_for_profile(raw)
+    return _safe_resolve(get_hermes_home_for_profile(raw))
+
+
+def _is_default_profile_home(profile_home: Path) -> bool:
+    """Canonical identity check against the root/default Hermes home.
+
+    Compares resolved paths so a symlink alias of _DEFAULT_HERMES_HOME is
+    recognized as the default profile rather than treated as a foreign,
+    lexically-different directory (#7168 re-gate round 4).
+    """
+    try:
+        from api.profiles import _DEFAULT_HERMES_HOME
+        return _safe_resolve(profile_home) == _safe_resolve(_DEFAULT_HERMES_HOME)
+    except Exception:
+        return False
 
 
 def _remote_terminal_cwd(profile: str | Path | None = None) -> str | None:
@@ -411,7 +458,7 @@ def _migrate_global_workspaces() -> list:
 
 def load_workspaces(profile: str | Path | None = None) -> list:
     ws_file = _workspaces_file_for_profile(profile)
-    if ws_file.exists():
+    if ws_file is not None and ws_file.exists():
         try:
             raw = json.loads(ws_file.read_text(encoding='utf-8'))
             cleaned = _clean_workspace_list(raw, profile=profile)
@@ -430,10 +477,10 @@ def load_workspaces(profile: str | Path | None = None) -> list:
     # For the DEFAULT profile: migrate from the legacy global file (one-time cleanup).
     # For NAMED profiles: always start clean with just their own workspace.
     try:
-        from api.profiles import get_active_profile_name, _DEFAULT_HERMES_HOME
+        from api.profiles import get_active_profile_name
         if profile is not None:
             profile_home = _resolve_profile_home_param(profile)
-            is_default = profile_home == _DEFAULT_HERMES_HOME
+            is_default = _is_default_profile_home(profile_home)
         else:
             is_default = get_active_profile_name() in ('default', None)
     except ImportError:
@@ -448,6 +495,10 @@ def load_workspaces(profile: str | Path | None = None) -> list:
 
 def save_workspaces(workspaces: list, profile: str | Path | None = None) -> None:
     ws_file = _workspaces_file_for_profile(profile)
+    if ws_file is None:
+        # Fail-closed: an invalid profile name must not write any state file
+        # (it would land in the default profile's directory via the old clamp).
+        raise ValueError(f"cannot save workspaces for invalid profile {profile!r}")
     ws_file.parent.mkdir(parents=True, exist_ok=True)
     ws_file.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding='utf-8')
 
@@ -484,7 +535,7 @@ def get_profile_default_workspace(profile: str | Path | None = None) -> str:
         return None
 
     lw_file = _last_workspace_file_for_profile(profile)
-    if lw_file.exists():
+    if lw_file is not None and lw_file.exists():
         try:
             p = _valid(lw_file.read_text(encoding='utf-8').strip())
             if p:
@@ -515,7 +566,7 @@ def get_last_workspace(profile: str | Path | None = None) -> str:
         return None
 
     lw_file = _last_workspace_file_for_profile(profile)
-    if lw_file.exists():
+    if lw_file is not None and lw_file.exists():
         try:
             p = valid_last_workspace(lw_file.read_text(encoding='utf-8').strip())
             if p:
@@ -524,20 +575,23 @@ def get_last_workspace(profile: str | Path | None = None) -> str:
             logger.debug("Failed to read last workspace from %s", lw_file)
     # Fallback: try global file — but ONLY for the root/default profile. A named
     # profile must never inherit another profile's last-workspace binding through
-    # the legacy global state (#7168 re-gate round 3).
+    # the legacy global state (#7168 re-gate round 3). Identity is canonical:
+    # a symlink alias of the default home still counts as default, while a
+    # malformed profile name fails validation and is denied the fallback
+    # rather than being clamped onto the global file (#7168 re-gate round 4).
     _global_fallback_allowed = True  # ambient / no explicit profile: historical behavior
     if profile is not None:
-        try:
-            from api.profiles import _DEFAULT_HERMES_HOME as _DEF_HOME
-
-            _global_fallback_allowed = (
-                _resolve_profile_home_param(profile) == _DEF_HOME
-                or str(profile).strip() == 'default'
-            )
-        except Exception:
-            # Conservative default: an unresolvable explicit profile is NOT the
-            # root profile — deny the global fallback rather than leak.
-            _global_fallback_allowed = False
+        if str(profile).strip() == 'default':
+            _global_fallback_allowed = True
+        else:
+            try:
+                _global_fallback_allowed = _is_default_profile_home(
+                    _resolve_profile_home_param(profile)
+                )
+            except Exception:
+                # Conservative default: an unresolvable explicit profile is NOT the
+                # root profile — deny the global fallback rather than leak.
+                _global_fallback_allowed = False
     if _global_fallback_allowed and _GLOBAL_LW_FILE.exists():
         try:
             p = valid_last_workspace(_GLOBAL_LW_FILE.read_text(encoding='utf-8').strip())
@@ -551,6 +605,11 @@ def get_last_workspace(profile: str | Path | None = None) -> str:
 def set_last_workspace(path: str, profile: str | Path | None = None) -> None:
     try:
         lw_file = _last_workspace_file_for_profile(profile)
+        if lw_file is None:
+            # Fail-closed: an invalid profile name must not write the default
+            # profile's last_workspace.txt (#7168 re-gate round 4).
+            logger.debug("Refusing to set last workspace for invalid profile %r", profile)
+            return
         lw_file.parent.mkdir(parents=True, exist_ok=True)
         lw_file.write_text(str(path), encoding='utf-8')
     except Exception:
