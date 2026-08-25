@@ -13127,6 +13127,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/project-os/dashboard":
         return _handle_project_os_dashboard(handler, parsed)
 
+    if parsed.path == "/api/kanban/webui-wake":
+        from api.background_process import get_kanban_webui_wake_status
+
+        return j(handler, get_kanban_webui_wake_status(), status=200)
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_get
 
@@ -15003,6 +15008,22 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/kanban/webui-wake":
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"action"}
+            or body.get("action") not in {"enable", "disable"}
+        ):
+            return bad(handler, "action must be enable or disable", status=400)
+        from api.background_process import set_kanban_webui_wake_enabled
+
+        try:
+            status = set_kanban_webui_wake_enabled(body["action"] == "enable")
+        except Exception:
+            logger.exception("Kanban WebUI wake activation failed")
+            return bad(handler, "Kanban WebUI wake activation failed", status=503)
+        return j(handler, status, status=200)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)

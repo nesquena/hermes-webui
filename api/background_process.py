@@ -41,11 +41,13 @@ this module routes them to the same listener so the frontend's single
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Optional
 
 from api.process_event_utils import (
@@ -77,6 +79,181 @@ _REAPER_INTERVAL_SECS = 60.0
 # forever, un-joinable. A dedicated lock (not the purpose-bound
 # ``SESSION_CHANNELS_LOCK`` / ``_EMIT_COALESCE_LOCK``) keeps this narrow.
 _THREAD_LIFECYCLE_LOCK = threading.Lock()
+_KANBAN_POLL_LOCK = threading.Lock()
+_KANBAN_WAKE_STATE_LOCK = threading.Lock()
+_KANBAN_INFLIGHT_LOCK = threading.Lock()
+_KANBAN_INFLIGHT_CLAIMS = {}
+_KANBAN_POLL_INTERVAL_SECS = 1.0
+_KANBAN_EVENT_KINDS = (
+    "completed",
+    "blocked",
+    "gave_up",
+    "crashed",
+    "timed_out",
+    "review_requested",
+    "block_loop_detected",
+)
+_KANBAN_WAKE_STATE_VERSION = 1
+
+
+def _default_kanban_webui_wake_state() -> dict:
+    return {
+        "schema_version": _KANBAN_WAKE_STATE_VERSION,
+        "enabled": False,
+        "baseline_complete": False,
+        "activation_id": 0,
+        "baseline_completed_at": None,
+        "db_boundaries": {},
+    }
+
+
+def _kanban_webui_wake_state_file() -> Path:
+    from api import config as api_config
+
+    return Path(api_config.KANBAN_WEBUI_WAKE_STATE_FILE)
+
+
+def _load_kanban_webui_wake_state() -> tuple[dict, str | None]:
+    path = _kanban_webui_wake_state_file()
+    if not path.exists():
+        return _default_kanban_webui_wake_state(), None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("schema_version") != _KANBAN_WAKE_STATE_VERSION:
+            raise ValueError("unsupported state schema")
+        if not isinstance(raw.get("enabled"), bool) or not isinstance(
+            raw.get("baseline_complete"), bool
+        ):
+            raise ValueError("invalid state flags")
+        if not isinstance(raw.get("activation_id"), int) or raw["activation_id"] < 0:
+            raise ValueError("invalid activation id")
+        if not isinstance(raw.get("db_boundaries"), dict):
+            raise ValueError("invalid database boundaries")
+        if any(
+            not isinstance(path, str)
+            or not path
+            or not isinstance(boundary, int)
+            or boundary < 0
+            for path, boundary in raw["db_boundaries"].items()
+        ):
+            raise ValueError("invalid database boundary")
+        return raw, None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return _default_kanban_webui_wake_state(), str(exc)
+
+
+def get_kanban_webui_wake_status() -> dict:
+    state, error = _load_kanban_webui_wake_state()
+    status = dict(state)
+    status["db_paths"] = sorted(str(path) for path in state["db_boundaries"])
+    status["covered_db_count"] = len(state["db_boundaries"])
+    if error:
+        status["state_error"] = error
+    return status
+
+
+def _write_kanban_webui_wake_state(state: dict) -> None:
+    from api.paths import _atomic_write_text
+
+    path = _kanban_webui_wake_state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(
+        path,
+        json.dumps(state, sort_keys=True, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _kanban_event_boundary(conn) -> int:
+    row = conn.execute("SELECT COALESCE(MAX(id), 0) AS latest FROM task_events").fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["latest"])
+    except (KeyError, TypeError, IndexError):
+        return int(row[0] or 0)
+
+
+def _kanban_webui_wake_topology(boards) -> dict[str, str]:
+    topology: dict[str, str] = {}
+    for metadata in boards or []:
+        metadata = metadata or {}
+        slug = str(metadata.get("slug") or "default")
+        db_path = metadata.get("db_path")
+        key = str(Path(db_path).expanduser().resolve()) if db_path else f"board:{slug}"
+        topology.setdefault(key, slug)
+    return topology
+
+
+def _baseline_kanban_webui_wake(kb) -> dict[str, int]:
+    topology = _kanban_webui_wake_topology(
+        kb.list_boards(include_archived=False)
+    )
+    boundaries: dict[str, int] = {}
+    for db_path, board in sorted(topology.items()):
+        if _DRAIN_STOP.is_set():
+            raise RuntimeError("Kanban WebUI wake activation stopped")
+        conn = None
+        try:
+            conn = kb.connect(board=board)
+            boundary = _kanban_event_boundary(conn)
+            boundaries[db_path] = boundary
+            for _ in range(2):
+                for sub in kb.list_notify_subs(conn):
+                    if str(sub.get("platform") or "").strip().lower() != "webui":
+                        continue
+                    cursor = int(sub.get("last_event_id") or 0)
+                    if cursor >= boundary:
+                        continue
+                    kb.advance_notify_cursor(
+                        conn,
+                        task_id=str(sub.get("task_id") or ""),
+                        platform=str(sub.get("platform") or "webui"),
+                        chat_id=str(sub.get("chat_id") or ""),
+                        thread_id=str(sub.get("thread_id") or ""),
+                        new_cursor=boundary,
+                    )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Kanban WebUI wake baseline failed for {db_path}"
+            ) from exc
+        finally:
+            if conn is not None:
+                conn.close()
+    return boundaries
+
+
+def set_kanban_webui_wake_enabled(enabled: bool) -> dict:
+    with _KANBAN_POLL_LOCK:
+        with _KANBAN_WAKE_STATE_LOCK:
+            state, state_error = _load_kanban_webui_wake_state()
+            if not enabled:
+                if state_error:
+                    state = _default_kanban_webui_wake_state()
+                state["enabled"] = False
+                _write_kanban_webui_wake_state(state)
+                return get_kanban_webui_wake_status()
+            if not state_error and state["enabled"] and state["baseline_complete"]:
+                return get_kanban_webui_wake_status()
+            try:
+                from api.kanban_bridge import _kb
+
+                boundaries = _baseline_kanban_webui_wake(_kb())
+                new_state = _default_kanban_webui_wake_state()
+                new_state.update(
+                    {
+                        "enabled": True,
+                        "baseline_complete": True,
+                        "activation_id": int(state.get("activation_id") or 0) + 1,
+                        "baseline_completed_at": int(time.time()),
+                        "db_boundaries": boundaries,
+                    }
+                )
+                _write_kanban_webui_wake_state(new_state)
+                return get_kanban_webui_wake_status()
+            except Exception:
+                logger.warning("Kanban WebUI wake activation failed", exc_info=True)
+                raise
 
 # T3: per-session coalesce gate for the public bg_task_complete SSE emit.
 # The server-side wakeup path remains immediate; only the browser-observation
@@ -521,6 +698,253 @@ def _truncate(text: str, limit: int) -> str:
     if len(s) <= limit:
         return s
     return s[:limit] + "\n…(truncated)"
+
+
+def _webui_wake_subscription(sub: dict) -> bool:
+    return (
+        str(sub.get("platform") or "").strip().lower() == "webui"
+        and str(sub.get("delivery_mode") or "").strip().lower()
+        in {"wake", "notify+wake"}
+    )
+
+
+def _format_kanban_wakeup_prompt(task: object, event: object) -> str:
+    payload = getattr(event, "payload", None)
+    payload = payload if isinstance(payload, dict) else {}
+    result = getattr(task, "result", None) or getattr(task, "body", None) or ""
+    fields = {
+        "task_id": str(getattr(event, "task_id", None) or getattr(task, "id", "")),
+        "event_id": int(getattr(event, "id", 0)),
+        "kind": str(getattr(event, "kind", "")),
+        "status": str(getattr(task, "status", "")),
+        "summary": str(payload.get("summary") or result),
+        "decision_needed": str(payload.get("decision_needed") or ""),
+        "next_hint": str(payload.get("next_hint") or ""),
+        "idempotency_key": str(getattr(task, "idempotency_key", None) or ""),
+    }
+    lines = [
+        "[IMPORTANT: Kanban upstream handoff]",
+        "Kanban event:",
+    ]
+    for key, value in fields.items():
+        rendered = json.dumps(value, ensure_ascii=False)
+        if key == "event_id":
+            rendered = str(value)
+        lines.append(f"{key}: {rendered}")
+    lines.extend(
+        [
+            "Inspect the existing Kanban task and worker handoff before acting.",
+            "This is an upstream handoff: use kanban_create for the next specialist work when needed; do not recreate or decompose this task.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_kanban_batch_prompt(task: object, events: list[object]) -> str:
+    prompt = _format_kanban_wakeup_prompt(task, events[0])
+    if len(events) > 1:
+        prompt += "\n\nAdditional Kanban events:\n"
+        prompt += "\n\n".join(
+            _format_kanban_wakeup_prompt(task, event) for event in events[1:]
+        )
+    return prompt
+
+
+def _rewind_webui_kanban_claim(
+    board: str, sub: dict, old_cursor: int, new_cursor: int
+) -> bool:
+    try:
+        from api.kanban_bridge import _kb
+
+        kb = _kb()
+        conn = kb.connect(board=board)
+        try:
+            rewound = kb.rewind_notify_cursor(
+                conn,
+                task_id=str(sub.get("task_id") or ""),
+                platform=str(sub.get("platform") or "webui"),
+                chat_id=str(sub.get("chat_id") or ""),
+                thread_id=str(sub.get("thread_id") or ""),
+                claimed_cursor=new_cursor,
+                old_cursor=old_cursor,
+            )
+            if not rewound:
+                logger.warning(
+                    "Kanban WebUI wake rewind lost race board=%s task=%s event_cursor=%s",
+                    board,
+                    sub.get("task_id"),
+                    new_cursor,
+                )
+            return bool(rewound)
+        finally:
+            conn.close()
+    except Exception:
+        logger.warning(
+            "Kanban WebUI wake rewind failed board=%s task=%s",
+            board,
+            sub.get("task_id"),
+            exc_info=True,
+        )
+        return False
+
+
+def _webui_kanban_claim_key(board: str, sub: dict) -> tuple[str, str, str, str, str]:
+    return (
+        board,
+        str(sub.get("task_id") or ""),
+        str(sub.get("platform") or "webui"),
+        str(sub.get("chat_id") or ""),
+        str(sub.get("thread_id") or ""),
+    )
+
+
+def _claim_webui_kanban_events(conn, board: str, sub: dict, kb):
+    with _THREAD_LIFECYCLE_LOCK:
+        if _DRAIN_STOP.is_set():
+            return None
+        old_cursor, new_cursor, events = kb.claim_unseen_events_for_sub(
+            conn,
+            task_id=str(sub.get("task_id") or ""),
+            platform=str(sub.get("platform") or "webui"),
+            chat_id=str(sub.get("chat_id") or ""),
+            thread_id=str(sub.get("thread_id") or ""),
+            kinds=_KANBAN_EVENT_KINDS,
+        )
+        if events:
+            key = _webui_kanban_claim_key(board, sub)
+            with _KANBAN_INFLIGHT_LOCK:
+                _KANBAN_INFLIGHT_CLAIMS[key] = (
+                    board,
+                    dict(sub),
+                    old_cursor,
+                    new_cursor,
+                )
+        return old_cursor, new_cursor, events
+
+
+def _forget_webui_kanban_claim(board: str, sub: dict) -> None:
+    with _KANBAN_INFLIGHT_LOCK:
+        _KANBAN_INFLIGHT_CLAIMS.pop(_webui_kanban_claim_key(board, sub), None)
+
+
+def _finish_webui_kanban_claim(
+    board: str, sub: dict, old_cursor: int, new_cursor: int, status: int
+) -> None:
+    key = _webui_kanban_claim_key(board, sub)
+    with _KANBAN_INFLIGHT_LOCK:
+        claim = _KANBAN_INFLIGHT_CLAIMS.get(key)
+        expected = (board, sub, old_cursor, new_cursor)
+        if claim != expected:
+            return
+        _KANBAN_INFLIGHT_CLAIMS.pop(key, None)
+    # The Kanban cursor is acknowledged only by an exactly-200 turn response.
+    if status != 200:
+        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
+
+
+def _rewind_inflight_webui_kanban_claims() -> None:
+    with _KANBAN_INFLIGHT_LOCK:
+        claims = list(_KANBAN_INFLIGHT_CLAIMS.values())
+        _KANBAN_INFLIGHT_CLAIMS.clear()
+    for board, sub, old_cursor, new_cursor in claims:
+        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
+
+
+def _poll_webui_kanban_wakeups() -> None:
+    if _DRAIN_STOP.is_set() or not _KANBAN_POLL_LOCK.acquire(blocking=False):
+        return
+    try:
+        _KANBAN_WAKE_STATE_LOCK.acquire()
+        state, state_error = _load_kanban_webui_wake_state()
+        if state_error or not state["enabled"] or not state["baseline_complete"]:
+            return
+        from api.kanban_bridge import _kb
+        from api.models import get_session
+        from api.profiles import (
+            get_hermes_home_for_profile,
+            profile_env_for_background_worker,
+        )
+
+        kb = _kb()
+        boards = kb.list_boards(include_archived=False)
+        topology = _kanban_webui_wake_topology(boards)
+        if set(topology) != set(state["db_boundaries"]):
+            logger.warning("Kanban WebUI wake polling paused due to DB topology change")
+            return
+        for metadata in boards or []:
+            if _DRAIN_STOP.is_set():
+                return
+            board = str((metadata or {}).get("slug") or "default")
+            conn = kb.connect(board=board)
+            try:
+                subs = [
+                    sub for sub in kb.list_notify_subs(conn)
+                    if _webui_wake_subscription(sub)
+                ]
+                for sub in subs:
+                    if _DRAIN_STOP.is_set():
+                        return
+                    task_id = str(sub.get("task_id") or "")
+                    chat_id = str(sub.get("chat_id") or "")
+                    profile = str(sub.get("notifier_profile") or "").strip()
+                    if not task_id or not chat_id or not profile:
+                        continue
+                    if _DRAIN_STOP.is_set():
+                        return
+                    claimed = _claim_webui_kanban_events(conn, board, sub, kb)
+                    if not claimed:
+                        if _DRAIN_STOP.is_set():
+                            return
+                        continue
+                    old_cursor, new_cursor, events = claimed
+                    if not events:
+                        continue
+                    try:
+                        task = kb.get_task(conn, task_id)
+                        profile_home = get_hermes_home_for_profile(profile)
+                        with profile_env_for_background_worker(
+                            profile, "Kanban WebUI wake validation"
+                        ):
+                            session = get_session(chat_id, metadata_only=True)
+                        if (
+                            task is None
+                            or session is None
+                            or not profile_home.exists()
+                            or any(
+                                not event
+                                or not isinstance(getattr(event, "id", None), int)
+                                or getattr(event, "kind", None) not in _KANBAN_EVENT_KINDS
+                                for event in events
+                            )
+                        ):
+                            raise ValueError("Kanban WebUI wake target is unavailable")
+                        prompt = _format_kanban_batch_prompt(task, events)
+                    except Exception:
+                        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
+                        _forget_webui_kanban_claim(board, sub)
+                        continue
+                    if _DRAIN_STOP.is_set():
+                        return
+                    try:
+                        _start_server_side_wakeup_turn(
+                            chat_id,
+                            prompt,
+                            profile=profile,
+                            on_result=lambda status, _resp, _error, board=board,
+                            sub=dict(sub), old_cursor=old_cursor, new_cursor=new_cursor: _finish_webui_kanban_claim(
+                                board, sub, old_cursor, new_cursor, status
+                            ),
+                        )
+                    except Exception:
+                        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
+                        _forget_webui_kanban_claim(board, sub)
+            finally:
+                conn.close()
+    except Exception:
+        logger.debug("Kanban WebUI wake poll failed", exc_info=True)
+    finally:
+        _KANBAN_WAKE_STATE_LOCK.release()
+        _KANBAN_POLL_LOCK.release()
 
 
 def format_wakeup_prompt(evt: object) -> str | None:
@@ -1582,7 +2006,12 @@ def _session_has_active_turn(session_id: str) -> bool:
 
 
 def _start_server_side_wakeup_turn(
-    session_id: str, wakeup_prompt: str, *, process_id: str = ""
+    session_id: str,
+    wakeup_prompt: str,
+    *,
+    process_id: str = "",
+    profile: str = "",
+    on_result=None,
 ) -> None:
     """Start an agent turn server-side for a process_complete wakeup (Option Z).
 
@@ -1590,6 +2019,10 @@ def _start_server_side_wakeup_turn(
     ``start_session_turn`` itself spawns the agent worker thread, but does
     synchronous session-load / workspace / model resolution first, which must
     not stall the single drain thread shared by every WebUI session.
+
+    ``on_result`` is an internal delivery callback. Its status contract is
+    exact-200 acceptance; every other status or exception is a failed wakeup
+    for cursor consumers.
 
     Concurrency + idempotency are enforced by the layers below, not here:
       - ``start_session_turn`` → ``_start_chat_stream_for_session`` serializes
@@ -1614,13 +2047,21 @@ def _start_server_side_wakeup_turn(
     """
 
     def _runner() -> None:
+        status = 500
+        resp = None
+        error = None
         try:
             from api.routes import start_session_turn
+            from api.profiles import profile_env_for_background_worker
 
-            resp = start_session_turn(
-                session_id, wakeup_prompt, source="process_wakeup"
-            )
-            status = int((resp or {}).get("_status", 200) or 200)
+            with profile_env_for_background_worker(profile, "Kanban WebUI wake"):
+                resp = start_session_turn(
+                    session_id, wakeup_prompt, source="process_wakeup"
+                )
+            if not isinstance(resp, dict):
+                status = 500
+            else:
+                status = int(resp.get("_status", 200))
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
@@ -1634,7 +2075,7 @@ def _start_server_side_wakeup_turn(
                 # ``claim_deferred_wakeups`` still guarantees exactly-once
                 # delivery, and BG_TASK_COMPLETE_EVENTS_SEEN already deduped
                 # this process_id, so re-recording cannot double-fire.
-                if wakeup_prompt:
+                if on_result is None and wakeup_prompt:
                     record_deferred_wakeup(session_id, process_id, wakeup_prompt)
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
@@ -1654,12 +2095,21 @@ def _start_server_side_wakeup_turn(
                     session_id,
                     (resp or {}).get("stream_id"),
                 )
-        except Exception:
+        except Exception as exc:
+            error = exc
             logger.warning(
                 "server-side wakeup turn raised for session %s",
                 session_id,
                 exc_info=True,
             )
+        finally:
+            if on_result is not None:
+                try:
+                    on_result(status, resp, error)
+                except Exception:
+                    logger.debug(
+                        "server-side wakeup result callback failed", exc_info=True
+                    )
 
     threading.Thread(
         target=_runner,
@@ -1676,6 +2126,7 @@ def _drain_loop() -> None:
         logger.warning("bg_task_complete drain unavailable: %s", exc)
         return
     logger.info("bg_task_complete drain thread started")
+    next_kanban_poll = 0.0
     while not _DRAIN_STOP.is_set():
         # Read the queue defensively: a rebuilt/partially-initialized registry
         # may not expose ``completion_queue`` (mirrors streaming.py's
@@ -1685,12 +2136,28 @@ def _drain_loop() -> None:
         # backoff — a 100%-CPU tight loop. Back off on the stop event instead.
         q = getattr(process_registry, "completion_queue", None)
         if q is None:
+            now = time.monotonic()
+            if now >= next_kanban_poll and not _DRAIN_STOP.is_set():
+                next_kanban_poll = now + _KANBAN_POLL_INTERVAL_SECS
+                threading.Thread(
+                    target=_poll_webui_kanban_wakeups,
+                    name="hermes-webui-kanban-wakeup-poll",
+                    daemon=True,
+                ).start()
             _DRAIN_STOP.wait(1.0)
             continue
         try:
             evt = q.get(timeout=1.0)
         except queue.Empty:
-            # Nothing to drain this second — re-check the stop flag and loop.
+            now = time.monotonic()
+            if now >= next_kanban_poll and not _DRAIN_STOP.is_set():
+                next_kanban_poll = now + _KANBAN_POLL_INTERVAL_SECS
+                threading.Thread(
+                    target=_poll_webui_kanban_wakeups,
+                    name="hermes-webui-kanban-wakeup-poll",
+                    daemon=True,
+                ).start()
+            # Nothing to drain — poll Kanban only at idle cadence.
             continue
         except Exception:
             # Unexpected queue failure: log it (not silent) and back off on the
@@ -1823,7 +2290,9 @@ def start_drain_thread() -> bool:
 
 
 def stop_drain_thread(timeout: float = 2.0) -> None:
-    _DRAIN_STOP.set()
+    with _THREAD_LIFECYCLE_LOCK:
+        _DRAIN_STOP.set()
+    _rewind_inflight_webui_kanban_claims()
     th = _DRAIN_THREAD
     if th is not None and th.is_alive():
         th.join(timeout=timeout)
