@@ -4137,37 +4137,6 @@ async function _preflightContextWorkspace(host, sid){
     && !!host._briefData;
 }
 
-// Refresh visible brief panels when the background worker publishes a newer generation.
-let _contextBriefAutoTimer = null;
-function _startContextBriefAutoRefresh(){
-  if (_contextBriefAutoTimer) return;
-  _contextBriefAutoTimer = setInterval(async () => {
-    const panels = Array.from(document.querySelectorAll('[data-brief-sid]'))
-      .filter(p => p.dataset.briefLoaded === '1' && p.offsetParent !== null);
-    if (!panels.length) return;
-    const sid = _contextBriefSid();
-    if (!sid) return;
-    let data;
-    try {
-      const res = await fetch('/api/session/context-brief', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: sid}),
-      });
-      data = await res.json();
-    } catch(_) { return; }
-    if (!data || !data.ok || !data.brief) return;
-    const newGen = ((data.brief.llm_brief || {}).generated_at) || 0;
-    for (const p of panels){
-      if (p.dataset.briefSid !== sid) continue;
-      const oldGen = (((p._briefData || {}).llm_brief || {}).generated_at) || 0;
-      if (newGen !== oldGen){
-        renderContextBrief(data.brief, p);
-      }
-    }
-  }, 45000);
-}
-_startContextBriefAutoRefresh();
-
 // Compose a /goal from the brief's remaining (pending + in_progress) todos and
 // send it to the conversation, so the agent finishes the "reste à faire" work.
 async function _contextBriefGoalFinish(btn){
@@ -4334,6 +4303,37 @@ async function _pollContextBriefJob(){
     if (typeof showToast === 'function') showToast(t('context_brief_error'));
   }
 }
+
+// Refresh visible brief panels when the background worker publishes a newer generation.
+let _contextBriefAutoTimer = null;
+function _startContextBriefAutoRefresh(){
+  if (_contextBriefAutoTimer) return;
+  _contextBriefAutoTimer = setInterval(async () => {
+    const panels = Array.from(document.querySelectorAll('[data-brief-sid]'))
+      .filter(p => p.dataset.briefLoaded === '1' && p.offsetParent !== null);
+    if (!panels.length) return;
+    const sid = _contextBriefSid();
+    if (!sid) return;
+    let data;
+    try {
+      const res = await fetch('/api/session/context-brief', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sid}),
+      });
+      data = await res.json();
+    } catch(_) { return; }
+    if (!data || !data.ok || !data.brief) return;
+    const newGen = ((data.brief.llm_brief || {}).generated_at) || 0;
+    for (const p of panels){
+      if (p.dataset.briefSid !== sid) continue;
+      const oldGen = (((p._briefData || {}).llm_brief || {}).generated_at) || 0;
+      if (newGen !== oldGen){
+        renderContextBrief(data.brief, p);
+      }
+    }
+  }, 45000);
+}
+_startContextBriefAutoRefresh();
 
 // Banner shown above the message window when the session history is
 // truncated server-side (long conversations): one-tap path to the brief.
