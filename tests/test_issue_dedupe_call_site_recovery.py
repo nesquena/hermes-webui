@@ -207,6 +207,52 @@ def test_repair_preserves_current_turn_recovered_rows_when_older_identical_histo
 # ---------------------------------------------------------------------------
 
 
+def test_timestampless_prior_turn_does_not_claim_current_output(hermes_home):
+    """A legacy row without a timestamp is not proof of current-turn ownership."""
+    import json
+
+    sid = "regate_timestampless_prior_turn"
+    stream_id = "regate-timestampless-prior-turn"
+    append_run_event(sid, stream_id, "token", {"text": "identical answer"})
+
+    session = Session(session_id=sid, title="regate", messages=[])
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 222
+    session.pending_user_source = None
+
+    core_path = hermes_home / "sessions" / f"session_{sid}.json"
+    core_path.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "run the check"},
+                    {"role": "assistant", "content": "identical answer"},
+                ],
+                "tool_calls": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _apply_core_sync_or_error_marker(
+        session,
+        core_path,
+        stream_id_for_recheck=stream_id,
+        require_stream_dead=False,
+    ) is True
+
+    assert [m.get("content") for m in session.messages if m.get("role") == "user"] == [
+        "run the check",
+        "run the check",
+    ]
+    assert [m.get("content") for m in session.messages if m.get("role") == "assistant"].count(
+        "identical answer"
+    ) == 2
+
+
+
 def test_core_sync_preserves_repeated_current_prompt(hermes_home):
     """CORE#3: a historical duplicate prompt must not consume the pending turn."""
     import json

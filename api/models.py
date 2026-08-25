@@ -3988,14 +3988,6 @@ def _append_journaled_partial_output(
             getattr(session, 'pending_user_message', None)
         ) and owner_idx >= current_turn_min_idx:
             return True
-        owner = messages[owner_idx]
-        if (
-            _normalize_journal_recovery_text(getattr(session, 'pending_user_message', None))
-            and owner.get('timestamp') is None
-            and owner.get('_ts') is None
-            and _message_matches_pending_text(owner, session.pending_user_message)
-        ):
-            return True
         return False
 
     def content_match_can_receive_reasoning(existing_idx: int) -> bool:
