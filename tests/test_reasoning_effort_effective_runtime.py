@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+import subprocess
 from collections import OrderedDict
+from types import SimpleNamespace
 
 import pytest
 
-from api import gateway_chat, models, streaming
+from api import config, gateway_chat, models, streaming
 from api.config import STREAMS, create_stream_channel
 
 
@@ -86,6 +90,214 @@ def _event_pairs(subscriber):
         item = subscriber.get_nowait()
         events.append((item[0], item[1]))
     return events
+
+
+_GATEWAY_PARSE_SCRIPT = """
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from gateway.platforms.api_server import (
+    _REQUEST_OPTION_MISSING,
+    _request_agent_overrides,
+    _request_reasoning_config,
+    _request_service_tier,
+)
+
+results = []
+for body in json.loads(sys.stdin.read()):
+    overrides = _request_agent_overrides(body, virtual_model="hermes-agent")
+    model_options = overrides.get("model_options")
+    service_tier = _request_service_tier(model_options)
+    results.append({
+        "reasoning": _request_reasoning_config(model_options),
+        "service_tier_missing": service_tier is _REQUEST_OPTION_MISSING,
+        "service_tier": None if service_tier is _REQUEST_OPTION_MISSING else service_tier,
+    })
+print(json.dumps(results))
+"""
+
+
+def _installed_gateway_parser(request_bodies):
+    candidates = []
+    configured = str(os.environ.get("HERMES_WEBUI_AGENT_DIR") or "").strip()
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend(
+        [
+            Path.home() / ".hermes" / "hermes-agent",
+            Path("/usr/local/lib/hermes-agent"),
+        ]
+    )
+    agent_dir = next(
+        (
+            candidate
+            for candidate in candidates
+            if (candidate / "gateway" / "platforms" / "api_server.py").is_file()
+        ),
+        None,
+    )
+    if agent_dir is None:
+        pytest.skip("installed Hermes Agent Gateway parser is unavailable")
+    python = next(
+        (
+            candidate
+            for candidate in (
+                agent_dir / "venv" / "bin" / "python",
+                agent_dir / "venv" / "Scripts" / "python.exe",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if python is None:
+        pytest.skip("installed Hermes Agent Python is unavailable")
+    proc = subprocess.run(
+        [str(python), "-c", _GATEWAY_PARSE_SCRIPT, str(agent_dir)],
+        input=json.dumps(request_bodies),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _capture_gateway_request_body(
+    monkeypatch,
+    tmp_path,
+    *,
+    runs_api,
+    configured_effort,
+    configured_service_tier,
+    suffix,
+):
+    cfg = {
+        "model": {
+            "provider": "openai",
+            "default": "gpt-5.5",
+        },
+    }
+    if configured_effort is not None:
+        cfg["agent"] = {"reasoning_effort": configured_effort}
+    if configured_service_tier is not None:
+        cfg["model"]["service_tier"] = configured_service_tier
+
+    stream_id = f"gateway-options-{suffix}"
+    session_id = f"gateway-options-session-{suffix}"
+    session = SimpleNamespace(
+        active_stream_id=stream_id,
+        workspace=str(tmp_path),
+        profile=None,
+        context_messages=[],
+        _approval_notice_emitted=False,
+        save=lambda: None,
+    )
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+    captured = []
+
+    def fake_urlopen(req, timeout=0):
+        if req.data:
+            captured.append(json.loads(req.data.decode("utf-8")))
+        if runs_api and req.full_url.endswith("/v1/runs"):
+            return _JsonResponse({"run_id": f"run-{suffix}"})
+        return _SseResponse([b"data: [DONE]\n", b"\n"])
+
+    monkeypatch.setattr(gateway_chat, "RunJournalWriter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gateway_chat, "get_session", lambda _session_id: session)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(
+        gateway_chat,
+        "gateway_supports_approval",
+        lambda *_args, **_kwargs: runs_api,
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "gateway_approval_unavailable_reason",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda _cfg: {})
+    monkeypatch.setattr(
+        streaming,
+        "_prefill_messages_with_webui_context",
+        lambda _context, _cfg: [],
+    )
+    monkeypatch.setattr(
+        streaming,
+        "_normalize_prefill_messages_before_user_turn",
+        lambda messages: messages,
+    )
+    monkeypatch.setattr(streaming, "_public_prefill_context_status", lambda _context: {})
+    monkeypatch.setattr(
+        streaming,
+        "_webui_ephemeral_system_prompt",
+        lambda *_args, **_kwargs: "system",
+    )
+    monkeypatch.setenv(
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API",
+        "1" if runs_api else "0",
+    )
+
+    gateway_chat._run_gateway_chat_streaming(
+        session_id,
+        "exercise request options",
+        "gpt-5.5",
+        str(tmp_path),
+        stream_id,
+        [],
+        model_provider="openai",
+    )
+
+    assert len(captured) == 1
+    return captured[0], _event_pairs(subscriber)
+
+
+def test_gateway_request_options_compose_with_installed_parser_for_both_transports(
+    tmp_path, monkeypatch
+):
+    cases = [
+        ("high", "  HIGH  ", "priority", {"enabled": True, "effort": "high"}, "priority"),
+        ("off", "none", "priority", {"enabled": False}, "priority"),
+        ("absent", None, None, None, None),
+        ("invalid", "definitely-invalid", "turbo", None, None),
+    ]
+    bodies = []
+    expected = []
+    expected_run_meta_efforts = []
+
+    for runs_api in (True, False):
+        transport = "runs" if runs_api else "legacy"
+        for case_name, effort, service_tier, reasoning, accepted_tier in cases:
+            with monkeypatch.context() as scoped:
+                body, events = _capture_gateway_request_body(
+                    scoped,
+                    tmp_path,
+                    runs_api=runs_api,
+                    configured_effort=effort,
+                    configured_service_tier=service_tier,
+                    suffix=f"{transport}-{case_name}",
+                )
+            assert "reasoning_effort" not in body
+            assert "service_tier" not in body
+            bodies.append(body)
+            expected.append(
+                {
+                    "reasoning": reasoning,
+                    "service_tier_missing": accepted_tier is None,
+                    "service_tier": accepted_tier,
+                }
+            )
+            initial_meta = [payload for event, payload in events if event == "run_meta"]
+            assert len(initial_meta) == 1
+            expected_run_meta_efforts.append(
+                "off" if reasoning == {"enabled": False} else (reasoning or {}).get("effort")
+            )
+            assert initial_meta[0]["reasoning_effort"] == expected_run_meta_efforts[-1]
+
+    assert _installed_gateway_parser(bodies) == expected
 
 
 @pytest.mark.parametrize("runs_api", [True, False], ids=["runs-api", "legacy-stream"])
@@ -169,6 +381,18 @@ def test_gateway_terminal_runtime_reconciles_live_persisted_done_and_reload(
     )
 
     events = _event_pairs(subscriber)
+    assert "reasoning_effort" not in gateway_requests[0]
+    assert gateway_requests[0]["model_options"]["reasoning"] == {
+        "enabled": True,
+        "effort": "high",
+    }
+    assert _installed_gateway_parser([gateway_requests[0]]) == [
+        {
+            "reasoning": {"enabled": True, "effort": "high"},
+            "service_tier_missing": True,
+            "service_tier": None,
+        }
+    ]
     run_meta = [payload for event, payload in events if event == "run_meta"]
     assert run_meta == [
         {
