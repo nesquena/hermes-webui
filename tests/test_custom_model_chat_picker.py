@@ -90,6 +90,13 @@ def test_webui_managed_modern_custom_providers_appear_in_chat_picker(monkeypatch
         "@custom:gemini:gemini-3.7-flash-high",
     ]
 
+    fallback_groups = {
+        group["provider_id"]: group
+        for group in config._static_models_catalog_without_live_probes()["groups"]
+    }
+    assert fallback_groups["custom:deepseek"] == groups["custom:deepseek"]
+    assert fallback_groups["custom:gemini"] == groups["custom:gemini"]
+
 
 def test_active_webui_managed_custom_provider_keeps_its_exact_model_id(monkeypatch):
     payload = _catalog(
@@ -116,6 +123,14 @@ def test_active_webui_managed_custom_provider_keeps_its_exact_model_id(monkeypat
     assert [row["id"] for row in group["models"]] == [
         "deepseek-ai/deepseek-v4-flash-0731"
     ]
+    fallback_group = next(
+        group
+        for group in config._static_models_catalog_without_live_probes()["groups"]
+        if group["provider_id"] == "custom:deepseek"
+    )
+    assert [row["id"] for row in fallback_group["models"]] == [
+        "deepseek-ai/deepseek-v4-flash-0731"
+    ]
 
 
 def test_disabled_webui_managed_custom_provider_stays_out_of_chat_picker(monkeypatch):
@@ -136,3 +151,8 @@ def test_disabled_webui_managed_custom_provider_stays_out_of_chat_picker(monkeyp
 
     provider_ids = {group["provider_id"] for group in payload["groups"]}
     assert "custom:disabled" not in provider_ids
+    fallback_provider_ids = {
+        group["provider_id"]
+        for group in config._static_models_catalog_without_live_probes()["groups"]
+    }
+    assert "custom:disabled" not in fallback_provider_ids
