@@ -330,3 +330,38 @@ def test_mirrors_are_deduplicated_by_provenance_before_request_caps():
     assert contents.count("DEMANDE MIROIR UNIQUE") == 1
     assert contents.count("DEMANDE RÉPÉTÉE LÉGITIME") == 2
     assert "DEMANDE DISTINCTE 0" in contents
+
+
+def test_lineage_merge_preserves_equal_text_with_distinct_provenance():
+    sidecar_row = {
+        "id": "sidecar-distinct",
+        "role": "user",
+        "content": "DEMANDE IDENTIQUE MAIS DISTINCTE",
+        "timestamp": 1.0,
+    }
+    state_db_row = {
+        "id": "db-distinct",
+        "_row_id": 42,
+        "role": "user",
+        "content": "DEMANDE IDENTIQUE MAIS DISTINCTE",
+        "timestamp": 2.0,
+    }
+    session = SimpleNamespace(
+        session_id="lineage-distincte",
+        messages=[sidecar_row],
+        parent_session_id="snapshot-parent",
+    )
+
+    with patch(
+        "api.routes._webui_sidecar_lineage_messages_for_display",
+        return_value=[sidecar_row],
+    ), patch(
+        "api.models.get_state_db_session_messages",
+        return_value=[state_db_row],
+    ):
+        merged = context_brief._session_messages(session)
+        distilled = context_brief._distill_context_brief(session)
+
+    rows = _rendered_rows(distilled)
+    assert [row["id"] for row in merged] == ["sidecar-distinct", "db-distinct"]
+    assert [row["content"] for row in rows].count("DEMANDE IDENTIQUE MAIS DISTINCTE") == 2

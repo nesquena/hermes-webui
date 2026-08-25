@@ -815,7 +815,7 @@ def _session_messages(session) -> list[dict]:
     anchor summary (observed 2026-08-17: parent sidecars with 1-3 messages while
     state.db held the full 1,500-row history). The sidecar stitch alone still
     loses the original ask, so lineage sessions additionally merge the state.db
-    continuation history (text-deduped, chronologically ordered).
+    continuation history (provenance-deduped, chronologically ordered).
 
     State.db shims (SimpleNamespace) and forks pass through unchanged — the
     stitcher only follows ``pre_compression_snapshot`` parents. Any stitch or
@@ -858,22 +858,14 @@ def _decode_state_db_content(content):
     return content
 
 
-def _lineage_merge_key(msg: dict) -> tuple:
-    text = _message_text(_decode_state_db_content(msg.get("content")))
-    normalized = " ".join(_strip_workspace_tag(text).split())
-    digest = hashlib.sha1(normalized.encode("utf-8", "replace")).hexdigest()
-    return (str(msg.get("role") or ""), digest)
-
-
 def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
     """Union the sidecar lineage view with the state.db continuation history.
 
-    Both inputs are chronological within themselves; rows are deduped on
-    (role, normalized-text hash) — the state.db mirror of a sidecar turn can
-    carry a slightly different timestamp and a ``\\x00json:`` content envelope,
-    so timestamp-based keys miss them. Ordering merges the two lists by
-    carry-forward timestamp (undated rows inherit their predecessor's ts) with
-    the sidecar side winning ties. Any failure returns ``base`` unchanged.
+    Both inputs are chronological within themselves; rows are deduped only on
+    validated message/state.db identities. Equal text with distinct or missing
+    provenance remains distinct. Ordering merges the two lists by carry-forward
+    timestamp (undated rows inherit their predecessor's ts) with the sidecar
+    side winning ties. Any failure returns ``base`` unchanged.
     """
     sid = str(getattr(session, "session_id", "") or "")
     if not sid:
@@ -888,7 +880,9 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
     if not db_rows:
         return base
     try:
-        seen = {_lineage_merge_key(m) for m in base}
+        seen: set[tuple[str, str]] = set()
+        for message in base:
+            seen.update(_message_provenance_tokens(message))
         added: list[dict] = []
         for row in db_rows:
             if not isinstance(row, dict):
@@ -898,10 +892,10 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
             if isinstance(content, str) and content.startswith(_STATE_DB_JSON_PREFIX):
                 decoded = dict(row)
                 decoded["content"] = _decode_state_db_content(content)
-            key = _lineage_merge_key(decoded)
-            if key in seen:
+            tokens = _message_provenance_tokens(decoded)
+            if tokens and any(token in seen for token in tokens):
                 continue
-            seen.add(key)
+            seen.update(tokens)
             added.append(decoded)
         if not added:
             return base
