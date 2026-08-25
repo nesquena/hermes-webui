@@ -602,8 +602,15 @@ def _provider_api_key_present(
     _known_oauth = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous", "anthropic"}
     if provider not in _SUPPORTED_PROVIDER_SETUPS and provider not in _known_oauth:
         try:
+            from api.aws_imds import suppress_ec2_imds_probe
             from hermes_cli.auth import get_auth_status as _gas
-            status = _gas(provider)
+            # Sibling of the models-catalog rebuild guard: onboarding runs on
+            # first paint, and for ``bedrock`` this reaches botocore's
+            # credential chain, which stalls on the link-local EC2 metadata
+            # endpoint off-EC2. No-op when IMDS is reachable. See
+            # api/aws_imds.py.
+            with suppress_ec2_imds_probe("onboarding provider key check"):
+                status = _gas(provider)
             if isinstance(status, dict) and status.get("logged_in"):
                 return True
         except Exception:

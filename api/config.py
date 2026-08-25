@@ -5253,8 +5253,22 @@ def _invoke_models_rebuild(builder):
     Production simply calls ``builder()``. Exists so tests can simulate a
     slow / hanging provider probe without having to reach the closure that
     actually does the per-provider network calls.
+
+    The rebuild enumerates provider auth state, which for ``bedrock`` reaches
+    ``agent.bedrock_adapter.has_aws_credentials()`` and botocore's full
+    credential chain. Off-EC2 that chain stalls on the link-local Instance
+    Metadata Service (169.254.169.254) for its whole connect timeout — measured
+    at ~1.0s of a 1.7s cold ``/api/models?freshness=session_visit`` rebuild,
+    which is the visible chat-open latency. Suppress the metadata leg here, at
+    the seam every rebuild passes through (foreground *and* the out-of-band
+    worker thread), rather than at any single provider call site. The guard is
+    a no-op unless the endpoint is provably unreachable from this host, so a
+    genuine EC2 instance role still resolves. See ``api/aws_imds.py``.
     """
-    return builder()
+    from api.aws_imds import suppress_ec2_imds_probe
+
+    with suppress_ec2_imds_probe("models catalog rebuild"):
+        return builder()
 
 
 def _configured_model_badges_from_static_catalog(
