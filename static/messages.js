@@ -4889,7 +4889,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // A detached suffix is not itself a reliable streaming boundary: the
       // chunk may have ended inside a filename (e.g. a. + png). Keep buffering
       // until the parsed reference itself proves complete.
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])){
+      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;

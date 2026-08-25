@@ -129,7 +129,7 @@ class TestSmdMediaInStream(unittest.TestCase):
         block = MESSAGES_JS[idx:idx + 6500]
         self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
         self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("!_smdMediaRefHasReliableBoundary(parts?parts[0]:m[1])", block)
+        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
         self.assertLess(block.index("const parts="), block.index("if(matchEnd===combined.length"))
         self.assertIn("unmatchedTail = candidate", block)
 
@@ -148,6 +148,12 @@ class TestSmdMediaAwareAddTextBehaviour(unittest.TestCase):
         result = _run_media_aware_chunks(["MEDIA:/tmp/a.", "png "])
         self.assertIn('data-ref="/tmp/a.png"', result["html"])
         self.assertNotIn('data-ref="/tmp/a"', result["html"])
+        self.assertNotIn("MEDIA:", result["text"])
+
+    def test_extension_like_prefix_does_not_complete_before_following_suffix(self):
+        result = _run_media_aware_chunks(["MEDIA:/tmp/a.png.", "bak "])
+        self.assertIn('data-ref="/tmp/a.png.bak"', result["html"])
+        self.assertNotIn('data-ref="/tmp/a.png"', result["html"])
         self.assertNotIn("MEDIA:", result["text"])
 
     def test_remote_query_fragment_trailing_punctuation_is_preserved(self):
