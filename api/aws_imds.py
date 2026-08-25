@@ -143,6 +143,11 @@ def should_suppress_imds() -> bool:
 
     False when the operator has already expressed an explicit preference, or
     when the IMDS endpoint is reachable (or its state is unknown).
+
+    Only meaningful when no module-owned scope is active: while one is, the
+    value in the environment is *ours*, not the operator's, so reading it here
+    cannot distinguish the two. :func:`suppress_ec2_imds_probe` establishes
+    that precondition by checking ``_scope_depth`` first.
     """
     if os.environ.get(_ENV_VAR) is not None:
         # Operator/deployment already decided — honour it either way.
@@ -159,25 +164,41 @@ def suppress_ec2_imds_probe(reason: str = ""):
     threads: scopes are refcounted and the previous environment value is
     restored exactly once, on exit of the outermost scope, on every exit path
     (success, exception, cancellation).
+
+    Ownership matters for the concurrent case. ``os.environ`` is process-global,
+    so a scope that begins while another is already active would otherwise read
+    the suppression value this module installed and mistake it for an operator
+    decision — declining to join the refcount, and then losing suppression the
+    moment the first scope exits. A late entrant therefore joins the existing
+    refcount under ``_state_lock`` without consulting the environment; only a
+    true outermost entrant reads and preserves the operator's value.
     """
     global _scope_depth, _saved_env_value
 
-    if not should_suppress_imds():
-        yield False
-        return
-
     with _state_lock:
-        entered_outermost = _scope_depth == 0
-        if entered_outermost:
-            _saved_env_value = os.environ.get(_ENV_VAR)
-            os.environ[_ENV_VAR] = "true"
-            if reason:
-                logger.debug(
-                    "EC2 IMDS probe suppressed (%s): %s is unreachable from this host",
-                    reason,
-                    _IMDS_HOST,
-                )
-        _scope_depth += 1
+        joined_active_scope = _scope_depth > 0
+        if joined_active_scope:
+            _scope_depth += 1
+
+    if not joined_active_scope:
+        if not should_suppress_imds():
+            yield False
+            return
+
+        with _state_lock:
+            # Re-check under the lock: reachability probing happens outside it,
+            # so another thread may have installed an outer scope meanwhile. If
+            # it did, join it rather than overwriting its saved value.
+            if _scope_depth == 0:
+                _saved_env_value = os.environ.get(_ENV_VAR)
+                os.environ[_ENV_VAR] = "true"
+                if reason:
+                    logger.debug(
+                        "EC2 IMDS probe suppressed (%s): %s is unreachable from this host",
+                        reason,
+                        _IMDS_HOST,
+                    )
+            _scope_depth += 1
 
     try:
         yield True

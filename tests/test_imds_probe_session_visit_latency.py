@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 
 import pytest
 
@@ -157,6 +158,68 @@ def test_nested_scopes_restore_only_once(no_suite_imds_guard, imds_unreachable):
             "inner scope exit wrongly re-enabled IMDS while outer scope was active"
         )
     assert os.environ.get("AWS_EC2_METADATA_DISABLED") is None
+
+
+def test_overlapping_scopes_on_two_threads_hold_suppression(
+    no_suite_imds_guard, imds_unreachable
+):
+    """A late entrant must JOIN the active scope, not read our own env value.
+
+    FAILS BEFORE THE OWNERSHIP FIX. `test_nested_scopes_restore_only_once` is
+    sequential — the inner block always exits first — so it cannot expose the
+    overlap. Here thread B enters while A holds the scope and is still inside
+    when A exits: if B mistook the module-installed `AWS_EC2_METADATA_DISABLED`
+    for an operator decision it never joined the refcount, and A's exit strips
+    suppression out from under B, which then issues the IMDS request its scope
+    promised to suppress.
+    """
+    aws_imds = imds_unreachable
+
+    a_installed = threading.Event()
+    b_entered = threading.Event()
+    a_exited = threading.Event()
+    observed: dict[str, object] = {}
+    timeout = 10
+
+    def thread_a():
+        with aws_imds.suppress_ec2_imds_probe("A: models catalog rebuild") as active:
+            observed["a_active"] = active
+            a_installed.set()
+            assert b_entered.wait(timeout), "thread B never entered its scope"
+        a_exited.set()
+
+    def thread_b():
+        assert a_installed.wait(timeout), "thread A never installed suppression"
+        with aws_imds.suppress_ec2_imds_probe("B: providers auth status") as active:
+            observed["b_active"] = active
+            b_entered.set()
+            assert a_exited.wait(timeout), "thread A never exited"
+            observed["b_env_after_a_exit"] = os.environ.get("AWS_EC2_METADATA_DISABLED")
+            observed["b_depth_after_a_exit"] = aws_imds._scope_depth
+
+    threads = [threading.Thread(target=thread_a), threading.Thread(target=thread_b)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout * 2)
+        assert not t.is_alive(), "barrier deadlock — a scope never reached its exit"
+
+    assert observed["a_active"] is True
+    assert observed["b_active"] is True, (
+        "REGRESSION: the overlapping scope reported itself inactive; it read the "
+        "module's own suppression value as an operator decision."
+    )
+    assert observed["b_env_after_a_exit"] == "true", (
+        "REGRESSION: thread A's exit removed suppression while thread B was still "
+        "inside its scope — B can now issue the IMDS request it suppressed."
+    )
+    assert observed["b_depth_after_a_exit"] == 1, (
+        "late entrant did not join the refcount"
+    )
+
+    # And the refcount unwound cleanly once both scopes were gone.
+    assert aws_imds._scope_depth == 0
+    assert os.environ.get("AWS_EC2_METADATA_DISABLED") is None, "leaked after both exits"
 
 
 def test_reachable_imds_is_never_suppressed(no_suite_imds_guard, monkeypatch):
