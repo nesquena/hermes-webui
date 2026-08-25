@@ -29,6 +29,7 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
+    parse_reasoning_effort,
     peek_stream,
     register_active_run,
     unregister_active_run,
@@ -404,6 +405,30 @@ def _gateway_reasoning_effort_label(reasoning_effort):
     if not value:
         return None
     return "off" if value == "none" else value
+
+
+def _gateway_request_model_options(reasoning_effort, service_tier=None) -> dict[str, Any]:
+    """Build the model-options envelope consumed by the Gateway Agent."""
+    model_options: dict[str, Any] = {}
+    reasoning = parse_reasoning_effort(reasoning_effort)
+    if reasoning is not None:
+        model_options["reasoning"] = reasoning
+    normalized_service_tier = str(service_tier or "").strip().lower()
+    if normalized_service_tier == "priority":
+        model_options["service_tier"] = normalized_service_tier
+    return model_options
+
+
+def _gateway_accepted_reasoning_effort_label(model_options: dict[str, Any]) -> str | None:
+    """Return display metadata from the model options accepted for transport."""
+    reasoning = model_options.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    if reasoning.get("enabled") is False:
+        return "off"
+    if reasoning.get("enabled") is True:
+        return _gateway_reasoning_effort_label(reasoning.get("effort"))
+    return None
 
 
 def _gateway_effective_runtime_metadata(payload: dict) -> dict:
@@ -1131,13 +1156,6 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
-        reasoning_effort_label = _gateway_reasoning_effort_label(reasoning_effort)
-        put_gateway_event("run_meta", {
-            "session_id": session_id,
-            "model": model,
-            "provider": model_provider or "",
-            "reasoning_effort": reasoning_effort_label,
-        })
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         try:
@@ -1149,6 +1167,19 @@ def _run_gateway_chat_streaming(
             )
         except Exception:
             _gw_overrides = {}
+        request_model_options = _gateway_request_model_options(
+            reasoning_effort,
+            _gw_overrides.get("service_tier"),
+        )
+        reasoning_effort_label = _gateway_accepted_reasoning_effort_label(
+            request_model_options
+        )
+        put_gateway_event("run_meta", {
+            "session_id": session_id,
+            "model": model,
+            "provider": model_provider or "",
+            "reasoning_effort": reasoning_effort_label,
+        })
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
         _use_runs_api = _runs_api_enabled and gateway_supports_approval(base_url, api_key)
         if not _use_runs_api and runs_api_pending_marked:
@@ -1196,10 +1227,8 @@ def _run_gateway_chat_streaming(
             body_extras = {}
             if model_provider:
                 body_extras["provider"] = model_provider
-            if reasoning_effort is not None:
-                body_extras["reasoning_effort"] = reasoning_effort
-            if _gw_overrides.get("service_tier"):
-                body_extras["service_tier"] = _gw_overrides["service_tier"]
+            if request_model_options:
+                body_extras["model_options"] = request_model_options
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -1272,10 +1301,8 @@ def _run_gateway_chat_streaming(
             }
             if model_provider:
                 body["provider"] = model_provider
-            if reasoning_effort is not None:
-                body["reasoning_effort"] = reasoning_effort
-            if _gw_overrides.get("service_tier"):
-                body["service_tier"] = _gw_overrides["service_tier"]
+            if request_model_options:
+                body["model_options"] = request_model_options
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
