@@ -335,7 +335,14 @@ def _clean_workspace_list(workspaces: list, profile: str | Path | None = None) -
             # p is under ~/.hermes/profiles/ — only skip if it's under a DIFFERENT profile
             try:
                 from api.profiles import get_active_hermes_home
-                own_profile_dir = get_active_hermes_home().resolve()
+                if profile is not None:
+                    # Explicit profile wins: the list belongs to that profile,
+                    # so "own" is defined by the profile parameter, never by the
+                    # ambient home (loading profile A's list under ambient B must
+                    # not silently drop A's own workspaces).
+                    own_profile_dir = _resolve_profile_home_param(profile).resolve()
+                else:
+                    own_profile_dir = get_active_hermes_home().resolve()
                 p.relative_to(own_profile_dir)
                 # p is under our own profile dir — keep it
             except (ValueError, Exception):
@@ -1001,19 +1008,43 @@ def resolve_implicit_workspace_with_recovery(
         # never prove target-side deletion. Config-read uncertainty also fails
         # closed by preserving the original validation error.
         try:
-            from api.config import get_config
+            from api.config import get_config, get_config_for_profile_home
 
-            terminal_cfg = get_config().get("terminal", {})
+            if profile is not None:
+                # Classify the backend from THIS profile's own config, never the
+                # ambient one: a remote profile without terminal.cwd must still be
+                # recognized as remote when loaded under a different ambient home.
+                terminal_cfg = get_config_for_profile_home(
+                    _resolve_profile_home_param(profile)
+                ).get("terminal", {})
+            else:
+                terminal_cfg = get_config().get("terminal", {})
         except Exception:
             logger.debug("Failed to classify terminal backend for workspace recovery", exc_info=True)
             raise original_error from None
         if _is_remote_terminal_backend(terminal_cfg):
             raise original_error from None
         try:
-            local_candidate = _resolve_path(candidate)
+            local_candidate = (
+                _resolve_path(candidate, profile=profile)
+                if profile is not None
+                else _resolve_path(candidate)
+            )
             local_candidate.stat()
         except FileNotFoundError:
-            fallback_value = fallback() if callable(fallback) else fallback
+            def _profile_bound_fallback():
+                value = fallback() if callable(fallback) else fallback
+                if profile is not None and callable(fallback):
+                    # The production call sites pass profile-aware getters such as
+                    # get_last_workspace; bind the explicit profile so a missing-path
+                    # recovery can never fall back to another profile's workspace.
+                    try:
+                        return fallback(profile)
+                    except TypeError:
+                        return value
+                return value
+
+            fallback_value = _profile_bound_fallback()
             if profile is not None:
                 try:
                     return resolve_trusted_workspace(fallback_value, profile=profile), True

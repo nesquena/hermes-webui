@@ -5764,6 +5764,7 @@ def get_session_for_file_ops(sid: str):
         workspace, recovered = resolve_implicit_workspace_with_recovery(
             stored_workspace,
             get_last_workspace,
+            profile=session_profile or None,
         )
     except ValueError:
         # Preserve the existing file-handler behavior for non-missing trust or

@@ -774,3 +774,160 @@ def test_recovery_helper_threads_profile_to_trust_and_fallback(tmp_path):
         )
 
 
+
+def test_clean_workspace_list_explicit_profile_keeps_own_entries(monkeypatch, tmp_path):
+    """_clean_workspace_list must define 'own profile dir' by the explicit profile.
+
+    Maintainer re-gate 2026-08-25 (CORE / data-loss): with an explicit
+    profile="alice", own_profile_dir was still derived from the AMBIENT home.
+    Loading Alice's saved list while ambient Bob was active dropped Alice's own
+    workspace (it sat under Alice's home, not Bob's) and load_workspaces()
+    persisted the emptied list back to disk — silent destruction of a
+    profile's saved workspaces.
+
+    Regression: Alice request / Bob ambient — Alice's own entry survives and
+    is persisted intact; a genuinely foreign profile path is still removed.
+    """
+    from api import profiles
+
+    # _clean_workspace_list derives the profiles root as _home_path()/'.hermes'/profiles.
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path / ".hermes")
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path / ".hermes")
+    (tmp_path / ".hermes" / "profiles").mkdir(parents=True)
+
+    alice_home = tmp_path / ".hermes" / "profiles" / "alice"
+    alice_home.mkdir(parents=True)
+    bob_home = tmp_path / ".hermes" / "profiles" / "bob"
+    bob_home.mkdir(parents=True)
+
+    # Alice owns a workspace that lives inside her OWN profile directory.
+    alice_own = alice_home / "projects"
+    alice_own.mkdir(parents=True)
+    # A foreign entry pointing into BOB's profile dir must still be pruned.
+    foreign = bob_home / "secret"
+    foreign.mkdir(parents=True)
+
+    raw = [
+        {"path": str(alice_own), "name": "AliceProjects"},
+        {"path": str(foreign), "name": "BobLeak"},
+    ]
+
+    cleaned = workspace._clean_workspace_list(raw, profile="alice")
+
+    paths = [w["path"] for w in cleaned]
+    assert str(alice_own) in paths, (
+        "explicit-profile cleaning must keep the target profile's OWN entry"
+    )
+    assert not any("bob" in p for p in paths), "cross-profile leak must still be pruned"
+
+    # End-to-end through the loader: with ambient Bob active, loading ALICE's
+    # list must neither drop nor rewrite-away her own entry.
+    monkeypatch.setattr(
+        profiles, "get_active_profile_name", lambda: "bob", raising=False
+    )
+    ws_file = tmp_path / "state" / "workspaces.json"
+    monkeypatch.setattr(workspace, "_workspaces_file_for_profile", lambda p=None: ws_file)
+    ws_file.parent.mkdir(parents=True, exist_ok=True)
+    ws_file.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = workspace.load_workspaces(profile="alice")
+    loaded_paths = [w["path"] for w in loaded]
+    assert str(alice_own) in loaded_paths
+    on_disk = json.loads(ws_file.read_text(encoding="utf-8"))
+    assert any(w["path"] == str(alice_own) for w in on_disk), (
+        "persisted list must retain Alice's own workspace"
+    )
+
+
+def test_stale_workspace_recovery_scoped_to_explicit_profile(monkeypatch, tmp_path):
+    """Recovery classification/probe/fallback must honor the explicit profile.
+
+    Maintainer re-gate 2026-08-25 (CORE): resolve_implicit_workspace_with_recovery
+    classified the backend via ambient get_config(), probed candidate paths
+    without profile=, and fell back to an unbound getter. With profile="alice"
+    under ambient Bob it returned BOB's last workspace as recovered=True, and an
+    Alice remote backend without terminal.cwd was misclassified as local.
+
+    Regression A (remote misclassification): alice is ssh WITHOUT cwd, ambient
+      is local — recovery must fail closed preserving the original error.
+    Regression B (cross-profile bind): alice local, stored path missing,
+      fallback=get_last_workspace — must never return Bob's path nor claim
+      recovered=True for it.
+    """
+    from api import profiles
+
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path / ".hermes")
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path / ".hermes")
+    (tmp_path / ".hermes" / "profiles").mkdir(parents=True)
+
+    alice_home = tmp_path / ".hermes" / "profiles" / "alice"
+    alice_home.mkdir(parents=True)
+    bob_home = tmp_path / ".hermes" / "profiles" / "bob"
+    bob_home.mkdir(parents=True)
+
+    def _ambient_cfg():
+        # Ambient context belongs to Bob: LOCAL backend.
+        return {"terminal": {"backend": "local"}}
+
+    monkeypatch.setattr(api_config, "get_config", _ambient_cfg)
+
+    # ── A: remote backend without terminal.cwd fails closed ──
+    (alice_home / "config.yaml").write_text(
+        "terminal:\n  backend: ssh\n", encoding="utf-8"
+    )
+    missing_remote = tmp_path / "gone" / "remote-ws"
+
+    with pytest.raises(ValueError):
+        workspace.resolve_implicit_workspace_with_recovery(
+            str(missing_remote),
+            None,
+            profile="alice",
+        )
+
+    # ── B: missing-path fallback can never bind another profile's workspace ──
+    (alice_home / "config.yaml").write_text(
+        "terminal:\n  backend: local\n", encoding="utf-8"
+    )
+    stored_missing = tmp_path / "data" / "vanished"
+    bob_ws = tmp_path / "srv" / "bobs-place"
+    bob_ws.mkdir(parents=True)
+    alice_ws = tmp_path / "srv" / "alice-own"
+    alice_ws.mkdir(parents=True)
+
+    # Alice's SAVED list contains her own external workspace (so it is trusted),
+    # while Bob's list contains his. The saved-workspace trust branch is itself
+    # profile-scoped (earlier fix), so each name resolves only its own list.
+    alice_list = tmp_path / "state-alice" / "workspaces.json"
+    bob_list = tmp_path / "state-bob" / "workspaces.json"
+    alice_list.parent.mkdir(parents=True, exist_ok=True)
+    bob_list.parent.mkdir(parents=True, exist_ok=True)
+    alice_list.write_text(json.dumps([{"path": str(alice_ws), "name": "AliceOwn"}]), encoding="utf-8")
+    bob_list.write_text(json.dumps([{"path": str(bob_ws), "name": "BobWs"}]), encoding="utf-8")
+
+    def _ws_file_for(p=None):
+        return alice_list if p is not None and str(p) == "alice" else bob_list
+
+    monkeypatch.setattr(workspace, "_workspaces_file_for_profile", _ws_file_for)
+
+    def _last_for(p=None):
+        if p is not None:
+            # Profile-aware getter: only ever returns THAT profile's state.
+            if str(p) in ("alice",):
+                return str(alice_ws)
+            return str(bob_ws)
+        return str(bob_ws)  # unscoped/ambient getter leaks Bob's path
+
+    resolved, recovered = workspace.resolve_implicit_workspace_with_recovery(
+        str(stored_missing),
+        _last_for,
+        profile="alice",
+    )
+    assert recovered is True
+    assert resolved == alice_ws.resolve(), (
+        "recovery under profile='alice' must bind Alice's own workspace"
+    )
+    assert "bobs-place" not in str(resolved), (
+        "recovery under profile='alice' must never return Bob's workspace"
+    )
