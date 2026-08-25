@@ -20,121 +20,14 @@ import copy
 import hashlib
 import json
 import logging
-import tempfile
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-
-# Self-contained copies of the small session_squash.py helpers this module
-# needs (text extraction, busy-field pruning, transcript distillation,
-# atomic JSON writes). They are inlined so this PR stays reviewable on its
-# own; if session_squash lands upstream they can be deduplicated.
-_DISTILL_BUDGET_CHARS = 100_000
-
-
-def _message_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-        return "\n".join(parts)
-    return ""
-
-
-def _busy_fields(session) -> dict:
-    busy = {}
-    for field in ("active_stream_id", "pending_user_message", "pending_started_at", "pending_turn_id"):
-        value = getattr(session, field, None)
-        if value:
-            busy[field] = str(value)[:80]
-    attachments = getattr(session, "pending_attachments", None)
-    if attachments:
-        busy["pending_attachments"] = len(attachments)
-    return busy
-
-
-def _atomic_write(path: Path, payload: bytes) -> None:
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
-    finally:
-        Path(tmp_name).unlink(missing_ok=True)
-
-
-def _extract_llm_content(response) -> str:
-    message = response.choices[0].message
-    if isinstance(message, dict):
-        content = message.get("content")
-    else:
-        content = getattr(message, "content", message)
-    if not isinstance(content, str):
-        content = str(content) if content else ""
-    return content.strip()
-
-
-def _distill_transcript(session, budget: int = _DISTILL_BUDGET_CHARS) -> str:
-    """Compact, budget-bounded view of the transcript for the aux model.
-
-    Keeps every user message and every assistant message carrying a
-    ``# CONCLUSION`` block (the verified outcomes), plus the head/tail of the
-    conversation; tool payloads are intentionally dropped.
-    """
-    messages = [m for m in (session.messages or []) if isinstance(m, dict)]
-    sections: list[str] = []
-    used_idx: set[int] = set()
-
-    def _fmt(idx: int, m: dict, cap: int) -> str:
-        role = str(m.get("role") or "?")
-        text = _message_text(m.get("content")).strip()
-        if len(text) > cap:
-            text = text[:cap] + "\n[…tronqué…]"
-        return f"--- [{idx}] {role} ---\n{text}"
-
-    def _append(idx: int, cap: int) -> bool:
-        nonlocal budget
-        if idx in used_idx:
-            return True
-        chunk = _fmt(idx, messages[idx], cap)
-        if budget - len(chunk) < 0:
-            return False
-        sections.append(chunk)
-        used_idx.add(idx)
-        budget -= len(chunk)
-        return True
-
-    # 1. All user messages (the requests).
-    for i, m in enumerate(messages):
-        if m.get("role") == "user":
-            if not _append(i, 1200):
-                break
-    # 2. Assistant messages with a CONCLUSION block (verified outcomes).
-    for i, m in enumerate(messages):
-        if m.get("role") == "assistant" and "# CONCLUSION" in _message_text(m.get("content")):
-            if not _append(i, 3000):
-                break
-    # 3. Head and tail for framing.
-    for i in list(range(min(2, len(messages)))) + list(range(max(0, len(messages) - 4), len(messages))):
-        _append(i, 800)
-    # 4. Remaining assistant messages, newest first, while budget lasts.
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == "assistant":
-            if not _append(i, 1500):
-                break
-
-    sections.sort(key=lambda s: int(s.split("]")[0].split("[")[1]) if s.startswith("--- [") else 0)
-    return "\n\n".join(sections)
-
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +44,62 @@ _TIMELINE_CAP = _REQUEST_CAP + _CONCLUSION_CAP
 _COMPRESSION_CAP = 6
 _COMPRESSION_EXCERPT_CHARS = 160
 _LAST_REPLY_EXCERPT_CHARS = 280
+_BRIEF_DISTILL_BUDGET_CHARS = 100_000
+_BRIEF_RECENT_REQUEST_CAP = 7
+_BRIEF_RECENT_CONCLUSION_CAP = 8
+_BRIEF_RECENT_CONVERSATION_CAP = 12
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        Path(tmp_name).unlink(missing_ok=True)
+
+
+def _busy_fields(session) -> dict:
+    busy = {}
+    for field in (
+        "active_stream_id",
+        "pending_user_message",
+        "pending_started_at",
+        "pending_turn_id",
+    ):
+        value = getattr(session, field, None)
+        if value:
+            busy[field] = str(value)[:80]
+    attachments = getattr(session, "pending_attachments", None)
+    if attachments:
+        busy["pending_attachments"] = len(attachments)
+    return busy
+
+
+def _extract_llm_content(response) -> str:
+    message = response.choices[0].message
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", message)
+    if not isinstance(content, str):
+        content = str(content) if content else ""
+    return content.strip()
+
+
+def _message_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+    return ""
 
 
 class BriefError(Exception):
@@ -448,11 +397,115 @@ def _compression_kind(msg: dict) -> str | None:
     return None
 
 
+def _is_synthetic_narrative_message(msg: dict) -> bool:
+    """True for runtime summaries/handoffs that are evidence references only."""
+    if not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant"):
+        return True
+    if msg.get("_squash_summary") is True:
+        return True
+    text = _message_text(msg.get("content")).strip()
+    if not text:
+        return True
+    if msg.get("role") == "user":
+        return not _is_user_request(msg)
+    if _compression_kind(msg) is not None:
+        return True
+    return _is_automated_user_text(text)
+
+
+def _distill_context_brief(
+    session,
+    budget: int = _BRIEF_DISTILL_BUDGET_CHARS,
+) -> str:
+    """Build a recency-first, strictly bounded narrative input.
+
+    Selection priority is intentionally different from session squash: recent
+    conversational evidence is budgeted first, synthetic history is excluded,
+    then selected rows are rendered in canonical chronological order so the
+    newest direct evidence remains last.
+    """
+    if budget <= 0:
+        return ""
+    messages = _session_messages(session)
+    eligible: list[tuple[int, dict]] = []
+    requests: list[tuple[int, dict]] = []
+    conclusions: list[tuple[int, dict]] = []
+    assistants: list[tuple[int, dict]] = []
+    for idx, msg in enumerate(messages):
+        if _is_synthetic_narrative_message(msg):
+            continue
+        text = _message_text(msg.get("content")).strip()
+        if not text or text == "[[SILENT]]":
+            continue
+        row = (idx, msg)
+        eligible.append(row)
+        if _is_user_request(msg):
+            requests.append(row)
+        if msg.get("role") == "assistant":
+            assistants.append(row)
+            if "# CONCLUSION" in text:
+                conclusions.append(row)
+
+    priority: list[tuple[int, dict, int]] = []
+
+    def _prioritize(rows, cap: int) -> None:
+        priority.extend((idx, msg, cap) for idx, msg in reversed(list(rows)))
+
+    request_keep_indices = {
+        idx for idx, _msg in requests[-_BRIEF_RECENT_REQUEST_CAP:]
+    }
+    if requests:
+        request_keep_indices.add(requests[0][0])
+    recent_conversation = [
+        row
+        for row in eligible[-_BRIEF_RECENT_CONVERSATION_CAP:]
+        if row[1].get("role") != "user" or row[0] in request_keep_indices
+    ]
+    _prioritize(recent_conversation, 1500)
+    if conclusions:
+        idx, msg = conclusions[-1]
+        priority.append((idx, msg, 3000))
+    _prioritize(conclusions[-_BRIEF_RECENT_CONCLUSION_CAP:], 3000)
+    _prioritize(requests[-_BRIEF_RECENT_REQUEST_CAP:], 1200)
+    if requests:
+        idx, msg = requests[0]
+        priority.append((idx, msg, 1200))
+    _prioritize(assistants, 1500)
+
+    max_caps: dict[int, int] = {}
+    first_priority: list[tuple[int, dict]] = []
+    seen_priority: set[int] = set()
+    for idx, msg, cap in priority:
+        max_caps[idx] = max(max_caps.get(idx, 0), cap)
+        if idx not in seen_priority:
+            seen_priority.add(idx)
+            first_priority.append((idx, msg))
+
+    selected: dict[int, str] = {}
+    used = 0
+    for idx, msg in first_priority:
+        role = str(msg.get("role") or "?")
+        text = _message_text(msg.get("content")).strip()
+        if role == "user":
+            text = _strip_workspace_tag(text)
+        cap = max_caps[idx]
+        if len(text) > cap:
+            text = text[:cap] + "\n[…tronqué…]"
+        chunk = f"--- [{idx}] {role} ---\n{text}"
+        separator = 2 if selected else 0
+        if used + separator + len(chunk) > budget:
+            continue
+        selected[idx] = chunk
+        used += separator + len(chunk)
+
+    return "\n\n".join(selected[idx] for idx in sorted(selected))
+
+
 def _extract_todos(messages: list) -> dict | None:
     try:
         from api.todo_state import derive_todo_state
 
-        snapshot = derive_todo_state(messages)
+        snapshot = derive_todo_state(messages, include_source_index=True)
     except Exception:
         logger.debug("context brief: todo derivation failed", exc_info=True)
         return None
@@ -473,7 +526,18 @@ def _extract_todos(messages: list) -> dict | None:
         if current is None and status == "in_progress":
             current = content
         normalized.append({"content": _excerpt(content, 160), "status": status})
-    return {"items": normalized, "counts": counts, "current": current}
+    source_idx = snapshot.get("_source_message_index")
+    has_open_items = bool(counts.get("pending") or counts.get("in_progress"))
+    stale = False
+    if has_open_items and isinstance(source_idx, int):
+        stale = any(
+            isinstance(msg, dict)
+            and msg.get("role") == "assistant"
+            and _compression_kind(msg) is None
+            and "# CONCLUSION" in _message_text(msg.get("content"))
+            for msg in messages[source_idx + 1 :]
+        )
+    return {"items": normalized, "counts": counts, "current": current, "stale": stale}
 
 
 def _extract_goal(sid: str, session) -> dict | None:
@@ -627,6 +691,7 @@ def build_deterministic_brief(session, sid: str, *, source: str) -> dict:
             "created_at": getattr(session, "created_at", None),
             "updated_at": getattr(session, "updated_at", None),
             "message_count": len(messages),
+            "transcript_revision": _messages_revision(messages),
             "source": source,
         },
         "goal": _extract_goal(sid, session),
@@ -837,16 +902,21 @@ def _merge_lineage_with_state_db(session, base: list[dict]) -> list[dict]:
         return base
 
 
-def _transcript_revision(session) -> str:
-    """Stable content revision for same-count rewrites and state.db sessions."""
+def _messages_revision(messages: list[dict]) -> str:
+    """Stable content revision for one already-resolved transcript snapshot."""
     encoded = json.dumps(
-        _session_messages(session),
+        messages,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _transcript_revision(session) -> str:
+    """Stable content revision for same-count rewrites and state.db sessions."""
+    return _messages_revision(_session_messages(session))
 
 
 def _session_revision(session) -> dict:
@@ -1010,6 +1080,12 @@ Règles :
 - « Demandes » : les demandes de l'utilisateur, une puce courte par demande, de la plus ancienne à la plus récente (maximum 8 puces).
 - « Accompli » : faits vérifiés uniquement — livraisons, fichiers produits, validations, déploiements visibles dans le transcript ; écris « Rien d'accompli de vérifiable pour l'instant. » si la section est vide.
 - « Reste à faire » : travail en cours, prochaines actions explicites, blocages éventuels ; écris « Aucun travail restant identifié. » si la section est vide.
+- Les blocs `[CONTEXT COMPACTION…]`, `[PRIOR CONTEXT…]`, les synthèses squash et les handoffs historiques sont des références, jamais l'état actuel.
+- En cas de contradiction, la demande directe ou la conclusion vérifiée portant l'index le plus élevé prévaut.
+- Une action explicitement terminée, annulée ou remplacée plus tard ne doit pas apparaître dans « Reste à faire ».
+- Une checklist marquée obsolète dans l'état courant structuré n'est pas une source d'actions et ne doit pas être reprise.
+- L'état courant structuré est autoritaire pour savoir si des TODO sont actionnables et si un traitement est réellement en cours.
+- Un brief fraîchement généré n'est pas, à lui seul, un fait récent : la preuve doit venir du transcript direct ou de l'état courant structuré.
 - Ne jamais inventer un fait absent du transcript ; distinguer fait vérifié et intention annoncée.
 - Ne jamais inclure de secret, token ou mot de passe ; pas de journaux bruts.
 - Au plus 500 mots."""
@@ -1036,29 +1112,71 @@ def _fallback_brief_text(deterministic: dict, reason: str) -> str:
         lines.append("Rien d'accompli de vérifiable pour l'instant.")
     lines.extend(["", "## Reste à faire", ""])
     todos = deterministic.get("todos") or {}
+    stale_todos = bool(todos.get("stale"))
     current = todos.get("current")
     counts = todos.get("counts") or {}
     pending = int(counts.get("pending") or 0) + int(counts.get("in_progress") or 0)
-    if current:
-        lines.append(f"- En cours : {current}")
-    if pending:
-        lines.append(f"- {pending} tâche(s) non terminée(s) dans la liste de travail.")
+    if stale_todos:
+        lines.append(
+            "- La dernière liste de travail est obsolète ; régénérez-la avant de reprendre."
+        )
+    else:
+        if current:
+            lines.append(f"- En cours : {current}")
+        if pending:
+            lines.append(f"- {pending} tâche(s) non terminée(s) dans la liste de travail.")
     in_flight = deterministic.get("in_flight") or {}
     if in_flight.get("active"):
         lines.append("- Un traitement est actif ou en arrière-plan au moment de ce brief.")
-    if not current and not pending and not in_flight.get("active"):
+    if not stale_todos and not current and not pending and not in_flight.get("active"):
         lines.append("Aucun travail restant identifié.")
     return "\n".join(lines)
 
 
+def _structured_brief_state(deterministic: dict) -> dict:
+    """Return the bounded authoritative TODO/activity projection for the LLM."""
+    meta = deterministic.get("meta") or {}
+    raw_todos = deterministic.get("todos")
+    todos = None
+    if isinstance(raw_todos, dict):
+        stale = bool(raw_todos.get("stale"))
+        raw_counts = raw_todos.get("counts") or {}
+        counts = {}
+        for status in ("pending", "in_progress", "completed", "cancelled"):
+            try:
+                counts[status] = max(0, int(raw_counts.get(status) or 0))
+            except (TypeError, ValueError):
+                counts[status] = 0
+        current = None
+        if not stale:
+            current_text = _excerpt(raw_todos.get("current") or "", 160)
+            current = current_text or None
+        todos = {"stale": stale, "counts": counts, "current": current}
+    return {
+        "transcript_revision": str(meta.get("transcript_revision") or ""),
+        "todos": todos,
+        "in_flight": {
+            "active": bool((deterministic.get("in_flight") or {}).get("active"))
+        },
+    }
+
+
 def _generate_llm_brief(session, sid: str, deterministic: dict) -> tuple[str, str]:
     """Return (text, source). source ∈ auxiliary-llm | fallback-template."""
-    distilled = _distill_transcript(session)
+    distilled = _distill_context_brief(session)
     title = (deterministic.get("meta") or {}).get("title") or sid
+    structured_state = json.dumps(
+        _structured_brief_state(deterministic),
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    )
     prompt = (
         f"Session à briefer : titre « {title} », identifiant {sid}, "
         f"{(deterministic.get('meta') or {}).get('message_count', 0)} messages.\n\n"
-        f"Transcript distillé (demandes utilisateur, conclusions vérifiées, début et fin) :\n\n"
+        f"État courant structuré (autoritaire pour les TODO et traitements en cours) :\n"
+        f"{structured_state}\n\n"
+        f"Transcript distillé (preuves directes sélectionnées, index canonique croissant) :\n\n"
         f"{distilled}"
     )
     try:

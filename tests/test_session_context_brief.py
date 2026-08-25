@@ -11,14 +11,13 @@ duplicate, status polling, fallback when the auxiliary model is absent).
 import json
 import threading
 import time
-from pathlib import Path  # noqa: F401  (kept for fixture parity with the auto layer)
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from api import context_brief
-from tests._aux_client_helpers import auxiliary_client_modules
 
 
 SID = "20260812_120000_cb12ef"
@@ -152,6 +151,71 @@ def test_deterministic_brief_assembles_all_blocks(tmp_path):
     assert todos["current"] == "déployer en production"
 
 
+def test_todo_snapshot_is_stale_after_newer_conclusion(tmp_path):
+    """Open todos preceding the final conclusion are not safe to replay."""
+    sess = _make_session(tmp_path)
+
+    brief = context_brief.build_deterministic_brief(sess, SID, source="webui")
+
+    assert brief["todos"]["stale"] is True
+
+
+def test_fallback_brief_does_not_present_stale_todos_as_remaining_work(tmp_path):
+    sess = _make_session(tmp_path)
+    brief = context_brief.build_deterministic_brief(sess, SID, source="webui")
+
+    text = context_brief._fallback_brief_text(brief, "test")
+
+    assert brief["todos"]["stale"] is True
+    assert "liste de travail est obsolète" in text
+    assert "En cours :" not in text
+    assert "tâche(s) non terminée(s)" not in text
+
+
+def test_todo_snapshot_after_conclusion_remains_current(tmp_path):
+    messages = [
+        {
+            "role": "assistant",
+            "content": "# CONCLUSION\n---\n> 🟢 Une première étape est terminée",
+            "timestamp": 10.0,
+        },
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {"todos": [{"id": "next", "content": "livrer la suite", "status": "pending"}]}
+            ),
+            "timestamp": 11.0,
+        },
+    ]
+    sess = _make_session(tmp_path, messages=messages)
+
+    brief = context_brief.build_deterministic_brief(sess, SID, source="webui")
+
+    assert brief["todos"]["stale"] is False
+
+
+def test_compaction_mentioning_conclusion_does_not_stale_todos(tmp_path):
+    messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {"todos": [{"id": "active", "content": "continuer le lot", "status": "in_progress"}]}
+            ),
+            "timestamp": 10.0,
+        },
+        {
+            "role": "assistant",
+            "content": "[CONTEXT COMPACTION — REFERENCE ONLY]\nLe format final commence par # CONCLUSION",
+            "timestamp": 11.0,
+        },
+    ]
+    sess = _make_session(tmp_path, messages=messages)
+
+    brief = context_brief.build_deterministic_brief(sess, SID, source="webui")
+
+    assert brief["todos"]["stale"] is False
+
+
 def test_deterministic_brief_empty_session(tmp_path):
     sess = _make_session(tmp_path, messages=[])
     brief = context_brief.build_deterministic_brief(sess, SID, source="webui")
@@ -160,6 +224,18 @@ def test_deterministic_brief_empty_session(tmp_path):
     assert brief["todos"] is None
     assert brief["goal"] is None
     assert brief["accomplished"]["conclusion_count"] == 0
+
+
+def test_deterministic_brief_revision_changes_when_content_changes_at_same_count(tmp_path):
+    sess = _make_session(tmp_path)
+    before = context_brief.build_deterministic_brief(sess, SID, source="webui")
+
+    sess.messages[-1]["content"] = "# CONCLUSION\n---\n> 🟢 Correctif différent livré"
+    after = context_brief.build_deterministic_brief(sess, SID, source="webui")
+
+    assert before["meta"]["message_count"] == after["meta"]["message_count"]
+    assert before["meta"]["transcript_revision"]
+    assert before["meta"]["transcript_revision"] != after["meta"]["transcript_revision"]
 
 
 def test_requests_exclude_runtime_injected_user_messages(tmp_path):
@@ -337,10 +413,9 @@ def test_legacy_brief_without_transcript_digest_is_always_unverifiable(tmp_path)
 
 def test_brief_job_generates_fallback_without_aux_model(tmp_path):
     sess = _make_session(tmp_path)
-    with _patch_resolution(sess), auxiliary_client_modules(), patch(
+    with _patch_resolution(sess), patch(
         "agent.auxiliary_client.call_llm",
         side_effect=RuntimeError("auxiliary model unavailable in unit test"),
-        create=True,
     ):
         job = context_brief.start_brief_job(SID)
         assert job["status"] == "running"
@@ -379,7 +454,7 @@ def test_manual_brief_refresh_persists_for_archived_session(tmp_path):
         "_generate_llm_brief",
         return_value=("x" * 300, "auxiliary-llm"),
     ):
-        job = context_brief.start_brief_job(SID)  # manual (automatic= arrives with the auto layer)
+        job = context_brief.start_brief_job(SID, automatic=False)
         deadline = time.time() + 5
         while time.time() < deadline:
             snapshot = context_brief.brief_job_status(job["job_id"])
@@ -412,7 +487,7 @@ def test_manual_refresh_does_not_persist_after_successor_admission(tmp_path):
         "_save_llm_brief",
         side_effect=lambda *_args, **_kwargs: saved.append(True),
     ):
-        job = context_brief.start_brief_job(SID)  # manual (automatic= arrives with the auto layer)
+        job = context_brief.start_brief_job(SID, automatic=False)
         deadline = time.time() + 5
         while time.time() < deadline:
             snapshot = context_brief.brief_job_status(job["job_id"])
@@ -432,7 +507,7 @@ def test_brief_job_refuses_duplicate_and_empty(tmp_path):
     sess = _make_session(tmp_path)
 
     # Force the job to stay running so the duplicate check triggers.
-    started = __import__("threading").Event()
+    started = threading_event = __import__("threading").Event()
 
     def _slow_generate(session, sid, deterministic, **_kwargs):
         started.wait(timeout=5)

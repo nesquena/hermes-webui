@@ -120,7 +120,9 @@ def parse_todo_tool_result(function_result: Any) -> Optional[dict]:
     return _normalize_snapshot(data)
 
 
-def derive_todo_state(messages: Optional[Iterable[dict]]) -> Optional[dict]:
+def derive_todo_state(
+    messages: Optional[Iterable[dict]], *, include_source_index: bool = False
+) -> Optional[dict]:
     """Derive the latest todo snapshot from settled conversation history.
 
     Mirrors the agent-side ``_hydrate_todo_store`` logic: walk messages
@@ -158,6 +160,8 @@ def derive_todo_state(messages: Optional[Iterable[dict]]) -> Optional[dict]:
             continue
         snapshot = _normalize_snapshot(data)
         if snapshot is not None:
+            if include_source_index:
+                snapshot["_source_message_index"] = idx
             # Carry a timestamp so the frontend can reconcile cold-load
             # vs. INFLIGHT snapshots by recency.
             #
