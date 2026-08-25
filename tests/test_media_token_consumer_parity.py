@@ -109,17 +109,19 @@ def test_entity_balanced_local_media_matches_renderer_stream_server_consumers(
 
 
 @pytest.mark.parametrize("punctuation", [".", ";", "!"])
-def test_punctuated_http_path_is_preserved_while_server_consumers_bypass_remote_refs(
+def test_sentence_punctuation_detaches_from_remote_file_url_while_server_consumers_bypass_remote_refs(
     media_parity_driver, tmp_path, punctuation
 ):
     from api import routes, shares
     from api.media_snapshots import annotate_media_snapshots
 
-    ref = f"https://example.com/a.png{punctuation}"
-    text = f"MEDIA:{ref}"
+    clean_ref = "https://example.com/a.png"
+    text = f"MEDIA:{clean_ref}{punctuation}"
 
     rendered = _render(media_parity_driver, text)
-    assert f'src="{ref}"' in rendered
+    assert f'src="{clean_ref}"' in rendered
+    assert f'src="{clean_ref}{punctuation}"' not in rendered
+    assert punctuation in rendered
 
     # Public-share embedding intentionally handles only local refs; a remote
     # token must pass through byte-for-byte instead of being normalized as a
