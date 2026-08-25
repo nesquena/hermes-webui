@@ -7671,6 +7671,12 @@ function showApprovalCard(pending, pendingCount) {
     responding ? (_approvalResponding.controlChoice || _approvalResponding.choice) : null,
     responding,
   );
+  if (!_approvalCurrentId || !_approvalDisplayedOwner) {
+    // No actionable identity (legacy idless producer): render the card as an
+    // explicit unresolved state — action buttons disabled so they cannot
+    // silently no-op, X still durably dismisses. (#7242)
+    _setApprovalControlsDisabled(null, true);
+  }
   _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
@@ -7685,9 +7691,31 @@ function showApprovalCard(pending, pendingCount) {
 
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
+  const approvalId = _approvalCurrentId;
+  const owner = _approvalDisplayedOwner;
   if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
   hideApprovalCard(true);
   if (sid) _clearApprovalPendingForSession(sid);
+  // Durable dismissal: resolve the matching server-side pending entry (deny)
+  // so the same stale head is not re-rendered by the next poll and gateway-
+  // backed producers are unblocked instead of waiting out their 60s BLOCKED
+  // timeout. Best-effort — a failed or stale request must never block the
+  // local dismissal, which stays authoritative for the UI. (#7242)
+  if (sid && typeof api === "function") {
+    const body = {session_id: sid, choice: "deny"};
+    if (approvalId) body.approval_id = approvalId;
+    if (owner && owner.runId) body.run_id = owner.runId;
+    if (owner && owner.mirrorToken) body.mirror_token = owner.mirrorToken;
+    api("/api/approval/respond", {
+      method: "POST",
+      body: JSON.stringify(body),
+      timeoutToast: false,
+    })
+      .then(result => {
+        if (result && result.ok && sid) _clearApprovalPendingForSession(sid);
+      })
+      .catch(() => { /* local dismissal is authoritative for the UI */ });
+  }
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -7880,7 +7908,16 @@ function _startApprovalFallbackPoll(sid) {
     _approvalFallbackPollInFlight = true;
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
-      if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
+      if (data.pending) {
+        if (data.pending.approval_id && _isApprovalDismissed(sid, data.pending.approval_id)) {
+          // Durable dismissal: the server-side head still lingers (best-effort
+          // deny may have been stale), but this tab must not re-render it or
+          // keep the attention indicator lit. (#7242)
+          _clearApprovalPendingForSession(sid);
+        } else {
+          showApprovalForSession(sid, data.pending, data.pending_count||1);
+        }
+      }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
         const _resolvedEntry = _approvalPendingBySession.get(sid);
         _clearApprovalPendingForSession(sid);
