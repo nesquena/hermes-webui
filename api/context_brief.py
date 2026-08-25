@@ -377,7 +377,7 @@ _AUTOMATED_USER_PREFIXES = (
     "[prior context",
     "[system]",
     # Task-list / skill markers re-injected around compression boundaries are
-    # runtime plumbing, not something Anthony typed (2026-08-18).
+    # runtime plumbing, not something the user typed.
     "[your active task list was preserved",
     "[skills pruned during compression",
     "[skill_pruned",

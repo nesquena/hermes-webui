@@ -170,7 +170,7 @@ def test_requests_exclude_runtime_injected_user_messages(tmp_path):
     plumbing. Older wakeups predate the `_source` marker, so the text
     prefix must be enough on its own.
     """
-    ws = "[Workspace::v1: /home/example/project]\n"
+    ws = "[Workspace::v1: /srv/project]\n"
     messages = [
         {"role": "user", "content": ws + "déploie la nouvelle version", "timestamp": 1.0},
         {
@@ -213,7 +213,7 @@ def test_requests_strip_workspace_tag_and_dedupe(tmp_path):
     drifted timestamps, so dedupe is by TEXT alone (user report 2026-08-18):
     identical asks collapse to one entry keeping the first timestamp.
     """
-    ws = "[Workspace::v1: /home/example/project]\n"
+    ws = "[Workspace::v1: /srv/project]\n"
     messages = [
         {"role": "user", "content": ws + "corrige le brief", "timestamp": 10.0},
         {"role": "user", "content": "corrige le brief", "timestamp": 10.0},

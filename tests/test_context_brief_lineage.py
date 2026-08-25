@@ -146,7 +146,7 @@ def test_no_parent_session_unchanged(brief_env):
 
 
 def test_requests_exclude_synthetic_user_messages(brief_env):
-    """Only messages Anthony actually typed may appear as requests.
+    """Only messages the user actually typed may appear as requests.
 
     User report (2026-08-18): the brief showed '[Your active task list was
     preserved across context compression]' blocks as if they were his prompts.
