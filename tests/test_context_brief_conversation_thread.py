@@ -1,6 +1,6 @@
 """The context brief must read as a CONVERSATION, not as two disjoint lists.
 
-Anthony's complaint (2026-08-18): the Context panel showed "Vos demandes" and
+A user report showed that the Context panel displayed "Vos demandes" and
 "Accompli" as separate stacked sections, so a returning reader had to mentally
 pair the 4th request with the 2nd conclusion. The brief must interleave each
 ask with the conclusion that answered it, in transcript order, and the panel
