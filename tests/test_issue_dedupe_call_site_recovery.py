@@ -207,6 +207,102 @@ def test_repair_preserves_current_turn_recovered_rows_when_older_identical_histo
 # ---------------------------------------------------------------------------
 
 
+def test_core_sync_preserves_repeated_current_prompt(hermes_home):
+    """CORE#3: a historical duplicate prompt must not consume the pending turn."""
+    import json
+
+    sid = "regate_repeated_prompt"
+    stream_id = "regate-repeated-prompt"
+    append_run_event(sid, stream_id, "token", {"text": "current answer"})
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[],
+    )
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 222
+    session.pending_user_source = None
+
+    core_path = hermes_home / "sessions" / f"session_{sid}.json"
+    core_path.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "run the check", "timestamp": 111},
+                    {"role": "assistant", "content": "old answer", "timestamp": 112},
+                ],
+                "tool_calls": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _apply_core_sync_or_error_marker(
+        session,
+        core_path,
+        stream_id_for_recheck=stream_id,
+        require_stream_dead=False,
+    )
+    assert result is True
+
+    user_rows = [
+        message
+        for message in session.messages
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    assert [row.get("timestamp") for row in user_rows] == [111, 222]
+    assert session.pending_user_message is None
+
+
+
+def test_indexless_untagged_tool_card_does_not_suppress_current_recovery(hermes_home):
+    """CORE#2: an untagged tool with no anchor has unknown ownership."""
+    import api.models as models
+
+    sid = "regate_indexless_tool"
+    stream_id = "regate-indexless-stream"
+    append_run_event(sid, stream_id, "token", {"text": "all clear"})
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls -la"})
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 111},
+            {"role": "assistant", "content": "all clear", "timestamp": 112},
+            {"role": "user", "content": "run the check", "timestamp": 222},
+        ],
+    )
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 222
+    session.pending_user_source = None
+    session.tool_calls = [
+        {
+            "name": "terminal",
+            "preview": "ls -la",
+            "snippet": "ls -la",
+            "done": True,
+        },
+    ]
+    session.save()
+    models.SESSIONS.pop(sid, None)
+
+    reloaded = models.get_session(sid)
+
+    recovered_tools = [
+        tc for tc in (reloaded.tool_calls or [])
+        if tc.get("_recovered_from_run_journal")
+    ]
+    assert len(recovered_tools) == 1
+    assert recovered_tools[0].get("_recovered_stream_id") == stream_id
+
+
+
 def test_older_untagged_tool_card_does_not_suppress_current_recovery(hermes_home):
     """CORE#2: an older UNTAGGED tool card must not swallow the current turn's
     recovered tool card."""

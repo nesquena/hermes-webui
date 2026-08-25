@@ -1279,7 +1279,11 @@ class TestNonEmptyMessagesPendingCleared:
         s.save()
 
         core_messages = [
-            {"role": "user", "content": "Check maintainer activity"},
+            {
+                "role": "user",
+                "content": "Check maintainer activity",
+                "timestamp": int(s.pending_started_at),
+            },
             {"role": "assistant", "content": "I will check GitHub first."},
         ]
         core_tool_calls = [
