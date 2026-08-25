@@ -931,3 +931,116 @@ def test_stale_workspace_recovery_scoped_to_explicit_profile(monkeypatch, tmp_pa
     assert "bobs-place" not in str(resolved), (
         "recovery under profile='alice' must never return Bob's workspace"
     )
+
+def test_get_last_workspace_named_profile_never_reads_global_file(monkeypatch, tmp_path):
+    """get_last_workspace(profile=...) must not fall back to the global file.
+
+    Maintainer re-gate round 3 (CORE): for a named profile the getter still
+    consulted _GLOBAL_LW_FILE after missing the profile-local file, so a direct
+    probe returned Bob's globally-recorded workspace for profile="alice".
+    The legacy global fallback is now allowed ONLY for the root/default
+    profile. Uses the REAL getter with a real global-file fixture.
+    """
+    from api import profiles
+
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path / ".hermes")
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path / ".hermes")
+    (tmp_path / ".hermes" / "profiles").mkdir(parents=True)
+    (tmp_path / ".hermes" / "profiles" / "alice").mkdir(parents=True)
+
+    bobs_dir = tmp_path / "srv" / "bobs-global"
+    bobs_dir.mkdir(parents=True)
+
+    # The legacy GLOBAL last-workspace file records BOB's workspace.
+    global_lw = tmp_path / "global-state"
+    global_lw.mkdir(parents=True)
+    (global_lw / "last_workspace.txt").write_text(str(bobs_dir), encoding="utf-8")
+    monkeypatch.setattr(workspace, "_GLOBAL_LW_FILE", global_lw / "last_workspace.txt")
+
+    # Alice has NO profile-local last-workspace file at all.
+    alice_state = tmp_path / ".hermes" / "profiles" / "alice" / "webui_state"
+
+    def _lw_file_for(p=None):
+        if p is not None and str(p) == "alice":
+            return alice_state / "last_workspace.txt"
+        return global_lw / "last_workspace.txt"
+
+    monkeypatch.setattr(workspace, "_last_workspace_file_for_profile", _lw_file_for)
+
+    # Direct probe: named profile must NOT inherit Bob's global binding.
+    got = workspace.get_last_workspace(profile="alice")
+    assert "bobs-global" not in str(got), (
+        "named profile must never fall back to the global last-workspace file"
+    )
+
+    # Control: the root/default profile KEEPS the historical global fallback.
+    monkeypatch.setattr(
+        profiles,
+        "_resolve_profile_home_param",
+        lambda p: tmp_path / ".hermes" if p is None or str(p) in ("default",) else _lw_file_for(p).parent.parent.parent,
+        raising=False,
+    )
+    got_default = workspace.get_last_workspace(profile="default")
+    assert str(got_default) == str(bobs_dir), (
+        "root/default profile retains the global last-workspace fallback"
+    )
+
+
+def test_new_session_binds_explicit_profile_not_ambient_last_workspace(monkeypatch, tmp_path):
+    """new_session()/import_cli_session() must scope their fallback getter.
+
+    Maintainer re-gate round 3 (CORE): both Session constructions fell back to
+    get_last_workspace() WITHOUT the profile even though profile=profile was
+    set on the same Session — an Alice session created under ambient Bob bound
+    to BOB's workspace. Uses the real getters and real state files.
+    """
+    import api.models as models
+    from api import profiles
+
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path / ".hermes")
+    monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path / ".hermes")
+    (tmp_path / ".hermes" / "profiles").mkdir(parents=True)
+    (tmp_path / ".hermes" / "profiles" / "alice").mkdir(parents=True)
+
+    bobs_ws = tmp_path / "srv" / "bobs-workspace"
+    bobs_ws.mkdir(parents=True)
+    alice_ws = tmp_path / "srv" / "alice-workspace"
+    alice_ws.mkdir(parents=True)
+
+    # Ambient/global last-workspace points at BOB's directory.
+    global_lw = tmp_path / "global-state"
+    global_lw.mkdir(parents=True)
+    (global_lw / "last_workspace.txt").write_text(str(bobs_ws), encoding="utf-8")
+    monkeypatch.setattr(workspace, "_GLOBAL_LW_FILE", global_lw / "last_workspace.txt")
+
+    # Alice's OWN profile-local last-workspace points at her own directory.
+    alice_state = tmp_path / ".hermes" / "profiles" / "alice" / "webui_state"
+    alice_state.mkdir(parents=True)
+    (alice_state / "last_workspace.txt").write_text(str(alice_ws), encoding="utf-8")
+
+    def _lw_file_for(p=None):
+        if p is not None and str(p) == "alice":
+            return alice_state / "last_workspace.txt"
+        return global_lw / "last_workspace.txt"
+
+    monkeypatch.setattr(workspace, "_last_workspace_file_for_profile", _lw_file_for)
+    monkeypatch.setattr(models, "get_last_workspace", workspace.get_last_workspace)
+
+    s = models.new_session(profile="alice")
+    assert str(s.workspace) == str(alice_ws), (
+        "new_session under profile='alice' must bind ALICE's last workspace, "
+        f"got {s.workspace!r}"
+    )
+
+    imported = models.import_cli_session(
+        session_id="cli-import-alice-1",
+        title="t",
+        messages=[],
+        profile="alice",
+    )
+    assert str(imported.workspace) == str(alice_ws), (
+        "import_cli_session under profile='alice' must bind ALICE's last "
+        f"workspace, got {imported.workspace!r}"
+    )

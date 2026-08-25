@@ -5099,7 +5099,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
-        workspace=workspace_path or get_last_workspace(),
+        workspace=workspace_path or get_last_workspace(profile=profile),
         model=effective_model,
         model_provider=effective_model_provider,
         profile=profile,
@@ -6799,7 +6799,7 @@ def import_cli_session(
     s = Session(
         session_id=session_id,
         title=title,
-        workspace=get_last_workspace(),
+        workspace=get_last_workspace(profile=profile),
         model=model,
         messages=messages,
         profile=profile,

@@ -522,8 +522,23 @@ def get_last_workspace(profile: str | Path | None = None) -> str:
                 return p
         except Exception:
             logger.debug("Failed to read last workspace from %s", lw_file)
-    # Fallback: try global file
-    if _GLOBAL_LW_FILE.exists():
+    # Fallback: try global file — but ONLY for the root/default profile. A named
+    # profile must never inherit another profile's last-workspace binding through
+    # the legacy global state (#7168 re-gate round 3).
+    _global_fallback_allowed = True  # ambient / no explicit profile: historical behavior
+    if profile is not None:
+        try:
+            from api.profiles import _DEFAULT_HERMES_HOME as _DEF_HOME
+
+            _global_fallback_allowed = (
+                _resolve_profile_home_param(profile) == _DEF_HOME
+                or str(profile).strip() == 'default'
+            )
+        except Exception:
+            # Conservative default: an unresolvable explicit profile is NOT the
+            # root profile — deny the global fallback rather than leak.
+            _global_fallback_allowed = False
+    if _global_fallback_allowed and _GLOBAL_LW_FILE.exists():
         try:
             p = valid_last_workspace(_GLOBAL_LW_FILE.read_text(encoding='utf-8').strip())
             if p:
@@ -1033,16 +1048,17 @@ def resolve_implicit_workspace_with_recovery(
             local_candidate.stat()
         except FileNotFoundError:
             def _profile_bound_fallback():
-                value = fallback() if callable(fallback) else fallback
                 if profile is not None and callable(fallback):
-                    # The production call sites pass profile-aware getters such as
-                    # get_last_workspace; bind the explicit profile so a missing-path
-                    # recovery can never fall back to another profile's workspace.
+                    # Profile-bound getter FIRST (#7168 re-gate round 3): the
+                    # production call sites pass profile-aware getters such as
+                    # get_last_workspace, so binding the explicit profile must
+                    # take precedence over any zero-argument compatibility call,
+                    # which would read ambient/global state.
                     try:
                         return fallback(profile)
                     except TypeError:
-                        return value
-                return value
+                        pass
+                return fallback() if callable(fallback) else fallback
 
             fallback_value = _profile_bound_fallback()
             if profile is not None:
