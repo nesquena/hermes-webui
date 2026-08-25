@@ -1,4 +1,8 @@
-"""Focused regression coverage for MEDIA tokens in the streaming text path."""
+"""Focused regression coverage for MEDIA tokens in the streaming text path.
+
+Chunk-end completeness must be checked against the raw captured ref before
+suffix normalization, because punctuation may still be part of a later chunk.
+"""
 from __future__ import annotations
 
 import json
