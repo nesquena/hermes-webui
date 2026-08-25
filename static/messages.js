@@ -8035,7 +8035,19 @@ function _startHiddenActiveStreamPoll(sid) {
     if (S.activeStreamId) return; // already rendering; wait it out
     try {
       fetch(_apiUrl('api/session/status?session_id=' + encodeURIComponent(sid)), {credentials: 'same-origin'})
-        .then(r => r.ok ? r.json() : null)
+        .then(r => {
+          if (r && (r.status === 404 || r.status === 410)) {
+            // The session is permanently gone. Stop only when this response
+            // still belongs to the active poll so a late 404 from an older
+            // session cannot tear down its replacement.
+            if (_sessionStreamHiddenPollSid === sid) {
+              if (_sessionStreamHiddenSid === sid) _sessionStreamHiddenSid = null;
+              _stopHiddenActiveStreamPoll();
+            }
+            return null;
+          }
+          return r && r.ok ? r.json() : null;
+        })
         .then(d => {
           if (!d || _sessionStreamHiddenPollSid !== sid) return;
           const streamId = d.active_stream_id;
