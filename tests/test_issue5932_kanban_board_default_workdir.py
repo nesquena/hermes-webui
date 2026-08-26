@@ -177,7 +177,7 @@ def _locale_for_value(key, value):
         if match.start() > index:
             break
         locale = match.group("quoted") or match.group("plain")
-    assert locale, f"missing locale opener before snippet: {snippet}"
+    assert locale, f"missing locale opener before value: {key}={value}"
     return locale
 
 
