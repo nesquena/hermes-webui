@@ -1347,6 +1347,15 @@ async function cmdStop(){
 }
 
 async function cmdGoal(args){
+  const _ensureSessionOwner = typeof globalThis._ensureSessionOwner === 'function'
+    ? globalThis._ensureSessionOwner
+    : async()=>{
+      if(!S.session&&typeof newSession==='function'){
+        await newSession();
+        if(typeof renderSessionList==='function') await renderSessionList();
+      }
+      return S.session&&S.session.session_id||null;
+    };
   const activeSid=await _ensureSessionOwner();
   const _goalOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
     ? _isSessionCurrentPane(activeSid)

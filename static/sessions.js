@@ -1400,9 +1400,6 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
-    const _creationStartSid=S.session&&S.session.session_id||null;
-    const _creationStartLoadGeneration=typeof _loadSessionGeneration==='number'
-      ? _loadSessionGeneration : null;
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -1505,6 +1502,9 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    const _creationStartSid=S.session&&S.session.session_id||null;
+    const _creationStartLoadGeneration=typeof _loadSessionGeneration==='number'
+      ? _loadSessionGeneration : null;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     const createdSessionId=data&&data.session&&data.session.session_id||null;
     // A blank-page owner acquisition may be superseded while the create request
