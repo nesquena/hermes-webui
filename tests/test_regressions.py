@@ -46,17 +46,17 @@ def _make_session_visible(sid):
     from api.models import Session
     from tests.conftest import TEST_WORKSPACE
 
-    session = Session(
-        session_id=sid,
-        title="regression-test-delete-R8",
-        workspace=str(TEST_WORKSPACE),
-        model="test",
-        created_at=time.time(),
-        updated_at=time.time(),
-        profile="default",
-        messages=[{"role": "user", "content": "visible row", "timestamp": time.time()}],
-        tool_calls=[],
-    )
+    session = Session.load(sid)
+    if session is None:
+        session = Session(session_id=sid)
+    session.title = "regression-test-delete-R8"
+    session.workspace = str(TEST_WORKSPACE)
+    session.model = "test"
+    session.profile = "default"
+    session.messages = [
+        {"role": "user", "content": "visible row", "timestamp": time.time()}
+    ]
+    session.tool_calls = []
     session.save(touch_updated_at=False)
 
 
@@ -354,7 +354,16 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
+            clear_indices = [
+                idx
+                for idx in (
+                    text.find("if parsed.path == '/api/session/clear':", delete_idx),
+                    text.find('if parsed.path == "/api/session/clear":', delete_idx),
+                )
+                if idx > delete_idx
+            ]
+            delete_end = min(clear_indices) if clear_indices else len(text)
+            delete_block = text[delete_idx:delete_end]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -369,9 +378,31 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
-    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
-        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+    clear_indices = [
+        idx
+        for idx in (
+            routes_src.find("if parsed.path == '/api/session/clear':", delete_idx),
+            routes_src.find('if parsed.path == "/api/session/clear":', delete_idx),
+        )
+        if idx > delete_idx
+    ]
+    delete_end = min(clear_indices) if clear_indices else len(routes_src)
+    delete_block = routes_src[delete_idx:delete_end]
+    assert "_delete_session_sidecar_artifacts_locked(" in delete_block, (
+        "session/delete must route all sidecar removal through the canonical helper"
+    )
+
+    import inspect
+    from api.models import _delete_session_sidecar_artifacts_locked
+
+    helper_src = inspect.getsource(_delete_session_sidecar_artifacts_locked)
+    assert 'backup = sidecar.with_suffix(".json.bak")' in helper_src
+    assert "artifact.unlink(missing_ok=True)" in helper_src, (
+        "the canonical delete helper must unlink <sid>.json.bak"
+    )
+    assert "bak.archive-*" in helper_src, (
+        "the canonical delete helper must unlink versioned backup archives"
+    )
 
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 
