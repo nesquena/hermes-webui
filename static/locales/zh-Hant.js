@@ -1079,7 +1079,7 @@ registerLocale("zh-Hant", {
     kanban_back_to_board: '回到看板',
     kanban_lanes_by_profile: '依設定檔分欄',
     kanban_new_board: '新增看板…',
-    kanban_rename_board: '重新命名目前看板…',
+    kanban_rename_board: "看板設定…",
     kanban_archive_board: '封存目前看板…',
     kanban_archive_board_confirm: '封存看板「{name}」？任務仍會保留在磁碟上，且可從 kanban/boards/_archived/ 還原看板。',
     kanban_board_archived: '看板已封存',
@@ -1793,4 +1793,19 @@ registerLocale("zh-Hant", {
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
 
+
+    selected_text_refine: "潤飾",
+    selected_text_refine_title: "根據所選內容開始可編輯的潤飾草稿",
+    selected_text_refine_instruction: "潤飾指示：",
+    workspace_sort_by: "排序方式",
+    workspace_sort_name_asc: "名稱 (A → Z)",
+    workspace_sort_name_desc: "名稱 (Z → A)",
+    workspace_sort_created_desc: "建立日期 (最新優先)",
+    workspace_sort_modified_desc: "修改日期 (最新優先)",
+    workspace_sort_created_unavailable: "此伺服器或平台未回報建立時間。",
+    settings_label_kanban_sessions: "顯示Kanban工作階段",
+    kanban_board_settings: "看板設定",
+    kanban_board_default_workdir: "預設工作區路徑",
+    kanban_board_default_workdir_placeholder: "工作區路徑（選填）",
+    settings_desc_kanban_sessions: "將Kanban worker 的執行顯示為側邊欄中的對話。僅在啟用非 WebUI 工作階段時才有效。預設為關閉；worker 執行是內部的，可能會使側邊欄氾濫。",
   });
