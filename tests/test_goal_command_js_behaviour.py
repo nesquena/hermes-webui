@@ -102,6 +102,9 @@ const startApprovalPolling = () => {};
 const startClarifyPolling = () => {};
 const _fetchYoloState = () => {};
 const attachLiveStream = () => {};
+function _isSessionCurrentPane(sid) {
+  return !!S.session && S.session.session_id === sid;
+}
 const newSession = async () => {
   S.session = {
     session_id: SID,
@@ -218,6 +221,12 @@ const S = {
     await goalPromise;
     out.goalCalls = _apiCalls.length;
     out.sessionId = S.session && S.session.session_id;
+  } else if (scenario === 'blank_page_owner_stable') {
+    S.session = null;
+    _nextResponse = () => ({ stream_id: 's5', pending_started_at: 1 });
+    await cmdGoal('ship it');
+    out.goalCalls = _apiCalls.length;
+    out.goalSessionId = _apiCalls[0] && _apiCalls[0].body.session_id;
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -293,3 +302,9 @@ def test_goal_blank_page_fallback_rejects_sidebar_switch(driver_path):
     """#6491: the isolated-driver fallback keeps the captured create sid."""
     out = _run_scenario(driver_path, "blank_page_owner_switch")
     assert out == {"goalCalls": 0, "sessionId": "session-b"}
+
+
+def test_goal_blank_page_fallback_accepts_stable_creation(driver_path):
+    """#6491: the isolated fallback admits a stable captured creation id."""
+    out = _run_scenario(driver_path, "blank_page_owner_stable")
+    assert out == {"goalCalls": 1, "goalSessionId": "sid-6705-behaviour"}

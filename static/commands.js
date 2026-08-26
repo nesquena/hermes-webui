@@ -1350,13 +1350,18 @@ async function cmdGoal(args){
   const _goalSessionOwner = typeof _ensureSessionOwner === 'function'
     ? _ensureSessionOwner
     : async()=>{
-      if(S.session&&S.session.session_id)return S.session.session_id;
+      const currentSid=S.session&&S.session.session_id||null;
+      if(currentSid){
+        return typeof _isSessionCurrentPane==='function'&&_isSessionCurrentPane(currentSid)
+          ? currentSid : null;
+      }
       if(typeof newSession==='function'){
         const sid=await newSession();
+        if(!sid)return null;
         if(typeof renderSessionList==='function') await renderSessionList();
         return typeof _isSessionCurrentPane==='function'
           ? (_isSessionCurrentPane(sid)?sid:null)
-          : (S.session&&S.session.session_id===sid?sid:null);
+          : sid;
       }
       return null;
     };
