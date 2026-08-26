@@ -16,6 +16,7 @@ import os
 import threading
 import shutil
 import sqlite3
+import uuid
 from collections import Counter
 from contextlib import closing
 from pathlib import Path
@@ -398,13 +399,18 @@ def _atomic_write_json(path: Path, payload) -> None:
     # (umask default) since the plain open() respects the umask.
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    descriptor = None
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
+            descriptor = None
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
         try:
             os.unlink(tmp)
         except OSError:
@@ -448,18 +454,39 @@ def _plan_discoverability_repairs(report: dict) -> list[dict]:
 
 
 def _clear_sidecar_cli_flag(session_dir: Path, sid: str, backup_dir: Path, backed_up: dict[Path, str]) -> dict:
+    from api import models
+
+    action = "clear_sidecar_cli_flag"
+    if not models.is_safe_session_id(sid):
+        return {"session_id": sid, "action": action, "applied": False, "error": "invalid_session_id"}
     path = session_dir / f"{sid}.json"
-    payload = _read_json(path)
-    if not isinstance(payload, dict):
-        return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": False, "error": "sidecar_unreadable"}
-    if not _webui_origin(payload):
-        return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": False, "skipped": "not_webui_origin"}
-    if payload.get("is_cli_session") is not True:
-        return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": False, "skipped": "already_clear"}
-    backup = _backup_file(path, backup_dir, backed_up)
-    payload["is_cli_session"] = False
-    _atomic_write_json(path, payload)
-    return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": True, "backup": backup}
+    with models._session_sidecar_authority(sid, session_dir=session_dir):
+        revision = models._read_sidecar_revision(path)
+        if revision is None:
+            return {"session_id": sid, "action": action, "applied": False, "error": "sidecar_unreadable"}
+        if models._webui_deleted_session_is_tombstoned(
+            sid,
+            session_dir=session_dir,
+            strict=True,
+        ):
+            return {"session_id": sid, "action": action, "applied": False, "skipped": "deleted_session_tombstone"}
+        payload = _read_json(path)
+        if not isinstance(payload, dict) or payload.get('session_id') not in (None, sid):
+            return {"session_id": sid, "action": action, "applied": False, "error": "sidecar_unreadable"}
+        if not _webui_origin(payload):
+            return {"session_id": sid, "action": action, "applied": False, "skipped": "not_webui_origin"}
+        if payload.get("is_cli_session") is not True:
+            return {"session_id": sid, "action": action, "applied": False, "skipped": "already_clear"}
+        backup = _backup_file(path, backup_dir, backed_up)
+        payload["is_cli_session"] = False
+        payload['_sidecar_generation_v1'] = revision[0] + 1
+        payload['_sidecar_epoch_v1'] = revision[1] or uuid.uuid4().hex
+        if models._read_sidecar_revision(path) != revision:
+            return {"session_id": sid, "action": action, "applied": False, "skipped": "sidecar_changed_during_repair"}
+        _atomic_write_json(path, payload)
+        models._fsync_sidecar_directory(session_dir)
+        models._invalidate_cached_session_generation(sid)
+    return {"session_id": sid, "action": action, "applied": True, "backup": backup}
 
 
 def _clear_index_cli_flag(session_dir: Path, sid: str, backup_dir: Path, backed_up: dict[Path, str]) -> dict:
@@ -486,33 +513,61 @@ def _clear_index_cli_flag(session_dir: Path, sid: str, backup_dir: Path, backed_
 
 
 def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | None, sid: str, backup_dir: Path, backed_up: dict[Path, str]) -> dict:
+    from api import models
+
+    action = "materialize_sidecar_from_state_db"
     if state_db_path is None:
-        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "error": "state_db_required"}
+        return {"session_id": sid, "action": action, "applied": False, "error": "state_db_required"}
+    if not models.is_safe_session_id(sid):
+        return {"session_id": sid, "action": action, "applied": False, "error": "invalid_session_id"}
     target = session_dir / f"{sid}.json"
-    if target.exists():
-        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_exists"}
     try:
         from api.session_recovery import _read_state_db_missing_sidecar_rows, _state_db_row_to_sidecar
     except Exception as exc:
-        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "error": f"recovery_import_failed:{exc}"}
+        return {"session_id": sid, "action": action, "applied": False, "error": f"recovery_import_failed:{exc}"}
     rows = {str(row.get("id") or ""): row for row in _read_state_db_missing_sidecar_rows(session_dir, state_db_path)}
     row = rows.get(sid)
     if not row:
-        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "state_row_not_repairable"}
+        return {"session_id": sid, "action": action, "applied": False, "skipped": "state_row_not_repairable"}
     payload = _state_db_row_to_sidecar(row)
+    payload['_sidecar_generation_v1'] = 1
+    payload['_sidecar_epoch_v1'] = uuid.uuid4().hex
     _backup_file(state_db_path, backup_dir, backed_up)
     session_dir.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        os.link(str(tmp), str(target))
-    except FileExistsError:
-        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_appeared_during_repair"}
-    finally:
+    with models._session_sidecar_authority(sid, session_dir=session_dir):
+        if target.exists():
+            return {"session_id": sid, "action": action, "applied": False, "skipped": "sidecar_exists"}
+        if models._webui_deleted_session_is_tombstoned(
+            sid,
+            session_dir=session_dir,
+            strict=True,
+        ):
+            return {"session_id": sid, "action": action, "applied": False, "skipped": "deleted_session_tombstone"}
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
         try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+            with open(tmp, 'xb') as handle:
+                models._set_file_descriptor_mode(handle.fileno(), 0o600)
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if models._webui_deleted_session_is_tombstoned(
+                sid,
+                session_dir=session_dir,
+                strict=True,
+            ):
+                return {"session_id": sid, "action": action, "applied": False, "skipped": "deleted_session_tombstone"}
+            try:
+                os.link(str(tmp), str(target))
+                models._fsync_sidecar_directory(session_dir)
+                models._invalidate_cached_session_generation(sid)
+            except FileExistsError:
+                return {"session_id": sid, "action": action, "applied": False, "skipped": "sidecar_appeared_during_repair"}
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
     index_updated = False
     index_path = session_dir / "_index.json"
     index_payload = _read_json(index_path)
@@ -526,7 +581,7 @@ def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | 
         index_updated = True
     return {
         "session_id": sid,
-        "action": "materialize_sidecar_from_state_db",
+        "action": action,
         "applied": True,
         "messages": len(payload.get("messages") or []),
         "index_updated": index_updated,

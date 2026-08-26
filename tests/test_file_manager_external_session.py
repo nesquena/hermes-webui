@@ -452,7 +452,7 @@ def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     )
     monkeypatch.setattr(routes_module, "prune_session_from_index", lambda _sid: None)
     monkeypatch.setattr(
-        routes_module, "_record_webui_deleted_session_tombstone", lambda _sid: None
+        models_module, "_record_webui_deleted_session_tombstone", lambda _sid: None
     )
     monkeypatch.setattr(
         routes_module, "_publish_session_list_changed", lambda *_args, **_kwargs: None
@@ -564,7 +564,7 @@ def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
         lambda _sid: observed["mutations"].append("index"),
     )
     monkeypatch.setattr(
-        routes_module,
+        models_module,
         "_record_webui_deleted_session_tombstone",
         lambda _sid: observed["mutations"].append("tombstone"),
     )
