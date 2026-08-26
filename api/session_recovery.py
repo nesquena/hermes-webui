@@ -4,17 +4,19 @@ data-loss bugs like #1558.
 
 ``Session.save()`` writes a ``<sid>.json.bak`` snapshot of the previous
 state whenever an incoming save would shrink the messages array. This
-module reads those snapshots back and restores any session whose live
-file has fewer messages than its backup, or whose live file is missing
-while a valid backup remains.
+module reads those snapshots back and restores transcript-owned fields when
+the live file has fewer messages than its backup. A missing or malformed live
+sidecar also requires a complete current metadata envelope from the durable
+index; pre-index backups require explicit manual migration.
 
 Three integration points:
 
 1. ``recover_all_sessions_on_startup()`` — called from server.py at boot,
    scans the session dir, restores any session whose JSON has fewer
-   messages than its .bak, and recreates a missing ``<sid>.json`` from an
+   messages than its .bak, and can recreate a missing ``<sid>.json`` from an
    orphaned ``<sid>.json.bak`` when the canonical state DB still has that
-   session. Idempotent: a clean run is a no-op.
+   session and the index supplies current metadata authority. Idempotent: a
+   clean run is a no-op.
 
 2. ``recover_session(sid)`` — single-session helper backing the
    ``POST /api/session/recover`` endpoint, so users can re-run recovery
@@ -30,7 +32,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import threading
 from contextlib import closing
@@ -48,6 +49,101 @@ logger = logging.getLogger(__name__)
 _INTENTIONAL_SHRINK_GENERATION_RE = re.compile(
     r"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
 )
+
+# The #1558 rescue snapshot is authoritative only for transcript state that may
+# have been lost in the shrinking save. Metadata mutations made after that
+# snapshot (archive, title, project, profile, etc.) remain authoritative in the
+# live sidecar and must not be rolled back by recovery.
+_BACKUP_RECOVERY_TRANSCRIPT_FIELDS = (
+    "messages",
+    "context_messages",
+    "tool_calls",
+    "anchor_activity_scenes",
+)
+
+_INDEX_METADATA_AUTHORITY_FIELDS = (
+    "session_id",
+    "title",
+    "workspace",
+    "model",
+    "created_at",
+    "updated_at",
+    "archived",
+    "project_id",
+    "profile",
+)
+
+
+def _read_optional_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _read_index_metadata_authority(session_dir: Path, session_id: str) -> dict | None:
+    """Return one complete current metadata envelope from the durable index."""
+    index_path = session_dir / '_index.json'
+    try:
+        entries = json.loads(index_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    matches = [
+        entry for entry in entries
+        if isinstance(entry, dict) and entry.get('session_id') == session_id
+    ]
+    if len(matches) != 1:
+        return None
+    envelope = matches[0]
+    if any(field not in envelope for field in _INDEX_METADATA_AUTHORITY_FIELDS):
+        return None
+    if not isinstance(envelope.get('archived'), bool):
+        return None
+    if not isinstance(envelope.get('title'), str):
+        return None
+    if not isinstance(envelope.get('workspace'), str):
+        return None
+    if not isinstance(envelope.get('model'), str):
+        return None
+    if not isinstance(envelope.get('created_at'), (int, float)):
+        return None
+    if not isinstance(envelope.get('updated_at'), (int, float)):
+        return None
+    if envelope.get('project_id') is not None and not isinstance(envelope.get('project_id'), str):
+        return None
+    if envelope.get('profile') is not None and not isinstance(envelope.get('profile'), str):
+        return None
+    return dict(envelope)
+
+
+def _compose_backup_transcript_with_index_metadata(
+    session_dir: Path,
+    session_id: str,
+    backup: dict,
+) -> dict | None:
+    """Build a sidecar from current index metadata plus backup-owned transcript."""
+    from api.models import Session
+
+    envelope = _read_index_metadata_authority(session_dir, session_id)
+    if envelope is None:
+        return None
+    for field in _BACKUP_RECOVERY_TRANSCRIPT_FIELDS:
+        envelope.pop(field, None)
+        if field in backup:
+            envelope[field] = backup[field]
+    envelope['messages'] = backup['messages']
+    # Session serialization emits the canonical complete sidecar field set and
+    # intentionally drops backup-only metadata absent from the current index.
+    session = Session(**envelope)
+    if session.session_id != session_id:
+        return None
+    return json.loads(session._serialize_payload())
+
+
+def _recovery_residual(status: dict, kind: str) -> dict:
+    return {**status, "restored": False, "recovery_residual": kind}
 
 
 def _is_valid_intentional_shrink_generation(value) -> bool:
@@ -85,21 +181,39 @@ def _msg_count(p: Path) -> int:
     return len(msgs) if isinstance(msgs, list) else -1
 
 
-def _rebuild_recovery_session_index(session_dir: Path) -> None:
-    """Rebuild ``session_dir/_index.json`` from persisted sidecars only.
+def _stage_recovery_session_index_payload(
+    session_dir: Path,
+    sidecar_overrides: dict[str, bytes] | None = None,
+) -> bytes:
+    """Build an index from persisted sidecars plus exact staged replacements.
 
     Recovery repair/audit operates on a concrete sidecar directory. Unlike the
     live sidebar path, its rebuilt index must not include unrelated in-memory
     ``Session`` cache entries whose backing JSON files are absent from this
-    directory; those would immediately audit as ``index_missing_file`` rows.
+    directory. Overrides let recovery validate the exact sidecar/index images
+    before either one is published.
     """
-    from api.models import _load_session_from_path
+    from api.models import Session, _load_session_from_path
 
+    sidecar_overrides = dict(sidecar_overrides or {})
     entry_map: dict[str, dict] = {}
-    for path in sorted(session_dir.glob('*.json')):
-        if path.name.startswith('_'):
-            continue
-        session = _load_session_from_path(path)
+    paths = {
+        path.name: path
+        for path in session_dir.glob('*.json')
+        if not path.name.startswith('_')
+    }
+    paths.update({name: session_dir / name for name in sidecar_overrides})
+    for name, path in sorted(paths.items()):
+        if name in sidecar_overrides:
+            try:
+                data = json.loads(sidecar_overrides[name])
+                if not isinstance(data, dict) or data.get('session_id') != path.stem:
+                    raise ValueError("staged recovery sidecar id mismatch")
+                session = Session(**data)
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError(f"invalid staged recovery sidecar {name}") from exc
+        else:
+            session = _load_session_from_path(path)
         if not session:
             continue
         entry = session.compact()
@@ -115,20 +229,27 @@ def _rebuild_recovery_session_index(session_dir: Path) -> None:
         key=lambda entry: entry.get('updated_at', 0),
         reverse=True,
     )
-    index_path = session_dir / '_index.json'
-    tmp = index_path.with_suffix(f'.tmp.recovery.{os.getpid()}.{threading.current_thread().ident}')
-    try:
-        with open(tmp, 'w', encoding='utf-8') as fh:
-            fh.write(json.dumps(entries, ensure_ascii=False, indent=2))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, index_path)
-    except Exception:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise
+    payload = json.dumps(entries, ensure_ascii=False, indent=2).encode('utf-8')
+    if not isinstance(json.loads(payload), list):
+        raise ValueError("staged recovery index must be a list")
+    return payload
+
+
+def _rebuild_recovery_session_index_locked(session_dir: Path) -> None:
+    """Durably rebuild ``session_dir/_index.json`` from persisted sidecars."""
+    from api.session_batch_transaction import _replace_bytes
+
+    _replace_bytes(
+        session_dir / '_index.json',
+        _stage_recovery_session_index_payload(session_dir),
+    )
+
+
+def _rebuild_recovery_session_index(session_dir: Path) -> None:
+    from api.session_batch_transaction import session_store_transaction_lock
+
+    with session_store_transaction_lock(session_dir):
+        _rebuild_recovery_session_index_locked(session_dir)
 
 
 def _session_records_intentional_compress_shrink(session_path: Path) -> bool:
@@ -399,27 +520,108 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
 
 
 def recover_session(session_path: Path) -> dict:
-    """Restore session_path from its .bak when the bak has more messages.
+    """Serialize backup publication with saves and lineage transactions."""
+    from api.config import _get_session_agent_lock
+    from api.session_batch_transaction import (
+        SessionBatchTransactionError,
+        recover_pending_session_batch_locked,
+        session_store_transaction_lock,
+    )
+
+    session_path = Path(session_path)
+    with _get_session_agent_lock(session_path.stem):
+        with session_store_transaction_lock(session_path.parent):
+            prior = recover_pending_session_batch_locked(session_path.parent)
+            if prior["found"] and not prior["recovered"]:
+                raise SessionBatchTransactionError(
+                    "A prior session transaction still requires recovery",
+                    transaction_id=prior.get("transaction_id"),
+                    phase="preflight-recovery",
+                    recovery_required=True,
+                    recovery_errors=prior.get("errors"),
+                )
+            return _recover_session_locked(session_path)
+
+
+def _recover_session_locked(session_path: Path) -> dict:
+    """Restore transcript state from .bak when the backup has more messages.
 
     Returns a status dict identical to ``inspect_session_recovery_status``
     plus a "restored" boolean.
     """
+    bak_path = session_path.with_suffix('.json.bak')
+    live_snapshot = _read_optional_bytes(session_path)
+    backup_snapshot = _read_optional_bytes(bak_path)
     status = inspect_session_recovery_status(session_path)
+    if (
+        _read_optional_bytes(session_path) != live_snapshot
+        or _read_optional_bytes(bak_path) != backup_snapshot
+    ):
+        return _recovery_residual(status, "concurrent_sidecar_change")
     if status["recommend"] != "restore":
         return {**status, "restored": False}
-    bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix('.json.recover.tmp')
+    # A .bak predates the shrinking write and may therefore also predate later
+    # archive/title/project metadata. Compose only recovery-owned transcript
+    # fields into the current live payload. For a missing/malformed live
+    # sidecar, require a complete current metadata envelope from the index.
+    # Otherwise leave a residual instead of reviving stale backup metadata.
     try:
-        shutil.copyfile(bak_path, tmp_path)
-        tmp_path.replace(session_path)
-    except OSError as exc:
-        logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
+        if backup_snapshot is None:
+            raise ValueError("backup disappeared during recovery")
+        backup = json.loads(backup_snapshot.decode('utf-8'))
+        if not isinstance(backup, dict) or not isinstance(backup.get('messages'), list):
+            raise ValueError("backup is not a complete session payload")
         try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+            live = (
+                json.loads(live_snapshot.decode('utf-8'))
+                if live_snapshot is not None
+                else None
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            live = None
+
+        if isinstance(live, dict) and isinstance(live.get('messages'), list):
+            recovered = dict(live)
+            for field in _BACKUP_RECOVERY_TRANSCRIPT_FIELDS:
+                if field in backup:
+                    recovered[field] = backup[field]
+            recovered['message_count'] = len(backup['messages'])
+            if 'anchor_scene_index' in backup:
+                recovered['anchor_scene_index'] = backup['anchor_scene_index']
+            elif 'anchor_activity_scenes' in backup:
+                # Do not retain a fingerprint derived from the shrunken live
+                # scene when restoring a legacy backup with no fingerprint.
+                recovered.pop('anchor_scene_index', None)
+        else:
+            recovered = _compose_backup_transcript_with_index_metadata(
+                session_path.parent,
+                session_path.stem,
+                backup,
+            )
+            if recovered is None:
+                # A .bak owns transcript rescue only. No key-name heuristic can
+                # prove that its title/profile/project/source/future metadata is
+                # current, so incomplete authority always fails closed.
+                return _recovery_residual(
+                    status,
+                    "metadata_authority_unavailable",
+                )
+
+        payload = json.dumps(recovered, ensure_ascii=False, indent=2).encode('utf-8')
+        index_payload = _stage_recovery_session_index_payload(
+            session_path.parent,
+            {session_path.name: payload},
+        )
+        if (
+            _read_optional_bytes(session_path) != live_snapshot
+            or _read_optional_bytes(bak_path) != backup_snapshot
+        ):
+            return _recovery_residual(status, "concurrent_sidecar_change")
+        from api.session_batch_transaction import commit_session_recovery_locked
+
+        commit_session_recovery_locked(session_path, payload, index_payload)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("recover_session: restore failed for %s: %s", session_path, exc)
         return {**status, "restored": False, "error": str(exc)}
     logger.warning(
         "recover_session: restored %s from .bak (live=%d → bak=%d messages). "
@@ -1068,6 +1270,8 @@ def recover_all_sessions_on_startup(
         if result.get("restored"):
             restored += 1
             details.append(result)
+        elif result.get("recovery_residual"):
+            details.append(result)
     if restored:
         logger.warning(
             "recover_all_sessions_on_startup: restored %d/%d sessions from .bak. "
@@ -1086,6 +1290,43 @@ def recover_all_sessions_on_startup(
         "orphaned_backups": len(orphan_paths),
         "details": details,
     }
+
+
+def run_startup_session_recovery(session_dir: Path) -> None:
+    """Run both startup recovery passes with their distinct failure contracts.
+
+    1. The durable lineage-batch journal is the all-or-none authority for a
+       possibly mixed multi-session publication: it must replay (or be absent)
+       before the server may serve sessions, so failures propagate and abort
+       startup instead of being logged (see api/session_batch_transaction.py).
+    2. The legacy #1558 transcript-shrink .bak repair remains best-effort and
+       never blocks startup.
+    """
+    from api.session_batch_transaction import run_startup_batch_recovery
+
+    run_startup_batch_recovery(session_dir)
+
+    try:
+        from api.models import _active_state_db_path
+
+        result = recover_all_sessions_on_startup(
+            session_dir,
+            rebuild_index=True,
+            state_db_path=_active_state_db_path(),
+        )
+        if result.get("restored"):
+            print(
+                f"[recovery] Restored {result['restored']}/{result['scanned']} "
+                f"sessions from .bak (see #1558).",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[recovery] startup recovery failed: {exc}", flush=True)
+
+    # Legacy repair normally consumes its journal immediately. If an I/O error
+    # surfaced after the commit intent became durable, complete it (or abort
+    # startup) before serving a sidecar/index pair from different generations.
+    run_startup_batch_recovery(session_dir)
 
 
 def _main() -> int:
