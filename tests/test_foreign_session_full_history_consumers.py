@@ -2282,7 +2282,10 @@ def test_send_owner_guard_covers_upload_directive_and_chat_start_awaits():
     assert catch_idx < catch_guard_idx < success_guard_idx < stream_state_idx
     assert "queueSessionMessage(ownerSid" in SEND_SRC
     assert "updateQueueBadge(ownerSid)" in SEND_SRC
-    assert "const activeSid=await _ensureSessionOwner();" in CMD_GOAL_SRC
+    assert "const activeSid=await _goalSessionOwner();" in CMD_GOAL_SRC
+    assert "typeof _ensureSessionOwner === 'function'" in CMD_GOAL_SRC
+    assert "const sid=await newSession();" in CMD_GOAL_SRC
+    assert "_isSessionCurrentPane(sid)?sid:null" in CMD_GOAL_SRC
 
 
 def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():

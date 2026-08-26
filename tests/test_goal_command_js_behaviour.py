@@ -87,6 +87,11 @@ const _clearPendingSessionModel = clearPending;
 const t = k => k;
 const showToast = () => {};
 const renderMessages = () => {};
+let _delayRender = false;
+let _resolveRender = null;
+const renderSessionList = () => _delayRender
+  ? new Promise(resolve => { _resolveRender = resolve; })
+  : Promise.resolve();
 const clearLiveToolCards = () => {};
 const appendThinking = () => {};
 const setBusy = () => {};
@@ -97,8 +102,17 @@ const startApprovalPolling = () => {};
 const startClarifyPolling = () => {};
 const _fetchYoloState = () => {};
 const attachLiveStream = () => {};
-const renderSessionList = () => {};
-const newSession = async () => {};
+const newSession = async () => {
+  S.session = {
+    session_id: SID,
+    workspace: '/tmp/ws',
+    model: 'openai/gpt-5.4',
+    model_provider: 'openai',
+    profile: 'default',
+    active_stream_id: null,
+  };
+  return SID;
+};
 const $ = () => null;
 const INFLIGHT = {};
 
@@ -189,6 +203,21 @@ const S = {
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
     out.markerAfter = readPending(SID);
+  } else if (scenario === 'blank_page_owner_switch') {
+    // The isolated driver has no injected _ensureSessionOwner, so cmdGoal's
+    // compatibility fallback must keep the creation sid across the sidebar await.
+    S.session = null;
+    _delayRender = true;
+    const goalPromise = cmdGoal('ship it');
+    for (let i = 0; i < 20 && !_resolveRender; i++) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    if (typeof _resolveRender !== 'function') throw new Error('sidebar render was not awaited');
+    S.session = { session_id: 'session-b', workspace: '/tmp/ws', model: 'gpt-4o', model_provider: 'openai' };
+    _resolveRender();
+    await goalPromise;
+    out.goalCalls = _apiCalls.length;
+    out.sessionId = S.session && S.session.session_id;
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -258,3 +287,9 @@ def test_goal_kickoff_without_marker_sends_no_explicit_pick(driver_path):
     out = _run_scenario(driver_path, "no_marker_no_pick")
     assert "explicit_model_pick" not in out["payload"]
     assert out["markerAfter"] is None
+
+
+def test_goal_blank_page_fallback_rejects_sidebar_switch(driver_path):
+    """#6491: the isolated-driver fallback keeps the captured create sid."""
+    out = _run_scenario(driver_path, "blank_page_owner_switch")
+    assert out == {"goalCalls": 0, "sessionId": "session-b"}

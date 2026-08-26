@@ -1347,16 +1347,20 @@ async function cmdStop(){
 }
 
 async function cmdGoal(args){
-  const _ensureSessionOwner = typeof globalThis._ensureSessionOwner === 'function'
-    ? globalThis._ensureSessionOwner
+  const _goalSessionOwner = typeof _ensureSessionOwner === 'function'
+    ? _ensureSessionOwner
     : async()=>{
-      if(!S.session&&typeof newSession==='function'){
-        await newSession();
+      if(S.session&&S.session.session_id)return S.session.session_id;
+      if(typeof newSession==='function'){
+        const sid=await newSession();
         if(typeof renderSessionList==='function') await renderSessionList();
+        return typeof _isSessionCurrentPane==='function'
+          ? (_isSessionCurrentPane(sid)?sid:null)
+          : (S.session&&S.session.session_id===sid?sid:null);
       }
-      return S.session&&S.session.session_id||null;
+      return null;
     };
-  const activeSid=await _ensureSessionOwner();
+  const activeSid=await _goalSessionOwner();
   const _goalOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
     ? _isSessionCurrentPane(activeSid)
     : !!(S.session&&S.session.session_id===activeSid);
