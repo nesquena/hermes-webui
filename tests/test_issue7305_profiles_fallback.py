@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import builtins
 import importlib
-from pathlib import Path
 
 import pytest
 
@@ -37,10 +36,6 @@ def test_skills_stats_works_without_agent_skill_utils(tmp_path):
     importlib.reload(profiles)  # ensure the module-level agent imports are re-evaluated
     try:
         # Patch the import used by _get_profile_skills_stats' compute path.
-        import api.profiles as p2
-        orig = p2.__dict__.get("iter_skill_index_files")
-        # The fallback is installed inside the function; simulate the missing
-        # module by patching builtins for the module's import machinery.
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(builtins, "__import__", no_agent)
             enabled, compatible = profiles._get_profile_skills_stats(d)
