@@ -246,10 +246,20 @@ def _strip_leaked_webui_password_env() -> None:
     cache. Tests that legitimately enable auth set the var themselves AFTER
     this strip; an intentionally-empty value ("") is preserved so
     ctl.sh-style override semantics keep working.
+
+    HERMES_COMMAND gets the same treatment (#7168 re-gate round 7): a local
+    .env carrying HERMES_COMMAND leaks past bootstrap imports and redirects
+    gateway_restart._resolve_hermes_command() away from its mocked
+    shutil.which result, failing every later active-profile-restart test
+    with a machine-specific CLI path. Upstream code has no
+    HERMES_COMMAND override, so stripping a leaked value restores exact
+    upstream semantics.
     """
     if os.environ.get("HERMES_WEBUI_PASSWORD") == "":
-        return
-    os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+        pass  # intentional empty override preserved for the password var
+    else:
+        os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+    os.environ.pop("HERMES_COMMAND", None)
 
 
 @pytest.fixture(autouse=True)
