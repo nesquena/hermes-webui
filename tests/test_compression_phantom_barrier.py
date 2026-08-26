@@ -20,7 +20,7 @@ UI_JS = (STATIC / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (STATIC / "messages.js").read_text(encoding="utf-8")
 SUPPORT_SCRIPTS = [
     (STATIC / name).read_text(encoding="utf-8")
-    for name in ("i18n.js", "icons.js", "assistant_turn_anchors.js")
+    for name in ("i18n-core.js", "icons.js", "assistant_turn_anchors.js")
 ]
 
 def _matching_brace(source: str, opening: int) -> int:

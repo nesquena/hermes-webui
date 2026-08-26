@@ -7,12 +7,13 @@ import subprocess
 from pathlib import Path
 
 from tests.js_source_extract import extract_function
+from tests.i18n_locale_loader import locale_source_text
 
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N = locale_source_text()
 
 
 class _Boards:
@@ -163,9 +164,10 @@ def test_new_board_keys_are_present_in_every_locale_block():
         assert "kanban_board_default_workdir_placeholder:" in block
 
 
-def _locale_for_snippet(snippet):
-    index = I18N.find(snippet)
-    assert index != -1, f"missing snippet: {snippet}"
+def _locale_for_value(key, value):
+    match = re.search(rf"{re.escape(key)}:\s*(['\"]){re.escape(value)}\1", I18N)
+    assert match, f"missing value: {key}={value}"
+    index = match.start()
     locale = None
     for match in re.finditer(
         r"^\s*(?:'(?P<quoted>[a-z]{2}(?:-[A-Z][A-Za-z]+)?)'|(?P<plain>[a-z]{2}(?:-[A-Z]{2})?))\s*:\s*\{",
@@ -187,5 +189,4 @@ def test_new_board_keys_are_localized_in_non_english_sample_locales():
         "ko": "기본 워크스페이스 경로",
     }
     for locale, expected in samples.items():
-        snippet = f"kanban_board_default_workdir: '{expected}'"
-        assert _locale_for_snippet(snippet) == locale
+        assert _locale_for_value("kanban_board_default_workdir", expected) == locale
