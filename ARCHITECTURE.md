@@ -260,6 +260,22 @@ usable timestamp and rows at or after the sidecar tail also append normally.
 The fallback therefore preserves an accepted state-only row when exact ordering
 is ambiguous, while safely placeable recovery rows remain chronological.
 
+#### Replay reconciliation authority
+
+The visible `messages` projection, provider-facing `context_messages`, and
+persisted session repair all use the same assistant replay pipeline. Adjacent
+non-empty assistants collapse only when their complete strict-JSON payload
+digests match; ids, timestamps, reasoning, annotations, attachments, and other
+provider metadata therefore remain authoritative. Empty, partial, and
+incomplete assistants use the narrower typed replay identities implemented by
+that pipeline. Incomparable payloads fail closed and remain in order.
+
+The active-turn boundary is an atomic `(current_turn_user_idx, turn_id)` pair
+owned by one completed agent attempt. A credential retry clears any pair from
+the failed attempt, then accepts either a complete pair from the new result or
+a complete pair from the new agent. Fields from separate attempts or sources
+must never be combined into deletion authority.
+
 #### Imported `state.db` sidebar projection
 
 `api.models.get_cli_sessions()` projects conversations from the active Hermes
