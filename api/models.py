@@ -8178,6 +8178,41 @@ def _state_db_active_rows_digest(rows) -> str:
     return digest.hexdigest() if stamped else ''
 
 
+def _project_state_db_message(row, available, id_col, optional):
+    """Authoritative state.db row → WebUI message projection (#6826 r4).
+
+    Shared by ``get_state_db_session_messages`` and the regeneration
+    single-snapshot helper so the bounded tail can never drift from the
+    canonical reader: JSON-decode tool_calls/reasoning payloads, omit
+    empty fields, keep durable row id private (``_state_db_row_id`` only for
+    real Agent api_content replays), and apply ``tool_name → name``.
+    """
+    msg = {
+        'role': row['role'],
+        'content': row['content'],
+        'timestamp': row['timestamp'],
+    }
+    for col in optional:
+        if col not in row.keys():
+            continue
+        value = row[col]
+        if value in (None, ''):
+            continue
+        if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
+            value = _json_loads_if_string(value)
+        msg[col] = value
+    if (
+        id_col
+        and row['id'] is not None
+        and isinstance(msg.get('api_content'), str)
+        and msg['api_content']
+    ):
+        msg['_state_db_row_id'] = row['id']
+    if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
+        msg['name'] = msg['tool_name']
+    return msg
+
+
 @overload
 def get_state_db_session_messages(
     sid,
@@ -8418,38 +8453,9 @@ def get_state_db_session_messages(
 
             msgs = []
             for row in rows:
-                msg = {
-                    'role': row['role'],
-                    'content': row['content'],
-                    'timestamp': row['timestamp'],
-                }
-                # ``id`` is the durable SQLite row identity, not the WebUI's
-                # session-local stable message id.  Keep it in a private
-                # provenance field so duplicate reconciliation can align a
-                # state.db sidecar without changing the existing ``id`` key
-                # used by WebUI transcript merge/dedup logic.
-                for col in optional:
-                    if col not in row.keys():
-                        continue
-                    value = row[col]
-                    if value in (None, ''):
-                        continue
-                    if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
-                        value = _json_loads_if_string(value)
-                    msg[col] = value
-                # Keep durable provenance only alongside a real Agent replay
-                # sidecar. Ordinary state.db rows must retain their historic
-                # shape and must not acquire internal bookkeeping fields.
-                if (
-                    id_col
-                    and row['id'] is not None
-                    and isinstance(msg.get('api_content'), str)
-                    and msg['api_content']
-                ):
-                    msg['_state_db_row_id'] = row['id']
-                if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
-                    msg['name'] = msg['tool_name']
-                msgs.append(msg)
+                msgs.append(
+                    _project_state_db_message(row, available, bool(id_col), optional)
+                )
     except Exception:
         return _state_db_session_messages_result([], None, with_revision=with_revision)
     return _state_db_session_messages_result(msgs, revision, with_revision=with_revision)
@@ -8594,6 +8600,157 @@ def get_state_db_session_message_keys_before_timestamp(
                 )
                 for row in cur.fetchall()
             ]
+    except Exception:
+        return None
+
+
+def get_state_db_regeneration_tail_snapshot(
+    sid,
+    floor,
+    *,
+    profile=None,
+):
+    """Return prefix proof + bounded tail from ONE read transaction (#6826 r3).
+
+    The regeneration guard must not suffer TOCTOU: the prefix summary, the
+    ordered prefix keys, and the bounded tail must come from the same SQLite
+    snapshot, otherwise a row inserted between the proof and the data read
+    can be silently omitted while the proof still authorizes the bounded path.
+
+    Returns ``None`` when a stable single-connection snapshot cannot be
+    obtained (callers must fall back to the full read). Otherwise returns::
+
+        {
+          "prefix": {"count": N, "null_timestamp_count": M},
+          "prefix_keys": [visible-key, ...],       # rows < floor, db order
+          "tail": [message-dict, ...],             # rows >= floor (bounded)
+          "tail_keys": [visible-key, ...],         # rows >= floor, db order
+        }
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+
+    if not sid:
+        return None
+    try:
+        floor_ts = float(floor)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return {"prefix": {"count": 0, "null_timestamp_count": 0}, "prefix_keys": [], "tail": [], "tail_keys": []}
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA data_version")
+            dv_before = cur.fetchone()[0]
+            cur.execute("BEGIN")
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'role', 'content', 'timestamp'}.issubset(available):
+                cur.execute("ROLLBACK")
+                return None
+            active_clause = ""
+            if 'active' in available:
+                active_clause = " AND (active IS NULL OR active != 0)"
+            # durable order: id ASC when present (matches the canonical reader),
+            # else timestamp ASC
+            durable_order = 'id' if 'id' in available else 'timestamp'
+            # 1) prefix summary (rows with timestamp < floor)
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(CASE WHEN timestamp IS NOT NULL AND timestamp < ? THEN 1 END) AS count,
+                    COUNT(CASE WHEN timestamp IS NULL THEN 1 END) AS null_timestamp_count
+                FROM messages
+                WHERE session_id = ? {active_clause}
+                """,
+                (floor_ts, str(sid)),
+            )
+            row = cur.fetchone()
+            prefix = {
+                "count": int(row["count"]) if row else 0,
+                "null_timestamp_count": int(row["null_timestamp_count"]) if row else 0,
+            }
+            # 2) ordered prefix keys (rows < floor) in durable order
+            prefix_key_cols = "COALESCE(role,'') AS role, COALESCE(content,'') AS content"
+            if 'tool_calls' in available:
+                prefix_key_cols += ", tool_calls"
+            if 'api_content' in available:
+                prefix_key_cols += ", api_content"
+            prefix_key_sql = (
+                f"SELECT {prefix_key_cols} FROM messages "
+                "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
+                f"{active_clause} ORDER BY {durable_order} ASC"
+            )
+            try:
+                cur.execute(prefix_key_sql, (str(sid), floor_ts))
+            except Exception:
+                cur.execute("ROLLBACK")
+                return None
+            prefix_keys = [
+                _session_message_visible_key({
+                    "role": r["role"],
+                    "content": r["content"],
+                    "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
+                    "api_content": r["api_content"] if "api_content" in r.keys() else None,
+                }, normalize_workspace_prefix=True)
+                for r in cur.fetchall()
+            ]
+            # 3) bounded tail (rows >= floor) with the canonical projection
+            optional = [
+                'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
+                'reasoning_details', 'codex_reasoning_items', 'reasoning_content',
+                'codex_message_items', 'api_content',
+            ]
+            tail_select = ['id', 'role', 'content', 'timestamp'] if 'id' in available else ['role', 'content', 'timestamp']
+            for col in optional + (['active'] if 'active' in available else []):
+                if col in available and col not in tail_select:
+                    tail_select.append(col)
+            tail_sql = (
+                f"SELECT {', '.join(tail_select)} FROM messages "
+                f"WHERE session_id = ? AND (timestamp IS NULL OR timestamp >= ?) {active_clause} "
+                f"ORDER BY {durable_order} ASC"
+            )
+            cur.execute(tail_sql, (str(sid), floor_ts))
+            tail_rows = [
+                _project_state_db_message(r, available, 'id' in available, optional)
+                for r in cur.fetchall()
+            ]
+            tail_keys = [
+                _session_message_visible_key(
+                    {
+                        "role": r.get("role"),
+                        "content": r.get("content"),
+                        "tool_calls": r.get("tool_calls"),
+                        "api_content": r.get("api_content"),
+                    },
+                    normalize_workspace_prefix=True,
+                )
+                for r in tail_rows
+            ]
+            cur.execute("COMMIT")
+            cur.execute("PRAGMA data_version")
+            dv_after = cur.fetchone()[0]
+            if dv_before != dv_after:
+                # a concurrent WAL commit landed during the proof → stale
+                # snapshot; refuse the bounded path (TOCTOU).
+                return None
+            return {
+                "prefix": prefix,
+                "prefix_keys": prefix_keys,
+                "tail": tail_rows,
+                "tail_keys": tail_keys,
+            }
     except Exception:
         return None
 
