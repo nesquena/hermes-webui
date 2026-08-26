@@ -721,6 +721,11 @@ def main() -> None:
         logger.debug("Could not install SIGTERM handler", exc_info=True)
 
     try:
+        signal.signal(signal.SIGINT, _request_shutdown)
+    except (ValueError, OSError):
+        logger.debug("Could not install SIGINT handler", exc_info=True)
+
+    try:
         httpd.serve_forever()
     finally:
         httpd.server_close()
