@@ -2430,7 +2430,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof setStatus==='function') setStatus('');
       if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()){
         if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
-        else if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+        else if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(activeSid);
       }
     }
   }
