@@ -1394,7 +1394,7 @@ registerLocale('en', {
       kanban_back_to_board: 'Back to board',
       kanban_lanes_by_profile: 'Lanes by profile',
       kanban_new_board: 'New board…',
-      kanban_rename_board: 'Rename current board…',
+      kanban_rename_board: "Board settings…",
       kanban_archive_board: 'Archive current board…',
       kanban_archive_board_confirm: 'Archive board "{name}"? Tasks remain on disk and the board can be restored from kanban/boards/_archived/.',
       kanban_board_archived: 'Board archived',
@@ -2116,6 +2116,21 @@ registerLocale('en', {
     outline_title: 'Outline',
     outline_empty: 'No questions yet.',
     outline_loading: 'Loading…',
+
+    selected_text_refine: "Refine",
+    selected_text_refine_title: "Start an editable refinement draft from the selection",
+    selected_text_refine_instruction: "Refine instruction:",
+    workspace_sort_by: "Sort by",
+    workspace_sort_name_asc: "Name (A → Z)",
+    workspace_sort_name_desc: "Name (Z → A)",
+    workspace_sort_created_desc: "Date created (newest first)",
+    workspace_sort_modified_desc: "Date modified (newest first)",
+    workspace_sort_created_unavailable: "Creation time is not reported by this server or platform.",
+    settings_label_kanban_sessions: "Show kanban sessions",
+    kanban_board_settings: "Board settings",
+    kanban_board_default_workdir: "Default workspace path",
+    kanban_board_default_workdir_placeholder: "Workspace path (optional)",
+    settings_desc_kanban_sessions: "Surface kanban worker runs as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; worker runs are internal and can flood the sidebar.",
   });
 let _locale = LOCALES.en;
 loadLocale();

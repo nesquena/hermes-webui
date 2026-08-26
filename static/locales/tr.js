@@ -1011,7 +1011,7 @@ registerLocale("tr", {
     kanban_back_to_board: 'Panoya geri dön',
     kanban_lanes_by_profile: 'Profile göre şeritler',
     kanban_new_board: 'Yeni yönetim kurulu\u2026',
-    kanban_rename_board: 'Mevcut panoyu yeniden adlandır\u2026',
+    kanban_rename_board: "Pano ayarları…",
     kanban_archive_board: 'Mevcut panoyu arşivle\u2026',
     kanban_archive_board_confirm: 'Arşiv panosu "{name}"? Görevler diskte kalır ve pano kanban/boards/_archived/ adresinden geri yüklenebilir.',
     kanban_board_archived: 'Pano arşivlendi',
@@ -1739,4 +1739,19 @@ registerLocale("tr", {
 
 
 
+
+    selected_text_refine: "İyileştir",
+    selected_text_refine_title: "Seçimden düzenlenebilir bir iyileştirme taslağı başlat",
+    selected_text_refine_instruction: "İyileştirme talimatı:",
+    workspace_sort_by: "Sırala",
+    workspace_sort_name_asc: "Ad (A → Z)",
+    workspace_sort_name_desc: "Ad (Z → A)",
+    workspace_sort_created_desc: "Oluşturulma tarihi (en yeniler önce)",
+    workspace_sort_modified_desc: "Değiştirilme tarihi (en yeniler önce)",
+    workspace_sort_created_unavailable: "Oluşturma zamanı bu sunucu veya platform tarafından bildirilmiyor.",
+    settings_label_kanban_sessions: "Kanban oturumlarını göster",
+    kanban_board_settings: "Pano ayarları",
+    kanban_board_default_workdir: "Varsayılan workspace yolu",
+    kanban_board_default_workdir_placeholder: "Workspace yolu (isteğe bağlı)",
+    settings_desc_kanban_sessions: "Kanban worker çalıştırmalarını kenar çubuğunda konuşmalar olarak göster. Yalnızca WebUI dışı oturumlar etkinleştirildiğinde aktif. Varsayılan olarak kapalı; worker çalıştırmaları dahili olup kenar çubuğunu doldurabilir.",
   });
