@@ -223,8 +223,6 @@ class TestRound7DefaultStateRouting:
 
     def _seed_global_state(self, env, monkeypatch):
         """Point both global state files at an isolated tmp dir."""
-        import json
-
         g = env["tmp"] / "global-state"
         g.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(workspace, "_GLOBAL_WS_FILE", g / "workspaces.json")
