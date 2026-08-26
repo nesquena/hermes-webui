@@ -206,6 +206,17 @@ def _resolve_profile_home_param(profile: str | Path | None) -> Path:
     malformed value like ``"../evil"`` bypassed validation entirely and could
     read/overwrite an arbitrary ``webui_state/last_workspace.txt``
     (#7168 re-gate round 5, path traversal on the profile-isolation boundary).
+    Round 6 closes the last isolation hole in this resolver: the logical
+    string ``"default"`` used to short-circuit to ``_DEFAULT_HERMES_HOME``
+    before reaching ``get_hermes_home_for_profile()``, bypassing the
+    isolated-mode clamp in ``api.profiles._resolve_profile_home_for_name``
+    (#7168 re-gate round 6). In an isolated deployment pinned at
+    ``<base>/profiles/default``, a session created with ``profile="default"``
+    therefore resolved workspace/config from the BASE root home instead of
+    the pinned one. The name now flows through the same delegated path as
+    every other logical id; literal-default routing to the global state
+    files is retained in ``_profile_state_dir``/``get_last_workspace`` via
+    canonical ``_is_default_profile_home`` identity.
     An explicit home directory is expressed as a ``Path`` object (callers such
     as streaming's legacy ``_profile_home`` fallback wrap their home strings
     in ``Path``); Path values are honored and canonicalized so identity
@@ -217,9 +228,6 @@ def _resolve_profile_home_param(profile: str | Path | None) -> Path:
         return get_active_hermes_home()
 
     raw = str(profile).strip()
-    if raw == "default":
-        from api.profiles import _DEFAULT_HERMES_HOME
-        return _DEFAULT_HERMES_HOME
 
     if isinstance(profile, Path):
         return _safe_resolve(profile.expanduser())
