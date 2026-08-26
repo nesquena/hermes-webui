@@ -57,6 +57,20 @@ def _profile_state_dir(profile: str | Path | None = None) -> Path:
     try:
         from api.profiles import get_active_profile_name, get_active_hermes_home
         if profile is not None:
+            # Literal-"default" STATE routing (#7168 re-gate round 7): the
+            # default profile's workspace state always lives in the global
+            # state files, even when isolated mode pins the default home at
+            # <base>/profiles/default. The round-6 resolver change made
+            # _resolve_profile_home_param("default") return that pinned home,
+            # so the canonical-home check below sent explicit
+            # profile="default" state reads/writes to {pinned}/webui_state/
+            # while ambient calls kept using the global dir — splitting saved
+            # workspaces between two authorities. Config and workspace PATH
+            # resolution still use the pinned home via
+            # _resolve_profile_home_param; only this state-file tier stays
+            # global for the logical string "default".
+            if isinstance(profile, str) and profile.strip() == 'default':
+                return _GLOBAL_WS_FILE.parent
             profile_home = _resolve_profile_home_param(profile)
             if not _is_default_profile_home(profile_home):
                 d = profile_home / 'webui_state'
