@@ -1862,7 +1862,34 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         except Exception:
             pass
 
-    from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    try:
+        from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    except ImportError:
+        # agent source not mounted (two-container Docker,
+        # HERMES_WEBUI_CHAT_BACKEND=gateway): the fallback profile path must
+        # still work — never 500 GET /api/profiles (#7305). Best-effort local
+        # scan: no platform filtering, minimal frontmatter parse.
+        def iter_skill_index_files(root, filename="SKILL.md"):
+            for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+                if filename in filenames:
+                    yield Path(dirpath) / filename
+
+        def parse_frontmatter(content):
+            data = {}
+            try:
+                if content.startswith("---"):
+                    _head, _sep, rest = content.partition("\n---")
+                    fm, _, _body = rest.partition("\n---")
+                    for line in fm.splitlines():
+                        if ":" in line:
+                            k, v = line.split(":", 1)
+                            data[k.strip()] = v.strip().strip('"\'')
+            except Exception:
+                pass
+            return data, None
+
+        def skill_matches_platform(_frontmatter):
+            return True
 
     seen_names = set()
     enabled_count = 0
