@@ -699,10 +699,11 @@ def test_settings_post_serializes_after_locale_settlement_and_ignores_stale_succ
         _function_source(PANELS_JS, "_settingsLocaleSettlementIsCurrent"),
         _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
         _function_source(PANELS_JS, "_commitSettingsLocale"),
+        _function_source(PANELS_JS, "_enqueueSettingsPost"),
         _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
         _function_source(PANELS_JS, "_autosavePreferencesSettings"),
     ]
-    combined_sources = "let _settingsLocalePostInFlight=null; let _settingsPreferencesAutosaveRetryPayload=null; let _settingsHermesDefaultModelOnOpen=''; let _settingsHermesDefaultModelProviderOnOpen=null;\n" + "\n".join(sources)
+    combined_sources = "let _settingsPanelPostQueue=Promise.resolve(); let _settingsLocalePostInFlight=null; let _settingsPreferencesAutosaveRetryPayload=null; let _settingsHermesDefaultModelOnOpen=''; let _settingsHermesDefaultModelProviderOnOpen=null;\n" + "\n".join(sources)
     script = textwrap.dedent(
         f"""
         (async () => {{
@@ -785,6 +786,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
         _function_source(PANELS_JS, "_settingsLocaleSettlementIsCurrent"),
         _function_source(PANELS_JS, "_settingsLocaleCommitIsCurrent"),
         _function_source(PANELS_JS, "_commitSettingsLocale"),
+        _function_source(PANELS_JS, "_enqueueSettingsPost"),
         _function_source(PANELS_JS, "_postSettingsAtLocaleCommit"),
         _function_source(PANELS_JS, "saveSettings"),
         _function_source(PANELS_JS, "_applySavedSettingsUi"),
@@ -799,7 +801,7 @@ def test_settings_locale_supersession_covers_save_selector_load_and_saved_ui():
         + load_locale_segment
         + "}"
     )
-    combined_sources = "\n".join(sources)
+    combined_sources = "let _settingsPanelPostQueue=Promise.resolve();\n" + "\n".join(sources)
     script = textwrap.dedent(
         f"""
         (async () => {{
