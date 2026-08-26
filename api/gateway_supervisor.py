@@ -279,8 +279,11 @@ class GatewaySupervisor:
 
         Scans profiles (works without request context), acquires the
         restart lock to coordinate with WebUI-initiated restarts, then
-        launches ``hermes --profile <name> gateway run --no-supervise``
-        as a detached process.
+        launches ``hermes --profile <name> gateway run --no-supervise --replace``
+        as a detached process. ``--replace`` lets the supervisor recover
+        from a half-dead previous instance without a separate ``stop``
+        round-trip (which would block on systemd/s6 detection in
+        single-container mode where neither exists).
         """
         try:
             from api.gateway_restart import (
@@ -304,7 +307,7 @@ class GatewaySupervisor:
 
             try:
                 hermes_cmd = _resolve_hermes_command()
-                cmd = [hermes_cmd, "--profile", profile_name, "gateway", "run", "--no-supervise"]
+                cmd = [hermes_cmd, "--profile", profile_name, "gateway", "run", "--no-supervise", "--replace"]
 
                 env = os.environ.copy()
                 env["HERMES_HOME"] = str(profile_home)
@@ -315,10 +318,19 @@ class GatewaySupervisor:
                     profile_home,
                 )
 
+                # Redirect to log file so a stuck / conflicting process leaves evidence
+                # and the supervisor's Popen never blocks on a full PIPE buffer.
+                log_path = Path(profile_home) / "logs" / "gateway-supervisor.log"
+                try:
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+                log_fp = open(log_path, "ab", buffering=0)
                 proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=log_fp,
+                    stderr=log_fp,
+                    stdin=subprocess.DEVNULL,
                     env=env,
                     start_new_session=True,
                 )
@@ -330,18 +342,22 @@ class GatewaySupervisor:
                     self._backoff.record_start()
                     logger.info("Gateway process started successfully (pid=%s)", proc.pid)
 
-                    threading.Thread(
-                        target=_consume_stream, args=(proc.stdout,), daemon=True,
-                    ).start()
-                    threading.Thread(
-                        target=_consume_stream, args=(proc.stderr,), daemon=True,
-                    ).start()
+                    # Streams already redirected to log file (gateway-supervisor.log);
+                    # no Popen pipes to drain.
                 else:
-                    stdout = proc.stdout.read().decode("utf-8", errors="replace") if proc.stdout else ""
-                    stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+                    # Proc died in 3s — read tail of the log file to surface the cause
+                    tail = b""
+                    try:
+                        with open(log_path, "rb") as f:
+                            f.seek(0, 2)
+                            size = f.tell()
+                            f.seek(max(0, size - 4096))
+                            tail = f.read()
+                    except OSError:
+                        pass
                     logger.error(
-                        "Gateway exited immediately (code=%s)\nstdout: %s\nstderr: %s",
-                        returncode, stdout, stderr,
+                        "Gateway exited immediately (code=%s). See %s. Tail: %s",
+                        returncode, log_path, tail.decode("utf-8", errors="replace"),
                     )
             finally:
                 try:
