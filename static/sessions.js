@@ -4023,10 +4023,7 @@ async function _ensureAllMessagesLoaded() {
       S.messages = _msgsToAssign;
       _messagesTruncated = false;
       _oldestIdx = 0;
-      _syncToolCallsForLoadedMessages(
-        _msgsToAssign,
-        data.session.tool_calls || data.toolCalls || []
-      );
+      _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
       if (S.session && S.session.session_id === sid) {
         S.session.message_count = Number(data.session.message_count || msgs.length);
         if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {

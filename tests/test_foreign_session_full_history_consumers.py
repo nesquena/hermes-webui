@@ -2482,9 +2482,13 @@ def test_terminal_paths_route_artifacts_refresh_through_shared_idle_helper():
     assert "if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();" in MESSAGES_JS
     assert "renderSessionList();\n        _setActivePaneIdleIfOwner();" in MESSAGES_JS
     assert "_setActivePaneIdleIfOwner();\n      renderSessionList(); // clear streaming indicator immediately on apperror" in MESSAGES_JS
-    assert "finally{\n          _setActivePaneIdleIfOwner();\n        }" in MESSAGES_JS
+    assert "finally{\n            _setActivePaneIdleIfOwner();\n          }" in MESSAGES_JS
     assert "renderSessionList();\n      _setActivePaneIdleIfOwner();\n      return returnStatus?'restored':true;" in MESSAGES_JS
-    assert "_setActivePaneIdleIfOwner();\n  }\n\n  (async()=>{" in MESSAGES_JS
+    cancel_start = MESSAGES_JS.index("const _cancelSessionPayload")
+    cancel_end = MESSAGES_JS.index("for(const _runJournalEventName", cancel_start)
+    cancel_block = MESSAGES_JS[cancel_start:cancel_end]
+    assert "finally{" in cancel_block
+    assert "_setActivePaneIdleIfOwner();" in cancel_block
 
 
 def test_locale_blocks_cover_loading_and_download_feedback_keys():
