@@ -200,9 +200,17 @@ def _resolve_profile_home_param(profile: str | Path | None) -> Path:
     name that fails the profile-id grammar raises ValueError instead of being
     silently clamped onto the default home — the old clamp let a malformed
     name such as ``"bad name"`` read/write the DEFAULT profile's state.
-    Path-shaped values and Path objects are honored as explicit homes and
-    canonicalized so identity comparisons never depend on lexical spelling
-    (e.g. a symlink alias of the default home must compare equal to it).
+    Round 5 tightens the grammar gate: a STRING profile value is strictly a
+    logical profile id and is NEVER treated as a path-shaped home — the old
+    ``"/" in raw`` branch resolved any slash-bearing string directly, so a
+    malformed value like ``"../evil"`` bypassed validation entirely and could
+    read/overwrite an arbitrary ``webui_state/last_workspace.txt``
+    (#7168 re-gate round 5, path traversal on the profile-isolation boundary).
+    An explicit home directory is expressed as a ``Path`` object (callers such
+    as streaming's legacy ``_profile_home`` fallback wrap their home strings
+    in ``Path``); Path values are honored and canonicalized so identity
+    comparisons never depend on lexical spelling (e.g. a symlink alias of the
+    default home must compare equal to it).
     """
     if profile is None or str(profile).strip() == "":
         from api.profiles import get_active_hermes_home
@@ -216,10 +224,7 @@ def _resolve_profile_home_param(profile: str | Path | None) -> Path:
     if isinstance(profile, Path):
         return _safe_resolve(profile.expanduser())
 
-    if "/" in raw or "\\" in raw:
-        # Explicit path-shaped home (tests construct tmp_path homes directly).
-        return _safe_resolve(Path(raw).expanduser())
-
+    # Strings are LOGICAL PROFILE IDS ONLY — no path-shaped strings, ever.
     if not _PROFILE_NAME_RE.fullmatch(raw):
         raise ValueError(f"invalid profile name: {raw!r}")
 

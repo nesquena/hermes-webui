@@ -276,13 +276,23 @@ def test_build_native_multimodal_message_preserves_remote_workspace(monkeypatch,
 
 
 def test_resolve_profile_home_param_formats(tmp_path):
-    """_resolve_profile_home_param handles None, default, profile name, Path, and path string."""
+    """_resolve_profile_home_param handles None, default, profile name, and Path.
+
+    Round 5 (#7168): path-shaped STRINGS are no longer accepted as explicit
+    homes — a string is strictly a logical profile id (grammar-checked), so an
+    explicit home must be expressed as a Path value.
+    """
     from api.profiles import _DEFAULT_HERMES_HOME
 
     assert workspace._resolve_profile_home_param(None) == _DEFAULT_HERMES_HOME
     assert workspace._resolve_profile_home_param("default") == _DEFAULT_HERMES_HOME
-    assert workspace._resolve_profile_home_param(str(tmp_path / "profiles/custom")) == (tmp_path / "profiles/custom")
-    assert workspace._resolve_profile_home_param(tmp_path / "profiles/custom") == (tmp_path / "profiles/custom")
+    # Path-shaped string: rejected by the logical-id grammar.
+    with pytest.raises(ValueError):
+        workspace._resolve_profile_home_param(str(tmp_path / "profiles/custom"))
+    # Same location as a Path value: honored and canonicalized.
+    assert workspace._resolve_profile_home_param(tmp_path / "profiles/custom") == (
+        tmp_path / "profiles/custom"
+    )
 
 
 def test_remote_profile_a_cannot_use_remote_profile_b_cwd(monkeypatch, tmp_path):
@@ -1144,7 +1154,9 @@ class TestRound4ProfileIsolation:
         )
 
         # No profile-local last_workspace.txt exists → legacy global fallback applies.
-        got = workspace.get_last_workspace(profile=str(alias))
+        # Explicit home is expressed as a Path value (#7168 re-gate round 5:
+        # path-shaped STRINGS are rejected profile ids).
+        got = workspace.get_last_workspace(profile=alias)
         assert str(got) == str(shared_ws)
 
     def test_set_last_workspace_threads_session_profile(self, monkeypatch, tmp_path):
@@ -1236,3 +1248,143 @@ class TestRound4ProfileIsolation:
             f"projected row must carry the ALICE-scoped workspace; got "
             f"{[r.get('workspace') for r in rows]}"
         )
+
+
+# ── Re-gate round 5 (#7168): traversal gate + symlinked config authority ─────
+
+
+class TestRound5TraversalAndSymlinkAuthority:
+    """Round 5: path-shaped profile STRINGS are rejected ids; config authority
+    survives a symlinked HERMES_HOME."""
+
+    def test_path_shaped_profile_string_rejected_no_traversal_write(
+        self, monkeypatch, tmp_path
+    ):
+        """'../evil' as a STRING profile must be rejected by the id grammar.
+
+        Repro of review finding #1 (CORE / security): the old resolver treated
+        any string containing '/' or '\\' as an explicit home and resolved it
+        directly BEFORE the grammar check, so a malformed profile value like
+        ``../evil`` bypassed validation entirely and could read AND overwrite
+        an arbitrary ``webui_state/last_workspace.txt`` outside the profile
+        boundary. Real getters + real state files throughout.
+        """
+        from api import profiles
+
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir(parents=True)
+        monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", default_home)
+        monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: default_home)
+
+        # The file the traversal WOULD reach if it escaped the boundary.
+        evil_dir = tmp_path / "evil"
+        evil_state = evil_dir / "webui_state"
+        evil_state.mkdir(parents=True)
+        victim = evil_state / "last_workspace.txt"
+        victim.write_text("/original-victim-binding", encoding="utf-8")
+
+        traversal = "../evil"
+
+        # Grammar gate: a path-shaped STRING is not a valid logical id.
+        with pytest.raises(ValueError):
+            workspace._resolve_profile_home_param(traversal)
+
+        # Getter: reads NOTHING from the traversal target.
+        got = workspace.get_last_workspace(profile=traversal)
+        assert got != "/original-victim-binding"
+
+        # Setter: writes NO file anywhere along the traversal.
+        workspace.set_last_workspace("/attacker-chosen", profile=traversal)
+        assert victim.read_text(encoding="utf-8") == "/original-victim-binding"
+        assert sorted(p.name for p in evil_state.iterdir()) == ["last_workspace.txt"], (
+            "traversal profile must not create or modify any state file"
+        )
+
+        # Saved-list writer refuses outright too.
+        with pytest.raises(ValueError):
+            workspace.save_workspaces([{"path": str(evil_dir)}], profile=traversal)
+
+        # Same location delivered as a REAL Path is still honored — explicit
+        # homes move to Path values; they are canonicalized, not banned.
+        assert workspace._resolve_profile_home_param(Path(traversal)) == Path(
+            traversal
+        ).expanduser().resolve()
+
+    def test_symlinked_home_with_authoritative_config_path_keeps_authority(
+        self, monkeypatch, tmp_path
+    ):
+        """HERMES_HOME via symlink + authoritative HERMES_CONFIG_PATH.
+
+        Repro of review finding #2 (CORE): workspace canonicalization hands
+        get_config_for_profile_home the RESOLVED alias target, but the config
+        authority compared the active home and the config parent LEXICALLY.
+        With HERMES_HOME reached through a symlink alias, both identity checks
+        failed and the function performed a DIRECT read of the symlink
+        target's own (wrong) config.yaml instead of deferring to the
+        authoritative HERMES_CONFIG_PATH — master trusts the remote
+        terminal.cwd from the override; the lexical head rejected it.
+        Canonicalize all three sides before comparing.
+        """
+        import os
+
+        import yaml
+
+        from api import profiles
+
+        real_home = tmp_path / "real-hermes"
+        real_home.mkdir(parents=True)
+        alias_home = tmp_path / "alias-hermes"
+        try:
+            alias_home.symlink_to(real_home, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable in this environment")
+
+        # The symlink target's OWN config is the WRONG one a naive direct
+        # read picks up (no remote cwd — exactly what "rejects the remote
+        # path" looks like downstream).
+        (real_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"terminal": {"backend": "local", "cwd": "/srv/from-symlink-target"}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        # The AUTHORITATIVE config lives OUTSIDE the home, behind
+        # HERMES_CONFIG_PATH (maintainer-blocker-1 semantics).
+        override_dir = tmp_path / "override-dir"
+        override_dir.mkdir()
+        override_cfg = override_dir / "config.yaml"
+        override_cfg.write_text(
+            yaml.safe_dump(
+                {"terminal": {"backend": "ssh", "cwd": "/srv/from-override"}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        # Ambient resolver reports the home under its ALIAS spelling (as an
+        # env-provided HERMES_HOME would); callers pass the canonicalized
+        # target — the exact divergence the lexical comparison mishandled.
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: alias_home)
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(override_cfg))
+        api_config.reload_config()
+
+        got = api_config.get_config_for_profile_home(real_home)
+        assert got.get("terminal", {}).get("cwd") == "/srv/from-override", (
+            "canonicalized alias target must preserve HERMES_CONFIG_PATH "
+            f"authority; got {got.get('terminal')!r}"
+        )
+        assert got.get("terminal", {}).get("backend") == "ssh"
+
+        # The un-canonicalized alias spelling converges to the SAME answer —
+        # identity is by resolution, never by lexical spelling.
+        got_alias = api_config.get_config_for_profile_home(alias_home)
+        assert got_alias.get("terminal", {}).get("cwd") == "/srv/from-override"
+
+        # Sanity: the fixture genuinely exercises alias-vs-resolved-target
+        # comparison rather than passing trivially.
+        assert os.path.realpath(alias_home) == str(real_home)
+        assert os.path.realpath(real_home) != str(alias_home)
+        # NOTE: no manual delenv/reload here (see
+        # test_config_authority_active_home_with_external_override) —
+        # monkeypatch teardown + stale-path check invalidate the cache.

@@ -728,10 +728,18 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         target = Path(profile_home).expanduser()
     except Exception:
         return get_config()
+
+    from api.workspace import _safe_resolve as _cfg_safe_resolve
+
+    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
+    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
+    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
+    # the aliased home would be bypassed in favor of a direct — wrong — read.
+    target = _cfg_safe_resolve(target)
     try:
         from api.profiles import get_active_hermes_home
 
-        if Path(get_active_hermes_home()).expanduser() == target:
+        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
             return get_config()
     except Exception:
         pass
@@ -741,7 +749,7 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # whose directory doesn't physically exist yet (fresh install, monkeypatched
     # cfg) must still resolve through get_config(), not return {} (#4516 gate).
     try:
-        if _get_config_path().parent == target:
+        if _cfg_safe_resolve(_get_config_path().parent) == target:
             return get_config()
     except Exception:
         pass
