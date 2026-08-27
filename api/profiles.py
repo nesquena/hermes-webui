@@ -53,6 +53,7 @@ _profile_runtime_env_keys: set[str] = set()
 _process_env_scope_condition = threading.Condition()
 _active_process_env_scopes = 0
 _serialized_process_env_scope = False
+_waiting_serialized_process_env_scopes = 0
 _process_env_scope_baseline: dict[str, Optional[str]] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
@@ -1116,16 +1117,23 @@ def _restore_process_env(process_env, previous_env: dict[str, Optional[str]]) ->
 
 def _begin_process_env_scope(*, serialized: bool) -> None:
     global _active_process_env_scopes, _serialized_process_env_scope
+    global _waiting_serialized_process_env_scopes
     with _process_env_scope_condition:
         if serialized:
-            _process_env_scope_condition.wait_for(
-                lambda: _active_process_env_scopes == 0
-                and not _serialized_process_env_scope
-            )
-            _serialized_process_env_scope = True
+            _waiting_serialized_process_env_scopes += 1
+            try:
+                _process_env_scope_condition.wait_for(
+                    lambda: _active_process_env_scopes == 0
+                    and not _serialized_process_env_scope
+                )
+                _serialized_process_env_scope = True
+            finally:
+                _waiting_serialized_process_env_scopes -= 1
+                _process_env_scope_condition.notify_all()
         else:
             _process_env_scope_condition.wait_for(
                 lambda: not _serialized_process_env_scope
+                and _waiting_serialized_process_env_scopes == 0
             )
             _active_process_env_scopes += 1
 

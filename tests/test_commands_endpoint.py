@@ -812,7 +812,7 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     stream_entered = threading.Event()
     stream_release = threading.Event()
 
-    def streaming_worker():
+    def streaming_worker(entered, release):
         with profiles.process_env_scope_for_streaming_turn(
             {"XQUIK_API_KEY"},
             _ENV_LOCK,
@@ -821,29 +821,55 @@ def test_execute_plugin_commands_serialize_profile_process_env(
                 previous_key = os.environ.get("XQUIK_API_KEY")
                 os.environ["XQUIK_API_KEY"] = "alpha-key"
             try:
-                stream_entered.set()
-                assert stream_release.wait(timeout=5)
+                entered.set()
+                assert release.wait(timeout=5)
             finally:
                 with _ENV_LOCK:
                     os.environ["XQUIK_API_KEY"] = previous_key
 
     observed.pop("default")
     beta_entered.clear()
-    stream_thread = threading.Thread(target=streaming_worker)
+    beta_release.clear()
+    late_stream_entered = threading.Event()
+    late_stream_release = threading.Event()
+    stream_thread = threading.Thread(
+        target=streaming_worker,
+        args=(stream_entered, stream_release),
+    )
+    late_stream_thread = threading.Thread(
+        target=streaming_worker,
+        args=(late_stream_entered, late_stream_release),
+    )
     default_thread = threading.Thread(target=worker, args=("default",))
     try:
         stream_thread.start()
         assert stream_entered.wait(timeout=5)
         default_thread.start()
         assert not beta_entered.wait(timeout=0.2)
+        with profiles._process_env_scope_condition:
+            assert profiles._process_env_scope_condition.wait_for(
+                lambda: profiles._waiting_serialized_process_env_scopes == 1,
+                timeout=5,
+            )
+        late_stream_thread.start()
+        assert not late_stream_entered.wait(timeout=0.2)
         stream_release.set()
         assert beta_entered.wait(timeout=5)
+        assert not late_stream_entered.wait(timeout=0.2)
+        beta_release.set()
+        assert late_stream_entered.wait(timeout=5)
+        late_stream_release.set()
     finally:
         stream_release.set()
+        late_stream_release.set()
+        beta_release.set()
         stream_thread.join(timeout=5)
+        if late_stream_thread.ident is not None:
+            late_stream_thread.join(timeout=5)
         default_thread.join(timeout=5)
 
     assert not stream_thread.is_alive()
+    assert not late_stream_thread.is_alive()
     assert not default_thread.is_alive()
     assert not errors
     assert observed["default"] == "default-key"
