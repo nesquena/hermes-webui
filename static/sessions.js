@@ -1319,6 +1319,19 @@ function _clearEmptyComposerModelOverride(){
   _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
 }
 
+function _resetEmptyComposerModelToConfiguredDefault(){
+  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
+  const model=String(window._defaultModel||'').trim();
+  const modelSel=$('modelSelect');
+  if(!model||!modelSel) return null;
+  const provider=window._activeProvider||null;
+  const applied=typeof _ensureModelOptionInDropdown==='function'
+    ? _ensureModelOptionInDropdown(model,modelSel,provider)
+    : (typeof _applyModelToDropdown==='function'?_applyModelToDropdown(model,modelSel,provider):null);
+  if(applied&&typeof syncReasoningChip==='function') syncReasoningChip();
+  return applied;
+}
+
 let _newSessionWorkspaceAnnouncementClearTimer=null;
 
 function _setNewSessionWorkspaceCue(message){
@@ -4366,7 +4379,10 @@ function _renderBatchActionBar(){
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        else{
+          _resetEmptyComposerModelToConfiguredDefault();
+          $('msgInner').innerHTML='';$('emptyState').style.display='';
+        }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
@@ -9178,6 +9194,7 @@ async function deleteSession(sid, beforeDelete=null){
     if(remaining.sessions&&remaining.sessions.length){
       await loadSession(remaining.sessions[0].session_id);
     }else{
+      _resetEmptyComposerModelToConfiguredDefault();
       const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
