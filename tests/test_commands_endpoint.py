@@ -914,3 +914,49 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     assert not alpha_scope_thread.is_alive()
     assert not beta_scope_thread.is_alive()
     assert os.environ.get("XQUIK_API_KEY") == "default-key"
+
+
+def test_named_plugin_command_scrubs_root_only_runtime_key(monkeypatch, tmp_path):
+    """A named plugin must not inherit a key found only in the root profile."""
+    import os
+    import sys
+
+    import api.commands as commands
+    import api.profiles as profiles
+
+    base = tmp_path / ".hermes"
+    profile_home = base / "profiles" / "alpha"
+    profile_home.mkdir(parents=True)
+    (base / ".env").write_text("XQUIK_API_KEY=default-key\n", encoding="utf-8")
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: SimpleNamespace(
+        set_hermes_home_override=lambda _home: None,
+        reset_hermes_home_override=lambda _token: None,
+    ))
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda _home: True)
+    monkeypatch.setenv("XQUIK_API_KEY", "default-key")
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    plugins = ModuleType("hermes_cli.plugins")
+    observed = []
+
+    def handler(_arg):
+        observed.append(os.getenv("XQUIK_API_KEY"))
+        return "ok"
+
+    plugins.get_plugin_command_handler = lambda _name: handler
+    plugins.resolve_plugin_command_result = lambda result: result
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+
+    profiles.set_request_profile("alpha")
+    try:
+        result = commands.execute_plugin_command("/xstatus")
+    finally:
+        profiles.clear_request_profile()
+
+    assert result == "ok"
+    assert observed == [None]
+    assert os.environ.get("XQUIK_API_KEY") == "default-key"

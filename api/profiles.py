@@ -50,6 +50,7 @@ _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
 _profile_runtime_env_keys: set[str] = set()
+_profile_runtime_env_keys_lock = threading.Lock()
 _process_env_scope_condition = threading.Condition()
 _active_process_env_scopes = 0
 _serialized_process_env_scope = False
@@ -1093,15 +1094,39 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     return names
 
 
+def _profile_scoped_env_names(
+    profile_home_path: Path,
+    safe_runtime_env: dict[str, str],
+) -> set[str]:
+    """Return every known profile key that this scope must apply or scrub."""
+    root_home = Path(get_hermes_home_for_profile("default"))
+    root_env = filter_runtime_env_for_gateway_parity(
+        get_profile_runtime_env(root_home)
+    )
+    root_secret_names = _profile_secret_env_names(root_home)
+    selected_secret_names = (
+        root_secret_names
+        if Path(profile_home_path) == root_home
+        else _profile_secret_env_names(profile_home_path)
+    )
+    with _profile_runtime_env_keys_lock:
+        _profile_runtime_env_keys.update(root_env)
+        _profile_runtime_env_keys.update(root_secret_names)
+        _profile_runtime_env_keys.update(safe_runtime_env)
+        _profile_runtime_env_keys.update(selected_secret_names)
+        known_runtime_names = set(_profile_runtime_env_keys)
+    return known_runtime_names
+
+
 def _apply_profile_env_to_process(
     process_env,
     safe_runtime_env: dict[str, str],
     *,
-    secret_env_names: set[str],
+    scrub_env_names: set[str],
 ) -> dict[str, Optional[str]]:
-    scoped_keys = set(safe_runtime_env) | set(secret_env_names)
+    scoped_keys = set(safe_runtime_env) | set(scrub_env_names)
     previous_env = {key: process_env.get(key) for key in scoped_keys}
-    for key in secret_env_names:
+    for key in scrub_env_names:
         if key not in safe_runtime_env:
             process_env.pop(key, None)
     return previous_env
@@ -1264,13 +1289,11 @@ def profile_env_for_background_worker(
             _begin_process_env_scope(serialized=True)
             try:
                 with _ENV_LOCK:
-                    scoped_names = _profile_secret_env_names(root_home) | set(
-                        _profile_runtime_env_keys
-                    )
+                    scoped_names = _profile_scoped_env_names(root_home, root_env)
                     previous_env = _apply_profile_env_to_process(
                         os.environ,
                         root_env,
-                        secret_env_names=scoped_names,
+                        scrub_env_names=scoped_names,
                     )
                     previous_home = os.environ.get("HERMES_HOME")
                     had_home = "HERMES_HOME" in os.environ
@@ -1298,7 +1321,10 @@ def profile_env_for_background_worker(
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
-        secret_env_names = _profile_secret_env_names(profile_home_path)
+        scoped_env_names = _profile_scoped_env_names(
+            profile_home_path,
+            safe_runtime_env,
+        )
     except Exception:
         log.debug(
             "Failed to resolve profile env for %s profile %s; falling back to current env",
@@ -1397,10 +1423,9 @@ def profile_env_for_background_worker(
             _ENV_LOCK.acquire()
             _env_lock_held = True
         with nullcontext() if _env_lock_held else _ENV_LOCK:
-            _profile_runtime_env_keys.update(safe_runtime_env)
             if not serialize_process_env:
                 _capture_process_env_baseline(
-                    set(safe_runtime_env) | set(secret_env_names)
+                    set(safe_runtime_env) | set(scoped_env_names)
                 )
             if scope_skill_modules and should_restore_skill_modules:
                 # Snapshot and patch before mutating process env so setup
@@ -1411,7 +1436,7 @@ def profile_env_for_background_worker(
             old_runtime_env = _apply_profile_env_to_process(
                 os.environ,
                 safe_runtime_env,
-                secret_env_names=secret_env_names,
+                scrub_env_names=scoped_env_names,
             )
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
