@@ -364,6 +364,7 @@ def test_status_and_onboarding_catalog_declare_keyless_without_credentials(monke
     monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(onboarding, "_provider_api_key_present", lambda *args: False)
     monkeypatch.setattr(onboarding, "verify_hermes_imports", lambda: (True, [], []))
+    monkeypatch.setattr(onboarding, "_HERMES_FOUND", True)
     status = onboarding._status_from_runtime(
         {"model": {"provider": "opencode_free", "default": "x-preview-f-free"}},
         True,
