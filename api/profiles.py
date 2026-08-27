@@ -55,6 +55,7 @@ _process_env_scope_condition = threading.Condition()
 _active_process_env_scopes = 0
 _serialized_process_env_scope = False
 _waiting_serialized_process_env_scopes = 0
+_process_env_scope_depths: dict[int, int] = {}
 _process_env_scope_baseline: dict[str, Optional[str]] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
@@ -1143,6 +1144,7 @@ def _restore_process_env(process_env, previous_env: dict[str, Optional[str]]) ->
 def _begin_process_env_scope(*, serialized: bool) -> None:
     global _active_process_env_scopes, _serialized_process_env_scope
     global _waiting_serialized_process_env_scopes
+    owner = threading.get_ident()
     with _process_env_scope_condition:
         if serialized:
             _waiting_serialized_process_env_scopes += 1
@@ -1156,11 +1158,16 @@ def _begin_process_env_scope(*, serialized: bool) -> None:
                 _waiting_serialized_process_env_scopes -= 1
                 _process_env_scope_condition.notify_all()
         else:
+            depth = _process_env_scope_depths.get(owner, 0)
+            if depth:
+                _process_env_scope_depths[owner] = depth + 1
+                return
             _process_env_scope_condition.wait_for(
                 lambda: not _serialized_process_env_scope
                 and _waiting_serialized_process_env_scopes == 0
             )
             _active_process_env_scopes += 1
+            _process_env_scope_depths[owner] = 1
 
 
 def _capture_process_env_baseline(keys: set[str]) -> None:
@@ -1171,10 +1178,16 @@ def _capture_process_env_baseline(keys: set[str]) -> None:
 
 def _end_process_env_scope(*, serialized: bool, env_lock) -> None:
     global _active_process_env_scopes, _serialized_process_env_scope
+    owner = threading.get_ident()
     with _process_env_scope_condition:
         if serialized:
             _serialized_process_env_scope = False
         else:
+            depth = _process_env_scope_depths.get(owner, 0)
+            if depth > 1:
+                _process_env_scope_depths[owner] = depth - 1
+                return
+            _process_env_scope_depths.pop(owner, None)
             if _active_process_env_scopes == 1:
                 with env_lock:
                     _restore_process_env(os.environ, _process_env_scope_baseline)

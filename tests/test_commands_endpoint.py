@@ -916,6 +916,73 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     assert os.environ.get("XQUIK_API_KEY") == "default-key"
 
 
+def test_active_agent_turn_reenters_before_serialized_waiter(monkeypatch, tmp_path):
+    """A turn may enter a nested profile scope while a command waits."""
+    import api.profiles as profiles
+    from api.streaming import _ENV_LOCK
+
+    root_home = tmp_path / ".hermes"
+    profile_home = root_home / "profiles" / "alpha"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setattr(
+        profiles,
+        "_resolve_hermes_home_override",
+        lambda: SimpleNamespace(
+            set_hermes_home_override=lambda _home: None,
+            reset_hermes_home_override=lambda _token: None,
+        ),
+    )
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda _home: True)
+
+    outer_entered = threading.Event()
+    enter_nested = threading.Event()
+    nested_entered = threading.Event()
+    outer_release = threading.Event()
+    serialized_entered = threading.Event()
+
+    def agent_turn():
+        with profiles.process_env_scope_for_agent_turn(set(), _ENV_LOCK):
+            outer_entered.set()
+            assert enter_nested.wait(timeout=5)
+            with profiles.profile_scope_for_detached_worker("alpha", "model resolution"):
+                nested_entered.set()
+            assert outer_release.wait(timeout=5)
+
+    def serialized_command():
+        profiles._begin_process_env_scope(serialized=True)
+        try:
+            serialized_entered.set()
+        finally:
+            profiles._end_process_env_scope(serialized=True, env_lock=_ENV_LOCK)
+
+    agent_thread = threading.Thread(target=agent_turn, daemon=True)
+    command_thread = threading.Thread(target=serialized_command, daemon=True)
+    try:
+        agent_thread.start()
+        assert outer_entered.wait(timeout=5)
+        command_thread.start()
+        with profiles._process_env_scope_condition:
+            assert profiles._process_env_scope_condition.wait_for(
+                lambda: profiles._waiting_serialized_process_env_scopes == 1,
+                timeout=5,
+            )
+        enter_nested.set()
+        assert nested_entered.wait(timeout=1)
+        assert not serialized_entered.is_set()
+        outer_release.set()
+        assert serialized_entered.wait(timeout=5)
+    finally:
+        enter_nested.set()
+        outer_release.set()
+        agent_thread.join(timeout=5)
+        command_thread.join(timeout=5)
+
+    assert not agent_thread.is_alive()
+    assert not command_thread.is_alive()
+
+
 def test_sync_chat_blocks_serialized_plugin_command(monkeypatch, tmp_path):
     """A synchronous agent turn must keep plugin commands outside its env scope."""
     import os
