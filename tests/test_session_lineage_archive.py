@@ -2,8 +2,10 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import threading
 from collections import OrderedDict
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -174,6 +176,164 @@ def _assert_cold_archive_parity(session_dir, expected):
     for sid in ("lineage-root", "lineage-tip"):
         assert Session.load(sid).archived is expected
         assert by_id[sid]["archived"] is expected
+
+
+def _duplicate_partial_messages(label):
+    partial = {
+        "role": "assistant",
+        "content": f"partial-{label}",
+        "_partial": True,
+    }
+    return [
+        {"role": "user", "content": label},
+        dict(partial),
+        dict(partial),
+    ]
+
+
+def test_session_load_self_heal_cannot_revert_committed_lineage_archive(
+    lineage_session_store,
+    monkeypatch,
+):
+    """A pre-archive self-heal snapshot must not publish after the batch commit."""
+    import api.models as models
+    import api.session_batch_transaction as transaction
+
+    sessions = _lineage_sessions(lineage_session_store, archived=False)
+    sessions[0].messages = _duplicate_partial_messages("lineage-root")
+    sessions[0].save(touch_updated_at=False)
+
+    read_complete = threading.Event()
+    resume_self_heal = threading.Event()
+    original_collapse = models._collapse_adjacent_duplicate_partials
+    pause_lock = threading.Lock()
+    should_pause = True
+
+    def pause_after_real_collapse(messages):
+        nonlocal should_pause
+        collapsed, changed = original_collapse(messages)
+        with pause_lock:
+            pause_now = changed and should_pause
+            if pause_now:
+                should_pause = False
+        if pause_now:
+            read_complete.set()
+            assert resume_self_heal.wait(5), "timed out waiting to resume Session.load self-heal"
+        return collapsed, changed
+
+    monkeypatch.setattr(models, "_collapse_adjacent_duplicate_partials", pause_after_real_collapse)
+    loaded = []
+    errors = []
+
+    def load_root():
+        try:
+            loaded.append(models.Session.load("lineage-root"))
+        except BaseException as exc:  # surfaced in the parent assertion below
+            errors.append(exc)
+
+    reader = threading.Thread(target=load_root)
+    reader.start()
+    assert read_complete.wait(5), "Session.load did not reach duplicate-partial self-heal"
+
+    with ExitStack() as stack:
+        for session in sorted(sessions, key=lambda item: item.session_id):
+            stack.enter_context(models._get_session_agent_lock(session.session_id))
+        transaction.commit_session_archive_batch(sessions, True)
+
+    resume_self_heal.set()
+    reader.join(timeout=5)
+    assert not reader.is_alive()
+    assert errors == []
+    assert loaded and loaded[0] is not None
+    assert loaded[0].archived is True
+
+    sidecars = {
+        sid: json.loads((lineage_session_store / f"{sid}.json").read_text(encoding="utf-8"))
+        for sid in ("lineage-root", "lineage-tip")
+    }
+    index = {
+        row["session_id"]: row
+        for row in json.loads((lineage_session_store / "_index.json").read_text(encoding="utf-8"))
+    }
+    for sid in ("lineage-root", "lineage-tip"):
+        assert sidecars[sid]["archived"] is True
+        assert index[sid]["archived"] is True
+    assert len(sidecars["lineage-root"]["messages"]) == 2
+
+
+def test_session_load_self_heal_obeys_cross_process_store_lock(
+    lineage_session_store,
+    monkeypatch,
+):
+    """The real write-capable load path participates in the advisory store lock."""
+    import api.models as models
+
+    sessions = _lineage_sessions(lineage_session_store, archived=False)
+    sessions[0].messages = _duplicate_partial_messages("lineage-root")
+    sessions[0].save(touch_updated_at=False)
+
+    child_script = """
+import sys
+from pathlib import Path
+from api.session_batch_transaction import session_store_transaction_lock
+
+with session_store_transaction_lock(Path(sys.argv[1])):
+    print("locked", flush=True)
+    sys.stdin.readline()
+"""
+    child_env = os.environ.copy()
+    child_env["HERMES_HOME"] = str(lineage_session_store.parent / "child-hermes-home")
+    child_env["HERMES_WEBUI_STATE_DIR"] = str(lineage_session_store.parent / "child-webui-state")
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_script, str(lineage_session_store)],
+        cwd=ROOT,
+        env=child_env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None
+    assert child.stdout.readline().strip() == "locked"
+
+    read_complete = threading.Event()
+    load_complete = threading.Event()
+    original_collapse = models._collapse_adjacent_duplicate_partials
+
+    def observe_real_collapse(messages):
+        collapsed, changed = original_collapse(messages)
+        if changed:
+            read_complete.set()
+        return collapsed, changed
+
+    monkeypatch.setattr(models, "_collapse_adjacent_duplicate_partials", observe_real_collapse)
+    errors = []
+
+    def load_root():
+        try:
+            models.Session.load("lineage-root")
+        except BaseException as exc:  # surfaced in the parent assertion below
+            errors.append(exc)
+        finally:
+            load_complete.set()
+
+    reader = threading.Thread(target=load_root)
+    reader.start()
+    assert read_complete.wait(5), "Session.load did not read the duplicate-partial sidecar"
+    blocked_by_child = not load_complete.wait(0.5)
+
+    assert child.stdin is not None
+    child.stdin.write("\n")
+    child.stdin.flush()
+    child.stdin.close()
+    reader.join(timeout=5)
+    child_stderr = child.stderr.read() if child.stderr is not None else ""
+    child_rc = child.wait(timeout=5)
+
+    assert child_rc == 0, child_stderr
+    assert blocked_by_child, "Session.load self-heal bypassed the cross-process store lock"
+    assert not reader.is_alive()
+    assert errors == []
 
 
 @pytest.mark.parametrize("failed_target", ["lineage-tip.json", "_index.json"])

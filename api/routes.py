@@ -10615,6 +10615,7 @@ from api.models import (
 from api.session_batch_transaction import (
     SessionBatchTransactionError,
     commit_session_archive_batch,
+    session_store_transaction_lock,
 )
 
 
@@ -16332,9 +16333,7 @@ def handle_post(handler, parsed) -> bool:
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
-        # A delegated subagent child (#5307) is view-only and owned by the
-        # delegate runner. Deleting it here would call delete_cli_session() and
-        # erase the child's state.db transcript — refuse it.
+        # Delegated subagent state is view-only and owned by the runner (#5307).
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
@@ -16346,38 +16345,38 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Serialize with recovery, but bound contention so a browser timeout
-        # cannot be followed by a delayed server-side delete.
+        # Bound contention so a browser timeout cannot trigger a delayed delete.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
-            try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
+            with session_store_transaction_lock(SESSION_DIR):
+                with LOCK:
+                    SESSIONS.pop(sid, None)
                 try:
-                    _record_webui_deleted_session_tombstone(sid)
+                    p = (SESSION_DIR / f"{sid}.json").resolve()
+                    p.relative_to(SESSION_DIR.resolve())
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    return bad(handler, "Invalid session_id", 400)
+                sidecar_deleted = False
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
+                try:
+                    p.with_suffix('.json.bak').unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+                try:
+                    prune_session_from_index(sid)
+                except Exception:
+                    logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+                if sidecar_deleted and not is_messaging_session:
+                    try:
+                        _record_webui_deleted_session_tombstone(sid)
+                    except Exception:
+                        logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -22677,17 +22676,19 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            with _get_session_agent_lock(p.stem):
+                with session_store_transaction_lock(SESSION_DIR):
+                    s = Session.load(p.stem)
+                    if zero_only:
+                        should_delete = s and len(s.messages) == 0
+                    else:
+                        should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                    if should_delete:
+                        with LOCK:
+                            SESSIONS.pop(p.stem, None)
+                        p.unlink(missing_ok=True)
+                        cleaned += 1
+                        phase1_removed_ids.add(p.stem)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -22709,7 +22710,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         try:
             from api.models import _INDEX_WRITE_LOCK, _safe_replace
 
-            with _INDEX_WRITE_LOCK:
+            with session_store_transaction_lock(SESSION_DIR), _INDEX_WRITE_LOCK:
                 index_file_data = json.loads(
                     SESSION_INDEX_FILE.read_bytes()
                 )

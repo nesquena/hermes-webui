@@ -849,7 +849,7 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
     }
 
 
-def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Path | None) -> dict:
+def _recover_missing_sidecars_from_state_db_locked(session_dir: Path, state_db_path: Path | None) -> dict:
     """Materialize missing WebUI JSON sidecars from canonical state.db rows."""
     rows = _read_state_db_missing_sidecar_rows(session_dir, state_db_path)
     materialized = 0
@@ -903,6 +903,14 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         elif not detail_recorded:
             details.append({'session_id': sid, 'materialized': False, 'skipped': 'sidecar_appeared_during_reconcile'})
     return {'scanned': len(rows), 'materialized': materialized, 'details': details}
+
+
+def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Path | None) -> dict:
+    """Materialize missing sidecars under the shared session-store authority."""
+    from api.session_batch_transaction import session_store_transaction_lock
+
+    with session_store_transaction_lock(session_dir):
+        return _recover_missing_sidecars_from_state_db_locked(session_dir, state_db_path)
 
 
 def _new_audit_item(
