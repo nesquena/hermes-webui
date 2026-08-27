@@ -49,6 +49,11 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+_profile_runtime_env_keys: set[str] = set()
+_process_env_scope_condition = threading.Condition()
+_active_process_env_scopes = 0
+_serialized_process_env_scope = False
+_process_env_scope_baseline: dict[str, Optional[str]] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -1101,6 +1106,50 @@ def _apply_profile_env_to_process(
     return previous_env
 
 
+def _restore_process_env(process_env, previous_env: dict[str, Optional[str]]) -> None:
+    for key, old_value in previous_env.items():
+        if old_value is None:
+            process_env.pop(key, None)
+        else:
+            process_env[key] = old_value
+
+
+def _begin_process_env_scope(*, serialized: bool) -> None:
+    global _active_process_env_scopes, _serialized_process_env_scope
+    with _process_env_scope_condition:
+        if serialized:
+            _process_env_scope_condition.wait_for(
+                lambda: _active_process_env_scopes == 0
+                and not _serialized_process_env_scope
+            )
+            _serialized_process_env_scope = True
+        else:
+            _process_env_scope_condition.wait_for(
+                lambda: not _serialized_process_env_scope
+            )
+            _active_process_env_scopes += 1
+
+
+def _capture_process_env_baseline(keys: set[str]) -> None:
+    for key in keys | {"HERMES_HOME"}:
+        if key not in _process_env_scope_baseline:
+            _process_env_scope_baseline[key] = os.environ.get(key)
+
+
+def _end_process_env_scope(*, serialized: bool, env_lock) -> None:
+    global _active_process_env_scopes, _serialized_process_env_scope
+    with _process_env_scope_condition:
+        if serialized:
+            _serialized_process_env_scope = False
+        else:
+            if _active_process_env_scopes == 1:
+                with env_lock:
+                    _restore_process_env(os.environ, _process_env_scope_baseline)
+                    _process_env_scope_baseline.clear()
+            _active_process_env_scopes -= 1
+        _process_env_scope_condition.notify_all()
+
+
 _secret_scope_available = None
 
 
@@ -1188,8 +1237,35 @@ def profile_env_for_background_worker(
         if serialize_process_env:
             from api.streaming import _ENV_LOCK
 
-            with _ENV_LOCK:
-                yield
+            root_home = Path(get_hermes_home_for_profile("default"))
+            root_env = filter_runtime_env_for_gateway_parity(
+                get_profile_runtime_env(root_home)
+            )
+            _begin_process_env_scope(serialized=True)
+            try:
+                with _ENV_LOCK:
+                    scoped_names = _profile_secret_env_names(root_home) | set(
+                        _profile_runtime_env_keys
+                    )
+                    previous_env = _apply_profile_env_to_process(
+                        os.environ,
+                        root_env,
+                        secret_env_names=scoped_names,
+                    )
+                    previous_home = os.environ.get("HERMES_HOME")
+                    had_home = "HERMES_HOME" in os.environ
+                    os.environ.update(root_env)
+                    os.environ["HERMES_HOME"] = str(root_home)
+                    try:
+                        yield
+                    finally:
+                        _restore_process_env(os.environ, previous_env)
+                        if had_home:
+                            os.environ["HERMES_HOME"] = previous_home or ""
+                        else:
+                            os.environ.pop("HERMES_HOME", None)
+            finally:
+                _end_process_env_scope(serialized=True, env_lock=_ENV_LOCK)
         else:
             yield
         return
@@ -1240,7 +1316,10 @@ def profile_env_for_background_worker(
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
     _env_lock_held = False
+    _process_env_scope_entered = False
     try:
+        _begin_process_env_scope(serialized=serialize_process_env)
+        _process_env_scope_entered = True
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
         _secret_scope_mod = _resolve_secret_scope_module()
@@ -1298,6 +1377,11 @@ def profile_env_for_background_worker(
             _ENV_LOCK.acquire()
             _env_lock_held = True
         with nullcontext() if _env_lock_held else _ENV_LOCK:
+            _profile_runtime_env_keys.update(safe_runtime_env)
+            if not serialize_process_env:
+                _capture_process_env_baseline(
+                    set(safe_runtime_env) | set(secret_env_names)
+                )
             if scope_skill_modules and should_restore_skill_modules:
                 # Snapshot and patch before mutating process env so setup
                 # failures can unwind without leaking either state.
@@ -1317,11 +1401,7 @@ def profile_env_for_background_worker(
     finally:
         try:
             with nullcontext() if _env_lock_held else _ENV_LOCK:
-                for key, old_value in old_runtime_env.items():
-                    if old_value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = old_value
+                _restore_process_env(os.environ, old_runtime_env)
                 if had_hermes_home:
                     os.environ["HERMES_HOME"] = old_hermes_home or ""
                 else:
@@ -1346,11 +1426,18 @@ def profile_env_for_background_worker(
                     _secret_scope_mod.reset_secret_scope(_scope_token)
                 except Exception:
                     pass
-            _thread_ctx.block_process_env_fallback = previous_block_process_env
-            if previous_thread_env:
-                _set_thread_env(**previous_thread_env)
-            else:
-                _clear_thread_env()
+            try:
+                _thread_ctx.block_process_env_fallback = previous_block_process_env
+                if previous_thread_env:
+                    _set_thread_env(**previous_thread_env)
+                else:
+                    _clear_thread_env()
+            finally:
+                if _process_env_scope_entered:
+                    _end_process_env_scope(
+                        serialized=serialize_process_env,
+                        env_lock=_ENV_LOCK,
+                    )
 
 
 @contextmanager

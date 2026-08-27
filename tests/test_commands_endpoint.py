@@ -685,6 +685,8 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     import api.profiles as profiles
 
     base = tmp_path / ".hermes"
+    base.mkdir()
+    (base / ".env").write_text("XQUIK_API_KEY=default-key\n", encoding="utf-8")
     for profile in ("alpha", "beta"):
         home = base / "profiles" / profile
         home.mkdir(parents=True)
@@ -766,4 +768,81 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     assert not errors
     assert overlapped is False
     assert observed == {"alpha": "alpha-key", second_profile: second_key}
+    assert os.environ.get("XQUIK_API_KEY") == "default-key"
+
+    if second_profile != "default":
+        return
+
+    background_entered = threading.Event()
+    background_release = threading.Event()
+
+    def background_worker():
+        with profiles.profile_env_for_background_worker(
+            "alpha",
+            "concurrent background worker",
+            scope_skill_modules=False,
+        ):
+            background_entered.set()
+            assert background_release.wait(timeout=5)
+
+    observed.pop("default")
+    beta_entered.clear()
+    background_thread = threading.Thread(target=background_worker)
+    default_thread = threading.Thread(target=worker, args=("default",))
+    try:
+        background_thread.start()
+        assert background_entered.wait(timeout=5)
+        default_thread.start()
+        assert not beta_entered.wait(timeout=0.2)
+        background_release.set()
+        assert beta_entered.wait(timeout=5)
+    finally:
+        background_release.set()
+        background_thread.join(timeout=5)
+        default_thread.join(timeout=5)
+
+    assert not background_thread.is_alive()
+    assert not default_thread.is_alive()
+    assert not errors
+    assert observed["default"] == "default-key"
+    assert os.environ.get("XQUIK_API_KEY") == "default-key"
+
+    alpha_scope_entered = threading.Event()
+    beta_scope_entered = threading.Event()
+    alpha_scope_release = threading.Event()
+    beta_scope_release = threading.Event()
+
+    def mirrored_worker(profile, entered, release):
+        with profiles.profile_env_for_background_worker(
+            profile,
+            "overlapping background worker",
+            scope_skill_modules=False,
+        ):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    alpha_scope_thread = threading.Thread(
+        target=mirrored_worker,
+        args=("alpha", alpha_scope_entered, alpha_scope_release),
+    )
+    beta_scope_thread = threading.Thread(
+        target=mirrored_worker,
+        args=("beta", beta_scope_entered, beta_scope_release),
+    )
+    try:
+        alpha_scope_thread.start()
+        assert alpha_scope_entered.wait(timeout=5)
+        beta_scope_thread.start()
+        assert beta_scope_entered.wait(timeout=5)
+        alpha_scope_release.set()
+        alpha_scope_thread.join(timeout=5)
+        beta_scope_release.set()
+    finally:
+        alpha_scope_release.set()
+        beta_scope_release.set()
+        alpha_scope_thread.join(timeout=5)
+        beta_scope_thread.join(timeout=5)
+
+    assert not alpha_scope_thread.is_alive()
+    assert not beta_scope_thread.is_alive()
     assert os.environ.get("XQUIK_API_KEY") == "default-key"
