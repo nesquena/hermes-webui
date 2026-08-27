@@ -15,7 +15,7 @@ import re
 import shutil
 import sys
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Optional
 
@@ -1169,6 +1169,7 @@ def profile_env_for_background_worker(
     logger_override: Optional[logging.Logger] = None,
     *,
     scope_skill_modules: bool = True,
+    serialize_process_env: bool = False,
 ):
     """Temporarily route detached worker config reads through a profile.
 
@@ -1177,12 +1178,20 @@ def profile_env_for_background_worker(
     runtime provider settings, or skill paths must temporarily apply the
     session/request profile env or they can fall back to the server-default
     profile. Pass either a session-like object with `.profile` or a profile name.
+    Set ``serialize_process_env`` for short operations that read ``os.environ``
+    throughout their lifetime and cannot use the request-local environment.
     """
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or profile == "default":
-        yield
+        if serialize_process_env:
+            from api.streaming import _ENV_LOCK
+
+            with _ENV_LOCK:
+                yield
+        else:
+            yield
         return
 
     try:
@@ -1230,6 +1239,7 @@ def profile_env_for_background_worker(
     has_profile_skill_home = False
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
+    _env_lock_held = False
     try:
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1284,7 +1294,10 @@ def profile_env_for_background_worker(
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_skill_home_patch_lock = True
 
-        with _ENV_LOCK:
+        if serialize_process_env:
+            _ENV_LOCK.acquire()
+            _env_lock_held = True
+        with nullcontext() if _env_lock_held else _ENV_LOCK:
             if scope_skill_modules and should_restore_skill_modules:
                 # Snapshot and patch before mutating process env so setup
                 # failures can unwind without leaking either state.
@@ -1303,7 +1316,7 @@ def profile_env_for_background_worker(
         yield
     finally:
         try:
-            with _ENV_LOCK:
+            with nullcontext() if _env_lock_held else _ENV_LOCK:
                 for key, old_value in old_runtime_env.items():
                     if old_value is None:
                         os.environ.pop(key, None)
@@ -1316,6 +1329,9 @@ def profile_env_for_background_worker(
                 if should_restore_skill_modules and skill_home_snapshot is not None:
                     restore_skill_home_modules(skill_home_snapshot)
         finally:
+            if _env_lock_held:
+                _ENV_LOCK.release()
+                _env_lock_held = False
             if _acquired_skill_home_patch_lock:
                 _SKILL_HOME_MODULE_PATCH_LOCK.release()
                 _acquired_skill_home_patch_lock = False
@@ -1449,19 +1465,26 @@ def profile_env_for_active_request_readonly(
 def profile_env_for_active_request(
     purpose: str = "active request",
     logger_override: Optional[logging.Logger] = None,
+    *,
+    serialize_process_env: bool = False,
 ):
     """Apply the active per-request profile through the legacy mirrored path.
 
     Some request-scoped readers still delegate into Hermes helpers that resolve
     credentials directly from process env or ``get_hermes_home()``. Those paths
     stay on the mirrored scope until they are fully audited.
+
+    ``serialize_process_env`` holds the shared environment lock for the wrapped
+    operation. Use it only for short legacy readers and handlers.
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
-        return
+        profile = "default"
     with profile_env_for_background_worker(
-        profile, purpose, logger_override=logger_override
+        profile,
+        purpose,
+        logger_override=logger_override,
+        serialize_process_env=serialize_process_env,
     ):
         yield
 

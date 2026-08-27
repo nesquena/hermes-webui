@@ -135,7 +135,8 @@ def _install_profile_scoped_hermes_tweet(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
 
     @contextmanager
-    def profile_scope(purpose):
+    def profile_scope(purpose, *, serialize_process_env=False):
+        assert serialize_process_env is True
         state["scopes"].append(purpose)
         previous = state["active"]
         state["active"] = True
@@ -664,3 +665,105 @@ def test_execute_hermes_tweet_command_keeps_active_profile(monkeypatch):
         ("lookup", "xstatus", True),
         ("execute", "research", True),
     ]
+
+
+@pytest.mark.parametrize(
+    ("second_profile", "second_key"),
+    (("beta", "beta-key"), ("default", "default-key")),
+)
+def test_execute_plugin_commands_serialize_profile_process_env(
+    monkeypatch,
+    tmp_path,
+    second_profile,
+    second_key,
+):
+    """Concurrent plugin handlers must not observe another profile's key."""
+    import os
+    import sys
+
+    import api.commands as commands
+    import api.profiles as profiles
+
+    base = tmp_path / ".hermes"
+    for profile in ("alpha", "beta"):
+        home = base / "profiles" / profile
+        home.mkdir(parents=True)
+        (home / ".env").write_text(
+            f"XQUIK_API_KEY={profile}-key\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: SimpleNamespace(
+        set_hermes_home_override=lambda _home: None,
+        reset_hermes_home_override=lambda _token: None,
+    ))
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda _home: True)
+    monkeypatch.setenv("XQUIK_API_KEY", "default-key")
+
+    alpha_entered = threading.Event()
+    beta_entered = threading.Event()
+    alpha_release = threading.Event()
+    alpha_read = threading.Event()
+    beta_release = threading.Event()
+    observed = {}
+    errors = []
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    plugins = ModuleType("hermes_cli.plugins")
+
+    def get_plugin_command_handler(name):
+        assert name == "xstatus"
+
+        def xstatus(_arg):
+            profile = profiles.get_active_profile_name()
+            if profile == "alpha":
+                alpha_entered.set()
+                assert alpha_release.wait(timeout=5)
+                observed[profile] = os.getenv("XQUIK_API_KEY")
+                alpha_read.set()
+            else:
+                beta_entered.set()
+                assert beta_release.wait(timeout=5)
+                observed[profile] = os.getenv("XQUIK_API_KEY")
+            return profile
+
+        return xstatus
+
+    plugins.get_plugin_command_handler = get_plugin_command_handler
+    plugins.resolve_plugin_command_result = lambda result: result
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+
+    def worker(profile):
+        profiles.set_request_profile(profile)
+        try:
+            commands.execute_plugin_command("/xstatus")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            profiles.clear_request_profile()
+
+    alpha_thread = threading.Thread(target=worker, args=("alpha",))
+    beta_thread = threading.Thread(target=worker, args=(second_profile,))
+    try:
+        alpha_thread.start()
+        assert alpha_entered.wait(timeout=5)
+        beta_thread.start()
+        overlapped = beta_entered.wait(timeout=0.2)
+        alpha_release.set()
+        assert alpha_read.wait(timeout=5)
+        assert beta_entered.wait(timeout=5)
+        beta_release.set()
+    finally:
+        alpha_release.set()
+        beta_release.set()
+        alpha_thread.join(timeout=5)
+        beta_thread.join(timeout=5)
+
+    assert not alpha_thread.is_alive()
+    assert not beta_thread.is_alive()
+    assert not errors
+    assert overlapped is False
+    assert observed == {"alpha": "alpha-key", second_profile: second_key}
+    assert os.environ.get("XQUIK_API_KEY") == "default-key"

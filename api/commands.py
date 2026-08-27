@@ -57,14 +57,18 @@ def _parse_slash_command(command: str) -> tuple[str, str]:
     return cmd_base, cmd_parts[1] if len(cmd_parts) > 1 else ""
 
 
-def _bundle_profile_context(purpose: str):
+def _bundle_profile_context(purpose: str, *, serialize_process_env: bool = False):
     """Resolve the active-profile env wrapper used by command APIs."""
 
     try:
         from api.profiles import profile_env_for_active_request
     except ImportError:
         return nullcontext()
-    return profile_env_for_active_request(purpose, logger_override=logger)
+    return profile_env_for_active_request(
+        purpose,
+        logger_override=logger,
+        serialize_process_env=serialize_process_env,
+    )
 
 
 def _normalize_agent_command_name(command: str) -> str:
@@ -110,7 +114,7 @@ def list_commands(_registry=None) -> list[dict[str, Any]]:
 
     # Include plugin-registered slash commands
     try:
-        with _bundle_profile_context("/api/commands"):
+        with _bundle_profile_context("/api/commands", serialize_process_env=True):
             from hermes_cli.plugins import get_plugin_commands
             plugin_cmds = get_plugin_commands() or {}
         existing_names = {c['name'] for c in out}
@@ -461,7 +465,7 @@ def execute_plugin_command(command: str) -> str:
         raise RuntimeError("plugin command runtime unavailable") from exc
 
     try:
-        with _bundle_profile_context("/api/commands/exec"):
+        with _bundle_profile_context("/api/commands/exec", serialize_process_env=True):
             try:
                 handler = get_plugin_command_handler(cmd_base)
             except Exception as exc:
