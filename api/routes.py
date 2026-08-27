@@ -24425,16 +24425,22 @@ def _handle_chat_sync(handler, body):
         )[:2]
         s.model = model
         s.model_provider = model_provider
+    from api.profiles import process_env_scope_for_agent_turn
     from api.streaming import _ENV_LOCK
 
-    with _ENV_LOCK:
-        old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = str(workspace)
-        old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
-        old_session_key = os.environ.get("HERMES_SESSION_KEY")
-        os.environ["HERMES_EXEC_ASK"] = "1"
-        os.environ["HERMES_SESSION_KEY"] = s.session_id
+    process_env_scope = process_env_scope_for_agent_turn(
+        {"TERMINAL_CWD", "HERMES_EXEC_ASK", "HERMES_SESSION_KEY"},
+        _ENV_LOCK,
+    )
+    process_env_scope.__enter__()
     try:
+        with _ENV_LOCK:
+            old_cwd = os.environ.get("TERMINAL_CWD")
+            os.environ["TERMINAL_CWD"] = str(workspace)
+            old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
+            old_session_key = os.environ.get("HERMES_SESSION_KEY")
+            os.environ["HERMES_EXEC_ASK"] = "1"
+            os.environ["HERMES_SESSION_KEY"] = s.session_id
         AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
@@ -24534,19 +24540,22 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     finally:
-        with _ENV_LOCK:
-            if old_cwd is None:
-                os.environ.pop("TERMINAL_CWD", None)
-            else:
-                os.environ["TERMINAL_CWD"] = old_cwd
-            if old_exec_ask is None:
-                os.environ.pop("HERMES_EXEC_ASK", None)
-            else:
-                os.environ["HERMES_EXEC_ASK"] = old_exec_ask
-            if old_session_key is None:
-                os.environ.pop("HERMES_SESSION_KEY", None)
-            else:
-                os.environ["HERMES_SESSION_KEY"] = old_session_key
+        try:
+            with _ENV_LOCK:
+                if old_cwd is None:
+                    os.environ.pop("TERMINAL_CWD", None)
+                else:
+                    os.environ["TERMINAL_CWD"] = old_cwd
+                if old_exec_ask is None:
+                    os.environ.pop("HERMES_EXEC_ASK", None)
+                else:
+                    os.environ["HERMES_EXEC_ASK"] = old_exec_ask
+                if old_session_key is None:
+                    os.environ.pop("HERMES_SESSION_KEY", None)
+                else:
+                    os.environ["HERMES_SESSION_KEY"] = old_session_key
+        finally:
+            process_env_scope.__exit__(*sys.exc_info())
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(

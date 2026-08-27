@@ -813,7 +813,7 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     stream_release = threading.Event()
 
     def streaming_worker(entered, release):
-        with profiles.process_env_scope_for_streaming_turn(
+        with profiles.process_env_scope_for_agent_turn(
             {"XQUIK_API_KEY"},
             _ENV_LOCK,
         ):
@@ -914,6 +914,187 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     assert not alpha_scope_thread.is_alive()
     assert not beta_scope_thread.is_alive()
     assert os.environ.get("XQUIK_API_KEY") == "default-key"
+
+
+def test_sync_chat_blocks_serialized_plugin_command(monkeypatch, tmp_path):
+    """A synchronous agent turn must keep plugin commands outside its env scope."""
+    import os
+    import sys
+
+    import api.commands as commands
+    import api.config as config
+    import api.models as models
+    import api.oauth as oauth
+    import api.profiles as profiles
+    import api.routes as routes
+    from api.models import Session
+
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    profile_home = tmp_path / ".hermes"
+    profile_home.mkdir()
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "get_session", models.get_session)
+    monkeypatch.setattr(routes, "title_from", models.title_from)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", profile_home)
+    monkeypatch.setattr(
+        config,
+        "resolve_model_provider",
+        lambda _value: ("test-model", "test-provider", None),
+    )
+    monkeypatch.setattr(
+        config,
+        "resolve_custom_provider_connection",
+        lambda _provider: (None, None),
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda _value: tmp_path)
+    monkeypatch.setattr(routes, "load_settings", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _session_id: False)
+    monkeypatch.setattr(
+        routes,
+        "_read_profile_model_config",
+        lambda _session, _provider: ("test-provider", "test-model", {}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("test-model", "test-provider", False),
+    )
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+
+    sync_entered = threading.Event()
+    sync_release = threading.Event()
+    plugin_entered = threading.Event()
+    observed = {}
+    errors = []
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, **kwargs):
+            observed["sync_session_key"] = os.getenv("HERMES_SESSION_KEY")
+            sync_entered.set()
+            assert sync_release.wait(timeout=5)
+            return {
+                "messages": [
+                    *kwargs["conversation_history"],
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "done"},
+                ],
+                "final_response": "done",
+                "completed": True,
+            }
+
+    monkeypatch.setattr(routes, "require_ai_agent_class", lambda: FakeAgent)
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    plugins = ModuleType("hermes_cli.plugins")
+    runtime_provider = ModuleType("hermes_cli.runtime_provider")
+
+    def plugin_handler(_arg):
+        observed["plugin_session_key"] = os.getenv("HERMES_SESSION_KEY")
+        plugin_entered.set()
+        return "ok"
+
+    plugins.get_plugin_command_handler = lambda _name: plugin_handler
+    plugins.resolve_plugin_command_result = lambda result: result
+    runtime_provider.resolve_runtime_provider = lambda **_kwargs: {
+        "provider": "test-provider",
+        "api_key": None,
+        "base_url": None,
+    }
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", runtime_provider)
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, **kwargs: resolver(**kwargs),
+    )
+
+    session = Session(
+        session_id="sync-chat-env-scope",
+        workspace=str(tmp_path),
+        messages=[],
+        context_messages=[],
+        model="test-model",
+        model_provider="test-provider",
+    )
+    session.save(touch_updated_at=False)
+
+    class FakeHandler:
+        def __init__(self):
+            self.status = None
+            self.headers = {}
+            self.body = bytearray()
+            self.wfile = self
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, name, value):
+            self.headers[name] = value
+
+        def end_headers(self):
+            pass
+
+        def write(self, data):
+            self.body.extend(data)
+
+    handler = FakeHandler()
+
+    def run_sync_chat():
+        try:
+            routes._handle_chat_sync(
+                handler,
+                {
+                    "session_id": session.session_id,
+                    "message": "hello",
+                    "workspace": str(tmp_path),
+                },
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def run_plugin_command():
+        try:
+            observed["plugin_result"] = commands.execute_plugin_command("/xstatus")
+        except BaseException as exc:
+            errors.append(exc)
+
+    sync_thread = threading.Thread(target=run_sync_chat)
+    plugin_thread = threading.Thread(target=run_plugin_command)
+    try:
+        sync_thread.start()
+        assert sync_entered.wait(timeout=5)
+        plugin_thread.start()
+        overlapped = plugin_entered.wait(timeout=0.2)
+        sync_release.set()
+    finally:
+        sync_release.set()
+        sync_thread.join(timeout=5)
+        plugin_thread.join(timeout=5)
+
+    assert not sync_thread.is_alive()
+    assert not plugin_thread.is_alive()
+    assert not errors
+    assert overlapped is False
+    assert handler.status == 200
+    assert observed == {
+        "sync_session_key": session.session_id,
+        "plugin_session_key": None,
+        "plugin_result": "ok",
+    }
+    assert os.getenv("HERMES_SESSION_KEY") is None
 
 
 def test_named_plugin_command_scrubs_root_only_runtime_key(monkeypatch, tmp_path):

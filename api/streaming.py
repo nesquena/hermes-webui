@@ -9204,7 +9204,7 @@ def _run_agent_streaming(
                 snapshot_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
-                process_env_scope_for_streaming_turn,
+                process_env_scope_for_agent_turn,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
             )
@@ -9222,7 +9222,7 @@ def _run_agent_streaming(
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
             _SKILL_HOME_MODULE_PATCH_LOCK = None
-            process_env_scope_for_streaming_turn = None
+            process_env_scope_for_agent_turn = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -9294,8 +9294,8 @@ def _run_agent_streaming(
         # Dynamic-capable modules continue concurrent execution.
         _streaming_override_installed = bool(_streaming_hermes_home_override_ctx[2])
         _streaming_modules_are_dynamic = False
-        if process_env_scope_for_streaming_turn is not None:
-            _streaming_process_env_scope = process_env_scope_for_streaming_turn(
+        if process_env_scope_for_agent_turn is not None:
+            _streaming_process_env_scope = process_env_scope_for_agent_turn(
                 set(_safe_profile_runtime_env)
                 | {
                     'TERMINAL_CWD',

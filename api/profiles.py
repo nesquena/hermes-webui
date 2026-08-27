@@ -1184,8 +1184,8 @@ def _end_process_env_scope(*, serialized: bool, env_lock) -> None:
 
 
 @contextmanager
-def process_env_scope_for_streaming_turn(keys: set[str], env_lock):
-    """Coordinate a streaming turn with serialized process-env readers."""
+def process_env_scope_for_agent_turn(keys: set[str], env_lock):
+    """Coordinate an agent turn with serialized process-env readers."""
     _begin_process_env_scope(serialized=False)
     try:
         with env_lock:
