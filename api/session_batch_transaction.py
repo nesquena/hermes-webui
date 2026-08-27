@@ -38,6 +38,7 @@ _LEGACY_JOURNAL_VERSION = 1
 _JOURNAL_VERSION = 2
 _STORE_LOCK_NAME = "_session_store_transaction.lock"
 _BATCH_LOCK = threading.RLock()
+_STORE_LOCK_STATE = threading.local()
 
 
 class SessionBatchTransactionError(RuntimeError):
@@ -151,11 +152,27 @@ def session_store_transaction_lock(session_dir: Path):
     """Serialize sidecar/index authority in-process and across processes."""
     import api.models as models
 
-    session_dir = Path(session_dir)
+    session_dir = Path(session_dir).resolve()
     with _BATCH_LOCK:
+        held = getattr(_STORE_LOCK_STATE, "held", None)
+        if held is None:
+            held = {}
+            _STORE_LOCK_STATE.held = held
+        lock_key = str(session_dir / _STORE_LOCK_NAME)
+        if held.get(lock_key, 0):
+            held[lock_key] += 1
+            try:
+                yield
+            finally:
+                held[lock_key] -= 1
+            return
         with _session_store_process_lock(session_dir):
             with models._INDEX_WRITE_LOCK:
-                yield
+                held[lock_key] = 1
+                try:
+                    yield
+                finally:
+                    held.pop(lock_key, None)
 
 
 def _encode(data: bytes) -> str:
