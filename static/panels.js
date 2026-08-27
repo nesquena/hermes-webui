@@ -11736,7 +11736,7 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted);
+    const providers=(data.providers||[]).filter(p=>p.is_keyless||p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider||p.is_self_hosted);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
@@ -12166,6 +12166,7 @@ function _buildProviderCard(p){
   // Use the is_oauth flag from the backend — it reflects _OAUTH_PROVIDERS in providers.py.
   // key_source can be 'oauth' (hermes auth), 'config_yaml' (token in config.yaml), or 'none'.
   const isOauth=p.is_oauth===true;
+  const isKeyless=p.is_keyless===true;
   // models_total reflects the complete catalog (e.g. 396 for a large-tier
   // Nous Portal account). The "models" array may be trimmed to a featured
   // subset for UI scannability — fall back to its length only when the
@@ -12185,7 +12186,9 @@ function _buildProviderCard(p){
     try{ const u=new URL(value); if(u.host) return u.host; }catch(_){}
     return value.replace(/^[a-z][a-z0-9+.-]*:\/\//i,'').replace(/^[^@/]*@/,'').split(/[/?#]/)[0];
   };
-  const sourceLabel=p.is_self_hosted
+  const sourceLabel=isKeyless
+    ? t('providers_status_keyless')
+    : p.is_self_hosted
     ? (isConfigured ? (selfHostedEndpoint(p.base_url)||t('providers_status_configured_label')||'Configured') : t('providers_status_not_configured_label'))
     : p.key_source==='oauth'
       ? t('providers_status_oauth')
@@ -12206,13 +12209,23 @@ function _buildProviderCard(p){
       <div class="provider-card-name">${esc(p.display_name)}</div>
       <div class="provider-card-meta">${esc(metaText)}</div>
     </div>
-    ${isConfigured?`<span class="provider-card-badge">${esc(t(p.is_self_hosted?'providers_status_configured_label':'providers_status_configured'))}</span>`:''}
+    ${(isConfigured||isKeyless)?`<span class="provider-card-badge">${esc(isKeyless?t('providers_status_keyless'):t(p.is_self_hosted?'providers_status_configured_label':'providers_status_configured'))}</span>`:''}
     <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
   `;
   card.appendChild(header);
 
   const body=document.createElement('div');
   body.className='provider-card-body';
+
+  if(isKeyless){
+    const hint=document.createElement('div');
+    hint.className='provider-card-hint';
+    hint.textContent=t('providers_keyless_hint');
+    body.appendChild(hint);
+    card.appendChild(body);
+    header.addEventListener('click',()=>card.classList.toggle('open'));
+    return card;
+  }
 
   if(isOauth){
     const hint=document.createElement('div');
