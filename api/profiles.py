@@ -15,7 +15,8 @@ import re
 import shutil
 import sys
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +50,22 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+_profile_runtime_env_keys: set[str] = set()
+_profile_runtime_env_keys_lock = threading.Lock()
+_process_env_scope_condition = threading.Condition()
+_active_process_env_scopes = 0
+_serialized_process_env_scope = False
+_serialized_process_env_scope_owner: Optional[object] = None
+_serialized_process_env_scope_depth = 0
+_waiting_serialized_process_env_scopes = 0
+_process_env_scope_owner: ContextVar[Optional[object]] = ContextVar(
+    "process_env_scope_owner",
+    default=None,
+)
+_process_env_scope_depths: dict[object, int] = {}
+_process_env_scope_tls = threading.local()
+_process_env_scope_baseline: dict[str, Optional[str]] = {}
+_serialized_process_env_baseline: dict[str, Optional[str]] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -558,6 +575,25 @@ def get_active_hermes_home() -> Path:
 _cron_env_lock = threading.Lock()
 
 
+def _begin_cron_process_env_scope():
+    from api.streaming import _ENV_LOCK
+
+    _begin_process_env_scope(serialized=False)
+    try:
+        _cron_env_lock.acquire()
+    except BaseException:
+        _end_process_env_scope(env_lock=_ENV_LOCK)
+        raise
+    return _ENV_LOCK
+
+
+def _end_cron_process_env_scope(env_lock) -> None:
+    try:
+        _cron_env_lock.release()
+    finally:
+        _end_process_env_scope(env_lock=env_lock)
+
+
 def _cron_profile_context_depth() -> int:
     return int(getattr(_tls, 'cron_profile_depth', 0) or 0)
 
@@ -665,7 +701,7 @@ class cron_profile_context_for_home:
         self._home = Path(home)
 
     def __enter__(self):
-        _cron_env_lock.acquire()
+        self._process_env_lock = _begin_cron_process_env_scope()
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')
@@ -701,9 +737,9 @@ class cron_profile_context_for_home:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context_for_home: cron.scheduler unavailable")
-        except Exception:
+        except BaseException:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
             raise
         return self
 
@@ -727,7 +763,7 @@ class cron_profile_context_for_home:
                     pass
         finally:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
         return False
 
 
@@ -744,7 +780,7 @@ class cron_profile_context:
     """
 
     def __enter__(self):
-        _cron_env_lock.acquire()
+        self._process_env_lock = _begin_cron_process_env_scope()
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')
@@ -779,9 +815,9 @@ class cron_profile_context:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context: cron.scheduler unavailable; env-var only")
-        except Exception:
+        except BaseException:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
             raise
         return self
 
@@ -808,7 +844,7 @@ class cron_profile_context:
                     pass
         finally:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
         return False
 
 
@@ -1038,6 +1074,54 @@ def _agent_registry_credential_env_names() -> set[str]:
     return names
 
 
+def _plugin_required_env_names(*profile_home_paths: Path) -> set[str]:
+    """Return env-var names declared by installed Hermes plugins."""
+    names: set[str] = set()
+
+    def add_requirements(requirements) -> None:
+        if isinstance(requirements, (str, dict)):
+            requirements = (requirements,)
+        for requirement in requirements or ():
+            value = requirement.get("name") if isinstance(requirement, dict) else requirement
+            name = value.strip() if isinstance(value, str) else ""
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                names.add(name)
+
+    plugin_roots = {Path(home) / "plugins" for home in profile_home_paths}
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        manager = get_plugin_manager()
+        plugins = getattr(manager, "_plugins", {}) or {}
+        loaded_plugins = plugins.values() if hasattr(plugins, "values") else ()
+        for loaded in loaded_plugins:
+            manifest = getattr(loaded, "manifest", None)
+            add_requirements(getattr(manifest, "requires_env", ()))
+    except Exception:
+        logger.debug(
+            "Failed to load plugin env names for profile scope",
+            exc_info=True,
+        )
+
+    for plugin_root in plugin_roots:
+        if not plugin_root.is_dir():
+            continue
+        manifest_paths = list(plugin_root.glob("*/plugin.yaml"))
+        manifest_paths.extend(plugin_root.glob("*/*/plugin.yaml"))
+        for manifest_path in manifest_paths:
+            try:
+                payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+                if isinstance(payload, dict):
+                    add_requirements(payload.get("requires_env", ()))
+            except Exception:
+                logger.debug(
+                    "Failed to inspect plugin env names from %s",
+                    manifest_path,
+                    exc_info=True,
+                )
+    return names
+
+
 def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     names: set[str] = set()
     try:
@@ -1087,18 +1171,171 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     return names
 
 
+def _profile_scoped_env_names(
+    profile_home_path: Path,
+    safe_runtime_env: dict[str, str],
+) -> set[str]:
+    """Return every known profile key that this scope must apply or scrub."""
+    root_home = Path(get_hermes_home_for_profile("default"))
+    root_env = filter_runtime_env_for_gateway_parity(
+        get_profile_runtime_env(root_home)
+    )
+    root_secret_names = _profile_secret_env_names(root_home)
+    selected_secret_names = (
+        root_secret_names
+        if Path(profile_home_path) == root_home
+        else _profile_secret_env_names(profile_home_path)
+    )
+    loaded_env_names = set(_loaded_profile_env_keys)
+    plugin_env_names = _plugin_required_env_names(root_home, profile_home_path)
+    with _profile_runtime_env_keys_lock:
+        _profile_runtime_env_keys.update(root_env)
+        _profile_runtime_env_keys.update(root_secret_names)
+        _profile_runtime_env_keys.update(loaded_env_names)
+        _profile_runtime_env_keys.update(plugin_env_names)
+        _profile_runtime_env_keys.update(safe_runtime_env)
+        _profile_runtime_env_keys.update(selected_secret_names)
+        known_runtime_names = set(_profile_runtime_env_keys)
+    return known_runtime_names
+
+
 def _apply_profile_env_to_process(
     process_env,
     safe_runtime_env: dict[str, str],
     *,
-    secret_env_names: set[str],
+    scrub_env_names: set[str],
 ) -> dict[str, Optional[str]]:
-    scoped_keys = set(safe_runtime_env) | set(secret_env_names)
+    scoped_keys = set(safe_runtime_env) | set(scrub_env_names)
     previous_env = {key: process_env.get(key) for key in scoped_keys}
-    for key in secret_env_names:
+    for key in scrub_env_names:
         if key not in safe_runtime_env:
             process_env.pop(key, None)
     return previous_env
+
+
+def _restore_process_env(process_env, previous_env: dict[str, Optional[str]]) -> None:
+    for key, old_value in previous_env.items():
+        if old_value is None:
+            process_env.pop(key, None)
+        else:
+            process_env[key] = old_value
+
+
+def _push_process_env_scope_frame(token, mode: str) -> None:
+    frames = getattr(_process_env_scope_tls, "frames", None)
+    if frames is None:
+        frames = []
+        _process_env_scope_tls.frames = frames
+    frames.append((token, mode))
+
+
+def _pop_process_env_scope_frame():
+    frames = getattr(_process_env_scope_tls, "frames", None)
+    if not frames:
+        return None
+    frame = frames.pop()
+    if not frames:
+        delattr(_process_env_scope_tls, "frames")
+    return frame
+
+
+def _begin_process_env_scope(*, serialized: bool) -> bool:
+    """Enter a process environment scope and report lock ownership."""
+    global _active_process_env_scopes, _serialized_process_env_scope
+    global _serialized_process_env_scope_owner, _serialized_process_env_scope_depth
+    global _waiting_serialized_process_env_scopes
+    with _process_env_scope_condition:
+        owner = _process_env_scope_owner.get()
+        if owner is _serialized_process_env_scope_owner and _serialized_process_env_scope:
+            _serialized_process_env_scope_depth += 1
+            _push_process_env_scope_frame(None, "serialized")
+            return False
+        active_depth = _process_env_scope_depths.get(owner, 0)
+        if active_depth:
+            if serialized:
+                raise RuntimeError("Cannot promote an active process environment scope")
+            _process_env_scope_depths[owner] = active_depth + 1
+            _push_process_env_scope_frame(None, "active")
+            return False
+
+        if serialized:
+            _waiting_serialized_process_env_scopes += 1
+            try:
+                _process_env_scope_condition.wait_for(
+                    lambda: _active_process_env_scopes == 0
+                    and not _serialized_process_env_scope
+                )
+                _serialized_process_env_scope = True
+                owner = object()
+                token = _process_env_scope_owner.set(owner)
+                _serialized_process_env_scope_owner = owner
+                _serialized_process_env_scope_depth = 1
+                _push_process_env_scope_frame(token, "serialized")
+            finally:
+                _waiting_serialized_process_env_scopes -= 1
+                _process_env_scope_condition.notify_all()
+        else:
+            _process_env_scope_condition.wait_for(
+                lambda: not _serialized_process_env_scope
+                and _waiting_serialized_process_env_scopes == 0
+            )
+            owner = object()
+            token = _process_env_scope_owner.set(owner)
+            _push_process_env_scope_frame(token, "active")
+            _active_process_env_scopes += 1
+            _process_env_scope_depths[owner] = 1
+    return serialized
+
+
+def _capture_process_env_baseline(keys: set[str]) -> None:
+    for key in keys | {"HERMES_HOME"}:
+        if key not in _process_env_scope_baseline:
+            _process_env_scope_baseline[key] = os.environ.get(key)
+
+
+def _end_process_env_scope(*, env_lock) -> None:
+    global _active_process_env_scopes, _serialized_process_env_scope
+    global _serialized_process_env_scope_owner, _serialized_process_env_scope_depth
+    frame = _pop_process_env_scope_frame()
+    if frame is None:
+        raise RuntimeError("Process environment scope exit has no matching entry")
+    owner_token, mode = frame
+    with _process_env_scope_condition:
+        owner = _process_env_scope_owner.get()
+        if mode == "serialized":
+            if _serialized_process_env_scope_depth > 1:
+                _serialized_process_env_scope_depth -= 1
+            else:
+                _serialized_process_env_scope = False
+                _serialized_process_env_scope_owner = None
+                _serialized_process_env_scope_depth = 0
+                _serialized_process_env_baseline.clear()
+        else:
+            depth = _process_env_scope_depths.get(owner, 0)
+            if depth > 1:
+                _process_env_scope_depths[owner] = depth - 1
+            else:
+                _process_env_scope_depths.pop(owner, None)
+                if _active_process_env_scopes == 1:
+                    with env_lock:
+                        _restore_process_env(os.environ, _process_env_scope_baseline)
+                        _process_env_scope_baseline.clear()
+                _active_process_env_scopes -= 1
+        _process_env_scope_condition.notify_all()
+    if owner_token is not None:
+        _process_env_scope_owner.reset(owner_token)
+
+
+@contextmanager
+def process_env_scope_for_agent_turn(keys: set[str], env_lock):
+    """Coordinate an agent turn with serialized process-env readers."""
+    _begin_process_env_scope(serialized=False)
+    try:
+        with env_lock:
+            _capture_process_env_baseline(keys)
+        yield
+    finally:
+        _end_process_env_scope(env_lock=env_lock)
 
 
 _secret_scope_available = None
@@ -1169,6 +1406,7 @@ def profile_env_for_background_worker(
     logger_override: Optional[logging.Logger] = None,
     *,
     scope_skill_modules: bool = True,
+    serialize_process_env: bool = False,
 ):
     """Temporarily route detached worker config reads through a profile.
 
@@ -1177,12 +1415,64 @@ def profile_env_for_background_worker(
     runtime provider settings, or skill paths must temporarily apply the
     session/request profile env or they can fall back to the server-default
     profile. Pass either a session-like object with `.profile` or a profile name.
+    Set ``serialize_process_env`` for short operations that read ``os.environ``
+    throughout their lifetime and cannot use the request-local environment.
     """
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or profile == "default":
-        yield
+        if serialize_process_env:
+            from api.streaming import _ENV_LOCK
+
+            root_home = Path(get_hermes_home_for_profile("default"))
+            root_env = filter_runtime_env_for_gateway_parity(
+                get_profile_runtime_env(root_home)
+            )
+            owns_env_lock = _begin_process_env_scope(serialized=True)
+            try:
+                with _ENV_LOCK if owns_env_lock else nullcontext():
+                    scoped_names = _profile_scoped_env_names(root_home, root_env)
+                    ambient_root_env = (
+                        os.environ
+                        if owns_env_lock
+                        else _serialized_process_env_baseline
+                    )
+                    effective_root_env = {
+                        name: value
+                        for name in scoped_names
+                        if (value := ambient_root_env.get(name)) is not None
+                    }
+                    effective_root_env.update(root_env)
+                    previous_env = _apply_profile_env_to_process(
+                        os.environ,
+                        effective_root_env,
+                        scrub_env_names=scoped_names,
+                    )
+                    if owns_env_lock:
+                        _serialized_process_env_baseline.update(previous_env)
+                    previous_home = os.environ.get("HERMES_HOME")
+                    had_home = "HERMES_HOME" in os.environ
+                    os.environ.update(effective_root_env)
+                    os.environ["HERMES_HOME"] = str(root_home)
+                    try:
+                        yield
+                    finally:
+                        _restore_process_env(os.environ, previous_env)
+                        if had_home:
+                            os.environ["HERMES_HOME"] = previous_home or ""
+                        else:
+                            os.environ.pop("HERMES_HOME", None)
+            finally:
+                _end_process_env_scope(env_lock=_ENV_LOCK)
+        else:
+            from api.streaming import _ENV_LOCK
+
+            _begin_process_env_scope(serialized=False)
+            try:
+                yield
+            finally:
+                _end_process_env_scope(env_lock=_ENV_LOCK)
         return
 
     try:
@@ -1193,7 +1483,10 @@ def profile_env_for_background_worker(
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
-        secret_env_names = _profile_secret_env_names(profile_home_path)
+        scoped_env_names = _profile_scoped_env_names(
+            profile_home_path,
+            safe_runtime_env,
+        )
     except Exception:
         log.debug(
             "Failed to resolve profile env for %s profile %s; falling back to current env",
@@ -1230,7 +1523,12 @@ def profile_env_for_background_worker(
     has_profile_skill_home = False
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
+    _env_lock_held = False
+    _env_lock_owned = False
+    _process_env_scope_entered = False
     try:
+        owns_env_lock = _begin_process_env_scope(serialized=serialize_process_env)
+        _process_env_scope_entered = True
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
         _secret_scope_mod = _resolve_secret_scope_module()
@@ -1284,7 +1582,16 @@ def profile_env_for_background_worker(
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_skill_home_patch_lock = True
 
-        with _ENV_LOCK:
+        if serialize_process_env:
+            if owns_env_lock:
+                _ENV_LOCK.acquire()
+                _env_lock_owned = True
+            _env_lock_held = True
+        with nullcontext() if _env_lock_held else _ENV_LOCK:
+            if not serialize_process_env:
+                _capture_process_env_baseline(
+                    set(safe_runtime_env) | set(scoped_env_names)
+                )
             if scope_skill_modules and should_restore_skill_modules:
                 # Snapshot and patch before mutating process env so setup
                 # failures can unwind without leaking either state.
@@ -1294,8 +1601,10 @@ def profile_env_for_background_worker(
             old_runtime_env = _apply_profile_env_to_process(
                 os.environ,
                 safe_runtime_env,
-                secret_env_names=secret_env_names,
+                scrub_env_names=scoped_env_names,
             )
+            if serialize_process_env and owns_env_lock:
+                _serialized_process_env_baseline.update(old_runtime_env)
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
             os.environ.update(safe_runtime_env)
@@ -1303,12 +1612,8 @@ def profile_env_for_background_worker(
         yield
     finally:
         try:
-            with _ENV_LOCK:
-                for key, old_value in old_runtime_env.items():
-                    if old_value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = old_value
+            with nullcontext() if _env_lock_held else _ENV_LOCK:
+                _restore_process_env(os.environ, old_runtime_env)
                 if had_hermes_home:
                     os.environ["HERMES_HOME"] = old_hermes_home or ""
                 else:
@@ -1316,6 +1621,9 @@ def profile_env_for_background_worker(
                 if should_restore_skill_modules and skill_home_snapshot is not None:
                     restore_skill_home_modules(skill_home_snapshot)
         finally:
+            if _env_lock_owned:
+                _ENV_LOCK.release()
+                _env_lock_owned = False
             if _acquired_skill_home_patch_lock:
                 _SKILL_HOME_MODULE_PATCH_LOCK.release()
                 _acquired_skill_home_patch_lock = False
@@ -1330,11 +1638,15 @@ def profile_env_for_background_worker(
                     _secret_scope_mod.reset_secret_scope(_scope_token)
                 except Exception:
                     pass
-            _thread_ctx.block_process_env_fallback = previous_block_process_env
-            if previous_thread_env:
-                _set_thread_env(**previous_thread_env)
-            else:
-                _clear_thread_env()
+            try:
+                _thread_ctx.block_process_env_fallback = previous_block_process_env
+                if previous_thread_env:
+                    _set_thread_env(**previous_thread_env)
+                else:
+                    _clear_thread_env()
+            finally:
+                if _process_env_scope_entered:
+                    _end_process_env_scope(env_lock=_ENV_LOCK)
 
 
 @contextmanager
@@ -1449,19 +1761,26 @@ def profile_env_for_active_request_readonly(
 def profile_env_for_active_request(
     purpose: str = "active request",
     logger_override: Optional[logging.Logger] = None,
+    *,
+    serialize_process_env: bool = False,
 ):
     """Apply the active per-request profile through the legacy mirrored path.
 
     Some request-scoped readers still delegate into Hermes helpers that resolve
     credentials directly from process env or ``get_hermes_home()``. Those paths
     stay on the mirrored scope until they are fully audited.
+
+    ``serialize_process_env`` holds the shared environment lock for the wrapped
+    operation. Use it only for short legacy readers and handlers.
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
-        return
+        profile = "default"
     with profile_env_for_background_worker(
-        profile, purpose, logger_override=logger_override
+        profile,
+        purpose,
+        logger_override=logger_override,
+        serialize_process_env=serialize_process_env,
     ):
         yield
 
