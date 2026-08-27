@@ -1373,3 +1373,65 @@ def test_serialized_profile_env_scope_is_reentrant(
     assert not thread.is_alive()
     assert observed == ["alpha-key", nested_key, "alpha-key"]
     assert os.getenv("XQUIK_API_KEY") == "process-root-key"
+
+
+@pytest.mark.parametrize("first_profile", ("default", "alpha"))
+def test_default_background_worker_blocks_named_serialized_scope(
+    monkeypatch,
+    tmp_path,
+    first_profile,
+):
+    """Default reads and named serialized handlers must not overlap."""
+    import os
+
+    import api.profiles as profiles
+
+    base = tmp_path / ".hermes"
+    profile_home = base / "profiles" / "alpha"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("XQUIK_API_KEY=alpha-key\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setenv("XQUIK_API_KEY", "default-key")
+
+    entered = {profile: threading.Event() for profile in ("default", "alpha")}
+    release = {profile: threading.Event() for profile in ("default", "alpha")}
+    observed = {}
+    errors = []
+
+    def worker(profile):
+        try:
+            with profiles.profile_env_for_background_worker(
+                profile,
+                f"{profile} worker",
+                scope_skill_modules=False,
+                serialize_process_env=profile == "alpha",
+            ):
+                observed[profile] = os.getenv("XQUIK_API_KEY")
+                entered[profile].set()
+                assert release[profile].wait(timeout=5)
+        except BaseException as exc:
+            errors.append(exc)
+
+    second_profile = "alpha" if first_profile == "default" else "default"
+    first_thread = threading.Thread(target=worker, args=(first_profile,))
+    second_thread = threading.Thread(target=worker, args=(second_profile,))
+    try:
+        first_thread.start()
+        assert entered[first_profile].wait(timeout=5)
+        second_thread.start()
+        overlapped = entered[second_profile].wait(timeout=1)
+        release[first_profile].set()
+        assert entered[second_profile].wait(timeout=5)
+        release[second_profile].set()
+    finally:
+        release["default"].set()
+        release["alpha"].set()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not errors
+    assert overlapped is False
+    assert observed == {"default": "default-key", "alpha": "alpha-key"}
+    assert os.getenv("XQUIK_API_KEY") == "default-key"

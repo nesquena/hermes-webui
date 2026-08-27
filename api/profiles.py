@@ -1466,7 +1466,13 @@ def profile_env_for_background_worker(
             finally:
                 _end_process_env_scope(env_lock=_ENV_LOCK)
         else:
-            yield
+            from api.streaming import _ENV_LOCK
+
+            _begin_process_env_scope(serialized=False)
+            try:
+                yield
+            finally:
+                _end_process_env_scope(env_lock=_ENV_LOCK)
         return
 
     try:
