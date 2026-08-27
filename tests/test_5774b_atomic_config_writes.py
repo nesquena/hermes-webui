@@ -173,6 +173,34 @@ def test_mode_restore_does_not_revert_a_concurrent_permission_change(
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o2666
 
 
+def test_mode_restore_runs_before_fsync_not_after(tmp_path: Path, monkeypatch) -> None:
+    """The restore must not straddle the fsync.
+
+    ``flush()`` issues the ``write(2)`` that clears the special bits, so the
+    restore belongs immediately after it. Running it after ``fsync`` instead
+    leaves the durability wait — by far the slowest step here — inside the
+    window where a concurrent ``chmod`` gets clobbered. A permission change
+    landing during the fsync must therefore survive untouched.
+    """
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.link(target, tmp_path / "config.hardlink")
+    os.chmod(target, 0o2664)
+
+    real_fsync = os.fsync
+
+    def revoke_during_fsync(fd: int) -> None:
+        os.chmod(target, 0o0664)  # admin: chmod g-s, after our restore ran
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", revoke_during_fsync)
+    _atomic_write_text(target, "model:\n  default: new\n")
+
+    assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
+    # Restoring before the fsync means the revocation lands after us and stands.
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o0664
+
+
 @pytest.mark.skipif(
     not all(hasattr(os, name) for name in ("getxattr", "listxattr", "setxattr")),
     reason="extended attributes are unavailable on this platform",
