@@ -43,6 +43,9 @@ jobs:
           - name: terminal-error
             script: tests/browser_conversation_lifecycle.py
             scenario: terminal-error
+          - name: immediate-cancel
+            script: tests/browser_conversation_lifecycle.py
+            scenario: immediate-cancel
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
     steps:

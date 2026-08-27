@@ -96,11 +96,16 @@ that breaks the page for everyone).
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
 multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,
 while a localhost-only fixture supplies reasoning, tool, process, and final/error
-events through the existing Hermes Gateway Runs API. The gate now covers both
-normal and terminal-error proof-matrix rows, asserting semantic activity during
-live streaming, after settlement, and after hard reload, including
-transcript-backed `activity_scene_v1` persistence and zero unexpected browser
-errors. It uses isolated temporary state and no provider credentials.
+events through the existing Hermes Gateway Runs API. The gate covers normal,
+terminal-error, and immediate-cancel proof-matrix rows. The first two assert
+semantic activity during live streaming, after settlement, and after hard reload,
+including transcript-backed `activity_scene_v1` persistence. The cancellation row
+holds a stopped Gateway worker open while `ACTIVE_RUNS` remains lifecycle-busy and
+`STREAMS` is empty, then proves browser recovery never reattaches that terminal
+run: the composer stays out of Stop, session/chat EventSource counts remain
+bounded, hidden-tab status reports no active stream, and the transcript does not
+rebuild repeatedly. Every row requires zero unexpected browser errors and uses
+isolated temporary state with no provider credentials.
 
 ```bash
 pip install -r requirements.txt playwright
@@ -109,8 +114,11 @@ python -m playwright install --with-deps chromium
 # Normal-path deterministic conversation lifecycle gate.
 python tests/browser_conversation_lifecycle.py
 
-# Terminal-error lifecycle gate (new row in the proof matrix).
+# Terminal-error lifecycle gate.
 LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
+
+# Immediate Stop / cancelling-worker recovery gate.
+LIFECYCLE_SCENARIO=immediate-cancel python tests/browser_conversation_lifecycle.py
 
 # Historical ID-linked transcript hydration row.
 python tests/browser_historical_transcript_hydration.py
@@ -137,11 +145,11 @@ HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
 ```
 
 The dedicated `Conversation lifecycle (informational)` workflow runs the current
-proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`) and
-stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add session switching, reconnect/replay,
-cancellation, compression, and recovery.
+proof rows (`normal`, `terminal-error`, `immediate-cancel`, and
+`historical-transcript-hydration`) and stays non-blocking while the public matrix
+expands to additional behavior rows. The maintainer's private QA harness remains
+broader; later public slices will add session switching, compression, and further
+recovery cases.
 
 ### Streaming reader intent
 

@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 PROMPT = "Exercise the public conversation lifecycle gate."
@@ -40,6 +40,83 @@ TEST_BITE = os.environ.get("LIFECYCLE_TEST_BITE", "").strip()
 GATEWAY_ACTIVITY_TIMEOUT = 60.0
 ANCHOR_SCENE_PERSIST_TIMEOUT = 60.0
 ANCHOR_SCENE_PROJECTION_TIMEOUT = 10_000
+IMMEDIATE_CANCEL_STABILITY_MS = 6_500
+IMMEDIATE_CANCEL_PROBE_JS = r"""
+(() => {
+  const NativeEventSource = window.EventSource;
+  const metrics = window.__cancelLoopMetrics = {
+    eventSources: [],
+    sessionSources: 0,
+    chatSources: 0,
+    allStarts: 0,
+    recoveredStarts: 0,
+    buttonActions: [],
+    stableTranscriptAdds: 0,
+    stableTranscriptRemovals: 0,
+  };
+  function WrappedEventSource(url, options) {
+    const href = String(url || '');
+    const source = new NativeEventSource(url, options);
+    metrics.eventSources.push(href);
+    if (href.includes('/api/session/stream?')) {
+      metrics.sessionSources += 1;
+      source.addEventListener('server_turn_started', event => {
+        metrics.allStarts += 1;
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          if (payload.recovered) metrics.recoveredStarts += 1;
+        } catch (_) {}
+      });
+    }
+    if (href.includes('/api/chat/stream?')) metrics.chatSources += 1;
+    return source;
+  }
+  WrappedEventSource.prototype = NativeEventSource.prototype;
+  Object.setPrototypeOf(WrappedEventSource, NativeEventSource);
+  for (const key of ['CONNECTING', 'OPEN', 'CLOSED']) {
+    try { WrappedEventSource[key] = NativeEventSource[key]; } catch (_) {}
+  }
+  window.EventSource = WrappedEventSource;
+
+  const installButtonObserver = () => {
+    const button = document.querySelector('#btnSend');
+    if (!button) return;
+    let previous = null;
+    const sample = () => {
+      const action = button.dataset.action || '';
+      if (action === previous) return;
+      previous = action;
+      metrics.buttonActions.push(action);
+    };
+    new MutationObserver(sample).observe(button, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    sample();
+  };
+  metrics.beginStableWindow = () => {
+    const transcript = document.querySelector('#msgInner');
+    if (!transcript) return false;
+    metrics.stableTranscriptAdds = 0;
+    metrics.stableTranscriptRemovals = 0;
+    if (metrics.stableObserver) metrics.stableObserver.disconnect();
+    metrics.stableObserver = new MutationObserver(records => {
+      for (const record of records) {
+        metrics.stableTranscriptAdds += record.addedNodes.length;
+        metrics.stableTranscriptRemovals += record.removedNodes.length;
+      }
+    });
+    metrics.stableObserver.observe(transcript, {childList: true});
+    return true;
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', installButtonObserver, {once: true});
+  } else {
+    installButtonObserver();
+  }
+})();
+"""
 
 
 def _latest_anchor_scene_from_disk(state_root: Path, session_id: str) -> dict | None:
@@ -272,7 +349,7 @@ def _start_webui_server(repo_root: Path, env: dict, artifact_dir: Path):
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        if _wait_for_health(base_url, proc=proc):
+        if _wait_for_health(base_url, timeout=60.0, proc=proc):
             return proc, log, log_path, base_url
         _terminate_process(proc)
         log.close()
@@ -290,6 +367,8 @@ class DeterministicGateway:
     def __init__(self, scenario: str) -> None:
         self.scenario = scenario
         self.activity_ready = threading.Event()
+        self.events_connected = threading.Event()
+        self.stop_received = threading.Event()
         self.release_settle = threading.Event()
         self.final_prefix_ready = threading.Event()
         self.release_terminal = threading.Event()
@@ -348,6 +427,22 @@ class DeterministicGateway:
                 self.send_header("Connection", "close")
                 self.end_headers()
                 try:
+                    if owner.scenario == "immediate-cancel":
+                        # Leave the Gateway reader blocked even after /stop is
+                        # acknowledged. cancel_stream() still emits its local
+                        # terminal event and removes STREAMS immediately, while
+                        # ACTIVE_RUNS deliberately remains phase=cancelling until
+                        # this fixture releases the worker. That is the precise
+                        # recovery window which used to replay the cancelled run
+                        # forever through /api/session/stream.
+                        self.wfile.write(b": gateway-connected\n\n")
+                        self.wfile.flush()
+                        owner.events_connected.set()
+                        if not owner.release_terminal.wait(timeout=30):
+                            return
+                        self.wfile.write(b": release-cancelled-worker\n\n")
+                        self.wfile.flush()
+                        return
                     self._event("reasoning.available", {
                         "event": "reasoning.available",
                         "text": REASONING_TEXT,
@@ -404,12 +499,21 @@ class DeterministicGateway:
                     return
 
             def do_POST(self):
-                if urlsplit(self.path).path != "/v1/runs":
-                    self._json({"error": "not found"}, status=404)
-                    return
+                request_path = urlsplit(self.path).path
                 length = int(self.headers.get("Content-Length", "0"))
-                owner.request_body = json.loads(self.rfile.read(length) or b"{}")
-                self._json({"run_id": "lifecycle-run-1"})
+                raw_body = self.rfile.read(length) if length else b""
+                if request_path == "/v1/runs":
+                    owner.request_body = json.loads(raw_body or b"{}")
+                    self._json({"run_id": "lifecycle-run-1"})
+                    return
+                if (
+                    owner.scenario == "immediate-cancel"
+                    and request_path == "/v1/runs/lifecycle-run-1/stop"
+                ):
+                    owner.stop_received.set()
+                    self._json({"ok": True, "stopped": True})
+                    return
+                self._json({"error": "not found"}, status=404)
 
         return Handler
 
@@ -704,6 +808,172 @@ def _semantic_activity(snapshot: dict) -> list[dict]:
     return sorted(semantic, key=lambda item: json.dumps(item, sort_keys=True))
 
 
+def _run_immediate_cancel_gate(page, gateway, base_url: str, errors: list) -> None:
+    """Hold a cancelling worker open and prove browser recovery stays idle."""
+    page.wait_for_selector('#btnSend[data-action="stop"]', timeout=10_000)
+    if not gateway.events_connected.wait(timeout=20):
+        raise AssertionError(
+            "Gateway event stream never connected for immediate-cancel; "
+            f"request body: {gateway.request_body!r}"
+        )
+    before_stop_metrics = page.evaluate(
+        """() => ({
+          sessionSources: window.__cancelLoopMetrics.sessionSources,
+          chatSources: window.__cancelLoopMetrics.chatSources,
+          allStarts: window.__cancelLoopMetrics.allStarts,
+          recoveredStarts: window.__cancelLoopMetrics.recoveredStarts,
+        })"""
+    )
+    page.locator('#btnSend[data-action="stop"]').click()
+    if not gateway.stop_received.wait(timeout=10):
+        raise AssertionError("composer Stop did not reach the deterministic Gateway")
+
+    page.wait_for_function(
+        """() => typeof S !== 'undefined' &&
+          S.busy === false &&
+          !S.activeStreamId &&
+          !document.querySelector('#liveAssistantTurn') &&
+          document.querySelector('#btnSend')?.dataset.action !== 'stop'""",
+        timeout=10_000,
+    )
+    session_id = str(page.evaluate("() => S.session && S.session.session_id") or "")
+    if not session_id:
+        raise AssertionError("immediate-cancel browser gate has no mounted session id")
+
+    overlap = None
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        with urllib.request.urlopen(base_url + "/health?deep=1", timeout=3) as response:
+            health = json.load(response)
+        if (
+            int(health.get("active_runs") or 0) == 1
+            and int(health.get("active_streams") or 0) == 0
+        ):
+            overlap = health
+            break
+        time.sleep(0.05)
+    if overlap is None:
+        raise AssertionError(
+            "never observed the target race window: ACTIVE_RUNS=1 and STREAMS=0"
+        )
+
+    status_url = (
+        base_url
+        + "/api/session/status?session_id="
+        + quote(session_id, safe="")
+    )
+    with urllib.request.urlopen(status_url, timeout=3) as response:
+        status_payload = json.load(response)
+    if status_payload.get("active_stream_id"):
+        raise AssertionError(
+            "hidden-tab status exposed a cancelling run: "
+            f"{status_payload.get('active_stream_id')!r}"
+        )
+
+    page.wait_for_timeout(250)
+    if not page.evaluate("() => window.__cancelLoopMetrics.beginStableWindow()"):
+        raise AssertionError("could not install post-cancel transcript stability observer")
+    page.wait_for_timeout(IMMEDIATE_CANCEL_STABILITY_MS)
+
+    metrics = page.evaluate("() => ({...window.__cancelLoopMetrics})")
+    actions = list(metrics.get("buttonActions") or [])
+    try:
+        first_stop = actions.index("stop")
+    except ValueError as exc:
+        raise AssertionError(f"composer never entered Stop state: {actions!r}") from exc
+    left_stop = next(
+        (idx for idx in range(first_stop + 1, len(actions)) if actions[idx] != "stop"),
+        None,
+    )
+    if left_stop is None:
+        raise AssertionError(f"composer never settled out of Stop state: {actions!r}")
+    if "stop" in actions[left_stop + 1:]:
+        raise AssertionError(f"composer re-entered Stop after cancellation: {actions!r}")
+    post_stop_all_starts = int(metrics.get("allStarts") or 0) - int(
+        before_stop_metrics.get("allStarts") or 0
+    )
+    post_stop_recovered_starts = int(metrics.get("recoveredStarts") or 0) - int(
+        before_stop_metrics.get("recoveredStarts") or 0
+    )
+    post_stop_chat_sources = int(metrics.get("chatSources") or 0) - int(
+        before_stop_metrics.get("chatSources") or 0
+    )
+    post_stop_session_sources = int(metrics.get("sessionSources") or 0) - int(
+        before_stop_metrics.get("sessionSources") or 0
+    )
+    if post_stop_all_starts != 0 or post_stop_recovered_starts != 0:
+        raise AssertionError(
+            "session recovery replayed a cancelling run after Stop: "
+            f"all={post_stop_all_starts} recovered={post_stop_recovered_starts}"
+        )
+    if post_stop_chat_sources != 0:
+        raise AssertionError(
+            "cancelled stream reattached after Stop: "
+            f"new chat EventSources={post_stop_chat_sources}"
+        )
+    if post_stop_session_sources > 1:
+        raise AssertionError(
+            "session SSE repeatedly reopened after Stop: "
+            f"new session EventSources={post_stop_session_sources}"
+        )
+    if int(metrics.get("stableTranscriptAdds") or 0) > 2:
+        raise AssertionError(
+            "transcript kept adding top-level nodes after cancellation: "
+            f"{metrics.get('stableTranscriptAdds')}"
+        )
+    if int(metrics.get("stableTranscriptRemovals") or 0) > 2:
+        raise AssertionError(
+            "transcript kept removing top-level nodes after cancellation: "
+            f"{metrics.get('stableTranscriptRemovals')}"
+        )
+    if errors:
+        raise AssertionError(f"browser errors during immediate-cancel gate: {errors!r}")
+
+    final_state = page.evaluate(
+        """() => ({
+          busy: S.busy,
+          activeStreamId: S.activeStreamId,
+          action: document.querySelector('#btnSend')?.dataset.action,
+          stopClass: document.querySelector('#btnSend')?.classList.contains('stop'),
+          liveTurn: !!document.querySelector('#liveAssistantTurn'),
+        })"""
+    )
+    if final_state != {
+        "busy": False,
+        "activeStreamId": None,
+        "action": "disabled",
+        "stopClass": False,
+        "liveTurn": False,
+    }:
+        raise AssertionError(f"unexpected settled composer state: {final_state!r}")
+
+    page.locator("#msg").fill("stability probe")
+    page.wait_for_selector('#btnSend[data-action="send"]:not([disabled])', timeout=5_000)
+    send_state = page.evaluate(
+        """() => ({
+          action: document.querySelector('#btnSend')?.dataset.action,
+          disabled: document.querySelector('#btnSend')?.disabled,
+          stopClass: document.querySelector('#btnSend')?.classList.contains('stop'),
+          label: document.querySelector('#btnSend')?.getAttribute('aria-label'),
+        })"""
+    )
+    if send_state != {
+        "action": "send",
+        "disabled": False,
+        "stopClass": False,
+        "label": "Send message",
+    }:
+        raise AssertionError(f"composer did not recover its Send action: {send_state!r}")
+
+    print(
+        "OK  immediate cancel: lifecycle-busy worker stayed non-attachable "
+        f"for {IMMEDIATE_CANCEL_STABILITY_MS / 1000:.1f}s "
+        f"(newSessionSources={post_stop_session_sources}, "
+        f"newChatSources={post_stop_chat_sources}, "
+        f"recoveredStarts={post_stop_recovered_starts})"
+    )
+
+
 def main() -> int:
     try:
         from playwright.sync_api import sync_playwright
@@ -721,10 +991,10 @@ def main() -> int:
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     scenario = SCENARIO
-    if scenario not in {"normal", "terminal-error"}:
+    if scenario not in {"normal", "terminal-error", "immediate-cancel"}:
         raise ValueError(
             f"Unsupported LIFECYCLE_SCENARIO {scenario!r}; "
-            "expected 'normal' or 'terminal-error'"
+            "expected 'normal', 'terminal-error', or 'immediate-cancel'"
         )
     if TEST_BITE not in {
         "",
@@ -796,7 +1066,12 @@ def main() -> int:
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
-        context = browser.new_context(base_url=base_url)
+        context = browser.new_context(
+            base_url=base_url,
+            bypass_csp=scenario == "immediate-cancel",
+        )
+        if scenario == "immediate-cancel":
+            context.add_init_script(IMMEDIATE_CANCEL_PROBE_JS)
         page = context.new_page()
         anchor_scene_requests = _capture_anchor_scene_requests(page)
         if TEST_BITE:
@@ -841,6 +1116,11 @@ def main() -> int:
         page.wait_for_selector("#msg", state="visible", timeout=15000)
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
+
+        if scenario == "immediate-cancel":
+            _run_immediate_cancel_gate(page, gateway, base_url, errors)
+            exit_code = 0
+            return 0
 
         if not gateway.activity_ready.wait(timeout=GATEWAY_ACTIVITY_TIMEOUT):
             raise AssertionError(
