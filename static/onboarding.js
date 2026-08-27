@@ -193,6 +193,7 @@ function _renderOnboardingApiKeyField(){
   // wizard required a non-empty string here even for keyless installs, which
   // forced users to type random gibberish to clear onboarding.
   const provider=_getOnboardingSetupProvider(ONBOARDING.form.provider);
+  if(provider&&provider.is_keyless)return '';
   const keyOptional=!!(provider&&provider.key_optional);
   const labelKey=keyOptional?'onboarding_api_key_label_optional':'onboarding_api_key_label';
   const placeholderKey=keyOptional?'onboarding_api_key_placeholder_optional':'onboarding_api_key_placeholder';
@@ -288,7 +289,7 @@ function _renderOnboardingBody(){
     const groupedOptions=_renderProviderSelectOptions(selectedId);
     const provider=_getOnboardingSetupProvider(selectedId)||_getOnboardingSetupProviders()[0]||null;
     const showBaseUrl=provider&&provider.requires_base_url;
-    const keyHelp=provider
+    const keyHelp=provider&&!provider.is_keyless
       ? (provider.id==='anthropic'
         ? 'Anthropic API key path: paste an Anthropic Console API key here. This is separate from a Claude Code subscription; use the Claude Code OAuth card if you want subscription credentials instead.'
         : `${t('onboarding_api_key_help_prefix')} ${esc(provider.env_var)}.`)
@@ -320,7 +321,7 @@ function _renderOnboardingBody(){
           </label>
           ${_renderOnboardingApiKeyField()}
           ${_renderOnboardingBaseUrlField(showBaseUrl)}
-          <p class="onboarding-copy">${keyHelp}</p>`;
+          ${keyHelp?`<p class="onboarding-copy">${keyHelp}</p>`:''}`;
       } else {
         _setOnboardingNotice(t('onboarding_notice_setup_required'),'warn');
         body.innerHTML=`
@@ -339,7 +340,7 @@ function _renderOnboardingBody(){
           </label>
           ${_renderOnboardingApiKeyField()}
           ${_renderOnboardingBaseUrlField(showBaseUrl)}
-          <p class="onboarding-copy">${keyHelp}</p>`;
+          ${keyHelp?`<p class="onboarding-copy">${keyHelp}</p>`:''}`;
       }
       return;
     }
@@ -353,7 +354,7 @@ function _renderOnboardingBody(){
       ${_renderOnboardingApiKeyField()}
       ${_renderOnboardingProviderOAuthField(provider)}
       ${_renderOnboardingBaseUrlField(showBaseUrl)}
-      <p class="onboarding-copy">${keyHelp}</p>
+      ${keyHelp?`<p class="onboarding-copy">${keyHelp}</p>`:''}
       ${showBaseUrl?`<p class="onboarding-copy">${t('onboarding_base_url_help')}</p>`:''}
       <p class="onboarding-copy">${esc(setup.unsupported_note||'')||''}</p>`;
     return;
