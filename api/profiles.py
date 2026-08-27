@@ -65,6 +65,7 @@ _process_env_scope_owner: ContextVar[Optional[object]] = ContextVar(
 _process_env_scope_depths: dict[object, int] = {}
 _process_env_scope_tls = threading.local()
 _process_env_scope_baseline: dict[str, Optional[str]] = {}
+_serialized_process_env_baseline: dict[str, Optional[str]] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -1238,7 +1239,8 @@ def _pop_process_env_scope_frame():
     return frame
 
 
-def _begin_process_env_scope(*, serialized: bool) -> None:
+def _begin_process_env_scope(*, serialized: bool) -> bool:
+    """Enter a process environment scope and report lock ownership."""
     global _active_process_env_scopes, _serialized_process_env_scope
     global _serialized_process_env_scope_owner, _serialized_process_env_scope_depth
     global _waiting_serialized_process_env_scopes
@@ -1247,14 +1249,14 @@ def _begin_process_env_scope(*, serialized: bool) -> None:
         if owner is _serialized_process_env_scope_owner and _serialized_process_env_scope:
             _serialized_process_env_scope_depth += 1
             _push_process_env_scope_frame(None, "serialized")
-            return
+            return False
         active_depth = _process_env_scope_depths.get(owner, 0)
         if active_depth:
             if serialized:
                 raise RuntimeError("Cannot promote an active process environment scope")
             _process_env_scope_depths[owner] = active_depth + 1
             _push_process_env_scope_frame(None, "active")
-            return
+            return False
 
         if serialized:
             _waiting_serialized_process_env_scopes += 1
@@ -1282,6 +1284,7 @@ def _begin_process_env_scope(*, serialized: bool) -> None:
             _push_process_env_scope_frame(token, "active")
             _active_process_env_scopes += 1
             _process_env_scope_depths[owner] = 1
+    return serialized
 
 
 def _capture_process_env_baseline(keys: set[str]) -> None:
@@ -1306,6 +1309,7 @@ def _end_process_env_scope(*, env_lock) -> None:
                 _serialized_process_env_scope = False
                 _serialized_process_env_scope_owner = None
                 _serialized_process_env_scope_depth = 0
+                _serialized_process_env_baseline.clear()
         else:
             depth = _process_env_scope_depths.get(owner, 0)
             if depth > 1:
@@ -1425,18 +1429,31 @@ def profile_env_for_background_worker(
             root_env = filter_runtime_env_for_gateway_parity(
                 get_profile_runtime_env(root_home)
             )
-            _begin_process_env_scope(serialized=True)
+            owns_env_lock = _begin_process_env_scope(serialized=True)
             try:
-                with _ENV_LOCK:
+                with _ENV_LOCK if owns_env_lock else nullcontext():
                     scoped_names = _profile_scoped_env_names(root_home, root_env)
+                    ambient_root_env = (
+                        os.environ
+                        if owns_env_lock
+                        else _serialized_process_env_baseline
+                    )
+                    effective_root_env = {
+                        name: value
+                        for name in scoped_names
+                        if (value := ambient_root_env.get(name)) is not None
+                    }
+                    effective_root_env.update(root_env)
                     previous_env = _apply_profile_env_to_process(
                         os.environ,
-                        root_env,
+                        effective_root_env,
                         scrub_env_names=scoped_names,
                     )
+                    if owns_env_lock:
+                        _serialized_process_env_baseline.update(previous_env)
                     previous_home = os.environ.get("HERMES_HOME")
                     had_home = "HERMES_HOME" in os.environ
-                    os.environ.update(root_env)
+                    os.environ.update(effective_root_env)
                     os.environ["HERMES_HOME"] = str(root_home)
                     try:
                         yield
@@ -1501,9 +1518,10 @@ def profile_env_for_background_worker(
     should_restore_skill_modules = False
     _acquired_skill_home_patch_lock = False
     _env_lock_held = False
+    _env_lock_owned = False
     _process_env_scope_entered = False
     try:
-        _begin_process_env_scope(serialized=serialize_process_env)
+        owns_env_lock = _begin_process_env_scope(serialized=serialize_process_env)
         _process_env_scope_entered = True
         _set_thread_env(**thread_env)
         _thread_ctx.block_process_env_fallback = True
@@ -1559,7 +1577,9 @@ def profile_env_for_background_worker(
                 _acquired_skill_home_patch_lock = True
 
         if serialize_process_env:
-            _ENV_LOCK.acquire()
+            if owns_env_lock:
+                _ENV_LOCK.acquire()
+                _env_lock_owned = True
             _env_lock_held = True
         with nullcontext() if _env_lock_held else _ENV_LOCK:
             if not serialize_process_env:
@@ -1577,6 +1597,8 @@ def profile_env_for_background_worker(
                 safe_runtime_env,
                 scrub_env_names=scoped_env_names,
             )
+            if serialize_process_env and owns_env_lock:
+                _serialized_process_env_baseline.update(old_runtime_env)
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
             os.environ.update(safe_runtime_env)
@@ -1593,9 +1615,9 @@ def profile_env_for_background_worker(
                 if should_restore_skill_modules and skill_home_snapshot is not None:
                     restore_skill_home_modules(skill_home_snapshot)
         finally:
-            if _env_lock_held:
+            if _env_lock_owned:
                 _ENV_LOCK.release()
-                _env_lock_held = False
+                _env_lock_owned = False
             if _acquired_skill_home_patch_lock:
                 _SKILL_HOME_MODULE_PATCH_LOCK.release()
                 _acquired_skill_home_patch_lock = False

@@ -1248,13 +1248,19 @@ def test_named_plugin_command_scrubs_root_only_runtime_key(monkeypatch, tmp_path
         (set(), "manager"),
     ),
 )
-def test_named_plugin_command_scrubs_process_loaded_plugin_key(
+@pytest.mark.parametrize(
+    ("profile", "expected_key"),
+    (("alpha", None), ("default", "process-root-key")),
+)
+def test_plugin_command_scopes_process_loaded_plugin_key(
     monkeypatch,
     tmp_path,
     loaded_profile_keys,
     requirement_source,
+    profile,
+    expected_key,
 ):
-    """A named plugin must not inherit a process-loaded root credential."""
+    """Named profiles scrub process keys; the default profile preserves them."""
     import os
     import sys
 
@@ -1266,7 +1272,8 @@ def test_named_plugin_command_scrubs_process_loaded_plugin_key(
     profile_home.mkdir(parents=True)
     (profile_home / ".env").write_text("", encoding="utf-8")
     if requirement_source == "file":
-        plugin_home = profile_home / "plugins" / "hermes-tweet"
+        selected_home = base if profile == "default" else profile_home
+        plugin_home = selected_home / "plugins" / "hermes-tweet"
         plugin_home.mkdir(parents=True)
         (plugin_home / "plugin.yaml").write_text(
             "requires_env:\n  - name: XQUIK_API_KEY\n    secret: true\n",
@@ -1306,12 +1313,63 @@ def test_named_plugin_command_scrubs_process_loaded_plugin_key(
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
 
-    profiles.set_request_profile("alpha")
+    profiles.set_request_profile(profile)
     try:
         result = commands.execute_plugin_command("/xstatus")
     finally:
         profiles.clear_request_profile()
 
     assert result == "ok"
-    assert observed == [None]
+    assert observed == [expected_key]
     assert os.environ.get("XQUIK_API_KEY") == "process-root-key"
+
+
+@pytest.mark.parametrize(
+    ("nested_profile", "nested_key"),
+    (("alpha", "alpha-key"), ("default", "process-root-key")),
+)
+def test_serialized_profile_env_scope_is_reentrant(
+    monkeypatch,
+    tmp_path,
+    nested_profile,
+    nested_key,
+):
+    """A plugin command may enter another serialized profile operation."""
+    import os
+
+    import api.profiles as profiles
+
+    base = tmp_path / ".hermes"
+    profile_home = base / "profiles" / "alpha"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("XQUIK_API_KEY=alpha-key\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"XQUIK_API_KEY"})
+    monkeypatch.setattr(profiles, "_profile_runtime_env_keys", set())
+    monkeypatch.setenv("XQUIK_API_KEY", "process-root-key")
+    observed = []
+
+    def nested_operation():
+        with profiles.profile_env_for_background_worker(
+            "alpha",
+            "outer plugin command",
+            scope_skill_modules=False,
+            serialize_process_env=True,
+        ):
+            observed.append(os.getenv("XQUIK_API_KEY"))
+            with profiles.profile_env_for_background_worker(
+                nested_profile,
+                "nested plugin command",
+                scope_skill_modules=False,
+                serialize_process_env=True,
+            ):
+                observed.append(os.getenv("XQUIK_API_KEY"))
+            observed.append(os.getenv("XQUIK_API_KEY"))
+
+    thread = threading.Thread(target=nested_operation, daemon=True)
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert observed == ["alpha-key", nested_key, "alpha-key"]
+    assert os.getenv("XQUIK_API_KEY") == "process-root-key"
