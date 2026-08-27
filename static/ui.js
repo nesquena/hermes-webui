@@ -7591,7 +7591,9 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
+  // Exclude the backtick (\x60, not a literal — a literal one breaks text-based
+  // JS extraction in the test suite) so an inline-code MEDIA token keeps it out.
+  s=s.replace(/MEDIA:([^\s\)\]\x60]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
   });

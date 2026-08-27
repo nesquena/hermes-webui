@@ -216,6 +216,20 @@ class TestRendererSanitization:
         assert 'onclick' not in out
         assert '_openimglightbox' not in out
 
+    def test_media_token_in_code_span_does_not_capture_backtick(self, driver_path):
+        # Regression: agents routinely format the token as an inline-code span,
+        # e.g. `MEDIA:/workspace/report.md`. The closing backtick must NOT be
+        # captured into the path, otherwise the download URL becomes
+        # .../report.md%60 and the server 404s (no file has a backtick in its
+        # name). Guards the MEDIA path class in renderMd().
+        out = _render(
+            driver_path,
+            "**Markdown:** `MEDIA:/workspace/report.md`",
+        )
+        assert "api/media?path=" in out
+        assert "%60" not in out, f"backtick leaked into media path: {out!r}"
+        assert "report.md" in out
+
     def test_incomplete_raw_html_tag_is_escaped_before_paragraph_wrapping(self, driver_path):
         out = _render(driver_path, '<img src=x onerror=alert(1)//').lower()
         assert '&lt;img' in out
