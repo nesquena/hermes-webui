@@ -48,7 +48,10 @@ from api.config import (
     get_config,
     invalidate_models_cache,
     reload_config,
+    _canonicalise_provider_id,
+    _is_known_model_provider,
 )
+from api.provider_status import get_public_provider_statuses
 from api.plugin_providers import (
     effective_provider_display_name,
     effective_provider_env_var,
@@ -2124,6 +2127,20 @@ def _provider_account_usage_status(provider: str, display_name: str, *, refresh:
 
 
 def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
+    provider = _canonicalise_provider_id(provider_id or _active_provider_id() or "")
+    local = _get_provider_quota_local(provider, refresh=refresh)
+    if not provider or not _is_known_model_provider(provider):
+        return local
+    try:
+        public = get_public_provider_statuses(known_slugs={provider}, refresh=refresh).get(provider)
+    except Exception:
+        public = None
+    if public:
+        local["public_status"] = public
+    return local
+
+
+def _get_provider_quota_local(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
     OpenRouter keeps its documented key endpoint. OAuth-backed account usage
