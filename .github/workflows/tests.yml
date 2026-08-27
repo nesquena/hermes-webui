@@ -227,7 +227,7 @@ jobs:
           # it so test coverage exists. If mcp install fails (Python 3.13
           # wheel not yet available, etc.), tests/test_mcp_server.py uses
           # importorskip and the matrix stays green.
-          pip install mcp || echo "mcp install failed — test_mcp_server.py will importorskip"
+          pip install "mcp<2" || echo "mcp install failed — test_mcp_server.py will importorskip"
 
       - name: Get Playwright version
         if: needs.changes.outputs.docs_only != 'true'

@@ -339,7 +339,8 @@ class TestIndexHtmlIntegration:
         src = BOOT.read_text(encoding="utf-8")
         assert "pwaLaunchAction" in src
         assert "launchAction()" in src
-        assert "pwaLaunchAction==='new-chat'" in src
+        assert "function _shouldStartFreshPwaChat(action,urlSession)" in src
+        assert "_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)" in src
         assert "await newSession(true)" in src
 
     def test_index_route_url_encodes_asset_version(self):

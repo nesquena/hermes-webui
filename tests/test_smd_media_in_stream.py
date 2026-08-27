@@ -100,6 +100,7 @@ def _run_real_smd_media_cases() -> dict:
         "const _STREAM_FADE_MS = 620;\n"
         "let _streamFadeCurrentMs = _STREAM_FADE_MS;\n"
         "let _streamFadeLatestAnimationEndAt = 0;\n"
+        "let _streamFadeSilentPrefixChars = 0;\n"
         "let _streamFadeReduceMotionMql = null;\n"
         "let _streamFadeReduceMotion = false;\n"
         "let _streamFadeReduceMotionOnChange = null;\n"

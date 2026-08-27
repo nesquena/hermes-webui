@@ -16,9 +16,11 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import concurrent.futures
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ from api.config import (
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
     MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
 )
+from api.subprocess_utils import windows_hide_flags
 
 
 # ── Profile-aware path resolution ───────────────────────────────────────────
@@ -163,7 +166,14 @@ def _remote_terminal_cwd() -> str | None:
 
 
 def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
-    """Return a non-stat'ed target-side Path when it is under terminal.cwd."""
+    """Return a non-stat'ed target-side Path when it is under terminal.cwd.
+
+    Remote workspace paths live on the target host (e.g., remote SSH/Docker
+    backend). For valid target-side POSIX paths under ``terminal.cwd``, the
+    normalized target path is preserved as a ``Path`` object without invoking
+    local host-filesystem resolution (avoiding host-specific firmlink rewriting
+    such as macOS synthetic ``/home`` -> ``/System/Volumes/Data/home``).
+    """
     cwd = _remote_terminal_cwd()
     if not cwd:
         return None
@@ -180,7 +190,7 @@ def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
         if _is_blocked_workspace_path(Path(normalized_raw), normalized_raw) or _is_blocked_workspace_path(Path(normalized_cwd), normalized_cwd):
             return None
         if posix_candidate == posix_base or _posix_is_within(posix_candidate, posix_base):
-            return _resolve_path(normalized_raw)
+            return Path(normalized_raw)
         return None
     candidate = _resolve_path(raw)
     base = _resolve_path(cwd)
@@ -243,6 +253,8 @@ def _profile_default_workspace() -> str:
 
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
+    - Preserve target-side remote terminal workspace paths (SSH/Docker) without
+      resolving them against the local WebUI host filesystem.
     - Preserve saved paths even when they are currently missing or inaccessible;
       picker state must not be destroyed by a transient stat/permission failure.
     - Remove entries whose paths live inside another profile's directory
@@ -258,7 +270,11 @@ def _clean_workspace_list(workspaces: list) -> list:
         name = w.get('name', '')
         if not path:
             continue
-        p = _safe_resolve(_expanduser_path(path))
+        remote_cand = _remote_terminal_workspace_candidate(path)
+        if remote_cand is not None:
+            p = remote_cand
+        else:
+            p = _safe_resolve(_expanduser_path(path))
         # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
         # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
         # created under ~/.hermes/profiles/webui/webui-mvp-test/).
@@ -879,6 +895,47 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     )
 
 
+def resolve_implicit_workspace_with_recovery(
+    candidate: str | Path | None,
+    fallback: str | Path | None | Callable[[], str | Path | None],
+) -> tuple[Path, bool]:
+    """Resolve an implicit workspace, recovering only a genuinely missing path.
+
+    The fallback still passes through :func:`resolve_trusted_workspace`. Existing
+    but untrusted, inaccessible, or non-directory candidates are not recovery
+    cases: their original validation error is preserved so fallback cannot widen
+    the workspace trust boundary.
+    """
+    try:
+        return resolve_trusted_workspace(candidate), False
+    except ValueError as original_error:
+        if candidate in (None, ""):
+            raise original_error from None
+        # Remote terminal workspaces live on the target host. Classify the
+        # backend independently of terminal.cwd: remote backends may omit cwd,
+        # set it to an empty string, or use ".". A failed host-local stat can
+        # never prove target-side deletion. Config-read uncertainty also fails
+        # closed by preserving the original validation error.
+        try:
+            from api.config import get_config
+
+            terminal_cfg = get_config().get("terminal", {})
+        except Exception:
+            logger.debug("Failed to classify terminal backend for workspace recovery", exc_info=True)
+            raise original_error from None
+        if _is_remote_terminal_backend(terminal_cfg):
+            raise original_error from None
+        try:
+            local_candidate = _resolve_path(candidate)
+            local_candidate.stat()
+        except FileNotFoundError:
+            fallback_value = fallback() if callable(fallback) else fallback
+            return resolve_trusted_workspace(fallback_value), True
+        except (OSError, RuntimeError, ValueError):
+            raise original_error from None
+        raise original_error from None
+
+
 
 
 def _strip_surrounding_quotes(path: str) -> str:
@@ -973,6 +1030,7 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
 _DIR_FD_OK = os.open in getattr(os, "supports_dir_fd", set())
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
 
 
 def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
@@ -994,7 +1052,11 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         # Windows / no openat: fall back to a plain pathname open. No new race
         # protection, but no regression vs the prior path-based behaviour, and
         # symlink creation needs admin on Windows anyway.
-        flags = os.O_RDONLY | (_O_DIRECTORY if want_dir else 0) | _O_NOFOLLOW
+        flags = (
+            os.O_RDONLY
+            | (_O_DIRECTORY if want_dir else _O_BINARY)
+            | _O_NOFOLLOW
+        )
         try:
             return os.open(str(target), flags)
         except OSError:
@@ -1009,7 +1071,11 @@ def open_anchored_fd(workspace: Path, target: Path, *, want_dir: bool) -> int:
         for i, part in enumerate(rel_parts):
             is_last = i == len(rel_parts) - 1
             want_directory = (not is_last) or want_dir
-            flags = os.O_RDONLY | _O_NOFOLLOW | (_O_DIRECTORY if want_directory else 0)
+            flags = (
+                os.O_RDONLY
+                | _O_NOFOLLOW
+                | (_O_DIRECTORY if want_directory else _O_BINARY)
+            )
             try:
                 nfd = os.open(part, flags, dir_fd=fd)
             except OSError:
@@ -1231,6 +1297,40 @@ def rename_anchored(root: Path, source: Path, dest: Path) -> None:
         os.close(src_parent_fd)
 
 
+def _birthtime_ns(lst) -> int | None:
+    """Return creation time in ns, or None when the platform lacks birthtime."""
+    value = getattr(lst, 'st_birthtime_ns', None)
+    if value is not None:
+        return value
+    value = getattr(lst, 'st_birthtime', None)
+    if value is not None:
+        return int(value * 1_000_000_000)
+    if sys.platform == 'win32':
+        return getattr(lst, 'st_ctime_ns', None)
+    return None
+
+
+def _browser_timestamp_ns(value) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def serialize_workspace_entries_for_browser(entries: list[dict] | None) -> list[dict]:
+    payload = []
+    for entry in entries or []:
+        item = dict(entry or {})
+        if 'mtime_ns' in item:
+            item['mtime_ns'] = _browser_timestamp_ns(item.get('mtime_ns'))
+        if 'birthtime_ns' in item:
+            item['birthtime_ns'] = _browser_timestamp_ns(item.get('birthtime_ns'))
+        payload.append(item)
+    return payload
+
+
 def list_dir(workspace: Path, rel: str='.'):
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
@@ -1245,6 +1345,8 @@ def list_dir(workspace: Path, rel: str='.'):
         with follow_symlinks=False (else None); ``reachable`` is False when a
         follow_symlinks=True stat raised (broken target or symlink loop)."""
         if is_symlink:
+            # Keep the transport rank aligned with _sort_key_de/_sort_key_p.
+            workspace_sort_rank = 0
             if raw_link is None:
                 return
             # A symlink whose follow-stat raised (ELOOP / broken target) can never
@@ -1293,8 +1395,10 @@ def list_dir(workspace: Path, rel: str='.'):
                     'path': display_path,
                     'type': 'symlink',
                     'is_dir': False,
+                    'workspace_sort_rank': workspace_sort_rank,
                     'target_outside_workspace': True,
                     'mtime_ns': mtime_ns,
+                    'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
                 }
                 entries.append(entry)
             else:
@@ -1305,8 +1409,10 @@ def list_dir(workspace: Path, rel: str='.'):
                     'type': 'symlink',
                     'target': str(link_target),
                     'is_dir': is_dir,
+                    'workspace_sort_rank': workspace_sort_rank,
                     'target_outside_workspace': False,
                     'mtime_ns': mtime_ns,
+                    'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
                 }
                 if not is_dir:
                     try:
@@ -1320,6 +1426,7 @@ def list_dir(workspace: Path, rel: str='.'):
                 entry_path = rel + '/' + name
             if lstat_result is not None:
                 is_file = stat.S_ISREG(lstat_result.st_mode)
+                workspace_sort_rank = 2 if is_file else 1
                 size = lstat_result.st_size if is_file else None
                 mtime_ns = lstat_result.st_mtime_ns
                 is_dir_entry = stat.S_ISDIR(lstat_result.st_mode)
@@ -1327,12 +1434,15 @@ def list_dir(workspace: Path, rel: str='.'):
                 size = None
                 mtime_ns = None
                 is_dir_entry = False
+                workspace_sort_rank = 1
             entries.append({
                 'name': name,
                 'path': entry_path,
                 'type': 'dir' if is_dir_entry else 'file',
                 'size': size,
                 'mtime_ns': mtime_ns,
+                'birthtime_ns': _birthtime_ns(lstat_result) if lstat_result is not None else None,
+                'workspace_sort_rank': workspace_sort_rank,
             })
 
     if _DIR_FD_OK:
@@ -1683,6 +1793,7 @@ def _run_git(args, cwd, timeout=3):
         r = subprocess.run(
             ['git'] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
+            creationflags=windows_hide_flags(),
         )
         return r.stdout.strip() if r.returncode == 0 else None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):

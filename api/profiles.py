@@ -2114,7 +2114,7 @@ def list_profiles_api() -> list:
         else:
             rows = _build_profile_rows_fast()
             if rows is not None:
-                _LIST_PROFILES_CACHE = (rows, now)
+                _LIST_PROFILES_CACHE = (rows, time.time())
 
     if rows is None:
         # Fallback: cheap helpers unavailable — use the original (slow) path,
@@ -2393,20 +2393,41 @@ def _clean_profile_config_value(value: Optional[str], field: str) -> Optional[st
 
 
 def _split_webui_provider_model_value(default_model: Optional[str], model_provider: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Normalize WebUI-internal @provider:model picker values for config.yaml."""
+    """Normalize WebUI-internal @provider:model picker values for config.yaml.
+
+    Parsing is delegated to ``config._parse_provider_qualified_model_id()`` so
+    this agrees with the grammar every other call site uses (#6722, #6723). A
+    positional ``rsplit(":", 1)`` cannot tell a colon-tagged model
+    (``@ollama:qwen3.8:27b-mtp-q8_0``) from a multi-segment custom provider ID
+    (``@custom:backup:model-a``); it truncated the model name and persisted the
+    fragment into profile config, which the provider API then 404'd on (#7182).
+    """
     model = _clean_profile_config_value(default_model, "default_model")
     provider = _clean_profile_config_value(model_provider, "model_provider")
     if model and model.startswith("@") and ":" in model:
-        provider_part, model_part = model[1:].rsplit(":", 1)
-        provider = provider or _clean_profile_config_value(provider_part, "model_provider")
-        model = _clean_profile_config_value(model_part, "default_model")
+        from api.config import _parse_provider_qualified_model_id
+
+        parsed = _parse_provider_qualified_model_id(model)
+        if parsed:
+            model_part, provider_part = parsed
+            provider = provider or _clean_profile_config_value(provider_part, "model_provider")
+            model = _clean_profile_config_value(model_part, "default_model")
     return model, provider
 
 
 def _strip_webui_provider_prefix(model_id: object) -> str:
+    """Return the bare model name from a WebUI ``@provider:model`` value.
+
+    Uses the same shared grammar as ``_split_webui_provider_model_value()`` so a
+    tagged model name survives the round trip (#7182).
+    """
     value = str(model_id or "").strip()
     if value.startswith("@") and ":" in value:
-        return value.rsplit(":", 1)[1]
+        from api.config import _parse_provider_qualified_model_id
+
+        parsed = _parse_provider_qualified_model_id(value)
+        if parsed:
+            return str(parsed[0] or "").strip()
     return value
 
 

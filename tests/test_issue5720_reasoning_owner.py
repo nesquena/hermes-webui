@@ -476,6 +476,7 @@ for(const name of [
   '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
   '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_renderAnchorSceneRowsIntoWorklog',
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
+  '_restoreLiveAnchorScrollSnapshotAfterRebuild',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',
   '_renderLiveAnchorActivitySceneForStream','appendThinking','updateThinking',
 ]) eval(extractFunc(uiSrc,name));
@@ -530,6 +531,7 @@ global.EventSource=FakeEventSource;
 const attachStart=messagesSrc.indexOf('function attachLiveStream(');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
+eval(extractFunc(messagesSrc,'_dispatchExtensionTurnLifecycle'));
 eval(messagesSrc.slice(attachStart,attachEnd));
 attachLiveStream('sid-1','stream-1');
 const source=FakeEventSource.instances[0];

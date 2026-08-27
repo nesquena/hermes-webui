@@ -143,7 +143,7 @@ def test_programmatic_scroll_guard_still_skips_listener():
     end = UI_JS.index("})", brace)
     listener = UI_JS[brace:end]
 
-    bail_idx = listener.index("if(_programmaticScroll) return")
+    bail_idx = listener.index("if(_freshProgrammaticScrollActive()) return")
     raf_idx = listener.index("requestAnimationFrame")
     assert bail_idx < raf_idx, (
         "The _programmaticScroll guard must run before requestAnimationFrame "

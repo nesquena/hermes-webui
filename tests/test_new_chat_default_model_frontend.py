@@ -71,7 +71,7 @@ def test_hard_refresh_hydrates_saved_session_model_before_revealing_model_chip()
 
 def test_pwa_new_chat_launch_does_not_block_first_paint_on_model_catalog():
     boot_js = Path("static/boot.js").read_text(encoding="utf-8")
-    launch_marker = "if(pwaLaunchAction==='new-chat'){"
+    launch_marker = "if(_shouldStartFreshPwaChat(pwaLaunchAction,urlSession)){"
     assert launch_marker in boot_js
     launch_branch = boot_js[boot_js.index(launch_marker) : boot_js.index("const savedLocal=localStorage.getItem", boot_js.index(launch_marker))]
     assert "await newSession(true);" in launch_branch

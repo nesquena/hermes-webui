@@ -28,6 +28,7 @@ from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.subprocess_utils import windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
+_FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
@@ -214,9 +216,14 @@ def _run_git(args, cwd, timeout=10):
         return 'git executable not found', False
     try:
         r = subprocess.run(
-            [git_executable] + args, cwd=str(cwd), capture_output=True,
-            text=True, timeout=timeout,
-            encoding='utf-8', errors='replace',
+            [git_executable] + args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=windows_hide_flags(),
         )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
@@ -430,21 +437,15 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # diff-index --quiet exits 1 with no stdout/stderr to *signal* a dirty tree
-    # (not an error). _run_git() substitutes a synthetic "git exited with
-    # status N" diagnostic when both streams are empty, which makes the naive
-    # `if not out` guard always false on dirty trees — silently dropping the
-    # suffix and defeating dev-build cache busting (static/foo.js?v=… stays
-    # identical to the last-committed version). Treat the synthetic shape as
-    # the dirty signal; real errors (timeouts, missing git) carry a different
-    # diagnostic and correctly suppress the suffix.
-    if not out or out.startswith('git exited with status '):
-        diff, diff_ok = _run_git(['diff', '--binary', 'HEAD', '--'], path, timeout=timeout)
-        if diff_ok and diff:
-            digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
-            return f"-dirty-{digest}"
-        return "-dirty"
-    return ""
+    # Only diff-index status 1 means dirty. Keep version display consistent
+    # with the strict action-time probe; all other failures suppress the suffix.
+    if out != 'git exited with status 1':
+        return ""
+    diff, diff_ok = _run_git(['diff', '--binary', 'HEAD', '--'], path, timeout=timeout)
+    if diff_ok and diff:
+        digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
+        return f"-dirty-{digest}"
+    return "-dirty"
 
 
 def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:
@@ -1279,6 +1280,22 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     return None
 
 
+def _probe_dirty(
+    path: Path, timeout: int = 1, *, legacy_empty_is_dirty: bool = False,
+) -> bool | None:
+    """Return dirty, clean, or unknown for a working-tree probe."""
+    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    if ok:
+        return False
+    if out == 'git exited with status 1' or (legacy_empty_is_dirty and (not out or out.startswith('git exited with status '))):
+        return True
+    logger.warning(
+        'git dirty probe failed; treating working-tree state as unknown: %s',
+        out,
+    )
+    return None
+
+
 def _is_dirty(path: Path, timeout: int = 1) -> bool:
     """Return True when the working tree has uncommitted changes vs HEAD.
 
@@ -1288,10 +1305,11 @@ def _is_dirty(path: Path, timeout: int = 1) -> bool:
     reported as clean so a transient probe failure never produces a false-
     positive "local changes" alert.
     """
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
-    if ok:
-        return False
-    return not out or out.startswith('git exited with status ')
+    # Older checker consumers model diff-index status 1 as ('', False). Keep
+    # that boolean contract here; force updates use the strict tri-state form.
+    return _probe_dirty(
+        path, timeout=timeout, legacy_empty_is_dirty=True,
+    ) is True
 
 
 def _ignored_agent_update_info() -> dict:
@@ -1899,17 +1917,41 @@ def _agent_gateway_restart_failure_message(target: str, restart_result: dict) ->
     )
 
 
+def _discard_local_changes(path: Path, reset_ref: str) -> bool:
+    """Discard local changes and reset *path* to *reset_ref*."""
+    # Do not use -x: ignored build/cache artifacts should survive force update.
+    _run_git(['checkout', '.'], path)
+    # Best-effort clean: a `git clean -fd` failure is NOT fatal. The
+    # following `reset --hard` overwrites any tracked-file collisions
+    # regardless, and residual untracked files that git can't delete are
+    # harmless. In particular, on Windows a file named after a reserved
+    # device name (nul, con, prn, aux, com1-9, lpt1-9) — which can appear
+    # in the working tree when a shell command redirects to `> nul` under
+    # Git Bash — cannot be removed via the normal Win32 path that git uses,
+    # so `clean` exits non-zero. Aborting the whole force update over that
+    # left users stuck (issue #4914). Log the stderr for diagnostics and
+    # proceed to the reset, which is what actually applies the update.
+    clean_out, clean_ok = _run_git(['clean', '-fd'], path)
+    if not clean_ok:
+        logger.warning(
+            'force_apply_update: `git clean -fd` failed (non-fatal, '
+            'continuing to reset --hard): %s',
+            clean_out,
+        )
+    _, ok = _run_git(['reset', '--hard', reset_ref], path)
+    return ok
+
+
 def apply_force_update(target: str, channel=None) -> dict:
-    """Force-reset the target repo to the latest remote HEAD.
+    """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
     merge conflicts, this discards all local modifications (checkout .) and
-    resets to origin/<branch> — equivalent to what the diverged/conflict
-    error messages ask the user to run manually.
+    resets to the selected update ref. A dirty stable WebUI checkout with no
+    promoted ref resets to its symbolic HEAD so the commit itself is unchanged.
 
-    Should only be called when apply_update() has already returned a
-    response with ``conflict: True`` or ``diverged: True`` and the user
-    has confirmed they want to discard local changes.
+    The endpoint is called after the user has confirmed they want to discard
+    local changes, including the stable no-ref dirty-checkout recovery path.
 
     CHANNEL SAFETY (rewind guard): ``reset --hard`` is destructive. When the
     selected channel resolves to a ref that is an ANCESTOR of HEAD (i.e. the
@@ -1967,13 +2009,19 @@ def apply_force_update(target: str, channel=None) -> dict:
         # force to. Do NOT fall back to origin/master (firehose). See
         # _select_apply_compare_ref channel semantics.
         if compare_ref is None:
-            return {
-                'ok': True,
-                'message': f'{target} is already up to date on the {channel} channel.',
-                'target': target,
-                'up_to_date': True,
-                'channel': channel,
-            }
+            dirty_state = None
+            if target == 'webui' and channel == 'stable':
+                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+            if dirty_state is True:
+                compare_ref = 'HEAD'
+            else:
+                return {
+                    'ok': True,
+                    'message': f'{target} is already up to date on the {channel} channel.',
+                    'target': target,
+                    'up_to_date': True,
+                    'channel': channel,
+                }
 
         # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
         # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
@@ -1995,28 +2043,7 @@ def apply_force_update(target: str, channel=None) -> dict:
                 'channel': channel,
                 'refused_rewind': True,
             }
-        # Discard local modifications and untracked colliders before resetting.
-        # Do not use -x: ignored build/cache artifacts should survive force update.
-        _run_git(['checkout', '.'], path)
-        # Best-effort clean: a `git clean -fd` failure is NOT fatal. The
-        # following `reset --hard` overwrites any tracked-file collisions
-        # regardless, and residual untracked files that git can't delete are
-        # harmless. In particular, on Windows a file named after a reserved
-        # device name (nul, con, prn, aux, com1-9, lpt1-9) — which can appear
-        # in the working tree when a shell command redirects to `> nul` under
-        # Git Bash — cannot be removed via the normal Win32 path that git uses,
-        # so `clean` exits non-zero. Aborting the whole force update over that
-        # left users stuck (issue #4914). Log the stderr for diagnostics and
-        # proceed to the reset, which is what actually applies the update.
-        clean_out, clean_ok = _run_git(['clean', '-fd'], path)
-        if not clean_ok:
-            logger.warning(
-                'force_apply_update: `git clean -fd` failed (non-fatal, '
-                'continuing to reset --hard): %s',
-                clean_out,
-            )
-        _, ok = _run_git(['reset', '--hard', compare_ref], path)
-        if not ok:
+        if not _discard_local_changes(path, compare_ref):
             return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
         with _cache_lock:
