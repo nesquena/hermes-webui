@@ -11,14 +11,15 @@ saw 502 Proxy Error while WebUI eventually started the run anyway, creating
 a duplicate-send risk if the user retried.
 
 The fix: when the caller supplies an explicit model_provider AND the model is
-not an @provider:model-qualified string, skip the catalog build entirely and
-return (model, requested_provider, False) verbatim. The slow path would have
-reached the same answer; we just avoid paying for the cold catalog.
+not an @provider:model-qualified string, skip the live catalog build and use
+only the cache before returning the pair. The cache-only check can repair a
+provably stale provider without paying for cold provider discovery.
 
 Coverage:
 
-1. The fast path returns without calling get_available_models() when both
-   inputs are present and the model has no @-prefix.
+1. The fast path reads only the nonblocking catalog snapshot when both inputs
+   are present and the model has no @-prefix; it never calls the blocking
+   catalog builder.
 2. The fast path correctly preserves the model and provider unchanged.
 3. The slow path still fires for @provider:model qualified IDs (those need
    the catalog to validate the qualifier against the active provider).
@@ -41,26 +42,31 @@ def _read(rel_path: str) -> str:
 
 
 class TestFastPathInvocation:
-    """The fast path must skip get_available_models() in the happy case."""
+    """The fast path must use only cached catalog data in the happy case."""
 
-    def test_fast_path_with_bare_model_and_provider_skips_catalog(self):
-        """Caller-supplied (model, model_provider) returns without catalog."""
+    def test_fast_path_with_bare_model_and_provider_uses_cached_catalog(self):
+        """Caller-supplied (model, model_provider) avoids live discovery."""
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        cached_catalog = {
+            "groups": [
+                {"provider_id": "openai-codex", "models": [{"id": "gpt-5.5"}]}
+            ]
+        }
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=cached_catalog,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "gpt-5.5",
                 "openai-codex",
             )
 
-        assert mock_catalog.call_count == 0, (
-            "get_available_models() must not be called when both model and "
-            "model_provider are supplied and the model has no @provider:model "
-            "qualifier — that's the point of the fast path."
-        )
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result == ("gpt-5.5", "openai-codex", False)
 
-    def test_fast_path_with_openrouter_slash_qualified_model_skips_catalog(self):
+    def test_fast_path_with_openrouter_slash_qualified_model_uses_cached_catalog(self):
         """OpenRouter slash-qualified IDs still hit the fast path.
 
         Slash-qualified IDs are valid picker output for OpenRouter and a stored
@@ -69,17 +75,29 @@ class TestFastPathInvocation:
         """
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        cached_catalog = {
+            "groups": [
+                {
+                    "provider_id": "openrouter",
+                    "models": [{"id": "anthropic/claude-opus-4.7"}],
+                }
+            ]
+        }
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=cached_catalog,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "anthropic/claude-opus-4.7",
                 "openrouter",
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result == ("anthropic/claude-opus-4.7", "openrouter", False)
 
-    def test_codex_with_stale_openai_slash_id_uses_catalog_repair(self):
-        """Codex must repair stale OpenRouter-shaped OpenAI IDs.
+    def test_codex_with_stale_openai_slash_id_uses_nonblocking_catalog_repair(self):
+        """Codex repairs stale OpenRouter-shaped IDs without live discovery.
 
         Browser/localStorage state can submit ``openai/gpt-...`` while the
         session/provider is ``openai-codex``. If the fast path preserves that
@@ -89,21 +107,42 @@ class TestFastPathInvocation:
         """
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
-            mock_catalog.return_value = {
+        cached_catalog = {
                 "active_provider": "openai-codex",
                 "default_model": "gpt-5.5",
                 "groups": [
                     {"provider_id": "openai-codex", "models": [{"id": "gpt-5.5"}]}
                 ],
             }
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=cached_catalog,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "openai/gpt-5.4-mini",
                 "openai-codex",
             )
 
-        assert mock_catalog.call_count == 1
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result == ("gpt-5.5", "openai-codex", True)
+
+    def test_qualified_explicit_pair_never_waits_for_live_catalog(self):
+        """An @provider:model pair preserves intent when the snapshot is absent."""
+        from api.routes import _resolve_compatible_session_model_state
+
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=None,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
+            result = _resolve_compatible_session_model_state(
+                "@openrouter:anthropic/claude-opus-4.7",
+                "openrouter",
+            )
+
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
+        assert result == ("@openrouter:anthropic/claude-opus-4.7", "openrouter", False)
 
     def test_fast_path_normalizes_provider_default_alias(self):
         """`'default'` is treated as None by _clean_session_model_provider.
@@ -133,7 +172,18 @@ class TestFastPathInvocation:
         """Caller's explicit provider passes through verbatim, no aliasing."""
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        cached_catalog = {
+            "groups": [
+                {
+                    "provider_id": "custom:siliconflow",
+                    "models": [{"id": "GLM-4.5-Air-FP8"}],
+                }
+            ]
+        }
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=cached_catalog,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             # Even a non-canonical provider slug must pass through — this is
             # the contract that resolve_model_provider() in config.py relies on
             # to route through custom: providers.
@@ -142,7 +192,8 @@ class TestFastPathInvocation:
                 "custom:siliconflow",
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result[0] == "GLM-4.5-Air-FP8"
         assert result[1] == "custom:siliconflow"
         assert result[2] is False  # model_was_normalized=False
@@ -155,24 +206,25 @@ class TestSlowPathStillFires:
         """`@openrouter:foo/bar` strings need the catalog to validate the qualifier."""
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
-            mock_catalog.return_value = {
+        cached_catalog = {
                 "active_provider": "openrouter",
                 "default_model": "anthropic/claude-opus-4.7",
                 "groups": [
                     {"provider_id": "openrouter", "models": [{"id": "anthropic/claude-opus-4.7"}]}
                 ],
             }
+        with patch("api.routes.get_nonblocking_available_models_snapshot", return_value=cached_catalog) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             _resolve_compatible_session_model_state(
                 "@openrouter:anthropic/claude-opus-4.7",
                 "openrouter",
             )
 
-        assert mock_catalog.call_count == 1, (
+        assert mock_snapshot.call_count == 1, (
             "@provider:model qualified strings need the catalog to verify "
             "the qualifier matches the active provider and to detect stale "
             "cross-provider artifacts (#1253)."
         )
+        mock_catalog.assert_not_called()
 
     def test_configured_provider_qualified_model_skips_catalog(self):
         """Configured providers already carry trusted routing context."""

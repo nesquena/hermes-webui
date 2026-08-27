@@ -60,7 +60,7 @@ function extractFunc(name) {
 let modelSelect;
 function $(id) { return id === 'modelSelect' ? modelSelect : null; }
 
-function makeSelect(options, initialValue) {
+function makeSelect(options, initialValue, selectedIndex) {
   const sel = {options: [], selectedIndex: -1, selectedOptions: []};
   Object.defineProperty(sel, 'value', {
     get() { return this._value || ''; },
@@ -78,6 +78,10 @@ function makeSelect(options, initialValue) {
     sel.options.push(opt);
   }
   sel.value = initialValue || '';
+  if (Number.isInteger(selectedIndex) && sel.options[selectedIndex]) {
+    sel.selectedIndex = selectedIndex;
+    sel.selectedOptions = [sel.options[selectedIndex]];
+  }
   return sel;
 }
 
@@ -100,9 +104,12 @@ for (const name of [
 }
 
 const args = JSON.parse(process.argv[3]);
-modelSelect = makeSelect(args.options || [], args.initialValue || '');
+modelSelect = makeSelect(args.options || [], args.initialValue || '', args.selectedIndex);
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
-var S = {session: {model_provider: args.sessionProvider || null}};
+var S = {session: {
+  model: args.sessionModel || null,
+  model_provider: args.sessionProvider || null,
+}};
 
 if (args.mode === 'modelState') {
   process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
@@ -150,12 +157,61 @@ def _run_model_state_helper(driver_path, payload):
 def test_model_provider_for_send_preserves_session_provider(driver_path):
     provider = _run_helper(driver_path, {
         "model": "grok-4.3",
+        "sessionModel": "grok-4.3",
         "sessionProvider": "session-provider",
-        "initialValue": "grok-4.3",
-        "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],
+        "initialValue": "claude-sonnet-4.6",
+        "options": [{"provider": "anthropic", "value": "claude-sonnet-4.6"}],
     })
 
     assert provider == "session-provider"
+
+
+@node_test
+@pytest.mark.parametrize(
+    ("model", "provider"),
+    [("grok-4.3", "xai-oauth"), ("gpt-5.6-terra", "openai-codex")],
+)
+def test_model_provider_for_send_preserves_correct_session_pair(driver_path, model, provider):
+    resolved = _run_helper(driver_path, {
+        "model": model,
+        "sessionModel": model,
+        "sessionProvider": provider,
+        "initialValue": model,
+        "options": [{"provider": provider, "value": model}],
+    })
+
+    assert resolved == provider
+
+
+@node_test
+def test_model_provider_for_send_preserves_selected_same_model_collision(driver_path):
+    provider = _run_helper(driver_path, {
+        "model": "shared-model",
+        "sessionModel": "shared-model",
+        "sessionProvider": "provider-a",
+        "initialValue": "shared-model",
+        "selectedIndex": 1,
+        "options": [
+            {"provider": "provider-a", "value": "shared-model"},
+            {"provider": "provider-b", "value": "shared-model"},
+        ],
+    })
+
+    assert provider == "provider-b"
+
+
+@node_test
+@pytest.mark.parametrize("model", ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"])
+def test_model_provider_for_send_does_not_reuse_stale_session_provider(driver_path, model):
+    provider = _run_helper(driver_path, {
+        "model": model,
+        "sessionModel": "grok-4.3",
+        "sessionProvider": "xai-oauth",
+        "initialValue": model,
+        "options": [{"provider": "openai-codex", "value": model}],
+    })
+
+    assert provider == "openai-codex"
 
 
 @node_test
@@ -198,6 +254,43 @@ def test_model_provider_for_send_uses_only_matching_persisted_state(driver_path)
 
     assert matching == "xai-oauth"
     assert unrelated is None
+
+
+@node_test
+def test_model_provider_for_send_uses_persisted_pair_after_model_transition(driver_path):
+    provider = _run_helper(driver_path, {
+        "model": "gpt-5.6-terra",
+        "sessionModel": "grok-4.3",
+        "sessionProvider": "xai-oauth",
+        "initialValue": "",
+        "persisted": {"model": "gpt-5.6-terra", "model_provider": "openai-codex"},
+    })
+
+    assert provider == "openai-codex"
+
+
+@node_test
+def test_model_provider_for_send_prefers_matching_persisted_collision(driver_path):
+    provider = _run_helper(driver_path, {
+        "model": "shared-model",
+        "sessionModel": "shared-model",
+        "sessionProvider": "provider-a",
+        "initialValue": "",
+        "persisted": {"model": "shared-model", "model_provider": "provider-b"},
+    })
+
+    assert provider == "provider-b"
+
+
+@node_test
+def test_model_provider_for_send_preserves_explicit_qualified_selection(driver_path):
+    provider = _run_helper(driver_path, {
+        "model": "@openai-codex:gpt-5.6-terra",
+        "sessionModel": "grok-4.3",
+        "sessionProvider": "xai-oauth",
+    })
+
+    assert provider == "openai-codex"
 
 
 @node_test

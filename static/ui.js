@@ -3089,8 +3089,6 @@ function _captureModelDropdownSelection(sel){
   return {model:String(sel.value||''),model_provider:null};
 }
 function _modelProviderForSend(modelId){
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
-  if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
   if(!model) return null;
   const explicitProvider=typeof _providerFromModelValue==='function'
@@ -3114,6 +3112,9 @@ function _modelProviderForSend(modelId){
       }
     }catch(_){}
   }
+  const sessionModel=String((S&&S.session&&S.session.model)||'').trim();
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  if(sessionProvider&&sessionModel===model) return sessionProvider;
   return null;
 }
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){

@@ -137,10 +137,13 @@ class TestProfileProviderResolution:
         assert mock_catalog.call_count == 1
 
     def test_explicit_provider_still_uses_fast_path(self):
-        """Explicit model_provider must still take the fast path per #1855."""
+        """Explicit model_provider must still avoid live discovery per #1855."""
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=None,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "gpt-5.5",
                 "openai-codex",
@@ -148,7 +151,8 @@ class TestProfileProviderResolution:
                 profile_default_model="claude-sonnet-4.6",
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result == ("gpt-5.5", "openai-codex", False)
 
     def test_at_qualified_model_wins_over_profile(self):

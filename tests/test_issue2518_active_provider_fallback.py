@@ -21,8 +21,8 @@ Coverage:
 
 1. newSession() source carries the active-provider fallback chain.
 2. End-to-end: when client sends ``model_provider`` (either explicit or via
-   the new fallback), /api/session/new's resolve step does NOT call
-   ``get_available_models()``.
+   the new fallback), /api/session/new's resolve step reads the nonblocking
+   snapshot exactly once and never calls the catalog builder.
 3. Negative: client sends ``model_provider: null`` (no fallback available) —
    resolve step still works via the slow path and returns the catalog's
    default.
@@ -100,44 +100,78 @@ class TestClientFallbackSourceShape:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: with model_provider, /api/session/new skips the cold catalog.
+# End-to-end: with model_provider, /api/session/new uses the cached catalog once.
 # ---------------------------------------------------------------------------
 
 
 class TestSessionNewFastPathWithProvider:
-    """When client supplies a real model_provider, no catalog rebuild."""
+    """A real model_provider uses one cached lookup, never live discovery."""
 
-    def test_explicit_provider_skips_get_available_models(self):
-        """The headline fix: client-supplied provider → fast path."""
+    def test_explicit_provider_uses_cached_catalog_once(self):
+        """An explicit pair validates against cached catalog data exactly once."""
         from api.routes import _session_model_state_from_request
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        cached_catalog = {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5"}],
+                }
+            ],
+        }
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=cached_catalog,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             model, provider = _session_model_state_from_request(
                 "gpt-5.5",
                 "openai-codex",
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert model == "gpt-5.5"
         assert provider == "openai-codex"
 
-    def test_active_provider_fallback_does_not_double_invoke_catalog(self):
-        """Sanity: the fast path is shared between the explicit and fallback
-        cases on the client. As long as the client sent a truthy
-        model_provider, the server stays on the fast path. The actual
-        fallback selection happens client-side; this test pins that the
-        server side is invariant under the two client strategies."""
+    def test_active_provider_fallback_uses_cached_catalog_once(self):
+        """Explicit and fallback wire pairs each use one cached-only lookup."""
         from api.routes import _session_model_state_from_request
 
         # Simulate the two client strategies (explicit vs active-provider
-        # fallback) producing the same wire shape.
-        for client_provider in ("openai-codex", "anthropic", "openrouter"):
-            with patch("api.routes.get_available_models") as mock_catalog:
-                _session_model_state_from_request("claude-opus-4.7", client_provider)
-            assert mock_catalog.call_count == 0, (
-                f"client_provider={client_provider!r} must hit the fast path; "
-                f"otherwise the #2518 fallback is invisible to the server."
-            )
+        # fallback) producing the same wire shape with realistic provider-owned
+        # models. A concrete dict is required here: a bare MagicMock is truthy
+        # and can accidentally exercise catalog-repair branches.
+        cached_catalog = {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {"provider_id": "openai-codex", "models": [{"id": "gpt-5.5"}]},
+                {"provider_id": "anthropic", "models": [{"id": "claude-opus-4.7"}]},
+                {
+                    "provider_id": "openrouter",
+                    "models": [{"id": "google/gemini-2.5-pro"}],
+                },
+            ],
+        }
+        client_pairs = (
+            ("gpt-5.5", "openai-codex"),
+            ("claude-opus-4.7", "anthropic"),
+            ("google/gemini-2.5-pro", "openrouter"),
+        )
+        for client_model, client_provider in client_pairs:
+            with patch(
+                "api.routes.get_nonblocking_available_models_snapshot",
+                return_value=cached_catalog,
+            ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
+                model, provider = _session_model_state_from_request(
+                    client_model,
+                    client_provider,
+                )
+            mock_snapshot.assert_called_once_with()
+            mock_catalog.assert_not_called()
+            assert (model, provider) == (client_model, client_provider)
 
 
 # ---------------------------------------------------------------------------

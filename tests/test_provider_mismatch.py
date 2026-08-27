@@ -1169,6 +1169,11 @@ def test_at_provider_removed_provider_still_reverts_to_default(monkeypatch):
             ],
         },
     )
+    monkeypatch.setattr(
+        routes,
+        "get_nonblocking_available_models_snapshot",
+        lambda: routes.get_available_models(),
+    )
 
     # Non-explicit (2nd+ turn / chat switch): unknown provider -> repair to default.
     model, _provider, changed = routes._resolve_compatible_session_model_state(
@@ -1352,6 +1357,11 @@ def test_at_provider_first_party_named_third_party_model_known_limitation(monkey
                 },
             ],
         },
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_nonblocking_available_models_snapshot",
+        lambda: routes.get_available_models(),
     )
 
     # Non-explicit path: the gpt-prefixed third-party id is (imperfectly) treated

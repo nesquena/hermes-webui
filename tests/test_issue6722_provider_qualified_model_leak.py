@@ -112,34 +112,32 @@ class TestSessionModelStatePreservesQualifierForRepair:
     still see the qualified form. The qualifier is stripped to the bare model ONLY
     at the gateway boundary (see TestGatewayModelField)."""
 
-    def test_unavailable_qualified_provider_repairs_to_active_default(self, monkeypatch):
-        """A session pinned to a removed/unconfigured provider must revert to the
-        active default on a non-explicit resolve — the premature strip in the
-        previous revision returned (bare_model, removed) instead."""
+    def test_unavailable_qualified_provider_preserves_pair_without_live_catalog(self, monkeypatch):
+        """Missing catalog evidence preserves the qualified pair without blocking.
+
+        OPS-359 makes this request path latency-safe: an unavailable provider
+        cannot justify a silent model swap, and resolving it must not rebuild the
+        live catalog behind the cache lock.
+        """
         import api.routes as routes
 
         monkeypatch.setattr(
             routes,
+            "get_nonblocking_available_models_snapshot",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            routes,
             "get_available_models",
-            lambda: {
-                "active_provider": "openai-codex",
-                "default_model": "gpt-5.5",
-                "groups": [
-                    {
-                        "provider_id": "openai-codex",
-                        "models": [{"id": "@openai-codex:gpt-5.5"}],
-                    },
-                ],
-            },
+            lambda: (_ for _ in ()).throw(AssertionError("blocking catalog must not be called")),
         )
         model_value, provider = routes._session_model_state_from_request(
             "@removed:mistral-large", None, "removed"
         )
-        assert model_value == "gpt-5.5", (
-            f"removed/unconfigured qualified provider must repair to the active "
-            f"default, got model_value={model_value!r}"
+        assert model_value == "@removed:mistral-large", (
+            f"missing catalog evidence must preserve the explicit model, got {model_value!r}"
         )
-        assert provider == "openai-codex"
+        assert provider == "removed"
 
     def test_active_provider_qualified_model_preserves_qualifier_for_routing(self, monkeypatch):
         """A qualified model naming the active provider is preserved intact so

@@ -74,9 +74,9 @@ def test_poisoned_pair_repairs_at_chat_start(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _p: (None, None, {"model": {"provider": "kilocode"}}))
     monkeypatch.setattr(
         routes,
-        "get_available_models",
-        lambda *, prefer_cache=False: (
-            catalog_calls.append(prefer_cache)
+        "get_nonblocking_available_models_snapshot",
+        lambda: (
+            catalog_calls.append(True)
             or _catalog(
                 _group("ollama", "llama3.2"),
                 _group("kilocode", "@kilocode:kilo/minimax/minimax-m3"),
@@ -98,8 +98,8 @@ def test_catalog_equivalent_owner_repairs_poisoned_pair(monkeypatch):
     session = _session(model="gpt-4o-mini", provider="ollama")
     monkeypatch.setattr(
         routes,
-        "get_available_models",
-        lambda *, prefer_cache=False: _catalog(
+        "get_nonblocking_available_models_snapshot",
+        lambda: _catalog(
             _group("ollama", "llama3.2"),
             _group("kilocode", "GPT.4O.MINI"),
         ),
@@ -112,8 +112,8 @@ def test_equivalent_request_model_repairs_poisoned_pair(monkeypatch):
     session = _session(model="GPT.4O.MINI", provider="ollama")
     monkeypatch.setattr(
         routes,
-        "get_available_models",
-        lambda *, prefer_cache=False: _catalog(
+        "get_nonblocking_available_models_snapshot",
+        lambda: _catalog(
             _group("ollama", "llama3.2"),
             _group("kilocode", "gpt-4o-mini"),
         ),
@@ -132,8 +132,8 @@ def test_self_hosted_exact_owner_is_preserved(monkeypatch, provider):
     session = _session(model="vendor/model/with/slashes", provider=provider)
     monkeypatch.setattr(
         routes,
-        "get_available_models",
-        lambda *, prefer_cache=False: _catalog(
+        "get_nonblocking_available_models_snapshot",
+        lambda: _catalog(
             _group(provider, "vendor/model/with/slashes"),
             _group("kilocode", "other-model"),
         ),
@@ -148,8 +148,8 @@ def test_stored_owner_in_extra_models_is_preserved(monkeypatch):
     stored_group["extra_models"] = [{"id": "kilo/minimax/minimax-m3"}]
     monkeypatch.setattr(
         routes,
-        "get_available_models",
-        lambda *, prefer_cache=False: _catalog(
+        "get_nonblocking_available_models_snapshot",
+        lambda: _catalog(
             stored_group,
             _group("kilocode", "kilo/minimax/minimax-m3"),
         ),
@@ -164,8 +164,8 @@ def test_stored_provider_discovery_failure_is_preserved(monkeypatch):
     stored_group["models_endpoint_error"] = "catalog unavailable"
     monkeypatch.setattr(
         routes,
-        "get_available_models",
-        lambda *, prefer_cache=False: _catalog(
+        "get_nonblocking_available_models_snapshot",
+        lambda: _catalog(
             stored_group,
             _group("kilocode", "kilo/minimax/minimax-m3"),
         ),
@@ -183,7 +183,11 @@ def test_stored_provider_discovery_failure_is_preserved(monkeypatch):
 )
 def test_explicit_or_qualified_model_selection_is_preserved(monkeypatch, requested_model, explicit_model_pick):
     session = _session()
-    monkeypatch.setattr(routes, "get_available_models", lambda **_kwargs: pytest.fail("catalog must not be read"))
+    monkeypatch.setattr(
+        routes,
+        "get_nonblocking_available_models_snapshot",
+        lambda: pytest.fail("catalog must not be read"),
+    )
 
     assert _repair(
         session,
@@ -207,14 +211,25 @@ def test_explicit_or_qualified_model_selection_is_preserved(monkeypatch, request
 )
 def test_missing_or_ambiguous_catalog_evidence_is_preserved(monkeypatch, catalog):
     session = _session()
-    monkeypatch.setattr(routes, "get_available_models", lambda *, prefer_cache=False: catalog)
+    monkeypatch.setattr(routes, "get_nonblocking_available_models_snapshot", lambda: catalog)
 
     assert _repair(session, catalog) == "ollama"
 
 
+def test_unavailable_nonblocking_catalog_snapshot_preserves_provider(monkeypatch):
+    session = _session()
+    monkeypatch.setattr(routes, "get_nonblocking_available_models_snapshot", lambda: None)
+
+    assert _repair(session, None) == "ollama"
+
+
 def test_matching_profile_provider_skips_catalog(monkeypatch):
     session = _session()
-    monkeypatch.setattr(routes, "get_available_models", lambda **_kwargs: pytest.fail("catalog must not be read"))
+    monkeypatch.setattr(
+        routes,
+        "get_nonblocking_available_models_snapshot",
+        lambda: pytest.fail("catalog must not be read"),
+    )
 
     assert _repair(session, None, profile_provider="ollama") == "ollama"
 
@@ -249,7 +264,7 @@ def test_preservation_cases_still_reach_chat_start(monkeypatch, tmp_path, body, 
     )
     captured = {}
 
-    def get_catalog(*, prefer_cache=False):
+    def get_catalog():
         if isinstance(catalog, Exception):
             raise catalog
         return catalog
@@ -257,7 +272,7 @@ def test_preservation_cases_still_reach_chat_start(monkeypatch, tmp_path, body, 
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid, **_kwargs: session)
     monkeypatch.setattr(routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path))
     monkeypatch.setattr(routes, "_read_profile_model_config", lambda _s, _p: (None, None, {"model": {"provider": "kilocode"}}))
-    monkeypatch.setattr(routes, "get_available_models", get_catalog)
+    monkeypatch.setattr(routes, "get_nonblocking_available_models_snapshot", get_catalog)
     monkeypatch.setattr(routes, "_start_run", lambda _s, **kwargs: captured.update(kwargs) or {"ok": True})
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: payload)
 

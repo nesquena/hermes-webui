@@ -12,7 +12,10 @@ class TestIssue5127CustomProviderBareSuffixRepair:
     def test_fast_path_repairs_bare_suffix_to_profile_default(self):
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=None,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "grok-composer-2.5-fast",
                 "custom:my-proxy",
@@ -21,14 +24,18 @@ class TestIssue5127CustomProviderBareSuffixRepair:
                 prefer_cached_catalog=True,
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_not_called()
+        mock_catalog.assert_not_called()
         assert result == ("x-ai/grok-composer-2.5-fast", "custom:my-proxy", True)
 
     def test_fast_path_skips_repair_when_profile_provider_mismatches(self):
         """Regression: custom:other-proxy must not inherit my-proxy's qualified default."""
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=None,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "grok-composer-2.5-fast",
                 "custom:other-proxy",
@@ -37,13 +44,17 @@ class TestIssue5127CustomProviderBareSuffixRepair:
                 prefer_cached_catalog=True,
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result == ("grok-composer-2.5-fast", "custom:other-proxy", False)
 
     def test_fast_path_repairs_generic_custom_provider(self):
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=None,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "some-model",
                 "custom",
@@ -51,13 +62,17 @@ class TestIssue5127CustomProviderBareSuffixRepair:
                 prefer_cached_catalog=True,
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_not_called()
+        mock_catalog.assert_not_called()
         assert result == ("vendor/some-model", "custom", True)
 
     def test_fast_path_does_not_rewrite_unrelated_bare_model(self):
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=None,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "other-model",
                 "custom:my-proxy",
@@ -65,13 +80,17 @@ class TestIssue5127CustomProviderBareSuffixRepair:
                 prefer_cached_catalog=True,
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result == ("other-model", "custom:my-proxy", False)
 
     def test_fast_path_keeps_qualified_model_unchanged(self):
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value=None,
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "x-ai/grok-composer-2.5-fast",
                 "custom:my-proxy",
@@ -79,7 +98,8 @@ class TestIssue5127CustomProviderBareSuffixRepair:
                 prefer_cached_catalog=True,
             )
 
-        assert mock_catalog.call_count == 0
+        mock_snapshot.assert_called_once_with()
+        mock_catalog.assert_not_called()
         assert result == ("x-ai/grok-composer-2.5-fast", "custom:my-proxy", False)
 
     def test_slow_path_repairs_bare_suffix_to_profile_default_for_custom_provider(self):
@@ -194,12 +214,14 @@ class TestIssue5127CustomProviderBareSuffixRepair:
         """Regression: openai/... under openai-codex must not take bare fast return."""
         from api.routes import _resolve_compatible_session_model_state
 
-        with patch("api.routes.get_available_models") as mock_catalog:
-            mock_catalog.return_value = {
+        with patch(
+            "api.routes.get_nonblocking_available_models_snapshot",
+            return_value={
                 "active_provider": "openai-codex",
                 "default_model": "gpt-5.5",
                 "groups": [],
-            }
+            },
+        ) as mock_snapshot, patch("api.routes.get_available_models") as mock_catalog:
             result = _resolve_compatible_session_model_state(
                 "openai/gpt-5.4-mini",
                 "openai-codex",
@@ -207,7 +229,8 @@ class TestIssue5127CustomProviderBareSuffixRepair:
                 prefer_cached_catalog=True,
             )
 
-        assert mock_catalog.call_count >= 1
+        assert mock_snapshot.call_count == 1
+        mock_catalog.assert_not_called()
         assert result[0] == "gpt-5.5"
         assert result[2] is True
 

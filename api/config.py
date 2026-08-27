@@ -8629,6 +8629,34 @@ def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None
         return None
 
 
+def get_nonblocking_available_models_snapshot() -> dict | None:
+    """Return immediate complete catalog evidence without waiting for a rebuild.
+
+    The chat-start send path must never queue behind
+    ``_available_models_cache_lock``. Try the current validated memory snapshot
+    with a nonblocking lock acquisition; if memory is unavailable or busy, use
+    only the strict validated disk snapshot. Never build, wait, or substitute a
+    minimal/static catalog, because incomplete evidence must preserve an
+    explicit model/provider pair.
+    """
+    acquired = _available_models_cache_lock.acquire(blocking=False)
+    if acquired:
+        try:
+            try:
+                cached = _get_fresh_memory_models_cache(time.monotonic())
+            except Exception:
+                cached = None
+        finally:
+            _available_models_cache_lock.release()
+        if cached is not None:
+            return cached
+
+    try:
+        return _load_models_cache_from_disk()
+    except Exception:
+        return None
+
+
 def warm_models_catalog_provenance_if_cold() -> None:
     """Best-effort, NON-BLOCKING, disk-only publish of catalog provenance.
 

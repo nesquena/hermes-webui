@@ -2868,6 +2868,7 @@ from api.config import (
     SERVER_START_TIME,
     _resolve_cli_toolsets,
     get_available_models,
+    get_nonblocking_available_models_snapshot,
     get_available_models_for_session_visit,
     _provider_is_known_or_configured,
     IMAGE_EXTS,
@@ -6500,6 +6501,58 @@ def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
     return False
 
 
+def _repair_explicit_model_provider_from_cached_catalog(
+    model: str,
+    requested_provider: str,
+) -> tuple[str, bool]:
+    """Repair a stale explicit pair only from complete, unique cached ownership."""
+    try:
+        catalog = get_nonblocking_available_models_snapshot()
+    except Exception:
+        return requested_provider, False
+    if not isinstance(catalog, dict) or catalog.get("error"):
+        return requested_provider, False
+    groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
+    if not groups or any(group.get("models_endpoint_error") for group in groups):
+        return requested_provider, False
+    exact_requested_groups = [
+        group
+        for group in groups
+        if _clean_session_model_provider(group.get("provider_id")) == requested_provider
+    ]
+    requested_groups = exact_requested_groups
+    if not requested_groups:
+        requested_canonical = _normalize_provider_id(requested_provider)
+        canonical_groups = [
+            group
+            for group in groups
+            if requested_canonical
+            and requested_canonical != "custom"
+            and _normalize_provider_id(group.get("provider_id")) == requested_canonical
+        ]
+        canonical_group_ids = {
+            provider
+            for group in canonical_groups
+            if (provider := _clean_session_model_provider(group.get("provider_id")))
+        }
+        if len(canonical_group_ids) == 1:
+            requested_groups = canonical_groups
+    if not requested_groups:
+        return requested_provider, False
+    if any(_catalog_group_owns_exact_model(group, model) for group in requested_groups):
+        return requested_provider, False
+    owners = {
+        provider
+        for group in groups
+        if (provider := _clean_session_model_provider(group.get("provider_id")))
+        and provider != requested_provider
+        and _catalog_group_owns_exact_model(group, model)
+    }
+    if len(owners) != 1:
+        return requested_provider, False
+    return owners.pop(), True
+
+
 def _repair_foreign_session_model_provider(
     session,
     *,
@@ -6538,8 +6591,10 @@ def _repair_foreign_session_model_provider(
         return resolved_provider
 
     try:
-        catalog = get_available_models(prefer_cache=True)
+        catalog = get_nonblocking_available_models_snapshot()
     except Exception:
+        return resolved_provider
+    if not isinstance(catalog, dict) or catalog.get("error"):
         return resolved_provider
     groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
     stored_groups = [
@@ -7306,28 +7361,21 @@ def _resolve_compatible_session_model_state(
 
     Fast path (#1855): when the caller supplies both a model and an explicit
     ``model_provider`` AND the model is not itself ``@provider:model``-qualified,
-    we can return the inputs verbatim without calling ``get_available_models()``.
-    The slow path below would arrive at the same answer via
-    ``if requested_provider and not explicit_provider: return model, requested_provider, False``
-    after paying the full catalog-build cost. Avoiding the catalog here keeps
-    ``POST /api/chat/start`` snappy even when the model catalog is cold and the
-    rebuild has to make network calls (custom OpenAI-compat endpoints,
-    OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh),
-    those used to wedge the handler for >100s and trigger 502s on default-60s
-    reverse proxies, even though the WebUI itself eventually responded.
+    avoid a live catalog rebuild. Before returning the pair, use only the cached
+    catalog to repair a provider that provably does not own the model when one
+    and only one other provider does. Ambiguous, incomplete, or failed catalog
+    evidence preserves the requested pair.
 
-    ``prefer_cached_catalog=True`` (ours-original) makes the catalog lookup
-    non-blocking: it resolves from the warm/disk cache or a network-free
-    minimal catalog and NEVER triggers a live per-provider rebuild (the
-    Copilot token-exchange HTTPS call that hangs a server-initiated wakeup
-    turn, see rebase report §1/§3/model-resolve-hang). Human-initiated
-    chat/start leaves this False to keep full live discovery; a session that
-    already has a persisted model still resolves correctly because the
-    persisted model wins over the catalog and the catalog is only consulted
-    for the default-model backstop.
+    ``prefer_cached_catalog=True`` (ours-original) prevents the slow-path
+    lookup from triggering a live per-provider rebuild: it resolves from the
+    warm/disk cache or a network-free minimal catalog. Explicit model/provider
+    pairs never enter that lookup; their ownership repairs use only
+    ``get_nonblocking_available_models_snapshot()`` and preserve the pair when
+    no immediate complete evidence exists.
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    catalog_override = None
     if model and requested_provider == "moa":
         return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
@@ -7340,15 +7388,19 @@ def _resolve_compatible_session_model_state(
         if isinstance(providers_cfg, dict) and requested_provider in providers_cfg:
             return model, requested_provider, False
     if model and requested_provider:
-        # Only safe when the model itself does not carry an ``@provider:model``
-        # qualifier — qualified strings require the catalog to decide whether
-        # the qualifier matches the active provider (see slow path below).
         bare_model, explicit_provider = _split_provider_qualified_model(model)
         model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
         stale_codex_openai_slash_id = (
             requested_provider == "openai-codex"
             and model_prefix == "openai"
         )
+        if explicit_provider or stale_codex_openai_slash_id:
+            try:
+                catalog_override = get_nonblocking_available_models_snapshot()
+            except Exception:
+                catalog_override = None
+            if not isinstance(catalog_override, dict) or catalog_override.get("error"):
+                return model, requested_provider, False
         if not explicit_provider and not stale_codex_openai_slash_id:
             _profile_default = str(profile_default_model or "").strip()
             _profile_prov = _clean_session_model_provider(profile_provider)
@@ -7376,6 +7428,15 @@ def _resolve_compatible_session_model_state(
             if _repaired_model:
                 return _repaired_model, requested_provider, True
 
+            _catalog_provider, _provider_repaired = (
+                _repair_explicit_model_provider_from_cached_catalog(
+                    model,
+                    requested_provider,
+                )
+            )
+            if _provider_repaired:
+                return model, _catalog_provider, True
+
             return model, requested_provider, False
 
     # Default (human chat/start) path calls get_available_models() with NO
@@ -7388,7 +7449,9 @@ def _resolve_compatible_session_model_state(
     # genuine TypeError raised *inside* get_available_models(prefer_cache=True)
     # and silently fall back to the slow live provider rebuild that
     # prefer_cached_catalog=True is meant to avoid.
-    if prefer_cached_catalog:
+    if catalog_override is not None:
+        catalog = catalog_override
+    elif prefer_cached_catalog:
         import inspect as _inspect
 
         try:
