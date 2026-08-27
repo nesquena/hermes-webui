@@ -1,4 +1,5 @@
 """Tests for GET /api/commands -- exposes hermes-agent COMMAND_REGISTRY."""
+from contextlib import contextmanager
 import io
 import json
 import urllib.error
@@ -99,6 +100,51 @@ def _install_fake_account_usage(monkeypatch, *, view=None, exc=None):
     monkeypatch.setitem(sys.modules, "agent", agent_pkg)
     monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage)
     return account_usage
+
+
+def _install_profile_scoped_hermes_tweet(monkeypatch):
+    """Install a minimal profile-aware copy of Hermes Tweet's command contract."""
+    import sys
+
+    state = {"active": False, "scopes": [], "calls": []}
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    plugins = ModuleType("hermes_cli.plugins")
+
+    def get_plugin_commands():
+        state["calls"].append(("list", state["active"]))
+        if not state["active"]:
+            return {"default-status": {"description": "Default profile command"}}
+        return {"xstatus": {"description": "Show Xquik account and usage status"}}
+
+    def get_plugin_command_handler(name):
+        state["calls"].append(("lookup", name, state["active"]))
+        if name != "xstatus" or not state["active"]:
+            return None
+
+        def xstatus(arg):
+            state["calls"].append(("execute", arg, state["active"]))
+            return f"Xquik status for {arg}"
+
+        return xstatus
+
+    plugins.get_plugin_commands = get_plugin_commands
+    plugins.get_plugin_command_handler = get_plugin_command_handler
+    plugins.resolve_plugin_command_result = lambda result: result
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+
+    @contextmanager
+    def profile_scope(purpose):
+        state["scopes"].append(purpose)
+        previous = state["active"]
+        state["active"] = True
+        try:
+            yield
+        finally:
+            state["active"] = previous
+
+    return state, profile_scope
 
 
 def _get(path):
@@ -586,3 +632,35 @@ def test_list_commands_degrades_when_agent_missing(monkeypatch):
     # the stubbed-None module, raising ImportError, taking the fallback path.
     from api.commands import list_commands
     assert list_commands() == []
+
+
+def test_list_commands_discovers_hermes_tweet_in_active_profile(monkeypatch):
+    """Autocomplete should read plugin commands from the selected profile."""
+    import api.commands as commands
+
+    state, profile_scope = _install_profile_scoped_hermes_tweet(monkeypatch)
+    monkeypatch.setattr(commands, "_bundle_profile_context", profile_scope)
+
+    result = commands.list_commands(_registry=[])
+
+    assert [command["name"] for command in result] == ["xstatus"]
+    assert result[0]["description"] == "Show Xquik account and usage status"
+    assert state["scopes"] == ["/api/commands"]
+    assert state["calls"] == [("list", True)]
+
+
+def test_execute_hermes_tweet_command_keeps_active_profile(monkeypatch):
+    """Plugin lookup and execution should share the selected profile scope."""
+    import api.commands as commands
+
+    state, profile_scope = _install_profile_scoped_hermes_tweet(monkeypatch)
+    monkeypatch.setattr(commands, "_bundle_profile_context", profile_scope)
+
+    result = commands.execute_plugin_command("/xstatus research")
+
+    assert result == "Xquik status for research"
+    assert state["scopes"] == ["/api/commands/exec"]
+    assert state["calls"] == [
+        ("lookup", "xstatus", True),
+        ("execute", "research", True),
+    ]

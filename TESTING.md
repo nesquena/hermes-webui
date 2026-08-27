@@ -1991,6 +1991,13 @@ same `HERMES_HOME` (when applicable) and verify identical effect.
 - [ ] `/theme <name>` — switches webui theme.
 - [ ] `/workspace <name>` — switches workspace.
 
+Profile-scoped plugin commands:
+
+- [ ] In a named profile, install and enable `Xquik-dev/hermes-tweet`. Configure that profile's `XQUIK_API_KEY`.
+- [ ] Select the named profile. Verify `/xstatus` and `/xtrends` appear in autocomplete.
+- [ ] Run `/xstatus`. Verify it uses the selected profile's Xquik credentials.
+- [ ] Switch to a profile without Hermes Tweet. Verify both commands disappear and cannot execute.
+
 Unknown / deferred:
 
 - [ ] `/yolo`, `/reasoning`, `/voice`, `/branch`, `/insights`, `/debug`, `/reload`, etc. — toast "Web UI 暂未实现该命令: /<name>". MUST NOT be sent as plain text to the LLM.

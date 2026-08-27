@@ -58,7 +58,7 @@ def _parse_slash_command(command: str) -> tuple[str, str]:
 
 
 def _bundle_profile_context(purpose: str):
-    """Resolve the active-profile env wrapper used by bundle APIs."""
+    """Resolve the active-profile env wrapper used by command APIs."""
 
     try:
         from api.profiles import profile_env_for_active_request
@@ -110,8 +110,9 @@ def list_commands(_registry=None) -> list[dict[str, Any]]:
 
     # Include plugin-registered slash commands
     try:
-        from hermes_cli.plugins import get_plugin_commands
-        plugin_cmds = get_plugin_commands() or {}
+        with _bundle_profile_context("/api/commands"):
+            from hermes_cli.plugins import get_plugin_commands
+            plugin_cmds = get_plugin_commands() or {}
         existing_names = {c['name'] for c in out}
         for cmd_name, cmd_info in plugin_cmds.items():
             if cmd_name in existing_names or cmd_name in _NEVER_EXPOSE:
@@ -460,20 +461,27 @@ def execute_plugin_command(command: str) -> str:
         raise RuntimeError("plugin command runtime unavailable") from exc
 
     try:
-        handler = get_plugin_command_handler(cmd_base)
-    except Exception as exc:
-        logger.warning("Plugin command lookup failed for %r", cmd_base, exc_info=True)
-        raise RuntimeError("plugin command lookup failed") from exc
+        with _bundle_profile_context("/api/commands/exec"):
+            try:
+                handler = get_plugin_command_handler(cmd_base)
+            except Exception as exc:
+                logger.warning("Plugin command lookup failed for %r", cmd_base, exc_info=True)
+                raise RuntimeError("plugin command lookup failed") from exc
 
-    if not handler:
-        raise KeyError(cmd_base)
+            if not handler:
+                raise KeyError(cmd_base)
 
-    try:
-        result = resolve_plugin_command_result(handler(cmd_arg))
-        return str(result or "(no output)")
+            try:
+                result = resolve_plugin_command_result(handler(cmd_arg))
+                return str(result or "(no output)")
+            except Exception as exc:
+                # Don't leak raw exception str (paths, env, internal state) to the
+                # user-facing chat. Type name is enough for the user to know what
+                # class of failure occurred; full traceback lives in the server log.
+                logger.warning("Plugin command %r execution failed", cmd_base, exc_info=True)
+                return f"Plugin command error: {type(exc).__name__}"
+    except (KeyError, RuntimeError):
+        raise
     except Exception as exc:
-        # Don't leak raw exception str (paths, env, internal state) to the
-        # user-facing chat. Type name is enough for the user to know what
-        # class of failure occurred; full traceback lives in the server log.
-        logger.warning("Plugin command %r execution failed", cmd_base, exc_info=True)
-        return f"Plugin command error: {type(exc).__name__}"
+        logger.warning("Plugin command profile scope failed", exc_info=True)
+        raise RuntimeError("plugin command unavailable") from exc
