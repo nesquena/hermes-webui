@@ -118,6 +118,61 @@ def test_in_place_fallback_preserves_special_mode_bits(tmp_path: Path) -> None:
         assert os.stat(target).st_nlink > 1
 
 
+def test_in_place_fallback_keeps_content_when_mode_restore_is_denied(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A non-owner saving a group-writable config must not lose the save.
+
+    The in-place path commits its content before the special bits can be
+    re-applied, and a caller with write access but no ownership cannot chmod
+    the inode at all. Such a caller could always save this file (dropping the
+    bit) before the restore existed, so the restore must stay best-effort
+    rather than turn a working save into a hard failure.
+    """
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.link(target, tmp_path / "config.hardlink")
+    os.chmod(target, 0o2664)
+
+    def deny(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", deny)
+    monkeypatch.setattr(os, "chmod", deny)
+    _atomic_write_text(target, "model:\n  default: new\n")
+
+    assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
+
+
+def test_mode_restore_does_not_revert_a_concurrent_permission_change(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Restoring the bit must not write back a mode captured before the write.
+
+    An administrator can chmod the config while a save is in flight. Replaying
+    the pre-write mode would silently revert that change, so only the bits the
+    kernel actually cleared are OR-ed onto the inode's current mode.
+    """
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.link(target, tmp_path / "config.hardlink")
+    os.chmod(target, 0o2664)
+
+    real_fsync = os.fsync
+
+    def widen_mid_write(fd: int) -> None:
+        # Simulate `chmod g+w,o+w` landing between our fstat and the restore.
+        os.chmod(target, 0o2666)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", widen_mid_write)
+    _atomic_write_text(target, "model:\n  default: new\n")
+
+    assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
+    # The administrator's 0o666 survives, and setgid is still restored.
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2666
+
+
 @pytest.mark.skipif(
     not all(hasattr(os, name) for name in ("getxattr", "listxattr", "setxattr")),
     reason="extended attributes are unavailable on this platform",
