@@ -4792,12 +4792,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
     return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
   }
-  function _smdMediaRefHasReliableBoundary(rawRef){
-    const raw=String(rawRef||'');
-    if(/[?#]$/.test(raw)) return false;
-    const ref=raw.split(/[?#]/,1)[0];
-    return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
-  }
   function _smdMediaTokenParts(source, matchOffset, rawRef, parent){
     const value=String(source||'');
     const offset=Number(matchOffset)||0;
@@ -4874,8 +4868,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     // Walk the combined string, slicing into prose + MEDIA token runs.
     // Prose runs go through the owning text writer. MEDIA tokens go through
-    // the single-token DOMParser helper only after a delimiter or
-    // reliable filename suffix proves the ref is complete.
+    // the single-token DOMParser helper only after a grammar delimiter or
+    // authoritative parser finalization proves the ref is complete.
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
@@ -4886,10 +4880,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         writeCurrent(slice);
       }
       const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,m[1],parent):null;
-      // A detached suffix is not itself a reliable streaming boundary: the
-      // chunk may have ended inside a filename (e.g. a. + png). Keep buffering
-      // until the parsed reference itself proves complete.
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+      // An add_text callback boundary is never proof that the logical ref is
+      // complete: later callbacks can append a filename suffix, query, or
+      // fragment even when this callback ends at a familiar extension. Keep
+      // the trailing candidate buffered until grammar or parser finalization
+      // supplies an authoritative boundary.
+      if(matchEnd===combined.length){
         const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
