@@ -2802,12 +2802,12 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
         if not _custom_slug_rest_looks_like_host_port(_slug_rest):
             provider_hint, extra = provider_hint.rsplit(":", 1)
             bare_model = f"{extra}:{bare_model}"
-    elif (_canonicalise_provider_id(provider_hint) not in _PROVIDER_MODELS
-            and _canonicalise_provider_id(provider_hint) not in _PROVIDER_DISPLAY
+    elif (provider_hint not in _PROVIDER_MODELS
+            and provider_hint not in _PROVIDER_DISPLAY
             and not provider_hint.lower().startswith("custom:")):
         provider_hint, bare_model = inner.split(":", 1)
-    if not provider_hint.lower().startswith("custom:"):
-        provider_hint = _canonicalise_provider_id(provider_hint)
+    if _canonicalise_provider_id(provider_hint) == "opencode-free":
+        provider_hint = "opencode-free"
     return bare_model, provider_hint
 
 
@@ -2979,8 +2979,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # vLLM, TabbyAPI) actually use. See #1384.
     if isinstance(config_provider, str) and config_provider.strip().lower() == "local":
         config_provider = "custom"
-    if config_provider:
-        config_provider = _canonicalise_provider_id(config_provider)
+    if _canonicalise_provider_id(config_provider) == "opencode-free":
+        config_provider = "opencode-free"
 
     def _finalize(model: object, provider: object, base_url: object) -> tuple:
         """Point-of-return collision guard.
@@ -6562,7 +6562,8 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
         # matcher — see `static/panels.js` (#895).
         persisted_provider = str(requested_provider or resolved_provider or previous_provider or "").strip()
-        persisted_provider = _canonicalise_provider_id(persisted_provider)
+        if _canonicalise_provider_id(persisted_provider) == "opencode-free":
+            persisted_provider = "opencode-free"
         persisted_model = str(resolved_model or selected_model).strip()
         if persisted_provider == "opencode-free":
             persisted_model = _sanitize_opencode_free_default(persisted_model, persisted_provider)
@@ -7576,7 +7577,15 @@ def _static_models_catalog_without_live_probes() -> dict:
                     if has_local_signal:
                         detected_providers.add(canonical)
 
-        if provider_is_keyless("opencode-free"):
+        if provider_is_keyless("opencode-free") and (
+            not active_provider
+            or active_provider == "opencode-free"
+            or any(
+                _canonicalise_provider_id(key) == "opencode-free"
+                for key in (cfg.get("providers") or {})
+                if isinstance(cfg.get("providers") or {}, dict)
+            )
+        ):
             detected_providers.add("opencode-free")
 
         for provider_id in set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY):
@@ -10636,7 +10645,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _pid_norm.startswith("custom:") and _pid_norm not in _named_custom_slugs:
                     detected_providers.discard(_pid)
 
-        if provider_is_keyless("opencode-free"):
+        if provider_is_keyless("opencode-free") and (
+            not active_provider
+            or active_provider == "opencode-free"
+            or any(
+                _canonicalise_provider_id(key) == "opencode-free"
+                for key in (cfg.get("providers") or {})
+                if isinstance(cfg.get("providers") or {}, dict)
+            )
+        ):
             detected_providers.add("opencode-free")
 
         # Filter providers if providers.only_configured is set
