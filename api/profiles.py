@@ -1150,6 +1150,18 @@ def _end_process_env_scope(*, serialized: bool, env_lock) -> None:
         _process_env_scope_condition.notify_all()
 
 
+@contextmanager
+def process_env_scope_for_streaming_turn(keys: set[str], env_lock):
+    """Coordinate a streaming turn with serialized process-env readers."""
+    _begin_process_env_scope(serialized=False)
+    try:
+        with env_lock:
+            _capture_process_env_baseline(keys)
+        yield
+    finally:
+        _end_process_env_scope(serialized=False, env_lock=env_lock)
+
+
 _secret_scope_available = None
 
 

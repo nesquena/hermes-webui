@@ -677,7 +677,7 @@ def test_execute_plugin_commands_serialize_profile_process_env(
     second_profile,
     second_key,
 ):
-    """Concurrent plugin handlers must not observe another profile's key."""
+    """Plugin handlers must not observe another profile's process environment."""
     import os
     import sys
 
@@ -802,6 +802,48 @@ def test_execute_plugin_commands_serialize_profile_process_env(
         default_thread.join(timeout=5)
 
     assert not background_thread.is_alive()
+    assert not default_thread.is_alive()
+    assert not errors
+    assert observed["default"] == "default-key"
+    assert os.environ.get("XQUIK_API_KEY") == "default-key"
+
+    from api.streaming import _ENV_LOCK
+
+    stream_entered = threading.Event()
+    stream_release = threading.Event()
+
+    def streaming_worker():
+        with profiles.process_env_scope_for_streaming_turn(
+            {"XQUIK_API_KEY"},
+            _ENV_LOCK,
+        ):
+            with _ENV_LOCK:
+                previous_key = os.environ.get("XQUIK_API_KEY")
+                os.environ["XQUIK_API_KEY"] = "alpha-key"
+            try:
+                stream_entered.set()
+                assert stream_release.wait(timeout=5)
+            finally:
+                with _ENV_LOCK:
+                    os.environ["XQUIK_API_KEY"] = previous_key
+
+    observed.pop("default")
+    beta_entered.clear()
+    stream_thread = threading.Thread(target=streaming_worker)
+    default_thread = threading.Thread(target=worker, args=("default",))
+    try:
+        stream_thread.start()
+        assert stream_entered.wait(timeout=5)
+        default_thread.start()
+        assert not beta_entered.wait(timeout=0.2)
+        stream_release.set()
+        assert beta_entered.wait(timeout=5)
+    finally:
+        stream_release.set()
+        stream_thread.join(timeout=5)
+        default_thread.join(timeout=5)
+
+    assert not stream_thread.is_alive()
     assert not default_thread.is_alive()
     assert not errors
     assert observed["default"] == "default-key"

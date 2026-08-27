@@ -9131,6 +9131,7 @@ def _run_agent_streaming(
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
+    _streaming_process_env_scope = None
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -9203,6 +9204,7 @@ def _run_agent_streaming(
                 snapshot_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
+                process_env_scope_for_streaming_turn,
                 _skill_modules_support_profile_home,
                 _SKILL_HOME_MODULE_PATCH_LOCK,
             )
@@ -9220,6 +9222,7 @@ def _run_agent_streaming(
             restore_skill_home_modules = None
             _skill_modules_support_profile_home = None
             _SKILL_HOME_MODULE_PATCH_LOCK = None
+            process_env_scope_for_streaming_turn = None
 
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
@@ -9291,6 +9294,20 @@ def _run_agent_streaming(
         # Dynamic-capable modules continue concurrent execution.
         _streaming_override_installed = bool(_streaming_hermes_home_override_ctx[2])
         _streaming_modules_are_dynamic = False
+        if process_env_scope_for_streaming_turn is not None:
+            _streaming_process_env_scope = process_env_scope_for_streaming_turn(
+                set(_safe_profile_runtime_env)
+                | {
+                    'TERMINAL_CWD',
+                    'HERMES_EXEC_ASK',
+                    'HERMES_SESSION_KEY',
+                    'HERMES_SESSION_ID',
+                    'HERMES_SESSION_PLATFORM',
+                    'HERMES_SESSION_CHAT_ID',
+                },
+                _ENV_LOCK,
+            )
+            _streaming_process_env_scope.__enter__()
         if patch_skill_home_modules is not None and snapshot_skill_home_modules is not None:
             if _streaming_override_installed and _skill_modules_support_profile_home is not None:
                 try:
@@ -12808,6 +12825,9 @@ def _run_agent_streaming(
         if _acquired_streaming_skill_home_patch_lock:
             _SKILL_HOME_MODULE_PATCH_LOCK.release()
             _acquired_streaming_skill_home_patch_lock = False
+        if _streaming_process_env_scope is not None:
+            _streaming_process_env_scope.__exit__(None, None, None)
+            _streaming_process_env_scope = None
         _reset_streaming_hermes_home_override(*_streaming_hermes_home_override_ctx)
         # xsession wakeup misroute root fix (Option 1): restore the per-turn
         # session-identity context-locals (reset-token semantics). MUST run on
