@@ -1073,6 +1073,54 @@ def _agent_registry_credential_env_names() -> set[str]:
     return names
 
 
+def _plugin_required_env_names(*profile_home_paths: Path) -> set[str]:
+    """Return env-var names declared by installed Hermes plugins."""
+    names: set[str] = set()
+
+    def add_requirements(requirements) -> None:
+        if isinstance(requirements, (str, dict)):
+            requirements = (requirements,)
+        for requirement in requirements or ():
+            value = requirement.get("name") if isinstance(requirement, dict) else requirement
+            name = value.strip() if isinstance(value, str) else ""
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                names.add(name)
+
+    plugin_roots = {Path(home) / "plugins" for home in profile_home_paths}
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        manager = get_plugin_manager()
+        plugins = getattr(manager, "_plugins", {}) or {}
+        loaded_plugins = plugins.values() if hasattr(plugins, "values") else ()
+        for loaded in loaded_plugins:
+            manifest = getattr(loaded, "manifest", None)
+            add_requirements(getattr(manifest, "requires_env", ()))
+    except Exception:
+        logger.debug(
+            "Failed to load plugin env names for profile scope",
+            exc_info=True,
+        )
+
+    for plugin_root in plugin_roots:
+        if not plugin_root.is_dir():
+            continue
+        manifest_paths = list(plugin_root.glob("*/plugin.yaml"))
+        manifest_paths.extend(plugin_root.glob("*/*/plugin.yaml"))
+        for manifest_path in manifest_paths:
+            try:
+                payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+                if isinstance(payload, dict):
+                    add_requirements(payload.get("requires_env", ()))
+            except Exception:
+                logger.debug(
+                    "Failed to inspect plugin env names from %s",
+                    manifest_path,
+                    exc_info=True,
+                )
+    return names
+
+
 def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     names: set[str] = set()
     try:
@@ -1137,9 +1185,13 @@ def _profile_scoped_env_names(
         if Path(profile_home_path) == root_home
         else _profile_secret_env_names(profile_home_path)
     )
+    loaded_env_names = set(_loaded_profile_env_keys)
+    plugin_env_names = _plugin_required_env_names(root_home, profile_home_path)
     with _profile_runtime_env_keys_lock:
         _profile_runtime_env_keys.update(root_env)
         _profile_runtime_env_keys.update(root_secret_names)
+        _profile_runtime_env_keys.update(loaded_env_names)
+        _profile_runtime_env_keys.update(plugin_env_names)
         _profile_runtime_env_keys.update(safe_runtime_env)
         _profile_runtime_env_keys.update(selected_secret_names)
         known_runtime_names = set(_profile_runtime_env_keys)

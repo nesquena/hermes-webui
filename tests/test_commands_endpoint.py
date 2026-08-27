@@ -1238,3 +1238,80 @@ def test_named_plugin_command_scrubs_root_only_runtime_key(monkeypatch, tmp_path
     assert result == "ok"
     assert observed == [None]
     assert os.environ.get("XQUIK_API_KEY") == "default-key"
+
+
+@pytest.mark.parametrize(
+    ("loaded_profile_keys", "requirement_source"),
+    (
+        ({"XQUIK_API_KEY"}, "loaded"),
+        (set(), "file"),
+        (set(), "manager"),
+    ),
+)
+def test_named_plugin_command_scrubs_process_loaded_plugin_key(
+    monkeypatch,
+    tmp_path,
+    loaded_profile_keys,
+    requirement_source,
+):
+    """A named plugin must not inherit a process-loaded root credential."""
+    import os
+    import sys
+
+    import api.commands as commands
+    import api.profiles as profiles
+
+    base = tmp_path / ".hermes"
+    profile_home = base / "profiles" / "alpha"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    if requirement_source == "file":
+        plugin_home = profile_home / "plugins" / "hermes-tweet"
+        plugin_home.mkdir(parents=True)
+        (plugin_home / "plugin.yaml").write_text(
+            "requires_env:\n  - name: XQUIK_API_KEY\n    secret: true\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", loaded_profile_keys)
+    monkeypatch.setattr(profiles, "_profile_runtime_env_keys", set())
+    monkeypatch.setattr(profiles, "_resolve_hermes_home_override", lambda: SimpleNamespace(
+        set_hermes_home_override=lambda _home: None,
+        reset_hermes_home_override=lambda _token: None,
+    ))
+    monkeypatch.setattr(profiles, "_skill_modules_support_profile_home", lambda _home: True)
+    monkeypatch.setenv("XQUIK_API_KEY", "process-root-key")
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    plugins = ModuleType("hermes_cli.plugins")
+    observed = []
+
+    def handler(_arg):
+        observed.append(os.getenv("XQUIK_API_KEY"))
+        return "ok"
+
+    manifest_requirements = (
+        [{"name": "XQUIK_API_KEY", "secret": True}]
+        if requirement_source == "manager"
+        else []
+    )
+    manifest = SimpleNamespace(requires_env=manifest_requirements)
+    manager = SimpleNamespace(
+        _plugins={"hermes-tweet": SimpleNamespace(manifest=manifest)},
+    )
+    plugins.get_plugin_manager = lambda: manager
+    plugins.get_plugin_command_handler = lambda _name: handler
+    plugins.resolve_plugin_command_result = lambda result: result
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+
+    profiles.set_request_profile("alpha")
+    try:
+        result = commands.execute_plugin_command("/xstatus")
+    finally:
+        profiles.clear_request_profile()
+
+    assert result == "ok"
+    assert observed == [None]
+    assert os.environ.get("XQUIK_API_KEY") == "process-root-key"
