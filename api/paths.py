@@ -83,6 +83,34 @@ def _has_extended_attributes(path: Path) -> bool:
         raise
 
 
+# ``write()`` drops these from a file written by a non-superuser, so they can
+# only be applied *after* the payload lands. Sticky (``S_ISVTX``) survives a
+# write on both Linux and macOS and needs no restoration.
+_WRITE_CLEARED_MODE_BITS = stat.S_ISUID | stat.S_ISGID
+
+
+def _restore_write_cleared_mode_bits(
+    fd: int, mode: int | None, *, path: str | Path | None = None
+) -> None:
+    """Re-apply setuid/setgid bits that writing the payload cleared.
+
+    POSIX requires ``write()`` to clear ``S_ISUID``/``S_ISGID`` when the writer
+    is not the superuser (``man 2 write``), so a ``chmod`` issued *before* the
+    content is written loses exactly the bits it just set. macOS clears setgid
+    unconditionally; Linux keeps setgid only while the writer belongs to the
+    file's group but drops setuid regardless. Re-applying the mode once the
+    bytes are down is the only ordering that preserves an administrator's
+    policy on every platform, and it is skipped entirely for ordinary modes so
+    the common ``0644``/``0664`` path issues no extra syscall.
+    """
+    if mode is None or not mode & _WRITE_CLEARED_MODE_BITS:
+        return
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, mode)
+    elif path is not None:
+        os.chmod(path, mode)
+
+
 def _require_writable_target(write_path: Path) -> os.stat_result | None:
     """Reject writes to a read-only target before any replacement work.
 
@@ -124,6 +152,9 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     owner-only. Existing files copy uid/gid and mode onto the temp descriptor;
     new files use the active process umask, exactly as a normal
     ``open(..., "w")`` would.
+    Special mode bits need care: POSIX makes ``write()`` clear
+    ``S_ISUID``/``S_ISGID`` for a non-superuser writer, so the mode is
+    re-applied after the payload is written rather than only before it.
     (Unlike ``.env``, ``config.yaml`` holds no secrets and is not meant to be
     forced to ``0600``.)
 
@@ -186,6 +217,16 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                     fallback_file.write(text)
                     fallback_file.flush()
                     os.fsync(fallback_file.fileno())
+                    # This path writes the live config inode, so a cleared
+                    # setuid/setgid bit is lost from the real file rather than
+                    # from a discarded temp copy. Read the mode off the inode
+                    # actually opened above; the outer ``mode`` is ``None``
+                    # whenever the writability probe saw a non-regular file.
+                    _restore_write_cleared_mode_bits(
+                        fallback_file.fileno(),
+                        stat.S_IMODE(opened_stat.st_mode),
+                        path=write_path,
+                    )
             finally:
                 if owns_fallback_fd:
                     os.close(fallback_fd)
@@ -241,6 +282,10 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+            # The chmod above ran before these bytes existed, so the kernel
+            # has since stripped any setuid/setgid bit from the temp inode.
+            # Restore it before the rename carries the mode onto the target.
+            _restore_write_cleared_mode_bits(f.fileno(), mode, path=tmp)
         _verify_symlink_target()
         os.replace(tmp, write_path)
         _fsync_directory(write_path.parent)
