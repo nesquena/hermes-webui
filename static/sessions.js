@@ -1298,12 +1298,10 @@ const _emptyComposerModelOverrideHost=typeof window!=='undefined'?window:globalT
 function _rememberEmptyComposerModelOverride(model, modelProvider){
   const resolvedModel=String(model||'').trim();
   if(!resolvedModel) return;
-  const previous=_emptyComposerModelOverrideHost._emptyComposerModelOverride;
   _emptyComposerModelOverrideHost._emptyComposerModelOverride={
     model:resolvedModel,
     model_provider:modelProvider||null,
     saved_at:Date.now(),
-    revision:(Number(previous&&previous.revision||0)||0)+1,
   };
 }
 
@@ -1314,7 +1312,6 @@ function _readEmptyComposerModelOverride(){
     model:String(state.model||''),
     model_provider:state.model_provider||null,
     saved_at:Number(state.saved_at||0)||0,
-    revision:Number(state.revision||0)||0,
   };
 }
 
@@ -1322,17 +1319,48 @@ function _clearEmptyComposerModelOverride(){
   _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
 }
 
-function _resetEmptyComposerModelToConfiguredDefault(overrideRevisionAtDelete){
-  const currentOverride=typeof _readEmptyComposerModelOverride==='function'
-    ? _readEmptyComposerModelOverride()
+const _composerModelPickHost=typeof window!=='undefined'?window:globalThis;
+
+// Track explicit picker intent independently of S.session. During deletion the
+// picker can change both before and after the active session is cleared.
+function _rememberComposerModelPick(model, modelProvider){
+  const resolvedModel=String(model||'').trim();
+  if(!resolvedModel) return;
+  const previous=_composerModelPickHost._composerModelPick;
+  _composerModelPickHost._composerModelPick={
+    model:resolvedModel,
+    model_provider:modelProvider||null,
+    revision:(Number(previous&&previous.revision||0)||0)+1,
+  };
+}
+
+function _readComposerModelPick(){
+  const state=_composerModelPickHost._composerModelPick;
+  if(!state||!state.model) return null;
+  return {
+    model:String(state.model||''),
+    model_provider:state.model_provider||null,
+    revision:Number(state.revision||0)||0,
+  };
+}
+
+function _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete){
+  const currentPick=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
     : null;
-  const currentRevision=Number(currentOverride&&currentOverride.revision||0)||0;
-  if(currentRevision!==(Number(overrideRevisionAtDelete||0)||0)) return null;
-  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
-  const model=String(window._defaultModel||'').trim();
+  const currentRevision=Number(currentPick&&currentPick.revision||0)||0;
+  const preservePick=currentPick&&currentRevision!==(Number(modelPickRevisionAtDelete||0)||0);
+  const model=String(preservePick?currentPick.model:(window._defaultModel||'')).trim();
+  const provider=preservePick?currentPick.model_provider:(window._activeProvider||null);
+  if(preservePick){
+    if(typeof _rememberEmptyComposerModelOverride==='function'){
+      _rememberEmptyComposerModelOverride(model,provider);
+    }
+  }else if(typeof _clearEmptyComposerModelOverride==='function'){
+    _clearEmptyComposerModelOverride();
+  }
   const modelSel=$('modelSelect');
   if(!model||!modelSel) return null;
-  const provider=window._activeProvider||null;
   const applied=typeof _ensureModelOptionInDropdown==='function'
     ? _ensureModelOptionInDropdown(model,modelSel,provider)
     : (typeof _applyModelToDropdown==='function'?_applyModelToDropdown(model,modelSel,provider):null);
@@ -4374,6 +4402,10 @@ function _renderBatchActionBar(){
       danger:true
     });
     if(!ok)return;
+    const modelPickAtDelete=typeof _readComposerModelPick==='function'
+      ? _readComposerModelPick()
+      : null;
+    const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
     try{
       const results=await Promise.all(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
@@ -4383,16 +4415,12 @@ function _renderBatchActionBar(){
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
-        const overrideAtDelete=typeof _readEmptyComposerModelOverride==='function'
-          ? _readEmptyComposerModelOverride()
-          : null;
-        const overrideRevisionAtDelete=Number(overrideAtDelete&&overrideAtDelete.revision||0)||0;
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{
-          _resetEmptyComposerModelToConfiguredDefault(overrideRevisionAtDelete);
+          _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
           $('msgInner').innerHTML='';$('emptyState').style.display='';
         }
       }
@@ -9163,6 +9191,10 @@ async function deleteSession(sid, beforeDelete=null){
     danger:true
   });
   if(!ok)return false;
+  const modelPickAtDelete=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
   const reflowPositions=_captureSessionReflowPositions();
   const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
   const previousSessions=_allSessions;
@@ -9198,10 +9230,6 @@ async function deleteSession(sid, beforeDelete=null){
     _optimisticallyRemoveSessionFromList(sid);
   }
   if(S.session&&S.session.session_id===sid){
-    const overrideAtDelete=typeof _readEmptyComposerModelOverride==='function'
-      ? _readEmptyComposerModelOverride()
-      : null;
-    const overrideRevisionAtDelete=Number(overrideAtDelete&&overrideAtDelete.revision||0)||0;
     S.session=null;S.messages=[];S.entries=[];
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
@@ -9210,7 +9238,7 @@ async function deleteSession(sid, beforeDelete=null){
     if(remaining.sessions&&remaining.sessions.length){
       await loadSession(remaining.sessions[0].session_id);
     }else{
-      _resetEmptyComposerModelToConfiguredDefault(overrideRevisionAtDelete);
+      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
       const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
