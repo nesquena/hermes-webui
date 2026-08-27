@@ -144,26 +144,94 @@ def _restore_write_cleared_mode_bits(
             raise
 
 
-def _require_writable_target(write_path: Path) -> os.stat_result | None:
+def _require_writable_target(write_path: Path) -> tuple[int, os.stat_result] | None:
     """Reject writes to a read-only target before any replacement work.
 
     ``os.replace`` happily swaps a fresh inode over a ``0444`` file when the
     directory is writable, which would silently defeat a deliberately locked
     config. The old in-place ``Path.write_text`` raised ``PermissionError``
     there; preserve that contract with a non-truncating ``O_WRONLY`` probe,
-    letting the failure propagate. Returns the ``fstat`` of the inode the
-    probe actually opened (so the caller's metadata describes the verified
-    file even if a concurrent writer replaced it since its own ``stat``), or
-    ``None`` if the target vanished concurrently.
+    letting the failure propagate.
+
+    Returns the still-OPEN descriptor together with its ``fstat``, or ``None``
+    if the target vanished concurrently. The caller owns the descriptor and
+    must close it. Keeping it open is what makes the special-bit restore
+    safe: the mode is re-read from this pinned inode immediately before the
+    commit, so a bit revoked after the probe is never resurrected from a
+    stale snapshot, and the ``(st_dev, st_ino)`` identity can be rechecked to
+    prove the destination is still the same regular file.
     """
     try:
         probe_fd = os.open(write_path, os.O_WRONLY)
     except FileNotFoundError:
         return None
     try:
-        return os.fstat(probe_fd)
-    finally:
+        return probe_fd, os.fstat(probe_fd)
+    except BaseException:
         os.close(probe_fd)
+        raise
+
+
+def _live_special_bits(probe_fd: int | None, mode: int | None) -> int | None:
+    """Return the special bits to re-apply, re-read from the live target.
+
+    ``mode`` was captured when the destination was probed; between then and
+    the commit an administrator may have revoked ``S_ISUID``/``S_ISGID``.
+    Replaying the snapshot would silently undo that revocation, so the bits
+    are re-read from the still-open destination descriptor and intersected
+    with the snapshot: a bit that is no longer set on the live inode is not
+    restored.
+
+    Fails closed. If the descriptor cannot be stat'd, or the destination is
+    no longer a regular file, no special bit is returned at all — an
+    uncertain destination never receives a privilege bit.
+    """
+    if mode is None or not mode & _WRITE_CLEARED_MODE_BITS:
+        return mode
+    if probe_fd is None:
+        return mode & ~_WRITE_CLEARED_MODE_BITS
+    try:
+        live = os.fstat(probe_fd)
+    except OSError:
+        return mode & ~_WRITE_CLEARED_MODE_BITS
+    if not stat.S_ISREG(live.st_mode):
+        return mode & ~_WRITE_CLEARED_MODE_BITS
+    still_set = stat.S_IMODE(live.st_mode) & _WRITE_CLEARED_MODE_BITS
+    return (mode & ~_WRITE_CLEARED_MODE_BITS) | (mode & still_set)
+
+
+def _require_same_target(
+    probe_fd: int | None, write_path: Path, mode: int | None
+) -> None:
+    """Fail closed unless *write_path* is still the inode we probed.
+
+    Scoped deliberately to commits that carry ``S_ISUID``/``S_ISGID``. Those
+    are the only ones where a swapped destination is a privilege decision: a
+    target replaced after the probe (unlinked, swapped for a FIFO, or pointed
+    at another inode) would otherwise receive a special bit that belonged to
+    an inode we validated and no longer own.
+
+    Ordinary writes deliberately skip this. Concurrent saves are documented
+    last-writer-wins — several WebUI writers legitimately replace the file in
+    turn, each invalidating the previous writer's probe — so refusing on
+    identity change alone would turn normal concurrency into a hard failure
+    while protecting nothing. Without a special bit the swap costs no more
+    than the plain ``os.replace`` already did before this fix.
+    """
+    if probe_fd is None or mode is None or not mode & _WRITE_CLEARED_MODE_BITS:
+        return
+    try:
+        pinned = os.fstat(probe_fd)
+    except OSError as exc:
+        raise PermissionError("config target became unreadable before commit") from exc
+    try:
+        current = os.stat(write_path)
+    except FileNotFoundError as exc:
+        raise PermissionError("config target disappeared before commit") from exc
+    if not stat.S_ISREG(current.st_mode):
+        raise PermissionError("config target is no longer a regular file")
+    if (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
+        raise PermissionError("config target changed before commit")
 
 
 def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
@@ -262,9 +330,12 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                     # concurrent chmod could be clobbered as small as the
                     # kernel allows. This path writes the live config inode, so
                     # a cleared bit is lost from the real file rather than from
-                    # a discarded temp copy. Best-effort, because the content is
-                    # already committed and a group-writable config may be saved
-                    # by a non-owner who cannot chmod it at all.
+                    # a discarded temp copy. The bits come from this very
+                    # descriptor's pre-write fstat, not from an earlier probe,
+                    # so a revocation observed here is never undone.
+                    # Best-effort, because the content is already committed and
+                    # a group-writable config may be saved by a non-owner who
+                    # cannot chmod it at all.
                     _restore_write_cleared_mode_bits(
                         fallback_file.fileno(),
                         stat.S_IMODE(opened_stat.st_mode),
@@ -276,75 +347,95 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 if owns_fallback_fd:
                     os.close(fallback_fd)
 
-    if existing_stat is not None and stat.S_ISREG(existing_stat.st_mode):
-        probed_stat = _require_writable_target(write_path)
-        if probed_stat is not None and stat.S_ISREG(probed_stat.st_mode):
-            existing_stat = probed_stat
-            mode = stat.S_IMODE(existing_stat.st_mode)
-        else:
-            existing_stat = probed_stat
-            mode = None
-        if existing_stat is not None and (
-            existing_stat.st_nlink > 1 or _has_extended_attributes(write_path)
-        ):
-            _write_in_place()
-            return
-
+    probe_fd: int | None = None
     try:
-        fd, tmp = _create_atomic_temp_file(write_path, existing=existing_stat is not None)
-    except PermissionError:
-        _write_in_place()
-        return
-    owns_fd = True
-    try:
-        if existing_stat is not None and hasattr(os, "fchown"):
-            try:
-                os.fchown(fd, existing_stat.st_uid, existing_stat.st_gid)
-            except (OSError, NotImplementedError) as exc:
-                unsupported_ownership_errnos = {
-                    errno.EINVAL,
-                    errno.ENOSYS,
-                    errno.ENOTSUP,
-                }
-                if (
-                    isinstance(exc, OSError)
-                    and not isinstance(exc, PermissionError)
-                    and exc.errno not in unsupported_ownership_errnos
-                ):
-                    raise
-                os.close(fd)
-                owns_fd = False
-                os.unlink(tmp)
+        if existing_stat is not None and stat.S_ISREG(existing_stat.st_mode):
+            probed = _require_writable_target(write_path)
+            if probed is not None:
+                probe_fd, probed_stat = probed
+            else:
+                probed_stat = None
+            if probed_stat is not None and stat.S_ISREG(probed_stat.st_mode):
+                existing_stat = probed_stat
+                mode = stat.S_IMODE(existing_stat.st_mode)
+            else:
+                existing_stat = probed_stat
+                mode = None
+            if existing_stat is not None and (
+                existing_stat.st_nlink > 1 or _has_extended_attributes(write_path)
+            ):
                 _write_in_place()
                 return
-        if mode is not None and hasattr(os, "fchmod"):
-            os.fchmod(fd, mode)
-        elif mode is not None:
-            os.chmod(tmp, mode)
-        f = os.fdopen(fd, "w", encoding=encoding)
-        owns_fd = False
-        with f:
-            f.write(text)
-            f.flush()
-            # Restore before the fsync for the same reason as the in-place
-            # path; here the temp inode is still private, so no third party
-            # can observe or race it before os.replace commits.
-            _restore_write_cleared_mode_bits(f.fileno(), mode, path=tmp)
-            os.fsync(f.fileno())
-        _verify_symlink_target()
-        os.replace(tmp, write_path)
-        _fsync_directory(write_path.parent)
-    except BaseException:
-        if owns_fd:
+
+        try:
+            fd, tmp = _create_atomic_temp_file(
+                write_path, existing=existing_stat is not None
+            )
+        except PermissionError:
+            _write_in_place()
+            return
+        owns_fd = True
+        try:
+            if existing_stat is not None and hasattr(os, "fchown"):
+                try:
+                    os.fchown(fd, existing_stat.st_uid, existing_stat.st_gid)
+                except (OSError, NotImplementedError) as exc:
+                    unsupported_ownership_errnos = {
+                        errno.EINVAL,
+                        errno.ENOSYS,
+                        errno.ENOTSUP,
+                    }
+                    if (
+                        isinstance(exc, OSError)
+                        and not isinstance(exc, PermissionError)
+                        and exc.errno not in unsupported_ownership_errnos
+                    ):
+                        raise
+                    os.close(fd)
+                    owns_fd = False
+                    os.unlink(tmp)
+                    _write_in_place()
+                    return
+            if mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
+            elif mode is not None:
+                os.chmod(tmp, mode)
+            f = os.fdopen(fd, "w", encoding=encoding)
+            owns_fd = False
+            with f:
+                f.write(text)
+                f.flush()
+                # Restore before the fsync for the same reason as the in-place
+                # path; here the temp inode is still private, so no third party
+                # can observe or race it before os.replace commits.
+                #
+                # The bits to re-apply are re-read from the pinned destination
+                # descriptor rather than replayed from the probe-time snapshot:
+                # an admin who revoked setuid/setgid after the probe must not
+                # have that revocation undone by the commit, and a destination
+                # that is no longer the same regular file must not receive a
+                # privilege bit at all.
+                commit_mode = _live_special_bits(probe_fd, mode)
+                _restore_write_cleared_mode_bits(f.fileno(), commit_mode, path=tmp)
+                os.fsync(f.fileno())
+            _verify_symlink_target()
+            _require_same_target(probe_fd, write_path, mode)
+            os.replace(tmp, write_path)
+            _fsync_directory(write_path.parent)
+        except BaseException:
+            if owns_fd:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
-                os.close(fd)
+                os.unlink(tmp)
             except OSError:
                 pass
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            raise
+    finally:
+        if probe_fd is not None:
+            os.close(probe_fd)
 
 
 def _hermes_home_has_webui_state(base: Path) -> bool:

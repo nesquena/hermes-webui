@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from api import paths
 from api.paths import _atomic_write_text
 
 
@@ -137,7 +138,10 @@ def test_in_place_fallback_keeps_content_when_mode_restore_is_denied(
     target = tmp_path / "config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
     os.link(target, tmp_path / "config.hardlink")
-    os.chmod(target, 0o2664)
+    # setuid, not setgid: Linux only clears setgid when S_IXGRP is set, so a
+    # 0o2664 target never reaches the restore there and the denial below
+    # would never fire — the test would pass without proving anything.
+    os.chmod(target, 0o4664)
 
     def deny(*_args: object, **_kwargs: object) -> None:
         raise PermissionError(errno.EPERM, "Operation not permitted")
@@ -167,7 +171,10 @@ def test_mode_restore_does_not_revert_a_concurrent_permission_change(
     target = tmp_path / "config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
     os.link(target, tmp_path / "config.hardlink")
-    os.chmod(target, 0o2664)
+    # setuid: on Linux setgid is only cleared when S_IXGRP is set, so 0o2664
+    # would skip the restore entirely and the injected chmod would never land
+    # in the guarded window.
+    os.chmod(target, 0o4664)
 
     real_fstat = os.fstat
     fired: list[bool] = []
@@ -175,8 +182,8 @@ def test_mode_restore_does_not_revert_a_concurrent_permission_change(
     def widen_before_restore(fd: int) -> os.stat_result:
         result = real_fstat(fd)
         # The restore's own fstat is the first one to observe the payload
-        # write's cleared setgid; chmod there and let it read the new mode.
-        if not fired and not result.st_mode & stat.S_ISGID:
+        # write's cleared setuid; chmod there and let it read the new mode.
+        if not fired and not result.st_mode & stat.S_ISUID:
             fired.append(True)
             os.chmod(target, 0o0666)  # admin: chmod o+w while the save runs
             result = real_fstat(fd)
@@ -187,9 +194,9 @@ def test_mode_restore_does_not_revert_a_concurrent_permission_change(
 
     assert fired, "the concurrent chmod never landed in the guarded window"
     assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
-    # The administrator's o+w survives, and setgid is still restored on top.
-    # A wholesale replay of the captured 0o2664 would drop the o+w.
-    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2666
+    # The administrator's o+w survives, and setuid is still restored on top.
+    # A wholesale replay of the captured 0o4664 would drop the o+w.
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o4666
 
 
 def test_mode_restore_runs_before_fsync_not_after(tmp_path: Path, monkeypatch) -> None:
@@ -204,12 +211,13 @@ def test_mode_restore_runs_before_fsync_not_after(tmp_path: Path, monkeypatch) -
     target = tmp_path / "config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
     os.link(target, tmp_path / "config.hardlink")
-    os.chmod(target, 0o2664)
+    # setuid, for the Linux S_IXGRP reason noted above.
+    os.chmod(target, 0o4664)
 
     real_fsync = os.fsync
 
     def revoke_during_fsync(fd: int) -> None:
-        os.chmod(target, 0o0664)  # admin: chmod g-s, after our restore ran
+        os.chmod(target, 0o0664)  # admin: chmod u-s, after our restore ran
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", revoke_during_fsync)
@@ -259,7 +267,10 @@ def test_atomic_path_restore_failure_aborts_and_leaves_no_debris(
     """
     target = tmp_path / "config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
-    os.chmod(target, 0o2664)
+    # setuid, for the Linux S_IXGRP reason noted above: with 0o2664 the
+    # restore never runs on Linux, so the denial could not be reached and the
+    # `len(calls) == 2` assertion would fail for the wrong reason.
+    os.chmod(target, 0o4664)
     assert os.stat(target).st_nlink == 1, "must take the atomic path"
 
     real_fchmod = os.fchmod
@@ -283,7 +294,86 @@ def test_atomic_path_restore_failure_aborts_and_leaves_no_debris(
     assert len(calls) == 2, f"the restore never ran; fchmod calls: {calls}"
     # All-or-nothing: the original content and mode both survive intact.
     assert target.read_text(encoding="utf-8") == "model:\n  default: old\n"
-    assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o4664
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "config.yaml"]
+    assert leftovers == [], f"temp debris left behind: {leftovers}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX special mode bits")
+def test_revoked_special_bit_is_not_resurrected_from_the_probe_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A bit revoked after the probe must stay revoked.
+
+    ``mode`` is captured when the destination is probed and re-applied after
+    the payload write. If an administrator runs ``chmod u-s`` inside that
+    window, replaying the snapshot silently undoes the revocation and the
+    committed file carries a privilege bit the admin explicitly removed.
+    The commit must therefore re-read the live bits from the pinned target
+    instead of trusting the snapshot.
+    """
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.chmod(target, 0o4755)
+
+    real_probe = paths._require_writable_target
+    fired: list[bool] = []
+
+    def revoke_after_probe(write_path: Path):
+        probed = real_probe(write_path)
+        if not fired:
+            fired.append(True)
+            os.chmod(target, 0o0755)  # admin revokes setuid mid-write
+        return probed
+
+    monkeypatch.setattr(paths, "_require_writable_target", revoke_after_probe)
+    _atomic_write_text(target, "model:\n  default: new\n")
+
+    assert fired, "the revocation never landed in the guarded window"
+    assert target.read_text(encoding="utf-8") == "model:\n  default: new\n"
+    assert not os.stat(target).st_mode & stat.S_ISUID, (
+        "the write resurrected a setuid bit the administrator had revoked"
+    )
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o0755
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX special files")
+def test_target_swapped_after_probe_is_refused_rather_than_committed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A destination swapped after the probe must fail closed.
+
+    ``os.replace`` resolves the destination name a second time, so a target
+    replaced between the probe and the commit is written without any of the
+    checks that ran against the original inode. With a stale mode snapshot
+    that is worse than a lost check: committing over a swapped-in ``0600``
+    FIFO produces a brand-new *regular* file carrying setuid, i.e. a
+    privilege bit on an inode that never had one.
+    """
+    target = tmp_path / "config.yaml"
+    target.write_text("model:\n  default: old\n", encoding="utf-8")
+    os.chmod(target, 0o4755)
+
+    real_probe = paths._require_writable_target
+    fired: list[bool] = []
+
+    def swap_after_probe(write_path: Path):
+        probed = real_probe(write_path)
+        if not fired:
+            fired.append(True)
+            os.unlink(target)
+            os.mkfifo(target, 0o600)
+        return probed
+
+    monkeypatch.setattr(paths, "_require_writable_target", swap_after_probe)
+
+    with pytest.raises(PermissionError):
+        _atomic_write_text(target, "model:\n  default: new\n")
+
+    assert fired, "the swap never landed in the guarded window"
+    final = os.stat(target)
+    assert stat.S_ISFIFO(final.st_mode), "the swapped-in target was overwritten"
+    assert not final.st_mode & stat.S_ISUID
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != "config.yaml"]
     assert leftovers == [], f"temp debris left behind: {leftovers}"
 
