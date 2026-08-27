@@ -158,6 +158,82 @@ def test_cron_profile_context_serializes_concurrent_access(tmp_path):
     assert third[0] == "enter" and fourth[0] == "exit" and third[1] == fourth[1]
 
 
+def test_cron_profile_context_blocks_serialized_process_env_scope(tmp_path):
+    """Plugin environment scopes must wait until cron restores its profile."""
+    from api import profiles
+    from api.streaming import _ENV_LOCK
+
+    home = tmp_path / "cron-home"
+    home.mkdir()
+    cron_entered = threading.Event()
+    cron_release = threading.Event()
+    plugin_entered = threading.Event()
+    errors = []
+
+    def cron_worker():
+        try:
+            with profiles.cron_profile_context_for_home(home):
+                cron_entered.set()
+                assert cron_release.wait(timeout=5)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def plugin_worker():
+        try:
+            profiles._begin_process_env_scope(serialized=True)
+            try:
+                plugin_entered.set()
+            finally:
+                profiles._end_process_env_scope(env_lock=_ENV_LOCK)
+        except BaseException as exc:
+            errors.append(exc)
+
+    cron_thread = threading.Thread(target=cron_worker, daemon=True)
+    plugin_thread = threading.Thread(target=plugin_worker, daemon=True)
+    try:
+        cron_thread.start()
+        assert cron_entered.wait(timeout=5)
+        plugin_thread.start()
+        assert not plugin_entered.wait(timeout=0.2)
+        cron_release.set()
+        assert plugin_entered.wait(timeout=5)
+    finally:
+        cron_release.set()
+        cron_thread.join(timeout=5)
+        plugin_thread.join(timeout=5)
+
+    assert not cron_thread.is_alive()
+    assert not plugin_thread.is_alive()
+    assert not errors
+
+
+def test_serialized_process_env_scope_allows_nested_cron_context(tmp_path):
+    """A plugin handler may use cron without waiting on its own scope."""
+    from api import profiles
+    from api.streaming import _ENV_LOCK
+
+    home = tmp_path / "cron-home"
+    home.mkdir()
+    errors = []
+
+    def worker():
+        profiles._begin_process_env_scope(serialized=True)
+        try:
+            with profiles.cron_profile_context_for_home(home):
+                assert os.environ["HERMES_HOME"] == str(home)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            profiles._end_process_env_scope(env_lock=_ENV_LOCK)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert not errors
+
+
 def test_cron_run_does_not_silently_swallow_profile_resolution_errors():
     """_handle_cron_run must NOT silently fall through to profile_home=None
     when get_active_hermes_home() raises.

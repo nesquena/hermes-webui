@@ -16,6 +16,7 @@ import shutil
 import sys
 import threading
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
 
@@ -54,8 +55,15 @@ _profile_runtime_env_keys_lock = threading.Lock()
 _process_env_scope_condition = threading.Condition()
 _active_process_env_scopes = 0
 _serialized_process_env_scope = False
+_serialized_process_env_scope_owner: Optional[object] = None
+_serialized_process_env_scope_depth = 0
 _waiting_serialized_process_env_scopes = 0
-_process_env_scope_depths: dict[int, int] = {}
+_process_env_scope_owner: ContextVar[Optional[object]] = ContextVar(
+    "process_env_scope_owner",
+    default=None,
+)
+_process_env_scope_depths: dict[object, int] = {}
+_process_env_scope_tls = threading.local()
 _process_env_scope_baseline: dict[str, Optional[str]] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
@@ -566,6 +574,25 @@ def get_active_hermes_home() -> Path:
 _cron_env_lock = threading.Lock()
 
 
+def _begin_cron_process_env_scope():
+    from api.streaming import _ENV_LOCK
+
+    _begin_process_env_scope(serialized=False)
+    try:
+        _cron_env_lock.acquire()
+    except BaseException:
+        _end_process_env_scope(env_lock=_ENV_LOCK)
+        raise
+    return _ENV_LOCK
+
+
+def _end_cron_process_env_scope(env_lock) -> None:
+    try:
+        _cron_env_lock.release()
+    finally:
+        _end_process_env_scope(env_lock=env_lock)
+
+
 def _cron_profile_context_depth() -> int:
     return int(getattr(_tls, 'cron_profile_depth', 0) or 0)
 
@@ -673,7 +700,7 @@ class cron_profile_context_for_home:
         self._home = Path(home)
 
     def __enter__(self):
-        _cron_env_lock.acquire()
+        self._process_env_lock = _begin_cron_process_env_scope()
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')
@@ -709,9 +736,9 @@ class cron_profile_context_for_home:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context_for_home: cron.scheduler unavailable")
-        except Exception:
+        except BaseException:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
             raise
         return self
 
@@ -735,7 +762,7 @@ class cron_profile_context_for_home:
                     pass
         finally:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
         return False
 
 
@@ -752,7 +779,7 @@ class cron_profile_context:
     """
 
     def __enter__(self):
-        _cron_env_lock.acquire()
+        self._process_env_lock = _begin_cron_process_env_scope()
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')
@@ -787,9 +814,9 @@ class cron_profile_context:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context: cron.scheduler unavailable; env-var only")
-        except Exception:
+        except BaseException:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
             raise
         return self
 
@@ -816,7 +843,7 @@ class cron_profile_context:
                     pass
         finally:
             _pop_cron_profile_context_depth()
-            _cron_env_lock.release()
+            _end_cron_process_env_scope(self._process_env_lock)
         return False
 
 
@@ -1141,11 +1168,42 @@ def _restore_process_env(process_env, previous_env: dict[str, Optional[str]]) ->
             process_env[key] = old_value
 
 
+def _push_process_env_scope_frame(token, mode: str) -> None:
+    frames = getattr(_process_env_scope_tls, "frames", None)
+    if frames is None:
+        frames = []
+        _process_env_scope_tls.frames = frames
+    frames.append((token, mode))
+
+
+def _pop_process_env_scope_frame():
+    frames = getattr(_process_env_scope_tls, "frames", None)
+    if not frames:
+        return None
+    frame = frames.pop()
+    if not frames:
+        delattr(_process_env_scope_tls, "frames")
+    return frame
+
+
 def _begin_process_env_scope(*, serialized: bool) -> None:
     global _active_process_env_scopes, _serialized_process_env_scope
+    global _serialized_process_env_scope_owner, _serialized_process_env_scope_depth
     global _waiting_serialized_process_env_scopes
-    owner = threading.get_ident()
     with _process_env_scope_condition:
+        owner = _process_env_scope_owner.get()
+        if owner is _serialized_process_env_scope_owner and _serialized_process_env_scope:
+            _serialized_process_env_scope_depth += 1
+            _push_process_env_scope_frame(None, "serialized")
+            return
+        active_depth = _process_env_scope_depths.get(owner, 0)
+        if active_depth:
+            if serialized:
+                raise RuntimeError("Cannot promote an active process environment scope")
+            _process_env_scope_depths[owner] = active_depth + 1
+            _push_process_env_scope_frame(None, "active")
+            return
+
         if serialized:
             _waiting_serialized_process_env_scopes += 1
             try:
@@ -1154,18 +1212,22 @@ def _begin_process_env_scope(*, serialized: bool) -> None:
                     and not _serialized_process_env_scope
                 )
                 _serialized_process_env_scope = True
+                owner = object()
+                token = _process_env_scope_owner.set(owner)
+                _serialized_process_env_scope_owner = owner
+                _serialized_process_env_scope_depth = 1
+                _push_process_env_scope_frame(token, "serialized")
             finally:
                 _waiting_serialized_process_env_scopes -= 1
                 _process_env_scope_condition.notify_all()
         else:
-            depth = _process_env_scope_depths.get(owner, 0)
-            if depth:
-                _process_env_scope_depths[owner] = depth + 1
-                return
             _process_env_scope_condition.wait_for(
                 lambda: not _serialized_process_env_scope
                 and _waiting_serialized_process_env_scopes == 0
             )
+            owner = object()
+            token = _process_env_scope_owner.set(owner)
+            _push_process_env_scope_frame(token, "active")
             _active_process_env_scopes += 1
             _process_env_scope_depths[owner] = 1
 
@@ -1176,24 +1238,36 @@ def _capture_process_env_baseline(keys: set[str]) -> None:
             _process_env_scope_baseline[key] = os.environ.get(key)
 
 
-def _end_process_env_scope(*, serialized: bool, env_lock) -> None:
+def _end_process_env_scope(*, env_lock) -> None:
     global _active_process_env_scopes, _serialized_process_env_scope
-    owner = threading.get_ident()
+    global _serialized_process_env_scope_owner, _serialized_process_env_scope_depth
+    frame = _pop_process_env_scope_frame()
+    if frame is None:
+        raise RuntimeError("Process environment scope exit has no matching entry")
+    owner_token, mode = frame
     with _process_env_scope_condition:
-        if serialized:
-            _serialized_process_env_scope = False
+        owner = _process_env_scope_owner.get()
+        if mode == "serialized":
+            if _serialized_process_env_scope_depth > 1:
+                _serialized_process_env_scope_depth -= 1
+            else:
+                _serialized_process_env_scope = False
+                _serialized_process_env_scope_owner = None
+                _serialized_process_env_scope_depth = 0
         else:
             depth = _process_env_scope_depths.get(owner, 0)
             if depth > 1:
                 _process_env_scope_depths[owner] = depth - 1
-                return
-            _process_env_scope_depths.pop(owner, None)
-            if _active_process_env_scopes == 1:
-                with env_lock:
-                    _restore_process_env(os.environ, _process_env_scope_baseline)
-                    _process_env_scope_baseline.clear()
-            _active_process_env_scopes -= 1
+            else:
+                _process_env_scope_depths.pop(owner, None)
+                if _active_process_env_scopes == 1:
+                    with env_lock:
+                        _restore_process_env(os.environ, _process_env_scope_baseline)
+                        _process_env_scope_baseline.clear()
+                _active_process_env_scopes -= 1
         _process_env_scope_condition.notify_all()
+    if owner_token is not None:
+        _process_env_scope_owner.reset(owner_token)
 
 
 @contextmanager
@@ -1205,7 +1279,7 @@ def process_env_scope_for_agent_turn(keys: set[str], env_lock):
             _capture_process_env_baseline(keys)
         yield
     finally:
-        _end_process_env_scope(serialized=False, env_lock=env_lock)
+        _end_process_env_scope(env_lock=env_lock)
 
 
 _secret_scope_available = None
@@ -1321,7 +1395,7 @@ def profile_env_for_background_worker(
                         else:
                             os.environ.pop("HERMES_HOME", None)
             finally:
-                _end_process_env_scope(serialized=True, env_lock=_ENV_LOCK)
+                _end_process_env_scope(env_lock=_ENV_LOCK)
         else:
             yield
         return
@@ -1492,10 +1566,7 @@ def profile_env_for_background_worker(
                     _clear_thread_env()
             finally:
                 if _process_env_scope_entered:
-                    _end_process_env_scope(
-                        serialized=serialize_process_env,
-                        env_lock=_ENV_LOCK,
-                    )
+                    _end_process_env_scope(env_lock=_ENV_LOCK)
 
 
 @contextmanager

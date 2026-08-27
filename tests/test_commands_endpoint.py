@@ -1,4 +1,5 @@
 """Tests for GET /api/commands -- exposes hermes-agent COMMAND_REGISTRY."""
+import contextvars
 from contextlib import contextmanager
 import io
 import json
@@ -939,23 +940,48 @@ def test_active_agent_turn_reenters_before_serialized_waiter(monkeypatch, tmp_pa
     outer_entered = threading.Event()
     enter_nested = threading.Event()
     nested_entered = threading.Event()
+    nested_finished = threading.Event()
     outer_release = threading.Event()
     serialized_entered = threading.Event()
+    nested_threads = []
+    errors = []
 
-    def agent_turn():
-        with profiles.process_env_scope_for_agent_turn(set(), _ENV_LOCK):
-            outer_entered.set()
-            assert enter_nested.wait(timeout=5)
+    def nested_profile_scope():
+        try:
             with profiles.profile_scope_for_detached_worker("alpha", "model resolution"):
                 nested_entered.set()
-            assert outer_release.wait(timeout=5)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            nested_finished.set()
+
+    def agent_turn():
+        try:
+            with profiles.process_env_scope_for_agent_turn(set(), _ENV_LOCK):
+                outer_entered.set()
+                assert enter_nested.wait(timeout=5)
+                nested_context = contextvars.copy_context()
+                nested_thread = threading.Thread(
+                    target=nested_context.run,
+                    args=(nested_profile_scope,),
+                    daemon=True,
+                )
+                nested_threads.append(nested_thread)
+                nested_thread.start()
+                assert nested_finished.wait(timeout=5)
+                assert outer_release.wait(timeout=5)
+        except BaseException as exc:
+            errors.append(exc)
 
     def serialized_command():
-        profiles._begin_process_env_scope(serialized=True)
         try:
-            serialized_entered.set()
-        finally:
-            profiles._end_process_env_scope(serialized=True, env_lock=_ENV_LOCK)
+            profiles._begin_process_env_scope(serialized=True)
+            try:
+                serialized_entered.set()
+            finally:
+                profiles._end_process_env_scope(env_lock=_ENV_LOCK)
+        except BaseException as exc:
+            errors.append(exc)
 
     agent_thread = threading.Thread(target=agent_turn, daemon=True)
     command_thread = threading.Thread(target=serialized_command, daemon=True)
@@ -978,9 +1004,13 @@ def test_active_agent_turn_reenters_before_serialized_waiter(monkeypatch, tmp_pa
         outer_release.set()
         agent_thread.join(timeout=5)
         command_thread.join(timeout=5)
+        for nested_thread in nested_threads:
+            nested_thread.join(timeout=5)
 
     assert not agent_thread.is_alive()
     assert not command_thread.is_alive()
+    assert all(not nested_thread.is_alive() for nested_thread in nested_threads)
+    assert not errors
 
 
 def test_sync_chat_blocks_serialized_plugin_command(monkeypatch, tmp_path):
