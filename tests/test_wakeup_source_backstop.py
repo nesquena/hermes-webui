@@ -57,6 +57,37 @@ def test_state_db_reader_preserves_durable_wakeup_provenance(tmp_path, monkeypat
     ]
 
 
+def test_regeneration_tail_snapshot_preserves_durable_wakeup_provenance(
+    tmp_path,
+    monkeypatch,
+):
+    """The bounded reader must match the canonical state.db projection."""
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages ("
+            "session_id TEXT, role TEXT, content TEXT, timestamp REAL, "
+            "display_kind TEXT, display_metadata TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "session-1",
+                "user",
+                WAKE_TEXT,
+                1,
+                "process_wakeup",
+                json.dumps({"delivery_id": "delivery-1"}),
+            ),
+        )
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    snapshot = models.get_state_db_regeneration_tail_snapshot("session-1", 0)
+
+    assert snapshot is not None
+    assert snapshot["tail"] == [_wake("delivery-1", timestamp=1.0)]
+
+
 def test_trusted_wakeup_is_stamped_and_gets_display_metadata():
     row = _wake("delivery-1")
     assert _normalize_wakeup_rows_for_display([row]) == [row]
