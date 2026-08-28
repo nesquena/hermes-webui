@@ -22,6 +22,7 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _canonicalise_provider_id,
+    _strip_opencode_free_provider_prefix,
     provider_is_keyless,
     _get_config_path,
     get_available_models,
@@ -307,6 +308,8 @@ def _normalize_model_for_provider(provider: str, model: str) -> str:
     clean = (model or "").strip()
     if not clean:
         return ""
+    if provider == "opencode-free":
+        return _strip_opencode_free_provider_prefix(clean)
     if provider in {"anthropic", "openai"} and clean.startswith(provider + "/"):
         return clean.split("/", 1)[1]
     return clean
@@ -742,7 +745,10 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     if provider_configured:
         meta = _SUPPORTED_PROVIDER_SETUPS.get(provider, {})
         if provider == "opencode-free":
-            provider_ready = model in _OPENCODE_FREE_MODEL_IDS
+            provider_ready = (
+                _strip_opencode_free_provider_prefix(model)
+                in _OPENCODE_FREE_MODEL_IDS
+            )
         elif provider in _SUPPORTED_PROVIDER_SETUPS:
             # key_optional providers (lmstudio, ollama, custom) are ready as
             # soon as the user has saved a provider+model+base_url; an api_key
@@ -1023,7 +1029,10 @@ def apply_onboarding_setup(body: dict) -> dict:
         return get_onboarding_status()
     if not model:
         raise ValueError("model is required")
-    if provider == "opencode-free" and model not in _OPENCODE_FREE_MODEL_IDS:
+    if (
+        provider == "opencode-free"
+        and _strip_opencode_free_provider_prefix(model) not in _OPENCODE_FREE_MODEL_IDS
+    ):
         raise ValueError("opencode-free only supports its six curated free models")
 
     provider_meta = _SUPPORTED_PROVIDER_SETUPS[provider]

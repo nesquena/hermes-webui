@@ -3188,6 +3188,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 continue
             if target in _configured_model_ids(pdef.get('models')):
                 p_base_url = str(pdef.get('base_url') or '').strip()
+                if _canonicalise_provider_id(slug) == "opencode-free":
+                    return _finalize(model_id, "opencode-free", None)
                 return model_id, slug, p_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
