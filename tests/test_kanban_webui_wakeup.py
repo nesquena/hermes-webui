@@ -24,6 +24,7 @@ def _enable_webui_wake_consumer_for_legacy_tests(monkeypatch):
             None,
         ),
     )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
     monkeypatch.setattr(bp, "_KANBAN_WAKE_STATE_LOCK", threading.Lock())
     monkeypatch.setattr(
         "api.profiles.list_profiles_api",

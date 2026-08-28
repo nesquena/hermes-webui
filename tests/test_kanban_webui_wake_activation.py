@@ -13,6 +13,7 @@ def activation(monkeypatch, tmp_path):
 
     state_file = tmp_path / "kanban_webui_wake_state.json"
     monkeypatch.setattr(api_config, "KANBAN_WEBUI_WAKE_STATE_FILE", state_file, raising=False)
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
     monkeypatch.setattr(bp, "_KANBAN_POLL_LOCK", bp.threading.Lock(), raising=False)
     monkeypatch.setattr(bp, "_KANBAN_WAKE_STATE_LOCK", bp.threading.Lock(), raising=False)
     monkeypatch.setattr(
@@ -24,6 +25,53 @@ def activation(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name == "default")
     return bp, state_file
+
+
+def test_activation_isolates_leftover_module_drain_stop(monkeypatch, tmp_path, request):
+    from api import background_process as bp
+
+    real_stop = bp._DRAIN_STOP
+    real_stop.set()
+    try:
+        bp, state_file = request.getfixturevalue("activation")
+
+        class Conn:
+            def execute(self, sql):
+                return SimpleNamespace(fetchone=lambda: {"latest": 4})
+
+            def close(self):
+                pass
+
+        class KB:
+            def list_boards(self, **kwargs):
+                return [{"slug": "default", "db_path": str(state_file.parent / "db.sqlite")}]
+
+            def connect(self, **kwargs):
+                return Conn()
+
+            def list_notify_subs(self, conn, **_kwargs):
+                return [
+                    {
+                        "task_id": "t",
+                        "platform": "webui",
+                        "chat_id": "c",
+                        "thread_id": "",
+                        "last_event_id": 0,
+                    }
+                ]
+
+            def advance_notify_cursor(self, conn, **kwargs):
+                pass
+
+        monkeypatch.setattr("api.kanban_bridge._kb", lambda: KB())
+        result = bp.set_kanban_webui_wake_enabled(True)
+        assert result["enabled"] is True
+        assert result["activation_id"] == 1
+        assert real_stop.is_set()
+        assert bp._DRAIN_STOP is not real_stop
+        assert not bp._DRAIN_STOP.is_set()
+    finally:
+        real_stop.clear()
 
 
 def test_missing_or_corrupt_state_is_disabled(activation):
