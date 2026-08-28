@@ -1361,7 +1361,7 @@ def profile_env_for_background_worker(
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
-    if not profile or profile == "default":
+    if not profile or _is_root_profile(profile):
         # Root keeps the process env as its runtime env, minus any key that
         # lives only in an external secret source — hydrate just those.
         with _root_profile_secret_source_scope(purpose, logger_override):

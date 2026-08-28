@@ -371,6 +371,47 @@ def test_root_scope_hydrates_the_root_home(tmp_path, monkeypatch):
     assert calls == [str(base)]
 
 
+def test_renamed_root_profile_takes_additive_root_scope(tmp_path, monkeypatch):
+    """A RENAMED root profile must short-circuit to the additive root scope, not
+    the named-profile isolation path.
+
+    ``_is_root_profile`` matches any name ``list_profiles_api`` reports as
+    ``is_default=True``. ``profile_env_for_background_worker`` was the one scope
+    still comparing against the literal ``"default"``, so a renamed root fell
+    through to the isolation path — ``block_process_env_fallback=True`` plus a
+    secret-name scrub that hid process-loaded credentials. It must hydrate via
+    the additive root scope instead.
+    """
+    from api.config import _thread_ctx, _thread_local_env_value
+
+    base = _make_root_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    calls = []
+
+    def _hydrate(home):
+        calls.append(str(home))
+        return {"DEEPSEEK_API_KEY": "kinni-root-key"}
+
+    # Report the root profile as renamed to "kinni".
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [{"name": "kinni", "is_default": True, "path": str(base)}],
+    )
+    profiles._invalidate_root_profile_cache()
+    _install_hydrator(monkeypatch, _hydrate)
+    try:
+        with profiles.profile_env_for_background_worker("kinni", "background title"):
+            assert _thread_local_env_value("DEEPSEEK_API_KEY") == "kinni-root-key"
+            # Root scope is additive: no isolation block on process-env fallback.
+            assert not getattr(_thread_ctx, "block_process_env_fallback", False)
+    finally:
+        profiles._invalidate_root_profile_cache()
+
+    # The hydrator was asked about the ROOT home, not a "kinni" profile home.
+    assert calls == [str(base)]
+
+
 def test_process_env_wins_over_root_secret_source(tmp_path, monkeypatch):
     """[gap-fill only] For root the PROCESS env is the already-resolved profile
     env, so a credential provided by docker ``-e`` / systemd / the repo ``.env``
