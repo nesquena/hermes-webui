@@ -177,7 +177,9 @@ def test_keyless_free_catalog_matrix(
         ]
         expected_ids = [model["id"] for model in config._PROVIDER_MODELS["opencode-free"]]
         assert free_ids == expected_ids
-        assert not {"opencode-free", "opencode_free", "free"} & config.cfg["providers"].keys()
+        assert not {"opencode-free", "opencode_free", "free"} & config.cfg.get(
+            "providers", {}
+        ).keys()
         assert config.cfg["model"]["provider"] == active_provider
         assert result["active_provider"] == active_provider
     finally:
