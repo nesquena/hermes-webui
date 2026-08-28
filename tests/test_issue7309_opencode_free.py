@@ -138,6 +138,7 @@ def test_keyless_free_catalog_matrix(
     monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "missing-models.json")
     monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
     monkeypatch.setattr(config, "reload_config_if_stale", lambda: None)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
     monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda pid: [
         model["id"] for model in config._PROVIDER_MODELS.get(pid, [])
     ])
