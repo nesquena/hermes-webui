@@ -151,19 +151,31 @@ def test_paid_free_suffix_stays_separate_from_keyless_free(monkeypatch):
     import api.providers as providers
 
     monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
-    original = copy.deepcopy(config.cfg)
+    original_cfg = copy.deepcopy(config.cfg)
+    original_models = copy.deepcopy(config._PROVIDER_MODELS)
     try:
+        config._PROVIDER_MODELS["opencode-go"] = [
+            *config._PROVIDER_MODELS["opencode-go"],
+            {"id": "ox-alpha-free", "label": "Ox Alpha Free"},
+        ]
         config.cfg.clear()
-        config.cfg.update({"model": {}, "providers": {"only_configured": True}})
+        config.cfg.update({
+            "model": {"provider": "opencode-go", "default": "ox-alpha-free"},
+            "providers": {"only_configured": False},
+        })
         result = config._static_models_catalog_without_live_probes()
-        go = next(
-            (group for group in result["groups"] if group["provider_id"] == "opencode-go"),
-            None,
-        )
-        assert go is None or all("free" not in model["id"] for model in go["models"])
+        go = next(group for group in result["groups"] if group["provider_id"] == "opencode-go")
+        go_ids = {model["id"].split(":", 1)[-1] for model in go["models"]}
+        free = next(group for group in result["groups"] if group["provider_id"] == "opencode-free")
+        free_ids = {model["id"].split(":", 1)[-1] for model in free["models"]}
+        assert "ox-alpha-free" in go_ids
+        assert "ox-alpha-free" not in free_ids
+        assert config.provider_is_keyless("opencode-go") is False
     finally:
+        config._PROVIDER_MODELS.clear()
+        config._PROVIDER_MODELS.update(original_models)
         config.cfg.clear()
-        config.cfg.update(original)
+        config.cfg.update(original_cfg)
 
 
 def test_gateway_payload_contract_is_canonical_and_credential_free():

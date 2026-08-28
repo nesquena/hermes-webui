@@ -2142,12 +2142,6 @@ def _seed_provider_models_from_core() -> None:
             continue
         if not isinstance(core_models, list):
             continue
-        if _canonicalise_provider_id(provider_id) == "opencode-free":
-            # The free tier is an explicit six-model product contract. Core
-            # catalogs may contain paid or experimental entries, so it must
-            # not be enriched implicitly.
-            continue
-
         # Resolve the core's provider_id to the WebUI's key for this provider.
         webui_key = provider_id
         webui_list = _PROVIDER_MODELS.get(provider_id)
@@ -2190,6 +2184,11 @@ def _seed_provider_models_from_core() -> None:
         }
         for mid in core_models:
             if not isinstance(mid, str) or not mid.strip():
+                continue
+            if (
+                _canonicalise_provider_id(provider_id) == "opencode-free"
+                and mid.strip() not in _OPENCODE_FREE_MODEL_IDS
+            ):
                 continue
             normed = mid.strip().replace("-", ".").lower()
             if normed not in existing_ids:
