@@ -47,6 +47,7 @@ MESSAGING_SOURCES = {
     'slack',
     'telegram',
     'weixin',
+    'matrix',
 }
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
@@ -59,6 +60,7 @@ SOURCE_LABELS = {
     'cron': 'Cron',
     'discord': 'Discord',
     'email': 'Email',
+    'kanban': 'Kanban',
     'wecom': 'WeCom',
     'wecom_callback': 'WeCom Callback',
     'slack': 'Slack',
@@ -68,6 +70,7 @@ SOURCE_LABELS = {
     'webhook': 'Webhook',
     'webui': 'WebUI',
     'weixin': 'Weixin',
+    'matrix': 'Matrix',
 }
 
 
@@ -95,6 +98,8 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
         session_source = 'cron'
     elif raw == 'webhook':
         session_source = 'webhook'
+    elif raw == 'kanban':
+        session_source = 'kanban'
     elif raw == 'tool':
         session_source = 'tool'
     elif raw == 'api_server':
@@ -218,7 +223,7 @@ def is_cli_session_row(row: dict) -> bool:
     # runner, never a writable WebUI/CLI session (#5307). Classify it non-CLI so
     # sidebar rows and every is_cli_session_row() consumer keep it out of the
     # CLI/writable treatment.
-    non_cli_sources = MESSAGING_SOURCES | {"cron", "webhook", "tool", "api", "api_server", "subagent"}
+    non_cli_sources = MESSAGING_SOURCES | {"cron", "webhook", "kanban", "tool", "api", "api_server", "subagent"}
     if {source, source_tag, raw_source, source_name, source_label} & non_cli_sources:
         return False
     if source == "messaging":
@@ -512,6 +517,19 @@ def read_importable_agent_session_rows(
     ``exclude_sources=None``. ``include_sources`` is an additional narrowing
     filter; callers that want an include-only query should explicitly pass
     ``exclude_sources=None`` so the default exclusions do not also apply.
+
+    ``limit`` bounds the *recency slice*, not the returned row count. Subagent
+    rows only render as children when their parent row is in the same payload,
+    so subagent ancestors of selected rows are re-added afterwards and the
+    result can exceed ``limit`` by the number of such anchors. Callers must
+    therefore iterate the result rather than assume ``len(rows) <= limit``.
+
+    That recovery is deliberately bounded by the oversampled candidate set
+    (``limit * 8`` newest sessions): it re-uses rows the projection already
+    fetched and never issues an extra query, so an ancestor older than the
+    oversample stays unresolved and its children render top-level, exactly as
+    they did before. Widening that window is a ``candidate_limit`` change, not
+    a change to this walk.
     """
     db_path = Path(db_path)
     if not db_path.exists():
@@ -761,7 +779,43 @@ def read_importable_agent_session_rows(
         projected = [row for row in projected if is_cli_session_row_visible(row)]
         if limit is None:
             return projected
-        return projected[:max(0, int(limit))]
+        selected = projected[:max(0, int(limit))]
+
+        # The recency slice is per-row, but subagent rows are only renderable as
+        # children: the sidebar nests a child under its parent solely when that
+        # parent row is present in the same payload. A frozen orchestrator stops
+        # writing while its leaves keep streaming, so the leaves win the recency
+        # race and the parent falls outside the window — leaving the leaves to be
+        # promoted to top-level sidebar rows. Re-add subagent parents that the
+        # oversampled candidate set already projected (no extra query); webui
+        # ancestors are left out because that sidebar bucket already has them.
+        #
+        # Bounded by construction: ``by_id`` only holds the ``limit * 8``
+        # newest candidates, so an ancestor older than that oversample is not
+        # recovered and its children stay top-level — the pre-existing
+        # behaviour, narrowed rather than fixed. Resolving those would need an
+        # unbounded per-row ancestor query on the hot sidebar path; widen
+        # ``candidate_limit`` instead if the window proves too tight.
+        # NOTE: this can return more than ``limit`` rows (see docstring).
+        have = {row.get('id') for row in selected}
+        by_id = {row.get('id'): row for row in projected if row.get('id')}
+        pending = list(selected)
+        while pending:
+            row = pending.pop()
+            if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
+                continue
+            parent_id = row.get('parent_session_id')
+            if not parent_id or parent_id in have:
+                continue
+            parent = by_id.get(parent_id)
+            if parent is None:
+                continue
+            if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+                continue
+            selected.append(parent)
+            have.add(parent_id)
+            pending.append(parent)
+        return selected
 
 
 

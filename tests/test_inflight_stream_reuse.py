@@ -1328,6 +1328,60 @@ assert.ok(!selected.toolCalls[0].args.command.endsWith('...'));
     assert result.returncode == 0, result.stderr
 
 
+def test_projected_runtime_snapshot_restores_visible_scene_without_duplicate_tool_fallback():
+    """The HTTP projection may omit duplicate messages/tool_calls only when the
+    Anchor scene still makes the recovered inflight state visibly meaningful."""
+    assert NODE, "node not on PATH"
+    from api import routes
+
+    repeated = "tool output" * 100
+    snapshot = {
+        "stream_id": "stream-projected",
+        "last_seq": 9,
+        "last_event_id": "stream-projected:9",
+        "messages": [{"role": "assistant", "content": "progress", "_live": True, "_ts": 1234.5}],
+        "last_assistant_text": "progress",
+        "last_reasoning_text": "",
+        "tool_calls": [{"name": "terminal", "tid": "call-1", "snippet": repeated}],
+        "anchor_activity_scene": {
+            "version": "activity_scene_v1",
+            "identity": {"session_id": "session-1", "stream_id": "stream-projected", "run_id": "run-1"},
+            "activity_rows": [{
+                "row_id": "tool:call-1:0",
+                "local_id": "call-1",
+                "kind": "tool_completed",
+                "role": "tool",
+                "source_event_type": "tool_complete",
+                "status": "completed",
+                "tool_call_id": "call-1",
+                "tool": {"id": "call-1", "name": "terminal", "snippet": repeated, "done": True},
+            }],
+        },
+    }
+    projected = routes._runtime_journal_snapshot_for_session_payload(snapshot)
+
+    script = "\n".join([
+        "const assert=require('assert');",
+        _function_decl(SESSIONS_JS, "_serverLiveSnapshotToolId"),
+        _function_decl(SESSIONS_JS, "_serverLiveSnapshotInflight"),
+        _function_decl(SESSIONS_JS, "_inflightHasVisibleLiveState"),
+        f"const snapshot={json.dumps(projected)};",
+        "const recovered=_serverLiveSnapshotInflight(snapshot,[]);",
+        "assert.strictEqual(recovered.streamId,'stream-projected');",
+        "assert.strictEqual(recovered.toolCalls.length,1);",
+        "assert.strictEqual(recovered.toolCalls[0].snippet.length>0,true);",
+        "assert.strictEqual(recovered.messages.length,1);",
+        "assert.strictEqual(recovered.messages[0].content,'progress');",
+        "assert.strictEqual(recovered.messages[0]._ts,1234.5);",
+        "assert.strictEqual(recovered.anchorActivityScene.activity_rows.length,1);",
+        "assert.strictEqual(recovered.anchorActivityScene.activity_rows[0].tool.snippet.length>0,true);",
+        "assert.strictEqual(_inflightHasVisibleLiveState(recovered),true);",
+    ])
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_runtime_journal_scene_fallback_ignores_foreign_stream_snapshots():
     """A stale Anchor scene must not render under the current stream owner."""
     assert NODE, "node not on PATH"

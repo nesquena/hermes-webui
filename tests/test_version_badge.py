@@ -141,7 +141,7 @@ class TestDetectWebUIVersion:
             if args[:3] == ['describe', '--tags', '--always']:
                 return ('v0.50.123', True)
             if args[:2] == ['diff-index', '--quiet']:
-                return ('', False)
+                return ('git exited with status 1', False)
             return ('unexpected', False)
 
         result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)

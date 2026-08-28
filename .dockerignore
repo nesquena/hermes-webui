@@ -5,3 +5,4 @@ __pycache__
 *.pyo
 tests/
 .env*
+/AGENTS.md

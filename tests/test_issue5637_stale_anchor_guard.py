@@ -114,6 +114,7 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
     js = UI_JS_PATH.read_text(encoding="utf-8")
     functions = [
         "renderLiveAnchorActivityScene",
+        "_freshProgrammaticScrollActive",
         "_recordNonMessageScrollIntent",
         "_captureMessageScrollSnapshot",
         "_messageScrollSnapshotInputChanged",
@@ -127,6 +128,7 @@ def _live_render_ownership_harness(*, move_to_bottom: bool) -> str:
     target_delta = 100 if move_to_bottom else -100
     final_top = 90026 if move_to_bottom else 89000
     return production + f"""
+const PROGRAMMATIC_SCROLL_VALID_MS=150;
 let writes=[];
 let _messageScrollInputGeneration=0;
 let _messageUserUnpinned={str(move_to_bottom).lower()};

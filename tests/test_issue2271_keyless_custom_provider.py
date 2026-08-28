@@ -55,6 +55,54 @@ def test_named_custom_provider_keeps_existing_runtime_base_url(monkeypatch):
     assert base_url == "http://runtime.example/v1"
 
 
+def test_custom_provider_overrides_resolve_connection_within_profile_scope(monkeypatch):
+    """Finding #3: the custom endpoint AND credential are resolved inside the
+    session's OWN profile scope.
+
+    ``resolve_custom_provider_connection`` reads both the base_url and the API key
+    from one ``get_config()``/env snapshot. On a detached worker thread (no
+    inherited request-profile TLS/env) an unbound call reads the DEFAULT profile,
+    pairing a named profile's endpoint with the default profile's key. The
+    overrides helper must run that lookup under the passed profile scope.
+    """
+    import contextlib
+    import api.streaming as streaming
+    import api.profiles as profiles
+
+    scope_state = {"active": False, "name": None}
+
+    @contextlib.contextmanager
+    def _fake_scope(name, purpose="", logger_override=None):
+        scope_state["active"] = True
+        scope_state["name"] = name
+        try:
+            yield
+        finally:
+            scope_state["active"] = False
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", _fake_scope)
+
+    seen = {}
+
+    def _fake_conn(provider):
+        # Endpoint + credential must both be read WHILE the profile scope is active.
+        seen["scope_active"] = scope_state["active"]
+        seen["scope_name"] = scope_state["name"]
+        return ("team-key", "https://team.example/v1")
+
+    monkeypatch.setattr(streaming, "resolve_custom_provider_connection", _fake_conn)
+
+    provider, api_key, base_url = streaming._resolve_custom_provider_runtime_overrides(
+        "custom:team", None, None, profile_name="team",
+    )
+
+    assert seen["scope_active"] is True, "connection resolved OUTSIDE the profile scope"
+    assert seen["scope_name"] == "team"
+    assert provider == "custom"
+    assert api_key == "team-key"
+    assert base_url == "https://team.example/v1"
+
+
 def test_non_custom_provider_is_unchanged(monkeypatch):
     import api.streaming as streaming
 
