@@ -1263,6 +1263,8 @@ class Session:
         )
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
+        _base_url = kwargs.get('base_url')
+        self.base_url = str(_base_url).strip() if _base_url else None
         # #5979: signature of the model the user DELIBERATELY picked this session
         # (``"<model>\x1f<provider>"``), or None. Used by the streaming resolver
         # to preserve a custom-proxy vendor namespace on a COLD catalog ONLY when
@@ -1393,7 +1395,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'base_url', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -1740,6 +1742,7 @@ class Session:
             'workspace': self.workspace,
             'model': self.model,
             'model_provider': self.model_provider,
+            'base_url': self.base_url,
             'message_count': message_count,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
@@ -5008,9 +5011,10 @@ def find_compression_recovery_session(
 
 
 def _profile_default_model_state(profile=None):
-    """Return the default model/provider configured for *profile*."""
+    """Return the default model/provider/base URL configured for *profile*."""
     default_model = ""
     default_provider = None
+    default_base_url = None
     try:
         from api.profiles import get_hermes_home_for_profile
         config_path = Path(get_hermes_home_for_profile(profile)) / "config.yaml"
@@ -5024,8 +5028,9 @@ def _profile_default_model_state(profile=None):
     elif isinstance(model_cfg, dict):
         default_model = str(model_cfg.get("default") or "").strip()
         default_provider = str(model_cfg.get("provider") or "").strip() or None
+        default_base_url = str(model_cfg.get("base_url") or "").strip() or None
 
-    return default_model or get_effective_default_model(), default_provider
+    return default_model or get_effective_default_model(), default_provider, default_base_url
 
 
 def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
@@ -5060,11 +5065,18 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
             profile = get_active_profile_name()
         except ImportError:
             profile = None
+    profile_model, profile_provider, profile_base_url = _profile_default_model_state(profile)
     if model:
         effective_model = model
         effective_model_provider = model_provider
+        effective_base_url = (
+            profile_base_url
+            if not model_provider or model_provider == profile_provider
+            else None
+        )
     else:
-        effective_model, effective_model_provider = _profile_default_model_state(profile)
+        effective_model, effective_model_provider = profile_model, profile_provider
+        effective_base_url = profile_base_url
         if model_provider:
             effective_model_provider = model_provider
 
@@ -5074,6 +5086,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         workspace=workspace_path or get_last_workspace(),
         model=effective_model,
         model_provider=effective_model_provider,
+        base_url=effective_base_url,
         profile=profile,
         project_id=project_id,
         personality=None,

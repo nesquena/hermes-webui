@@ -7139,6 +7139,7 @@ async function switchToProfile(name) {
       if (S.session && !sessionInProgress) {
         S.session.model = modelToUse;
         S.session.model_provider = modelState.model_provider||providerId||null;
+        S.session.base_url=data.default_model_base_url||null;
         S.session.profile = data.active || name;
       }
     }
@@ -7152,7 +7153,7 @@ async function switchToProfile(name) {
       S.session.profile = data.active || name;
     }
     if (typeof refreshProfileTransitionReasoningChip === 'function') {
-      refreshProfileTransitionReasoningChip(data.default_model, data.default_model_provider);
+      refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider,data.default_model_base_url);
     }
 
     // ── Apply workspace ────────────────────────────────────────────────────

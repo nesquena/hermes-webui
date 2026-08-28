@@ -45,6 +45,19 @@ def test_reasoning_chip_html_starts_hidden():
     assert 'data-effort="max"' in src, (
         "composer reasoning dropdown must include Max option"
     )
+    assert 'data-effort="ultra"' in src, (
+        "composer reasoning dropdown must include Ultra option"
+    )
+
+
+def test_reasoning_slash_command_accepts_ultra():
+    with open("static/commands.js") as f:
+        src = f.read()
+    match = re.search(r"function cmdReasoning\(args\)\{(.+?)\n\}", src, re.DOTALL)
+    assert match, "cmdReasoning function must exist"
+    body = match.group(1)
+    assert "'ultra'" in body, "/reasoning must accept the canonical Ultra effort"
+    assert "xhigh|max|ultra" in body, "/reasoning status help must advertise Ultra"
 
 
 def test_ui_js_passes_model_context_to_reasoning_api():

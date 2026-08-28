@@ -160,9 +160,11 @@ def test_glm_5_3_in_zai_onboarding_models_list():
 
 
 def test_glm_5_3_reasoning_efforts():
-    """GLM-5.3 must support the full reasoning_effort ladder (GLM-5.2+ tier)."""
+    """GLM-5.3's explicit alias family supports the full effort ladder."""
     efforts = cfg.resolve_model_reasoning_efforts("glm-5.3", provider_id="zai")
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}, (
+    assert set(efforts) == {
+        "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+    }, (
         f"glm-5.3 must support the full reasoning_effort ladder; got {efforts!r}"
     )
 

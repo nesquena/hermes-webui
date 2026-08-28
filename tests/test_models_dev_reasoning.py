@@ -16,7 +16,7 @@ def _install_fake_models_dev(monkeypatch, fake_fn):
     monkeypatch.setitem(sys.modules, "agent.models_dev", fake_models_dev)
 
 
-def test_models_dev_true_returns_full_efforts(monkeypatch):
+def test_models_dev_true_respects_native_provider_ceiling(monkeypatch):
     _install_fake_models_dev(
         monkeypatch,
         lambda provider, model: SimpleNamespace(supports_reasoning=True),
@@ -24,9 +24,9 @@ def test_models_dev_true_returns_full_efforts(monkeypatch):
 
     import api.config as cfg
 
-    assert cfg._models_dev_reasoning_efforts("grok-4.3", "xai-oauth") == list(
-        cfg.VALID_REASONING_EFFORTS
-    )
+    assert cfg._models_dev_reasoning_efforts(
+        "grok-4.3", "xai-oauth"
+    ) == ["low", "medium", "high"]
 
 
 def test_models_dev_false_returns_authoritative_empty(monkeypatch):
@@ -50,12 +50,12 @@ def test_models_dev_unknown_allows_compatibility_fallback(monkeypatch):
     ) == list(cfg.VALID_REASONING_EFFORTS)
 
 
-def test_xai_oauth_grok_uses_agent_metadata(monkeypatch):
+def test_xai_oauth_grok_native_contract_overrides_stale_metadata(monkeypatch):
     seen = []
 
     def fake_capabilities(provider, model):
         seen.append((provider, model))
-        return SimpleNamespace(supports_reasoning=True)
+        return SimpleNamespace(supports_reasoning=False)
 
     _install_fake_models_dev(monkeypatch, fake_capabilities)
 
@@ -63,8 +63,8 @@ def test_xai_oauth_grok_uses_agent_metadata(monkeypatch):
 
     assert cfg.resolve_model_reasoning_efforts(
         "@xai-oauth:grok-4.3", provider_id="xai-oauth"
-    ) == list(cfg.VALID_REASONING_EFFORTS)
-    assert seen == [("xai-oauth", "grok-4.3")]
+    ) == ["low", "medium", "high"]
+    assert seen == []
 
 
 def test_models_dev_false_suppresses_prefix_heuristic(monkeypatch):
@@ -150,5 +150,5 @@ display:
     status = cfg.get_reasoning_status()
 
     assert status["reasoning_effort"] == "medium"
-    assert status["supported_efforts"] == list(cfg.VALID_REASONING_EFFORTS)
+    assert status["supported_efforts"] == ["low", "medium", "high"]
     assert status["supports_reasoning_effort"] is True
