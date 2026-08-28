@@ -912,6 +912,12 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
 
+    # Provider keys that live ONLY in an external secret source (Bitwarden
+    # Secrets Manager, 1Password) never appear in the profile's `.env`, so the
+    # legs above cannot see them and the turn ran without the credential.
+    # Gap-fill only, and a no-op on agents lacking the hydration symbol.
+    env.update(_external_secret_source_env(home, env))
+
     return env
 
 
@@ -1160,6 +1166,96 @@ def _resolve_hermes_home_override():
         return mod
     _hermes_home_override_available = False
     return None
+
+
+# A profile can keep provider credentials in an EXTERNAL secret source
+# (Bitwarden Secrets Manager, 1Password) instead of its plaintext `.env`. The
+# Hermes CLI and the gateway hydrate those sources through
+# `hermes_cli.env_loader.hydrate_profile_secret_sources(home)`; the WebUI's
+# profile runtime-env path never did, so a key that lives ONLY in a secret
+# source was silently absent from every profile-scoped WebUI path and the turn
+# ran with no credential. Resolved lazily + optionally, like the secret-scope
+# and Hermes-home-override resolvers above, so agents WITHOUT the symbol keep
+# exactly today's behavior (terminal config + `.env` only).
+_secret_source_hydrator_available = None
+
+
+def _resolve_secret_source_hydrator():
+    """Return ``hermes_cli.env_loader.hydrate_profile_secret_sources`` iff the
+    installed agent exposes it, else None. Cached; import-safe on older agents.
+
+    An already-imported module is honored BEFORE the negative cache (matching
+    ``_resolve_secret_scope_module``) so an agent that appears later in the
+    process is still picked up.
+    """
+    global _secret_source_hydrator_available
+    import sys as _sys
+    mod = _sys.modules.get('hermes_cli.env_loader')
+    if mod is None:
+        if _secret_source_hydrator_available is False:
+            return None
+        if _secret_source_hydrator_available is None:
+            try:
+                import importlib.util
+                _secret_source_hydrator_available = (
+                    importlib.util.find_spec('hermes_cli') is not None
+                )
+            except Exception:
+                _secret_source_hydrator_available = False
+        if not _secret_source_hydrator_available:
+            return None
+        try:
+            import hermes_cli.env_loader as mod  # noqa: F811
+        except Exception:
+            _secret_source_hydrator_available = False
+            return None
+    hydrate = getattr(mod, 'hydrate_profile_secret_sources', None)
+    if callable(hydrate):
+        _secret_source_hydrator_available = True
+        return hydrate
+    _secret_source_hydrator_available = False
+    return None
+
+
+def _external_secret_source_env(home: Path, existing: dict[str, str]) -> dict[str, str]:
+    """Return credentials contributed by *home*'s external secret sources, for
+    keys the profile's own ``config.yaml``/``.env`` did not already define.
+
+    GAP-FILL ONLY: a key already resolved from the profile's own config keeps
+    its value, so this cannot change the runtime env of any profile that works
+    today — it only fills keys that were previously missing entirely.
+
+    ``_PROTECTED_ENV_KEYS`` are filtered for the same reason the ``.env`` leg
+    filters them (#4589): an operator/deployment posture must never be settable
+    from a profile-controlled source. Empty values are dropped, matching the
+    ``if k and v`` rule the ``.env`` leg applies.
+
+    Never mutates ``os.environ`` — callers own env application. Any failure
+    (missing symbol, unreachable secret manager, unexpected return shape)
+    degrades to ``{}`` so a turn never fails because of hydration.
+    """
+    hydrate = _resolve_secret_source_hydrator()
+    if hydrate is None:
+        return {}
+    try:
+        hydrated = hydrate(home)
+        items = hydrated.items() if hasattr(hydrated, 'items') else ()
+        resolved: dict[str, str] = {}
+        for key, value in items:
+            k = str(key).strip()
+            if not k or k in _PROTECTED_ENV_KEYS or k in existing:
+                continue
+            if value is None:
+                continue
+            v = _stringify_env_value(value)
+            if v:
+                resolved[k] = v
+        return resolved
+    except Exception:
+        logger.debug(
+            "Failed to hydrate external secret sources for %s", home, exc_info=True
+        )
+        return {}
 
 
 @contextmanager
