@@ -375,8 +375,8 @@ class TestSupportsThinkingToggleVisibility:
 # (off). The earlier round-2 fix kept the chip visible but the only rendered
 # option was "None" — so a user could turn thinking OFF but never back ON.
 # These tests drive the actual _applyReasoningOptions against a simulated
-# dropdown containing all 8 options from static/index.html (Default/none/
-# minimal/low/medium/high/xhigh/max) and pin which are visible per tier.
+# dropdown containing all 9 options from static/index.html (Default/none/
+# minimal/low/medium/high/xhigh/max/ultra) and pin which are visible per tier.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -419,7 +419,7 @@ function makeEl() {
 }
 
 // Options mirror static/index.html's composerReasoningDropdown exactly.
-const options = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(makeOption);
+const options = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(makeOption);
 const optionEls = options;
 
 const els = {
@@ -508,22 +508,22 @@ class TestTwoStateToggleControl:
             f"None (disable thinking) must be shown; got {visible}"
         )
         # No effort levels for the thinking-only tier.
-        for level in ["minimal", "low", "medium", "high", "xhigh", "max"]:
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]:
             assert level not in visible, (
                 f"thinking-tier must not show effort level {level}; got {visible}"
             )
 
     def test_effort_tier_offers_default_none_and_ladder(self, driver_options_path):
-        """GLM-5.2: full ladder + toggle → Default, None, AND all 6 levels."""
+        """Sol: full ladder + toggle → Default, None, AND all 7 levels."""
         visible = _visible_options(
             driver_options_path,
-            "high",
-            {"supported_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
+            "ultra",
+            {"supported_efforts": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
              "supports_thinking_toggle": True},
         )
         assert "Default" in visible
         assert "none" in visible
-        for level in ["minimal", "low", "medium", "high", "xhigh", "max"]:
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]:
             assert level in visible, f"effort tier must show {level}; got {visible}"
 
     def test_off_then_on_round_trip_options(self, driver_options_path):

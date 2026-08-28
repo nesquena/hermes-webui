@@ -2273,8 +2273,10 @@ $('modelSelect').onchange=async()=>{
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
+  const modelProviderChanged=(S.session.model_provider||null)!==(modelState.model_provider||null);
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
+  if(modelProviderChanged) S.session.base_url=null;
   if(typeof syncModelChip==='function') syncModelChip();
   if(typeof syncReasoningChip==='function') syncReasoningChip();
   syncTopbar();

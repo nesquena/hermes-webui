@@ -1182,6 +1182,7 @@ _PROVIDER_DISPLAY = {
     "cursor-acp": "Cursor ACP",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
+    "kimi-coding-cn": "Kimi / Moonshot (China)",
     "deepseek": "DeepSeek",
     "minimax": "MiniMax",
     "minimax-cn": "MiniMax (China)",
@@ -1229,6 +1230,8 @@ _PROVIDER_ALIASES = {
     "google-ai-studio": "gemini",
     "kimi": "kimi-coding",
     "moonshot": "kimi-coding",
+    "kimi-cn": "kimi-coding-cn",
+    "moonshot-cn": "kimi-coding-cn",
     "claude": "anthropic",
     "claude-code": "anthropic",
     "deep-seek": "deepseek",
@@ -3357,7 +3360,9 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 # importing from the agent tree (which may not be installed).  Any drift here
 # will show up in the shared test suite since both sides accept the same set.
 # Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+VALID_REASONING_EFFORTS = (
+    "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+)
 
 
 def parse_reasoning_effort(effort):
@@ -3586,11 +3591,13 @@ def _zai_glm_classification(model_id: str, provider_id: str) -> str | None:
     Returns one of:
 
     * ``"effort"``  — accepts the ``reasoning_effort`` intensity ladder
-      (GLM-5.2+; Z.AI's max/xhigh/high/medium/low/minimal values match
-      ``VALID_REASONING_EFFORTS`` exactly).
+      (the GLM-5.2/5.3 alias families recognized by Hermes core).
+      Ultra is Hermes-internal and clamps before the request;
+      model-specific native vocabularies are narrower than
+      ``VALID_REASONING_EFFORTS``.
     * ``"thinking"`` — does NOT accept the effort ladder but DOES accept the
-      ``thinking: {"type": "enabled"|"disabled"}`` on/off toggle (GLM-4.5,
-      4.5-air/flash, 4.6, 5, 5.1, 5-turbo, and other 4.5+ non-4.7 GLM models).
+      ``thinking: {"type": "enabled"|"disabled"}`` on/off toggle (other
+      GLM-4.5+ models, including future-looking GLM versions).
     * ``"forced"``  — GLM-4.7 family: forced thinking, neither the toggle nor
       the ladder is configurable.
     * ``None``      — not a native-``zai`` GLM model (non-GLM id, non-zai
@@ -3598,9 +3605,10 @@ def _zai_glm_classification(model_id: str, provider_id: str) -> str | None:
       router rather than Z.AI's per-model docs).
 
     Scoped to the native ``zai`` endpoint (aliases ``glm``/``z-ai``/``z.ai``/
-    ``zhipu`` all resolve to ``zai`` via ``_resolve_provider_alias``). Per
-    docs.z.ai: ``thinking`` is supported by GLM-4.5+ (4.7 forces it on),
-    ``reasoning_effort`` is GLM-5.2+ exclusive.
+    ``zhipu`` all resolve to ``zai`` via ``_resolve_provider_alias``). Thinking
+    remains available for GLM-4.5+ (4.7 forces it on); effort capability mirrors
+    Hermes core's literal GLM-5.2/5.3 alias-family predicate rather than treating
+    all numerically later GLM versions as compatible.
 
     Shared by ``_filter_reasoning_efforts_for_provider`` (UI dropdown options),
     ``coerce_reasoning_effort_for_model`` (what is actually sent to Z.AI), and
@@ -3610,20 +3618,29 @@ def _zai_glm_classification(model_id: str, provider_id: str) -> str | None:
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     if provider != "zai":
         return None
-    bare = _strip_provider_hint_for_reasoning(str(model_id or "")).lower().rsplit("/", 1)[-1]
+    raw = str(model_id or "").strip().lower()
+    bare = _strip_provider_hint_for_reasoning(raw).lower().rsplit("/", 1)[-1]
     if "glm" not in bare:
         return None
     # GLM-4.7 family: forced thinking — reasoning is not configurable at all.
     if bare.startswith("glm-4.7"):
         return "forced"
+    # Mirror Hermes core plugins/model-providers/zai/_is_glm_5_2 exactly: only
+    # the literal 5.2/5.3 alias families accept reasoning_effort. Do not infer
+    # support from semver; later-looking GLM-5.4/6 ids remain thinking-only.
+    if any(
+        token in raw
+        for token in (
+            "glm-5.2", "glm-5-2", "glm-5p2",
+            "glm-5.3", "glm-5-3", "glm-5p3",
+        )
+    ):
+        return "effort"
     m = re.search(r"glm-(\d+)(?:\D+(\d+))?", bare)
     if m:
         major = int(m.group(1))
         minor = int(m.group(2)) if m.group(2) else 0
-        # GLM-5.2+ accepts the effort ladder.
-        if (major, minor) >= (5, 2):
-            return "effort"
-        # GLM-4.5+ (but below 5.2) accepts the thinking toggle only.
+        # Other GLM-4.5+ models accept the thinking toggle only.
         if (major, minor) >= (4, 5):
             return "thinking"
     # Pre-4.5 GLM (e.g. glm-4, glm-3): no thinking support documented by Z.AI.
@@ -3633,9 +3650,10 @@ def _zai_glm_classification(model_id: str, provider_id: str) -> str | None:
 def _zai_glm_reasoning_efforts_supported(model_id: str, provider_id: str) -> bool | None:
     """Z.AI native-endpoint gate for the ``reasoning_effort`` intensity field.
 
-    Returns True if the model accepts the effort ladder (GLM-5.2+), False if it
-    is known NOT to (pre-5.2 GLM and the forced-thinking GLM-4.7 family), or None
-    if this is not a native-``zai`` GLM model (caller should defer to other rules).
+    Returns True for Hermes core's GLM-5.2/5.3 alias families, False for other
+    native-ZAI GLM models (including future-looking versions and forced-thinking
+    GLM-4.7), or None if this is not a native-``zai`` GLM model (caller should
+    defer to other rules).
 
     Thin wrapper over ``_zai_glm_classification`` kept for the coercion path's
     explicit True/False/None contract. A known-False result means "send no
@@ -3673,17 +3691,51 @@ _OPENAI_FAMILY_REASONING_PROVIDERS = frozenset({
     "azure-foundry", "azure-openai", "azure",
 })
 
-_GPT_5_6_REASONING_MODELS = frozenset({
-    "gpt-5.6",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-})
+_GPT_5_6_REASONING_RE = re.compile(
+    r"^gpt-5\.6(?:$|-(?:sol|terra|luna)(?:-\d{4}-\d{2}-\d{2})?(?:-900k)?)$"
+)
+_GPT_5_6_PRO_REASONING_RE = re.compile(
+    r"^gpt-5\.6-(?:sol|terra|luna)-pro$"
+)
+_PUBLIC_OPENAI_REASONING_PROVIDERS = frozenset({"openai", "openai-api"})
 
 
-def _is_gpt_5_6_reasoning_model(bare_model: str) -> bool:
-    """Return whether an OpenAI-family model uses GPT-5.6's max ladder."""
-    return str(bare_model or "").strip().lower() in _GPT_5_6_REASONING_MODELS
+def _is_gpt_5_6_reasoning_model(bare_model: str, provider_id: str) -> bool:
+    """Return whether this provider/model lane exposes GPT-5.6's Max rung."""
+    bare = str(bare_model or "").strip().lower()
+    if _GPT_5_6_REASONING_RE.fullmatch(bare) is not None:
+        return True
+    provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    return (
+        provider in _PUBLIC_OPENAI_REASONING_PROVIDERS
+        and _GPT_5_6_PRO_REASONING_RE.fullmatch(bare) is not None
+    )
+
+
+_GROK_EFFORT_CAPABLE_PREFIXES = (
+    "grok-3-mini",
+    "grok-4.20-multi-agent",
+    "grok-4.3",
+    "grok-4.5",
+    "grok-4.6",
+)
+
+
+def _grok_supports_reasoning_effort(model_id: str) -> bool:
+    """Mirror Hermes core's conservative xAI effort-dial allowlist."""
+    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    return any(bare.startswith(prefix) for prefix in _GROK_EFFORT_CAPABLE_PREFIXES)
+
+
+def _is_grok_46_family(model_id: str) -> bool:
+    """Mirror core: xhigh belongs to Grok 4.6, not later-looking decimals."""
+    bare = (
+        _strip_provider_hint_for_reasoning(model_id)
+        .lower()
+        .replace("_", "-")
+        .rsplit("/", 1)[-1]
+    )
+    return bare == "grok-4.6" or bare.startswith("grok-4.6-")
 
 
 def _filter_reasoning_efforts_for_provider(
@@ -3702,18 +3754,43 @@ def _filter_reasoning_efforts_for_provider(
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
     # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
     # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
+    # Ultra is Hermes-internal vocabulary and only represents an honest extra
+    # intent tier when the target lane has a real max rung to clamp onto.
     if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
         if bare.startswith(("o1", "o3", "o4")):
-            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
-        if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
-            return [eff for eff in normalized if eff != "max"]
+            normalized = [eff for eff in normalized if eff in {"low", "medium", "high"}]
+        elif bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(
+            bare, provider
+        ):
+            normalized = [eff for eff in normalized if eff not in {"max", "ultra"}]
+
+    # xAI's native Responses endpoint gives the Grok 4.6 family an xhigh rung;
+    # every other effort-capable Grok tops out at high. Do not semver-compare
+    # decimal family names: Grok 4.20 multi-agent is not a later Grok 4.6.
+    # Neither vocabulary accepts max on the wire.
+    if provider in {"xai", "xai-oauth"}:
+        if not _grok_supports_reasoning_effort(model_id):
+            return []
+        allowed = {"low", "medium", "high"}
+        if _is_grok_46_family(model_id):
+            allowed.add("xhigh")
+        normalized = [eff for eff in normalized if eff in allowed]
+
+    # Moonshot/Kimi K2-era models accept low/medium/high only. Keep K3's
+    # native max path unchanged; its exact low/high/max vocabulary is enforced
+    # downstream by Hermes core.
+    if provider in {"kimi-coding", "kimi-coding-cn"} and not re.search(
+        r"(?:^|[^a-z0-9])k3(?:[^a-z0-9]|$)", bare
+    ):
+        normalized = [eff for eff in normalized if eff in {"low", "medium", "high"}]
+
     # Providers whose native ladder tops out below 'max' must NOT advertise it,
     # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
     # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
     # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
-        return [eff for eff in normalized if eff != "max"]
+        normalized = [eff for eff in normalized if eff not in {"max", "ultra"}]
     # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
     # Bedrock / Vertex — the ceiling follows the MODEL, not just the provider name.
     _anthropic_lanes = {
@@ -3722,15 +3799,18 @@ def _filter_reasoning_efforts_for_provider(
         "vertex", "google-vertex",
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
-        return [eff for eff in normalized if eff != "max"]
+        normalized = [eff for eff in normalized if eff not in {"max", "ultra"}]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
-    # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
-    # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
+    # True → keep the full ladder (core's GLM-5.2/5.3 aliases); False → strip it
+    # for every other native-ZAI GLM; None → not a zai GLM case, defer.
     zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
-    if zai_supports is True:
-        return normalized
     if zai_supports is False:
         return []
+    # Never advertise Ultra without Max. Hermes core treats Ultra as an internal
+    # tier and clamps it to a provider's real wire vocabulary; a lane whose
+    # strongest supported level is xhigh/high cannot represent Ultra distinctly.
+    if "max" not in normalized:
+        normalized = [eff for eff in normalized if eff != "ultra"]
     return normalized
 
 
@@ -3800,6 +3880,14 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     if not model or provider in {"cursor-acp", "copilot-acp"}:
         return []
     bare = model.rsplit("/", 1)[-1]
+    if provider in {"xai", "xai-oauth"} and bare.startswith("grok-"):
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
+    if provider in {"kimi-coding", "kimi-coding-cn"}:
+        if re.search(r"(?:^|[^a-z0-9])k3(?:[^a-z0-9]|$)", bare):
+            return ["low", "high", "max", "ultra"]
+        return ["low", "medium", "high"]
     if provider == "openai-codex" and bare.startswith(("gpt-5", "o1", "o3", "o4")):
         if bare.startswith(("o1", "o3", "o4")):
             return ["low", "medium", "high"]
@@ -4167,6 +4255,12 @@ def _resolve_model_reasoning_efforts_impl(
                              if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
                 _filtered = list(dict.fromkeys(_filtered))
                 if _filtered:
+                    # Ultra is an internal intent tier; providers advertise only
+                    # their native wire vocabulary. An authoritative native Max
+                    # declaration therefore enables Ultra even when the literal
+                    # word is absent from configuration.
+                    if "max" in _filtered and "ultra" not in _filtered:
+                        _filtered.append("ultra")
                     return _filtered
     except Exception:
         pass
@@ -4212,6 +4306,14 @@ def _resolve_model_reasoning_efforts_impl(
         if set(normalized).issubset({"off", "on"}):
             return []
         return []
+
+    # Hermes core has provider-specific native ladders for xAI Grok and
+    # Moonshot/Kimi. Prefer those known contracts over generic catalog booleans;
+    # models.dev may lag new native reasoning controls and report false.
+    if provider in {"xai", "xai-oauth"} and _grok_supports_reasoning_effort(hinted_model):
+        return _heuristic_reasoning_efforts(hinted_model, provider)
+    if provider in {"kimi-coding", "kimi-coding-cn"}:
+        return _heuristic_reasoning_efforts(hinted_model, provider)
 
     # _models_dev_reasoning_efforts already applies the provider/model filter
     # internally, so it is returned as-is here (filtering again would be
@@ -4286,18 +4388,21 @@ def coerce_reasoning_effort_for_model(
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
     #
-    # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
-    # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
-    # genuinely unknown/custom provider will 400 on it. So when the
-    # capability list is empty AND the provider is not one we recognize as
-    # reasoning-capable, degrade 'max' -> 'xhigh' rather than send an unsupported
-    # supra-ceiling level. But do NOT degrade for a RECOGNIZED reasoning provider
-    # whose specific model id we simply couldn't resolve (e.g. claude-opus-latest,
-    # a brand-new adaptive id) — those genuinely support 'max', and the ceiling
-    # filter above already stripped it for any KNOWN-capped model. All other
-    # levels (minimal..xhigh) keep the conservative preserve-verbatim behavior.
+    # EXCEPTION for native ``max`` (the #3505 default-deny refinement,
+    # maintainer call 2026-07-11): max is above the universally-safe xhigh
+    # ceiling, so a genuinely unknown/custom provider may reject it. Ultra is
+    # different: it is Hermes-internal intent and every transport clamps it to
+    # a literal provider wire level before sending the request. Preserve Ultra
+    # here so WebUI does not discard that stronger intent prematurely.
+    # When the capability list is empty AND the provider is not one we recognize
+    # as reasoning-capable, degrade only native max -> xhigh. Do NOT degrade max
+    # for a RECOGNIZED reasoning provider whose specific model id we simply
+    # couldn't resolve (e.g. claude-opus-latest, a brand-new adaptive id) — those
+    # genuinely support max, and the ceiling filter above already stripped it for
+    # any KNOWN-capped model. All other levels keep preserve-verbatim behavior.
     #
-    # EXCEPTION for the ZAI native-endpoint gate: a pre-5.2 GLM model (incl. the
+    # EXCEPTION for the ZAI native-endpoint gate: a native GLM outside core's
+    # GLM-5.2/5.3 effort-capable alias families (including future GLMs and the
     # forced-thinking GLM-4.7) is KNOWN not to accept reasoning_effort at all, so
     # any stored level must coerce to "" (send no field) — NOT be preserved
     # verbatim, which Z.AI would silently ignore. This keeps the value actually
@@ -4501,7 +4606,8 @@ def set_reasoning_effort(
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
+    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` |
+    ``max`` | ``ultra``).
 
     An empty string is accepted as "clear the override" — it removes the
     ``agent.reasoning_effort`` key so the provider default takes effect. This is

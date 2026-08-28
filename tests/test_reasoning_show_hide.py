@@ -325,7 +325,8 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+            'ultra',
         ):
             assert f"'{suggestion}'" in entry, (
                 f"reasoning subArgs must include '{suggestion}' for CLI parity"
@@ -359,21 +360,23 @@ class TestReasoningConfigHelpers:
         # Snapshot-style assertion: if hermes_constants adds a level, this
         # test will fail fast so we know to update WebUI too.
         assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         )
 
-    def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
-        """set_reasoning_effort writes agent.reasoning_effort to the active
-        profile's config.yaml — the same key the CLI writes."""
+    def test_set_reasoning_effort_persists_max_and_ultra_distinctly(
+        self, tmp_path, monkeypatch
+    ):
+        """Max and Ultra remain distinct in the CLI-shared config.yaml key."""
         import api.config as cfg
         cfgfile = tmp_path / 'config.yaml'
         monkeypatch.setattr(cfg, '_get_config_path', lambda: cfgfile)
-        cfg.set_reasoning_effort('high')
         import yaml as _yaml
-        data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
-        assert data.get('agent', {}).get('reasoning_effort') == 'high', (
-            "agent.reasoning_effort must be persisted to config.yaml"
-        )
+        for effort in ('max', 'ultra'):
+            cfg.set_reasoning_effort(effort)
+            data = _yaml.safe_load(cfgfile.read_text(encoding='utf-8'))
+            assert data.get('agent', {}).get('reasoning_effort') == effort, (
+                f"agent.reasoning_effort must preserve {effort!r} in config.yaml"
+            )
 
     def test_set_reasoning_display_persists_to_config_yaml(self, tmp_path, monkeypatch):
         """set_reasoning_display writes display.show_reasoning to the same

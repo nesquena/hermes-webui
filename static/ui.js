@@ -5158,17 +5158,20 @@ function _reasoningEffortContext(){
     const ctx={};
     if(transition.model) ctx.model=transition.model;
     if(transition.provider) ctx.provider=transition.provider;
+    if(transition.base_url) ctx.base_url=transition.base_url;
     return ctx;
   }
   const sel=$('modelSelect');
   const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
   let provider=(S&&S.session&&S.session.model_provider)||'';
+  const baseUrl=(S&&S.session&&S.session.base_url)||'';
   if(!provider&&sel&&model&&typeof _modelStateForSelect==='function'){
     provider=_modelStateForSelect(sel, model).model_provider||'';
   }
   const ctx={};
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
+  if(baseUrl) ctx.base_url=baseUrl;
   return ctx;
 }
 
@@ -5293,8 +5296,13 @@ function fetchReasoningChip(keyOverride){
   });
 }
 
-function refreshProfileTransitionReasoningChip(model, provider){
-  _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
+function refreshProfileTransitionReasoningChip(model, provider, baseUrl){
+  _profileTransitionReasoningContext={
+    profile:(S&&S.activeProfile)||'default',
+    model,
+    provider,
+    base_url:baseUrl||null,
+  };
   _currentReasoningEffort=null;
   _currentReasoningEffortsSupported=null;
   _currentReasoningToggleSupported=undefined;
@@ -5304,6 +5312,7 @@ function refreshProfileTransitionReasoningChip(model, provider){
   const params=new URLSearchParams();
   if(model) params.set('model',model);
   if(provider) params.set('provider',provider);
+  if(baseUrl) params.set('base_url',baseUrl);
   fetchReasoningChip(params.size?'?'+params.toString():undefined);
 }
 

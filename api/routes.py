@@ -15545,8 +15545,11 @@ def handle_post(handler, parsed) -> bool:
         # preference set via WebUI is honoured in the terminal REPL and vice
         # versa.  Body is one of:
         #   {"display": "show"|"hide"|"on"|"off"}   → display.show_reasoning
-        #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"}
-        #                                            → agent.reasoning_effort
+        #   {"effort": "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|
+        #              "max"|"ultra", "model"?: ..., "provider"?: ...,
+        #              "base_url"?: ...}             → agent.reasoning_effort
+        # Optional model context makes the returned capability/status payload
+        # describe the active session rather than only the profile default.
         try:
             display = body.get("display")
             effort = body.get("effort")
@@ -15843,6 +15846,8 @@ def handle_post(handler, parsed) -> bool:
                 if model is not None:
                     s.model = model
                 s.model_provider = provider
+                if str(old_provider or "") != str(getattr(s, "model_provider", "") or ""):
+                    s.base_url = None
                 if (
                     str(old_model or "") != str(getattr(s, "model", "") or "")
                     or str(old_provider or "") != str(getattr(s, "model_provider", "") or "")

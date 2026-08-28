@@ -6,8 +6,23 @@ from api import config as cfg
 GPT_5_6_MODELS = (
     "gpt-5.6",
     "gpt-5.6-sol",
+    "gpt-5.6-sol-900k",
+    "gpt-5.6-sol-2026-07-09",
+    "gpt-5.6-sol-2026-07-09-900k",
     "gpt-5.6-terra",
+    "gpt-5.6-terra-900k",
+    "gpt-5.6-terra-2026-07-09",
+    "gpt-5.6-terra-2026-07-09-900k",
     "gpt-5.6-luna",
+    "gpt-5.6-luna-900k",
+    "gpt-5.6-luna-2026-07-09",
+    "gpt-5.6-luna-2026-07-09-900k",
+)
+
+GPT_5_6_PRO_MODELS = (
+    "gpt-5.6-sol-pro",
+    "gpt-5.6-terra-pro",
+    "gpt-5.6-luna-pro",
 )
 
 OPENAI_FAMILY_PROVIDERS = (
@@ -36,6 +51,7 @@ def test_openai_codex_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
 def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
@@ -47,6 +63,7 @@ def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
     assert "xhigh" in efforts
     assert "max" not in efforts
+    assert "ultra" not in efforts
 
 
 def test_openai_codex_max_effort_is_clamped_before_streaming():
@@ -57,19 +74,42 @@ def test_openai_codex_max_effort_is_clamped_before_streaming():
     ) == "xhigh"
 
 
-def test_openai_family_gpt56_models_expose_and_preserve_max():
+def test_openai_family_gpt56_models_expose_and_preserve_max_and_ultra():
     for provider in OPENAI_FAMILY_PROVIDERS:
         for model in GPT_5_6_MODELS:
             efforts = cfg.resolve_model_reasoning_efforts(
                 f"@{provider}:{model}",
                 provider_id=provider,
             )
-            assert "max" in efforts, f"{model} on {provider} must expose max"
+            for effort in ("max", "ultra"):
+                assert effort in efforts, f"{model} on {provider} must expose {effort}"
+                assert cfg.coerce_reasoning_effort_for_model(
+                    effort,
+                    f"@{provider}:{model}",
+                    provider_id=provider,
+                ) == effort, f"{model} on {provider} must preserve {effort}"
+
+
+def test_gpt56_pro_max_and_ultra_are_public_openai_only():
+    provider_matrix = {
+        "openai": True,
+        "openai-api": True,
+        "openai-codex": False,
+        "azure": False,
+        "azure-openai": False,
+        "azure-foundry": False,
+    }
+    for provider, supports_max in provider_matrix.items():
+        for model in GPT_5_6_PRO_MODELS:
+            efforts = cfg.resolve_model_reasoning_efforts(
+                f"@{provider}:{model}", provider_id=provider
+            )
+            assert ("max" in efforts) is supports_max
+            assert ("ultra" in efforts) is supports_max
+            expected = "max" if supports_max else "xhigh"
             assert cfg.coerce_reasoning_effort_for_model(
-                "max",
-                f"@{provider}:{model}",
-                provider_id=provider,
-            ) == "max", f"{model} on {provider} must preserve max"
+                "max", f"@{provider}:{model}", provider_id=provider
+            ) == expected
 
 
 def test_unsupported_xhigh_degrades_to_high_not_disabled():
@@ -95,6 +135,92 @@ def test_coerce_never_escalates_above_configured_effort():
         "gpt-5.5",
         provider_id="openai-codex",
     ) == "low"
+
+
+def test_native_xai_uses_core_grok_effort_allowlist():
+    unsupported = (
+        "grok-4",
+        "grok-4-fast",
+        "grok-code-fast-1",
+        "grok-4.20-0309-reasoning",
+    )
+    supported = ("grok-3-mini", "grok-4.3", "grok-4.5")
+
+    for provider in ("xai", "xai-oauth"):
+        for model in unsupported:
+            assert cfg.resolve_model_reasoning_efforts(
+                model, provider_id=provider
+            ) == [], f"{model} on {provider} rejects the effort dial"
+        for model in supported:
+            assert cfg.resolve_model_reasoning_efforts(
+                model, provider_id=provider
+            ) == ["low", "medium", "high"]
+
+
+def test_native_xai_grok_matrix_uses_exact_46_xhigh_boundary():
+    cases = (
+        ("grok-4", []),
+        ("grok-4-fast", []),
+        ("grok-code-fast-1", []),
+        ("grok-4.20-0309-reasoning", []),
+        ("grok-4.20-0309-non-reasoning", []),
+        ("grok-4.20-multi-agent-0309", ["low", "medium", "high"]),
+        ("grok-4.3", ["low", "medium", "high"]),
+        ("grok-4.5", ["low", "medium", "high"]),
+        ("grok-4.6", ["low", "medium", "high", "xhigh"]),
+        ("grok-4.6-fast", ["low", "medium", "high", "xhigh"]),
+    )
+    for provider in ("xai", "xai-oauth"):
+        for model, expected in cases:
+            assert cfg.resolve_model_reasoning_efforts(
+                model, provider_id=provider
+            ) == expected, f"wrong xAI effort ladder for {provider}/{model}"
+
+
+def test_native_kimi_k2_hides_and_clamps_max_and_ultra():
+    model = "kimi-k2.6"
+    for provider in (
+        "kimi-coding",
+        "moonshot",
+        "kimi-coding-cn",
+        "kimi-cn",
+        "moonshot-cn",
+    ):
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=provider)
+        assert efforts == ["low", "medium", "high"]
+        for requested in ("max", "ultra"):
+            assert cfg.coerce_reasoning_effort_for_model(
+                requested,
+                model,
+                provider_id=provider,
+            ) == "high"
+
+
+def test_native_kimi_k3_exposes_and_preserves_max_and_ultra():
+    providers = (
+        "kimi-coding",
+        "moonshot",
+        "kimi-coding-cn",
+        "kimi-cn",
+        "moonshot-cn",
+    )
+    for provider in providers:
+        for model in ("k3", "k3-256k", "kimi-k3", "kimi-k3-cot"):
+            efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=provider)
+            assert efforts == ["low", "high", "max", "ultra"]
+            for effort in ("max", "ultra"):
+                assert cfg.coerce_reasoning_effort_for_model(
+                    effort,
+                    model,
+                    provider_id=provider,
+                ) == effort
+
+
+def test_kimi_native_ladder_is_provider_aware():
+    all_efforts: list[str] = list(cfg.VALID_REASONING_EFFORTS)
+    assert cfg._filter_reasoning_efforts_for_provider(
+        all_efforts, "kimi-k2.6", "openrouter"
+    ) == all_efforts
 
 
 def test_coerce_preserves_effort_for_unrecognized_model():
@@ -198,6 +324,25 @@ def test_provider_config_all_invalid_falls_through(monkeypatch):
         assert result != []
         assert "bogus" not in result
         assert "typo" not in result
+    finally:
+        if original is None:
+            cfg.cfg.pop("providers", None)
+        else:
+            monkeypatch.setitem(cfg.cfg, "providers", original)
+
+
+def test_authoritative_native_max_list_adds_internal_ultra(monkeypatch):
+    original = cfg.cfg.get("providers")
+    monkeypatch.setitem(
+        cfg.cfg,
+        "providers",
+        {"native-max": {"reasoning_efforts": ["low", "high", "max"]}},
+    )
+    try:
+        assert cfg.resolve_model_reasoning_efforts(
+            "vendor/reasoner",
+            provider_id="native-max",
+        ) == ["low", "high", "max", "ultra"]
     finally:
         if original is None:
             cfg.cfg.pop("providers", None)
@@ -517,6 +662,33 @@ def test_max_only_offered_in_ui_when_actually_supported():
     assert "max" not in cfg.resolve_model_reasoning_efforts("claude-sonnet-4-5", provider_id="anthropic")
     assert "max" not in cfg.resolve_model_reasoning_efforts("gpt-5.1", provider_id="openai")
     assert "max" not in cfg.resolve_model_reasoning_efforts("gemini-3-pro", provider_id="gemini")
+
+
+def test_ultra_follows_the_same_capability_ceiling_as_max():
+    # Ultra is Hermes' above-Max intent tier. The agent maps it to each model's
+    # highest real wire level, so WebUI must only advertise/preserve Ultra where
+    # the native Max rung is available; otherwise it degrades to the same ceiling.
+    capped = (
+        ("gpt-5.5", "openai-codex", "xhigh"),
+        ("gemini-3-pro", "gemini", "xhigh"),
+        ("claude-sonnet-4-5", "anthropic", "xhigh"),
+        ("o3-mini", "openai-codex", "high"),
+    )
+    for model, provider, ceiling in capped:
+        efforts = cfg.resolve_model_reasoning_efforts(model, provider_id=provider)
+        assert "ultra" not in efforts, f"{model} on {provider} must hide Ultra"
+        assert cfg.coerce_reasoning_effort_for_model(
+            "ultra", model_id=model, provider_id=provider
+        ) == ceiling
+
+
+def test_ultra_intent_is_preserved_for_unknown_provider_core_clamping():
+    # Unlike Max's legacy default-deny fallback, Ultra is Hermes-internal intent.
+    # Preserve it until the transport maps it onto its literal wire vocabulary;
+    # no transport forwards the word "ultra" to a provider.
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", model_id="some-unknown-model", provider_id="customprovider"
+    ) == "ultra"
 
 
 def test_datestamped_claude3_not_reasoning_capable_heuristic():

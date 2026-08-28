@@ -6,18 +6,20 @@ Z.AI's official API (docs.z.ai) defines two distinct parameters:
   supported by GLM-4.5 and above (with GLM-4.7 using *forced* thinking that
   cannot be disabled).
 * ``reasoning_effort`` — the effort intensity (max/xhigh/high/medium/low/
-  minimal/none), supported by **GLM-5.2 and above ONLY**.
+  minimal/none), supported only by the **GLM-5.2 and GLM-5.3 alias families**
+  recognized by Hermes core.
 
 Before this fix, hermes-webui advertised the full 6-level ``reasoning_effort``
 ladder (plus ``none``) for *every* GLM model, because ``_candidate_supports_reasoning``
 has an unconditional ``glm`` token match and ``_filter_reasoning_efforts_for_provider``
 had no ZAI branch. Six of seven catalog models therefore showed a selector whose
-values Z.AI documents as GLM-5.2-exclusive, and GLM-4.7 (forced thinking) showed
+values their native transport did not accept, and GLM-4.7 (forced thinking) showed
 a ``none`` option that has no effect.
 
 These tests pin the corrected behaviour: the intensity ladder is offered only for
-GLM-5.2+ via the native ``zai`` provider, and the entire ladder (including
-``none``) is dropped for earlier GLM models and for the forced-thinking GLM-4.7.
+the GLM-5.2/5.3 alias families via the native ``zai`` provider. Other GLM-4.5+
+models, including future-looking GLM-5.4/6 ids, remain thinking-toggle-only, while
+the forced-thinking GLM-4.7 family gets neither control.
 Aggregator providers (openrouter, kilocode, custom:...) are intentionally
 untouched because they route through their own routers, not Z.AI's native docs.
 """
@@ -27,12 +29,20 @@ import pytest
 import api.config as cfg
 
 
-# ── GLM-5.2: full ladder preserved (the only model that supports reasoning_effort) ─
+def test_zai_classification_docs_distinguish_internal_ultra_from_wire_vocabulary():
+    doc = cfg._zai_glm_classification.__doc__ or ""
+    assert "Ultra is Hermes-internal" in doc
+    assert "model-specific native vocabularies are narrower" in doc
+
+
+# ── GLM-5.2/5.3: exact core alias families preserve the effort ladder ──────────
 
 def test_glm_5_2_native_zai_keeps_full_ladder():
     efforts = cfg.resolve_model_reasoning_efforts("glm-5.2", provider_id="zai")
-    # Z.AI's accepted values match VALID_REASONING_EFFORTS exactly.
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
+    # Ultra is preserved as Hermes intent and clamps to Z.AI's real max wire rung.
+    assert set(efforts) == {
+        "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+    }
 
 
 def test_glm_5_2_preserves_none_sentinel():
@@ -57,12 +67,31 @@ def test_glm_5_2_preserves_none_sentinel():
 
 @pytest.mark.parametrize(
     "model_id",
-    ["glm-5.3", "glm-5.2-air", "glm-6-pro", "glm-6", "glm-5.2.1"],
+    [
+        "z-ai/glm-5.2",
+        "glm-5-2",
+        "glm-5p2",
+        "accounts/fireworks/models/glm-5p2",
+        "zai-org-glm-5-2",
+        "glm-5.2-air",
+        "z-ai/glm-5.3",
+        "glm-5-3",
+        "glm-5p3",
+        "zai-org-glm-5-3",
+    ],
 )
-def test_future_glm_5_2_plus_keeps_full_ladder(model_id):
-    """Forward-compat: any GLM >= 5.2 must keep the full ladder."""
+def test_core_glm_5_2_and_5_3_alias_families_keep_full_ladder(model_id):
     efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id="zai")
-    assert set(efforts) >= {"low", "medium", "high", "max"}
+    assert set(efforts) >= {"low", "medium", "high", "max", "ultra"}
+
+
+@pytest.mark.parametrize("model_id", ["glm-5.4", "glm-6", "glm-6-pro"])
+def test_future_glms_remain_thinking_only(model_id):
+    assert cfg.resolve_model_reasoning_efforts(model_id, provider_id="zai") == []
+    assert cfg._zai_glm_classification(model_id, provider_id="zai") == "thinking"
+    status = _reasoning_status(model_id)
+    assert status["supports_reasoning_effort"] is False
+    assert status["supports_thinking_toggle"] is True
 
 
 # ── Bug 1: pre-5.2 GLM models must NOT advertise reasoning_effort ────────────────
@@ -82,7 +111,7 @@ def test_pre_5_2_glm_drops_reasoning_effort_ladder(model_id):
     efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id="zai")
     assert efforts == [], (
         f"{model_id} via native zai must not advertise reasoning_effort "
-        f"(Z.AI: reasoning_effort is GLM-5.2+ only); got {efforts!r}"
+        f"(only core's GLM-5.2/5.3 aliases support it); got {efforts!r}"
     )
 
 
@@ -103,10 +132,10 @@ def test_glm_4_7_air_forced_thinking_drops_entire_ladder():
 
 
 # ── Three-tier classification: effort / thinking / forced ────────────────────────
-# Per docs.z.ai, the three Z.AI capability tiers are distinct:
-#   - GLM-5.2+:           effort ladder (max..minimal) AND thinking toggle
-#   - GLM-4.5–5.1:        thinking toggle ONLY (no effort ladder)
-#   - GLM-4.7:            forced thinking (neither toggle nor ladder)
+# Per Hermes core, the three Z.AI capability tiers are distinct:
+#   - GLM-5.2/5.3 aliases: effort ladder AND thinking toggle
+#   - Other GLM-4.5+:      thinking toggle ONLY (including future GLMs)
+#   - GLM-4.7:             forced thinking (neither toggle nor ladder)
 # Returning [] for the effort ladder must NOT also hide the thinking on/off
 # control for the middle tier — otherwise GLM-4.5/4.6/5.0/5.1 users lose the
 # working thinking toggle they had before (#6219 round-2 review).
@@ -115,12 +144,18 @@ def test_glm_4_7_air_forced_thinking_drops_entire_ladder():
 @pytest.mark.parametrize(
     "model_id,expected",
     [
-        # GLM-5.2+ → effort ladder + thinking toggle
+        # Exact core GLM-5.2/5.3 aliases → effort ladder + thinking toggle
         ("glm-5.2", "effort"),
         ("glm-5.2-air", "effort"),
+        ("glm-5-2", "effort"),
+        ("glm-5p2", "effort"),
         ("glm-5.3", "effort"),
-        ("glm-6", "effort"),
-        # GLM-4.5 up to (but not including) 5.2 → thinking toggle only
+        ("glm-5-3", "effort"),
+        ("glm-5p3", "effort"),
+        # Other GLM-4.5+ models → thinking toggle only
+        ("glm-5.4", "thinking"),
+        ("glm-6", "thinking"),
+        ("glm-6-pro", "thinking"),
         ("glm-5.1", "thinking"),
         ("glm-5", "thinking"),
         ("glm-5-turbo", "thinking"),
@@ -173,7 +208,7 @@ def test_glm_5_2_status_offers_effort_ladder_and_toggle():
     st = _reasoning_status("glm-5.2")
     assert st["supports_reasoning_effort"] is True
     assert set(st["supported_efforts"]) == {
-        "minimal", "low", "medium", "high", "xhigh", "max"
+        "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
     }
     assert st["supports_thinking_toggle"] is True
 
@@ -237,7 +272,7 @@ def test_zai_aliases_resolve_through_same_gate(alias):
     efforts_5_1 = cfg.resolve_model_reasoning_efforts("glm-5.1", provider_id=alias)
     efforts_4_7 = cfg.resolve_model_reasoning_efforts("glm-4.7", provider_id=alias)
     assert set(efforts_5_2) == {
-        "minimal", "low", "medium", "high", "xhigh", "max"
+        "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
     }
     assert efforts_5_1 == []
     assert efforts_4_7 == []
@@ -271,16 +306,19 @@ def test_non_glm_model_on_zai_provider_unaffected():
     # non-GLM models fall through unchanged. (The OpenAI-family ceiling does NOT
     # fire here because that branch is keyed on provider, not model family.)
     efforts = cfg.resolve_model_reasoning_efforts("gpt-5", provider_id="zai")
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
+    assert set(efforts) == {
+        "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+    }
 
 
 # ── Coercion agrees with advertising (UI/coercion invariant) ─────────────────────
-# The ZAI gate returns a KNOWN-empty list for pre-5.2 GLM (distinct from the
-# ambiguous empty list returned for genuinely-unknown models, which preserves
-# the configured effort verbatim per #3505). So any stored effort level — not
-# just 'max' — must coerce to "" (send no reasoning_effort field) for these
-# models, matching the UI showing no options. Without this, a stored 'high' or
-# 'medium' would be forwarded to Z.AI and silently ignored.
+# The ZAI gate returns a KNOWN-empty list for native GLMs outside core's 5.2/5.3
+# alias families (distinct from the ambiguous empty list returned for genuinely
+# unknown models, which preserves the configured effort verbatim per #3505).
+# So any stored effort level — not just 'max' — must coerce to "" (send no
+# reasoning_effort field) for these models, matching the UI showing no options.
+# Without this, a stored 'high' or 'medium' would be forwarded to Z.AI and
+# silently ignored.
 
 @pytest.mark.parametrize(
     "model_id",
@@ -299,8 +337,8 @@ def test_coerce_any_stored_level_to_empty_for_pre_5_2_glm(model_id):
 
 
 def test_coerce_preserves_levels_for_glm_5_2():
-    """GLM-5.2 accepts the full ladder — all stored levels preserve verbatim."""
-    for level in ["max", "xhigh", "high", "medium", "low", "minimal"]:
+    """GLM-5.2 preserves the full Hermes ladder until transport clamping."""
+    for level in ["ultra", "max", "xhigh", "high", "medium", "low", "minimal"]:
         coerced = cfg.coerce_reasoning_effort_for_model(
             level, "glm-5.2", provider_id="zai"
         )
@@ -444,7 +482,9 @@ def test_set_reasoning_effort_still_rejects_invalid():
             cfg.set_reasoning_effort("banana", model_id="glm-4.6", provider_id="zai")
 
 
-@pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize(
+    "effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+)
 def test_set_reasoning_effort_still_accepts_valid_levels(effort):
     """Regression guard: all valid levels + none must still save correctly."""
     import unittest.mock as mock
