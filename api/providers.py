@@ -2786,7 +2786,7 @@ def get_providers() -> dict[str, Any]:
                     pid,
                     exc_info=True,
                 )
-        if is_keyless:
+        if is_keyless and pid == "opencode-free":
             models = _curated_opencode_free_models(models)
             models_total = len(models)
         # Also include models from config.yaml providers section

@@ -82,6 +82,45 @@ def test_fallback_catalog_contains_only_curated_free_models(monkeypatch):
         config.cfg.update(original)
 
 
+def test_disk_cache_preserves_prefixed_free_models(monkeypatch, tmp_path):
+    cache_path = tmp_path / "models_cache.json"
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(config, "_current_webui_version", lambda: None)
+    monkeypatch.setattr(
+        config,
+        "_models_cache_source_fingerprint",
+        lambda: {"source": "test"},
+    )
+    prefixed_models = [
+        {
+            "id": f"@opencode-free:{model['id']}",
+            "label": model["label"],
+        }
+        for model in config._PROVIDER_MODELS["opencode-free"]
+    ]
+    payload = {
+        "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
+        "_source_fingerprint": {"source": "test"},
+        "active_provider": "opencode-go",
+        "default_model": "glm-5.1",
+        "configured_model_badges": {},
+        "groups": [{
+            "provider": "OpenCode Free",
+            "provider_id": "opencode-free",
+            "models": prefixed_models,
+            "extra_models": [],
+        }],
+    }
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    for loaded in (
+        config._load_models_cache_from_disk(),
+        config._load_stale_models_cache_from_disk(),
+    ):
+        assert loaded is not None
+        assert loaded["groups"][0]["models"] == prefixed_models
+
+
 @pytest.mark.parametrize("catalog_builder", ["static", "live"])
 @pytest.mark.parametrize("active_provider,default_model", [
     ("openai-codex", "gpt-5.5"),

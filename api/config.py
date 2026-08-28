@@ -1328,6 +1328,17 @@ _OPENCODE_FREE_MODEL_IDS = frozenset({
 })
 
 
+def _strip_opencode_free_provider_prefix(model_id: object) -> str:
+    """Return the bare curated id from a portal-qualified free model id."""
+    model = str(model_id or "").strip()
+    lowered = model.lower()
+    if lowered.startswith("opencode-free/"):
+        return model.split("/", 1)[1]
+    if lowered.startswith("@opencode-free:"):
+        return model.split(":", 1)[1]
+    return model
+
+
 def _curated_opencode_free_models(models: object) -> list[dict]:
     """Keep every free-provider catalog projection on the fixed six-model contract."""
     if not isinstance(models, (list, tuple)):
@@ -1336,7 +1347,7 @@ def _curated_opencode_free_models(models: object) -> list[dict]:
         copy.deepcopy(model)
         for model in models
         if isinstance(model, dict)
-        and str(model.get("id") or "").strip() in _OPENCODE_FREE_MODEL_IDS
+        and _strip_opencode_free_provider_prefix(model.get("id")) in _OPENCODE_FREE_MODEL_IDS
     ]
 
 
@@ -1345,12 +1356,7 @@ def _sanitize_opencode_free_default(model_id: object, provider_id: object) -> st
     model = str(model_id or "").strip()
     if _canonicalise_provider_id(provider_id) != "opencode-free":
         return model
-    candidate = model
-    lowered = candidate.lower()
-    if lowered.startswith("opencode-free/"):
-        candidate = candidate.split("/", 1)[1]
-    elif lowered.startswith("@opencode-free:"):
-        candidate = candidate.split(":", 1)[1]
+    candidate = _strip_opencode_free_provider_prefix(model)
     return model if candidate in _OPENCODE_FREE_MODEL_IDS else ""
 
 
