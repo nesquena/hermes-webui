@@ -17,7 +17,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 import yaml
 
@@ -1217,13 +1217,16 @@ def _resolve_secret_source_hydrator():
     return None
 
 
-def _external_secret_source_env(home: Path, existing: dict[str, str]) -> dict[str, str]:
+def _external_secret_source_env(home: Path, existing: Mapping[str, str]) -> dict[str, str]:
     """Return credentials contributed by *home*'s external secret sources, for
-    keys the profile's own ``config.yaml``/``.env`` did not already define.
+    keys *existing* did not already define.
 
     GAP-FILL ONLY: a key already resolved from the profile's own config keeps
     its value, so this cannot change the runtime env of any profile that works
     today — it only fills keys that were previously missing entirely.
+    ``existing`` is the profile's own ``config.yaml``/``.env`` env on the
+    runtime-env path, and ``os.environ`` on the root-profile path below (where
+    the process env IS the profile's already-resolved env).
 
     ``_PROTECTED_ENV_KEYS`` are filtered for the same reason the ``.env`` leg
     filters them (#4589): an operator/deployment posture must never be settable
@@ -1259,6 +1262,87 @@ def _external_secret_source_env(home: Path, existing: dict[str, str]) -> dict[st
 
 
 @contextmanager
+def _root_profile_secret_source_scope(
+    purpose: str,
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Expose the ROOT profile's external-secret-source keys on the thread-local
+    env channel for the body of a root-profile scope.
+
+    Every profile scope below short-circuits the root/default profile on the
+    premise that its env is already process-loaded: ``_reload_dotenv()`` reads
+    the plaintext ``~/.hermes/.env`` into ``os.environ`` at startup, so for the
+    root profile ``os.environ`` IS the profile runtime env. That premise does
+    not hold for a key kept in an EXTERNAL secret source — nothing in the WebUI
+    process hydrates those (``bootstrap._load_repo_dotenv`` reads
+    ``REPO_ROOT/.env``; ``_reload_dotenv`` reads the plaintext ``.env`` line by
+    line), so such a key is absent from ``os.environ`` for the whole process
+    lifetime. The streaming turn calls ``get_profile_runtime_env()`` directly
+    and therefore has it, while every short-circuited path — background title /
+    compression workers, ``/api/providers``, ``/api/models/live`` — did not.
+
+    Strictly ADDITIVE, and deliberately NOT the named-profile isolation scope:
+      - gap-fill against ``os.environ``, so a credential provided by the
+        process (docker ``-e``, systemd unit, repo ``.env``) always wins and can
+        never be shadowed by a secret source;
+      - ``block_process_env_fallback`` is NOT set and no secret name is
+        scrubbed, so nothing that resolves today stops resolving. Isolation is
+        not the goal here — the root profile IS the process profile;
+      - no ``agent.secret_scope`` is installed: that scope REPLACES the agent's
+        credential view, so a root scope carrying only the gap-fill keys would
+        HIDE the process-loaded ones;
+      - ``os.environ`` is never mutated.
+
+    A no-op — down to the bare ``yield`` — on agents without the hydration
+    symbol, when the root profile contributes no external secret at all, and
+    inside an enclosing profile-isolated scope.
+    """
+    if _resolve_secret_source_hydrator() is None:
+        yield
+        return
+    # No `yield` inside this block: an exception raised by the caller's body is
+    # thrown in at the yield point, and catching it here would swallow it and
+    # re-yield. Resolve first, decide after.
+    gap_fill: dict[str, str] = {}
+    previous_thread_env: dict[str, str] = {}
+    try:
+        from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
+
+        # An enclosing named-profile scope owns this thread's credential view;
+        # adding the root profile's secrets to it would be exactly the
+        # cross-profile leak that scope exists to prevent (#3961).
+        if not bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
+            previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
+            gap_fill = filter_runtime_env_for_gateway_parity(
+                _external_secret_source_env(get_hermes_home_for_profile(''), os.environ)
+            )
+    except Exception:
+        gap_fill = {}
+        (logger_override or logger).debug(
+            "Failed to hydrate root-profile secret sources for %s; "
+            "falling back to current env",
+            purpose,
+            exc_info=True,
+        )
+
+    if not gap_fill:
+        yield
+        return
+
+    # An enclosing thread env still wins key-by-key: this only ever fills in.
+    merged = dict(gap_fill)
+    merged.update(previous_thread_env)
+    try:
+        _set_thread_env(**merged)
+        yield
+    finally:
+        if previous_thread_env:
+            _set_thread_env(**previous_thread_env)
+        else:
+            _clear_thread_env()
+
+
+@contextmanager
 def profile_env_for_background_worker(
     session,
     purpose: str = "background worker",
@@ -1278,7 +1362,10 @@ def profile_env_for_background_worker(
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or profile == "default":
-        yield
+        # Root keeps the process env as its runtime env, minus any key that
+        # lives only in an external secret source — hydrate just those.
+        with _root_profile_secret_source_scope(purpose, logger_override):
+            yield
         return
 
     try:
@@ -1452,12 +1539,15 @@ def profile_env_for_active_request_readonly(
     agent-side auth-store reads stay on the active profile without mutating
     process-global ``os.environ``.
 
-    No-ops for the default/root profile, which is the common single-profile
-    deployment case.
+    For the default/root profile — the common single-profile deployment — the
+    process env is already the profile env, so this narrows to hydrating the
+    keys that live only in an external secret source
+    (``_root_profile_secret_source_scope``).
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
+        with _root_profile_secret_source_scope(purpose, logger_override):
+            yield
         return
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
@@ -1554,7 +1644,8 @@ def profile_env_for_active_request(
     """
     profile = (get_active_profile_name() or "").strip()
     if not profile or _is_root_profile(profile):
-        yield
+        with _root_profile_secret_source_scope(purpose, logger_override):
+            yield
         return
     with profile_env_for_background_worker(
         profile, purpose, logger_override=logger_override
@@ -1584,7 +1675,8 @@ def profile_scope_for_detached_worker(
     valid) into the worker, then enter this scope at the top of the worker body.
     It sets the request-profile TLS for this (worker) thread and applies the
     profile env via ``profile_env_for_background_worker``, restoring both on exit.
-    No-op for the default/root profile.
+    For the default/root profile it narrows to external-secret-source hydration
+    (``_root_profile_secret_source_scope``); the rest is already process state.
 
     Unlike ``profile_env_for_active_request`` (which reads the *current* thread's
     TLS and must NOT clear it — the request thread keeps using it after the call),
@@ -1593,7 +1685,8 @@ def profile_scope_for_detached_worker(
     """
     name = (profile_name or "").strip()
     if not name or _is_root_profile(name):
-        yield
+        with _root_profile_secret_source_scope(purpose, logger_override):
+            yield
         return
     set_request_profile(name)
     try:

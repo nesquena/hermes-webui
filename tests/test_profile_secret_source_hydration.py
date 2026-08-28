@@ -24,6 +24,11 @@ Contract pinned here:
   - a graceful no-op on older agents that lack the hydration symbol, and on a
     hydrator that raises.
 
+The second half covers the ROOT/default profile, which short-circuits every
+profile scope on the premise that its env is already process-loaded — true for
+its plaintext ``.env``, false for an external secret source. See
+``_root_profile_secret_source_scope``.
+
 The agent-side module is stubbed via ``sys.modules`` injection (house pattern),
 so these tests need neither a real hermes-agent install nor a real secret
 manager.
@@ -32,6 +37,7 @@ manager.
 import os
 import sys
 import types
+from contextlib import contextmanager
 
 import pytest
 import yaml
@@ -266,3 +272,319 @@ def test_resolver_honors_already_imported_module_over_negative_cache(monkeypatch
     )
 
     assert callable(profiles._resolve_secret_source_hydrator())
+
+
+# ── Root/default profile scopes ──────────────────────────────────────────────
+#
+# `_reload_dotenv()` loads the root profile's PLAINTEXT `~/.hermes/.env` into
+# os.environ at startup, which is why every profile scope short-circuits root.
+# Nothing in the WebUI process hydrates root's EXTERNAL secret sources, so a key
+# that lives only there is absent from os.environ for the whole process
+# lifetime: the streaming turn (which calls get_profile_runtime_env directly)
+# had it, while the short-circuited paths — background title/compression
+# workers, /api/providers, /api/models/live — ran without the credential.
+
+
+@pytest.fixture(autouse=True)
+def _isolated_thread_env():
+    """Keep the WebUI thread-local env channel clean between tests."""
+    from api.config import _clear_thread_env, _thread_ctx
+
+    _clear_thread_env()
+    _thread_ctx.block_process_env_fallback = False
+    yield
+    _clear_thread_env()
+    _thread_ctx.block_process_env_fallback = False
+
+
+def _make_root_home(tmp_path, monkeypatch):
+    """Point the root/default profile at an empty home under *tmp_path*."""
+    base = tmp_path / ".hermes"
+    base.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base)
+    return base
+
+
+ROOT_SCOPES = [
+    pytest.param(
+        lambda: profiles.profile_env_for_background_worker("default", "background title"),
+        id="background-worker",
+    ),
+    pytest.param(
+        lambda: profiles.profile_env_for_active_request_readonly("/api/providers"),
+        id="active-request-readonly",
+    ),
+    pytest.param(
+        lambda: profiles.profile_env_for_active_request("/api/models/live"),
+        id="active-request-mirrored",
+    ),
+    pytest.param(
+        lambda: profiles.profile_scope_for_detached_worker("default", "models rebuild"),
+        id="detached-worker",
+    ),
+]
+
+
+@pytest.mark.parametrize("scope", ROOT_SCOPES)
+def test_root_scopes_expose_external_only_secret(tmp_path, monkeypatch, scope):
+    """[the bug] Every root scope must see a credential that lives ONLY in the
+    root profile's external secret source.
+
+    Before the fix these scopes short-circuited to a bare ``yield``, so
+    ``/api/providers`` reported the provider unconfigured and the detached
+    title/compression workers ran with no credential — even though the main
+    streaming turn for the very same profile had the key.
+    """
+    from api.config import _thread_local_env_value
+
+    _make_root_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    _install_hydrator(monkeypatch, lambda _home: {"DEEPSEEK_API_KEY": "sk-from-vault"})
+
+    # The request-scoped wrappers read the active profile from thread-local
+    # state; pin it to root so the assertion is about the root branch.
+    profiles.set_request_profile("default")
+    try:
+        assert _thread_local_env_value("DEEPSEEK_API_KEY") == ""
+        with scope():
+            assert _thread_local_env_value("DEEPSEEK_API_KEY") == "sk-from-vault"
+        # ...and the channel is restored on exit.
+        assert _thread_local_env_value("DEEPSEEK_API_KEY") == ""
+    finally:
+        profiles.clear_request_profile()
+
+
+def test_root_scope_hydrates_the_root_home(tmp_path, monkeypatch):
+    """The hydrator is asked about the ROOT home, not a named profile home."""
+    base = _make_root_home(tmp_path, monkeypatch)
+    calls = []
+
+    def _hydrate(home):
+        calls.append(str(home))
+        return {}
+
+    _install_hydrator(monkeypatch, _hydrate)
+
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        pass
+
+    assert calls == [str(base)]
+
+
+def test_process_env_wins_over_root_secret_source(tmp_path, monkeypatch):
+    """[gap-fill only] For root the PROCESS env is the already-resolved profile
+    env, so a credential provided by docker ``-e`` / systemd / the repo ``.env``
+    must never be shadowed by a secret source."""
+    from api.config import _thread_local_env_value
+
+    _make_root_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-from-process")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _install_hydrator(
+        monkeypatch,
+        lambda _home: {
+            "DEEPSEEK_API_KEY": "sk-from-vault",
+            "OPENAI_API_KEY": "sk-openai-vault",
+        },
+    )
+
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        assert _thread_local_env_value("DEEPSEEK_API_KEY") == "sk-from-process"
+        # ...but a genuinely absent key is still filled.
+        assert _thread_local_env_value("OPENAI_API_KEY") == "sk-openai-vault"
+
+
+def test_root_scope_is_additive_and_never_mutates_process_env(tmp_path, monkeypatch):
+    """The root scope only ADDS to the thread-local channel: it neither touches
+    ``os.environ`` nor blocks the process-env fallback, so every credential that
+    resolves today keeps resolving inside the scope."""
+    from api.config import _thread_local_env_value
+
+    _make_root_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-process-only")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    _install_hydrator(monkeypatch, lambda _home: {"DEEPSEEK_API_KEY": "sk-from-vault"})
+
+    before = dict(os.environ)
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        # A process-only credential stays visible (no block_process_env_fallback).
+        assert _thread_local_env_value("ANTHROPIC_API_KEY") == "sk-process-only"
+        assert "DEEPSEEK_API_KEY" not in os.environ
+        assert dict(os.environ) == before
+    assert dict(os.environ) == before
+
+
+def test_root_scope_filters_shell_identity_and_protected_keys(tmp_path, monkeypatch):
+    """A root secret source can no more override HOME/PATH or an operator
+    posture key than a named profile's ``.env`` can (#4589 + gateway parity)."""
+    from api.config import _thread_local_env_value
+
+    _make_root_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", "/real/home")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("PATH", raising=False)
+    _install_hydrator(
+        monkeypatch,
+        lambda _home: {
+            "HOME": "/vault/home",
+            "PATH": "/vault/bin",
+            "HERMES_WEBUI_ISOLATED_PROFILE": "0",
+            "DEEPSEEK_API_KEY": "sk-from-vault",
+        },
+    )
+
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        assert _thread_local_env_value("HOME") == "/real/home"
+        assert _thread_local_env_value("HERMES_WEBUI_ISOLATED_PROFILE") == ""
+        assert _thread_local_env_value("DEEPSEEK_API_KEY") == "sk-from-vault"
+
+
+def test_root_scope_does_not_leak_into_an_isolated_scope(tmp_path, monkeypatch):
+    """A root scope entered INSIDE a profile-isolated scope must not inject
+    anything: that scope owns the thread's credential view, and adding root's
+    secrets to it is exactly the cross-profile leak it exists to prevent."""
+    from api.config import _set_thread_env, _thread_ctx, _thread_local_env_value
+
+    _make_root_home(tmp_path, monkeypatch)
+    _install_hydrator(monkeypatch, lambda _home: {"DEEPSEEK_API_KEY": "sk-root-vault"})
+
+    _set_thread_env(HERMES_HOME="/named/profile/home")
+    _thread_ctx.block_process_env_fallback = True
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        assert _thread_local_env_value("DEEPSEEK_API_KEY") == ""
+    assert _thread_local_env_value("HERMES_HOME") == "/named/profile/home"
+
+
+def test_enclosing_thread_env_wins_over_root_hydration(tmp_path, monkeypatch):
+    """An enclosing (non-isolated) thread env is authoritative key-by-key; the
+    root scope only fills gaps, and restores the original on exit."""
+    from api.config import _set_thread_env, _thread_ctx, _thread_local_env_value
+
+    _make_root_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    _install_hydrator(
+        monkeypatch,
+        lambda _home: {"DEEPSEEK_API_KEY": "sk-from-vault", "OPENAI_API_KEY": "sk-vault"},
+    )
+
+    _set_thread_env(DEEPSEEK_API_KEY="sk-enclosing")
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        assert _thread_local_env_value("DEEPSEEK_API_KEY") == "sk-enclosing"
+        assert _thread_local_env_value("OPENAI_API_KEY") == "sk-vault"
+    assert getattr(_thread_ctx, "env", {}) == {"DEEPSEEK_API_KEY": "sk-enclosing"}
+
+
+def test_root_scope_does_not_install_agent_secret_scope(tmp_path, monkeypatch):
+    """``agent.secret_scope`` REPLACES the agent's credential view, so a root
+    scope carrying only the gap-fill keys would HIDE the process-loaded ones.
+    The root path must not install one."""
+    _make_root_home(tmp_path, monkeypatch)
+    _install_hydrator(monkeypatch, lambda _home: {"DEEPSEEK_API_KEY": "sk-from-vault"})
+
+    calls = []
+    fake_scope = types.ModuleType("agent.secret_scope")
+    fake_scope.set_secret_scope = lambda scope: calls.append(dict(scope))
+    fake_scope.reset_secret_scope = lambda token: None
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", fake_scope)
+    monkeypatch.setattr(profiles, "_secret_scope_available", None, raising=False)
+
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        pass
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "hydrate",
+    [
+        None,
+        pytest.param(
+            lambda _home: (_ for _ in ()).throw(RuntimeError("vault unreachable")),
+            id="hydrator-raises",
+        ),
+        pytest.param(lambda _home: {}, id="no-external-secrets"),
+    ],
+    ids=["symbol-absent", "hydrator-raises", "no-external-secrets"],
+)
+def test_root_scope_degrades_to_todays_behavior(tmp_path, monkeypatch, hydrate):
+    """No hydration symbol, an unreachable vault, or a root profile with no
+    external source at all: the scope is a bare ``yield`` and leaves the
+    thread-local channel untouched, exactly as before the fix."""
+    from api.config import _thread_ctx
+
+    _make_root_home(tmp_path, monkeypatch)
+    if hydrate is None:
+        _disable_hydrator(monkeypatch)
+    else:
+        _install_hydrator(monkeypatch, hydrate)
+
+    with profiles.profile_env_for_background_worker("default", "background title"):
+        assert getattr(_thread_ctx, "env", {}) == {}
+
+
+@pytest.mark.parametrize(
+    ("hydrate", "isolated"),
+    [
+        pytest.param(lambda _home: {"DEEPSEEK_API_KEY": "sk-vault"}, False, id="scope-active"),
+        pytest.param(lambda _home: {}, False, id="scope-inactive"),
+        # The isolated branch returns without injecting anything — the path most
+        # likely to be written as a `yield` inside the scope's own try/except.
+        pytest.param(lambda _home: {"DEEPSEEK_API_KEY": "sk-vault"}, True, id="isolated"),
+        pytest.param(
+            lambda _home: (_ for _ in ()).throw(RuntimeError("vault unreachable")),
+            False,
+            id="hydrator-raises",
+        ),
+    ],
+)
+def test_root_scope_propagates_body_exceptions(tmp_path, monkeypatch, hydrate, isolated):
+    """A worker that raises inside the scope must surface ITS OWN exception.
+
+    The scope's error handling must wrap the RESOLUTION, never the ``yield``: a
+    ``try/except Exception`` around a yield catches whatever the caller's body
+    raised, then yields a second time — contextlib turns that into
+    ``RuntimeError: generator didn't stop after throw()`` and the real worker
+    error is lost.
+    """
+    from api.config import _set_thread_env, _thread_ctx
+
+    _make_root_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    _install_hydrator(monkeypatch, hydrate)
+    if isolated:
+        _set_thread_env(HERMES_HOME="/named/profile/home")
+        _thread_ctx.block_process_env_fallback = True
+
+    with pytest.raises(ValueError, match="worker blew up"):
+        with profiles.profile_env_for_background_worker("default", "background title"):
+            raise ValueError("worker blew up")
+
+    # ...and the thread-local channel is still unwound.
+    expected = {"HERMES_HOME": "/named/profile/home"} if isolated else {}
+    assert getattr(_thread_ctx, "env", {}) == expected
+
+
+def test_named_profile_does_not_take_the_root_hydration_path(tmp_path, monkeypatch):
+    """The root scope is root-only: a named profile still resolves its whole
+    runtime env through ``get_profile_runtime_env`` as it does today."""
+    _make_root_home(tmp_path, monkeypatch)
+    entered = []
+
+    @contextmanager
+    def _tracking_scope(purpose, logger_override=None):
+        entered.append(purpose)
+        yield
+
+    monkeypatch.setattr(profiles, "_root_profile_secret_source_scope", _tracking_scope)
+    _install_hydrator(monkeypatch, lambda _home: {})
+
+    profiles.set_request_profile("work")
+    try:
+        with profiles.profile_env_for_active_request_readonly("/api/providers"):
+            pass
+    finally:
+        profiles.clear_request_profile()
+
+    assert entered == []
