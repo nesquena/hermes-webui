@@ -2547,8 +2547,10 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
+  const blocked = task.status === 'blocked' || status === 'blocked';
+  const blockBadge = blocked ? `<span class="kanban-badge blocked">⛔ ${esc(t('kanban_task_blocked'))}</span>` : '';
   return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
-    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
+    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}${blockBadge}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
     <div class="kanban-card-meta">${assignee}${comments ? `<span class="kanban-card-metric">💬 ${comments}</span>` : ''}${linkTotal ? `<span class="kanban-card-metric">↔ ${linkTotal}</span>` : ''}${age ? `<span class="kanban-card-age">${esc(age)}</span>` : ''}</div>
@@ -3711,6 +3713,20 @@ async function removeKanbanDependency(parentId, childId){
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
+function _kanbanBlockDiagnosticsHtml(task){
+  const blockKind = task.block_kind || '';
+  const lastFailure = task.last_failure_error || '';
+  const consecutiveFailures = task.consecutive_failures || 0;
+  const hasDiagnostics = blockKind || lastFailure || (Number(consecutiveFailures) > 0);
+  if (!hasDiagnostics) return '';
+  return `<div class="kanban-detail-section kanban-block-diagnostics" style="border-color:var(--danger,#ff5f5f);background:color-mix(in srgb,var(--danger,#ff5f5f) 6%,var(--bg))">
+    <h3 style="color:var(--danger,#ff5f5f)">${esc(t('kanban_block_reason') || 'Block diagnostics')}</h3>
+    ${blockKind ? `<div class="kanban-detail-row"><div class="kanban-detail-row-main"><strong>${esc(t('kanban_block_kind') || 'Type')}:</strong> ${esc(blockKind)}</div></div>` : ''}
+    ${consecutiveFailures ? `<div class="kanban-detail-row"><div class="kanban-detail-row-main"><strong>${esc(t('kanban_consecutive_failures') || 'Consecutive failures')}:</strong> ${esc(String(consecutiveFailures))}</div></div>` : ''}
+    ${lastFailure ? `<div class="kanban-detail-row"><div class="kanban-detail-row-main"><strong>${esc(t('kanban_last_failure') || 'Last failure')}:</strong></div><pre class="kanban-detail-pre">${esc(lastFailure)}</pre></div>` : ''}
+  </div>`;
+}
+
 function _kanbanRenderTaskDetail(data){
   const task = data.task || {};
   const log = data.log || {};
@@ -3737,6 +3753,7 @@ function _kanbanRenderTaskDetail(data){
     <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
     <div class="kanban-status-actions">${statusButtons}</div>
+    ${task.status === 'blocked' ? _kanbanBlockDiagnosticsHtml(task) : ''}
     <div class="kanban-detail-grid">
       ${_kanbanDetailSection('kanban-detail-comments', String(t('kanban_comments_count')).replace('{0}', comments.length), comments.map(_kanbanCommentHtml).join(''), 'kanban_no_comments')}
       ${_kanbanDetailSection('kanban-detail-events', String(t('kanban_events_count')).replace('{0}', events.length), events.map(_kanbanEventHtml).join(''), 'kanban_no_events')}
