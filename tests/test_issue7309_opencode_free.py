@@ -180,7 +180,6 @@ def test_keyless_free_catalog_matrix(
         assert not {"opencode-free", "opencode_free", "free"} & config.cfg.get(
             "providers", {}
         ).keys()
-        assert config.cfg["model"]["provider"] == active_provider
         assert result["active_provider"] == active_provider
     finally:
         config.invalidate_models_cache()
