@@ -9749,19 +9749,69 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     truncation_watermark=getattr(session, "truncation_watermark", None),
                     truncation_boundary=getattr(session, "truncation_boundary", None),
                 )
-            merged_messages = []
+            # _session_message_merge_key cannot reconcile one turn that BOTH
+            # stores hold when only one of the two copies carries a stable id:
+            # the identified copy keys as ("message_id", id) while the other
+            # keys as ("legacy", role, content, timestamp, ...). Two key shapes
+            # never compare equal, so the turn survives twice. Every
+            # gateway-backed browser turn has that shape — WebUI stamps a stable
+            # id on the sidecar row it writes while the agent store holds its
+            # own unidentified copy of the same turn.
+            #
+            # Identified rows stay authoritative: two rows that both carry ids
+            # are distinct messages even when their text matches (a user really
+            # can send the same prompt twice). Only an UNIDENTIFIED row is
+            # reconciled away, and only when an identified row with the same
+            # visible identity is still unmatched — the same cross-store
+            # identity the append-only merge above uses.
+            def _cross_store_visible_key(msg, from_sidecar):
+                return _session_message_visible_key(
+                    msg, normalize_workspace_prefix=not from_sidecar
+                )
+
+            ordered = sorted(
+                [(msg, False) for msg in cli_messages]
+                + [(msg, True) for msg in sidecar_messages],
+                key=lambda pair: (
+                    float(pair[0].get("timestamp") or 0),
+                    str(pair[0].get("role") or ""),
+                    str(pair[0].get("content") or ""),
+                ),
+            )
             seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
+            unmatched_identified = {}
+            identified_by_visible_key = {}
+            kept_positions = set()
+            # Pass 1 admits every identified row and records the visible
+            # identity it already accounts for; pass 2 admits the unidentified
+            # rows that no identified row already covers.
+            for identified_pass in (True, False):
+                for position, (msg, from_sidecar) in enumerate(ordered):
+                    has_identity = bool(msg.get("id") or msg.get("message_id"))
+                    if has_identity != identified_pass:
+                        continue
+                    key = _session_message_merge_key(msg)
+                    if key in seen_message_keys:
+                        continue
+                    visible_key = _cross_store_visible_key(msg, from_sidecar)
+                    if has_identity:
+                        unmatched_identified[visible_key] = (
+                            unmatched_identified.get(visible_key, 0) + 1
+                        )
+                        identified_by_visible_key.setdefault(visible_key, msg)
+                    elif unmatched_identified.get(visible_key, 0) > 0:
+                        unmatched_identified[visible_key] -= 1
+                        _merge_session_display_metadata(
+                            identified_by_visible_key.get(visible_key), msg
+                        )
+                        continue
+                    seen_message_keys.add(key)
+                    kept_positions.add(position)
+            return [
+                msg
+                for position, (msg, _from_sidecar) in enumerate(ordered)
+                if position in kept_positions
+            ]
         return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
     return sidecar_messages
 
