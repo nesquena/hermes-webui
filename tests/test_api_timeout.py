@@ -228,11 +228,22 @@ def test_update_flows_keep_explicit_longer_timeouts():
 def test_session_message_loads_keep_explicit_longer_timeouts():
     """Large state.db installs can take longer than the generic 30s API timeout."""
     src = _source(SESSIONS_JS)
+    # Fresh session navigation starts its tail request in parallel with metadata
+    # but must retain the explicit 120s override on large installs.
     assert (
-        "api(\n"
-        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
-        "      {timeoutMs:120000}\n"
-        "    )"
+        "const messages=api(\n"
+        "    `${base}&messages=1&resolve_model=0&msg_limit=${_INITIAL_TAIL_MSG_LIMIT}&expand_renderable=1`,\n"
+        "    {timeoutMs:120000}\n"
+        "  )"
+    ) in src
+    # Same-session forced reloads do not use the parallel click request because
+    # they preserve the already-visible width; their fallback request keeps the
+    # same timeout contract.
+    assert (
+        ": await api(\n"
+        "        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
+        "        {timeoutMs:120000}\n"
+        "      )"
     ) in src
     # _loadOlderMessages now picks between two strategies (tail-growth vs
     # msg_before paging) via a useBeforePaging ternary, but both keep the long
