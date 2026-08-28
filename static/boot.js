@@ -32,7 +32,7 @@ async function cancelStream(reason){
   let respBody=null;
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}&reason=${encodeURIComponent(_reason)}`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
     try{respBody=await r.json();}catch(_){}
   }catch(e){
@@ -75,7 +75,7 @@ async function cancelSessionStream(session){
   }
   let respOk=false;
   try{
-    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}&reason=sidebar-stop`,document.baseURI||location.href).href,{credentials:'include'});
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;

@@ -14335,11 +14335,19 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, payload)
 
     if parsed.path == "/api/chat/cancel":
-        stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
+        cancel_query = parse_qs(parsed.query)
+        stream_id = cancel_query.get("stream_id", [""])[0]
         if not stream_id:
             return bad(handler, "stream_id required")
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
+        cancel_reason = str(cancel_query.get("reason", ["unspecified"])[0] or "unspecified")
+        cancel_reason = re.sub(r"[^A-Za-z0-9._:-]+", "_", cancel_reason)[:80]
+        logger.info(
+            "Cancel requested: stream_id=%s reason=%s",
+            stream_id,
+            cancel_reason,
+        )
         gateway_stop_blocked = False
         try:
             from api.gateway_chat import (

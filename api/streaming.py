@@ -2096,6 +2096,137 @@ def _settle_result_messages(
     return result_messages
 
 
+def _adopt_cancelled_in_place_compaction(
+    session,
+    agent,
+    pre_compression_count,
+    result,
+    previous_messages,
+    previous_context_messages,
+    msg_text,
+    source,
+    active_turn_identity,
+    stream_id,
+):
+    """Keep a committed in-place compaction when its turn is cancelled late.
+
+    A cancellation normally rejects the Agent result so an unwinding worker
+    cannot overwrite a successor turn.  In-place compression is different: the
+    Agent has already committed the new active projection to state.db.  Dropping
+    that projection here leaves the WebUI sidecar on the pre-compression context
+    and the next turn resurrects the old transcript.
+
+    Adopt only when this exact turn advanced the compressor count, the Agent
+    confirms the DB commit was in place, and this stream still owns session
+    writeback.  A rotated compression or stale worker continues to fail closed.
+    """
+    compressor = getattr(agent, "context_compressor", None)
+    if not (
+        bool(getattr(agent, "_last_compaction_in_place", False))
+        and getattr(compressor, "compression_count", 0) > pre_compression_count
+        and isinstance(result, dict)
+        and result.get("messages")
+    ):
+        return session
+
+    session_id = str(getattr(session, "session_id", None) or "").strip()
+    current = _resolve_current_session_for_write(session) if session_id else None
+    if current is None or session_writeback_owner(session_id) != stream_id:
+        logger.info(
+            "Skipping cancelled in-place compaction adoption for session %s stream %s; "
+            "writeback is no longer owned by this stream",
+            session_id,
+            stream_id,
+        )
+        return session
+    active_stream_id = getattr(current, "active_stream_id", None)
+    if active_stream_id is not None and active_stream_id != stream_id:
+        logger.info(
+            "Skipping cancelled in-place compaction adoption for session %s stream %s; "
+            "active_stream_id=%s",
+            session_id,
+            stream_id,
+            active_stream_id,
+        )
+        return session
+
+    # Verify the boundary against the Agent's unmodified result. Do not call a
+    # settlement helper first: it can synthesize the missing current-turn row,
+    # which would turn absent commit evidence into apparent evidence.
+    compacted_projection = list(result["messages"])
+    current_turn_idx = _find_active_turn_checkpoint_index(
+        compacted_projection,
+        previous_context_messages,
+        active_turn_identity,
+        msg_text,
+    )
+    current_turn_row = (
+        compacted_projection[current_turn_idx]
+        if current_turn_idx is not None
+        and 0 <= current_turn_idx < len(compacted_projection)
+        else None
+    )
+    expected_turn_text = (
+        active_turn_identity.get("text")
+        if isinstance(active_turn_identity, dict)
+        and active_turn_identity.get("text") is not None
+        else msg_text
+    )
+    boundary_verified = (
+        isinstance(current_turn_row, dict)
+        and current_turn_row.get("role") == "user"
+        and _normalize_user_text(_message_text(current_turn_row.get("content")))
+        == _normalize_user_text(expected_turn_text)
+    )
+    if not boundary_verified:
+        logger.warning(
+            "Skipping cancelled in-place compaction adoption for session %s stream %s; "
+            "committed current-turn boundary could not be verified",
+            session_id,
+            stream_id,
+        )
+        return session
+    assert current_turn_idx is not None
+    verified_turn_idx = current_turn_idx
+    if not any(
+        _message_text(message.get("content")).lower().lstrip().startswith(
+            ("[context compaction", "context compaction")
+        )
+        for message in compacted_projection[: verified_turn_idx + 1]
+        if isinstance(message, dict) and is_context_compression_marker(message)
+    ):
+        logger.warning(
+            "Skipping cancelled in-place compaction adoption for session %s stream %s; "
+            "committed projection has no prompt-compaction marker",
+            session_id,
+            stream_id,
+        )
+        return session
+
+    # Compression runs before the model call, so the committed projection ends
+    # at the already-present current-turn user row. Any assistant/tool rows after
+    # that boundary belong to the cancelled model call and must remain rejected.
+    compacted_projection = compacted_projection[: verified_turn_idx + 1]
+
+    _settle_result_messages(
+        current,
+        previous_messages,
+        previous_context_messages,
+        compacted_projection,
+        msg_text,
+        source,
+        active_turn_identity,
+    )
+    logger.info(
+        "Adopted committed in-place compaction during cancelled turn: "
+        "session=%s stream=%s context_messages=%d",
+        session_id,
+        stream_id,
+        len(getattr(current, "context_messages", None) or []),
+    )
+    return current
+
+
 def _current_turn_already_has_visible_assistant_answer(messages, *, active_turn_identity=None):
     """Return True only when the token-owned current turn already has visible assistant prose."""
     if not isinstance(active_turn_identity, dict) or not active_turn_identity.get('token'):
@@ -10758,6 +10889,18 @@ def _run_agent_streaming(
                         _finalize_cancelled_turn(s, ephemeral=True, stream_id=stream_id)
                 else:
                     with _agent_lock:
+                        s = _adopt_cancelled_in_place_compaction(
+                            s,
+                            agent,
+                            _pre_compression_count,
+                            result,
+                            _previous_messages,
+                            _previous_owner_context_messages,
+                            msg_text,
+                            _turn_pending_source,
+                            _active_turn_identity,
+                            stream_id,
+                        )
                         _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(
@@ -10807,6 +10950,18 @@ def _run_agent_streaming(
                 _ckpt_thread.join(timeout=15)
             if cancel_event.is_set():
                 with _agent_lock:
+                    s = _adopt_cancelled_in_place_compaction(
+                        s,
+                        agent,
+                        _pre_compression_count,
+                        result,
+                        _previous_messages,
+                        _previous_owner_context_messages,
+                        msg_text,
+                        _turn_pending_source,
+                        _active_turn_identity,
+                        stream_id,
+                    )
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                     try:
                         append_turn_journal_event_for_stream(
@@ -10868,6 +11023,18 @@ def _run_agent_streaming(
                         if isinstance(result, dict):
                             result = {**result, 'messages': _result_messages}
                     if cancel_event.is_set():
+                        s = _adopt_cancelled_in_place_compaction(
+                            s,
+                            agent,
+                            _pre_compression_count,
+                            result,
+                            _previous_messages,
+                            _previous_owner_context_messages,
+                            msg_text,
+                            _turn_pending_source,
+                            _active_turn_identity,
+                            stream_id,
+                        )
                         _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
                         try:
                             append_turn_journal_event_for_stream(

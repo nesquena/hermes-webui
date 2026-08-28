@@ -918,6 +918,154 @@ def test_webui_run_missing_explicit_profile_passes_no_foreign_revision(
     assert not any(event == "apperror" for event, _payload in events)
 
 
+def test_cancel_after_committed_in_place_compression_requires_result_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    """A late cancel adopts compaction only with its committed user boundary."""
+    import api.config as config
+
+    sid = "cancel-after-in-place-compression"
+    stream_id = "stream-cancel-after-in-place-compression"
+    prior_messages = [
+        {"role": "user", "content": "old user one", "timestamp": 1.0},
+        {"role": "assistant", "content": "old answer one", "timestamp": 2.0},
+        {"role": "user", "content": "old user two", "timestamp": 3.0},
+        {"role": "assistant", "content": "old answer two", "timestamp": 4.0},
+    ]
+    _make_state_db(tmp_path / "state.db", sid, prior_messages)
+    session, event_queue = _install_streaming_session(
+        monkeypatch,
+        tmp_path,
+        sid=sid,
+        stream_id=stream_id,
+        messages=prior_messages,
+        context_messages=prior_messages,
+    )
+    config.register_session_writeback_owner(sid, stream_id)
+
+    compacted_messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY]\n"
+                "Compressed history that must remain authoritative."
+            ),
+        },
+        {"role": "user", "content": "new webui turn"},
+    ]
+    cancelled_assistant_tail = {
+        "role": "assistant",
+        "content": "This answer completed after compression but was cancelled.",
+    }
+
+    class Compressor:
+        compression_count = 0
+
+    class CompressThenCancelAgent:
+        def __init__(self, session_id=None, **_kwargs):
+            self.session_id = session_id
+            self.context_compressor = Compressor()
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+            self._last_compaction_in_place = False
+            self._persist_user_message_idx = 1
+            self._current_turn_id = "agent-cancelled-compaction-turn"
+
+        def run_conversation(self, **_kwargs):
+            self.context_compressor.compression_count += 1
+            self._last_compaction_in_place = True
+            streaming.CANCEL_FLAGS[stream_id].set()
+            return {
+                "completed": False,
+                "interrupted": True,
+                "final_response": "",
+                "messages": [*compacted_messages, cancelled_assistant_tail],
+            }
+
+    monkeypatch.setattr(
+        streaming,
+        "_get_ai_agent",
+        lambda: CompressThenCancelAgent,
+    )
+
+    streaming._run_agent_streaming(
+        session_id=sid,
+        msg_text="new webui turn",
+        model="test-model",
+        workspace=str(tmp_path),
+        stream_id=stream_id,
+        attachments=[],
+    )
+
+    reloaded = Session.load(sid)
+    assert reloaded is not None
+    assert reloaded.context_messages == compacted_messages
+    assert cancelled_assistant_tail not in reloaded.context_messages
+    assert any(event == "cancel" for event, _payload in _drain_events(event_queue))
+    assert session.active_stream_id is None
+
+
+def test_cancelled_compaction_adoption_rejects_missing_result_user_boundary(monkeypatch):
+    """Verification must not synthesize commit evidence into a cancelled result."""
+    sid = "cancelled-compaction-missing-boundary"
+    stream_id = "stream-cancelled-compaction-missing-boundary"
+    prior_messages = [{"role": "user", "content": "old user"}]
+    session = Session(
+        session_id=sid,
+        messages=list(prior_messages),
+        context_messages=list(prior_messages),
+        active_stream_id=stream_id,
+    )
+    agent = types.SimpleNamespace(
+        context_compressor=types.SimpleNamespace(compression_count=1),
+        _last_compaction_in_place=True,
+    )
+    identity = {
+        "token": "active-token",
+        "text": "new webui turn",
+        "current_turn_user_idx": 1,
+        "turn_id": "agent-turn",
+        "agent_turn_boundary_resolved": True,
+    }
+    result = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "[CONTEXT COMPACTION — REFERENCE ONLY]\nSummary.",
+            },
+            {"role": "assistant", "content": "cancelled late answer"},
+        ]
+    }
+    monkeypatch.setattr(
+        streaming,
+        "_resolve_current_session_for_write",
+        lambda _session: session,
+    )
+    monkeypatch.setattr(
+        streaming,
+        "session_writeback_owner",
+        lambda _sid: stream_id,
+    )
+
+    adopted = streaming._adopt_cancelled_in_place_compaction(
+        session,
+        agent,
+        0,
+        result,
+        prior_messages,
+        prior_messages,
+        "new webui turn",
+        "webui",
+        identity,
+        stream_id,
+    )
+
+    assert adopted is session
+    assert session.context_messages == prior_messages
+    assert session.messages == prior_messages
+
+
 @pytest.mark.parametrize("delivery", ["exception", "result"])
 def test_stale_compression_snapshot_emits_actionable_error_without_replaying_turn(
     tmp_path, monkeypatch, delivery
