@@ -2,6 +2,7 @@ import copy
 import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -180,11 +181,11 @@ def test_load_self_heal_cannot_overwrite_a_newer_save(tmp_path, monkeypatch):
     writer_started = threading.Event()
     writer_committed = threading.Event()
     paused = False
-    real_read_text = Path.read_text
+    real_read_bytes = Path.read_bytes
 
     def _pause_loader_after_sidecar_read(path, *args, **kwargs):
         nonlocal paused
-        text = real_read_text(path, *args, **kwargs)
+        payload = real_read_bytes(path, *args, **kwargs)
         if (
             path == session_path
             and threading.current_thread().name == "stale-loader"
@@ -193,9 +194,9 @@ def test_load_self_heal_cannot_overwrite_a_newer_save(tmp_path, monkeypatch):
             paused = True
             stale_read.set()
             assert release_stale_reader.wait(timeout=5)
-        return text
+        return payload
 
-    monkeypatch.setattr(Path, "read_text", _pause_loader_after_sidecar_read)
+    monkeypatch.setattr(Path, "read_bytes", _pause_loader_after_sidecar_read)
     errors = []
 
     def _load_and_repair():
@@ -237,6 +238,206 @@ def test_load_self_heal_cannot_overwrite_a_newer_save(tmp_path, monkeypatch):
         message["id"]
         for message in json.loads(session_path.read_text(encoding="utf-8"))["messages"]
     ] == [1701, 1702]
+
+
+def test_load_self_heal_revalidates_exact_source_generation(tmp_path, monkeypatch):
+    """A non-cooperating replace observed after read restarts reconciliation."""
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "_write_session_index", lambda *_args, **_kwargs: None)
+
+    sid = "load-self-heal-exact-source"
+    session_path = session_dir / f"{sid}.json"
+    first = _incomplete_reasoning_only(1701)
+    newer = _incomplete_reasoning_only(1702)
+    stale_payload = {"session_id": sid, "messages": [first, dict(first)]}
+    newer_payload = {"session_id": sid, "messages": [first, newer]}
+    session_path.write_text(json.dumps(stale_payload), encoding="utf-8")
+
+    real_read_bytes = Path.read_bytes
+    swapped = False
+
+    def _replace_after_first_generation_read(path, *args, **kwargs):
+        nonlocal swapped
+        payload = real_read_bytes(path, *args, **kwargs)
+        if path == session_path and not swapped:
+            swapped = True
+            path.write_text(json.dumps(newer_payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", _replace_after_first_generation_read)
+
+    loaded = models.Session.load(sid)
+
+    assert swapped is True
+    assert loaded is not None
+    assert [message["id"] for message in loaded.messages] == [1701, 1702]
+    assert [
+        message["id"]
+        for message in json.loads(session_path.read_text(encoding="utf-8"))["messages"]
+    ] == [1701, 1702]
+
+
+def test_workspace_binding_cannot_be_reverted_by_delayed_load_repair(tmp_path, monkeypatch):
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "_write_session_index", lambda *_args, **_kwargs: None)
+
+    sid = "load-repair-workspace-binding"
+    old_workspace = tmp_path / "old-workspace"
+    new_workspace = tmp_path / "new-workspace"
+    new_workspace.mkdir()
+    first = _incomplete_reasoning_only(1701)
+    session_path = session_dir / f"{sid}.json"
+    session_path.write_text(
+        json.dumps(
+            {
+                "session_id": sid,
+                "workspace": str(old_workspace),
+                "messages": [first, dict(first)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loader_read = threading.Event()
+    release_loader = threading.Event()
+    binding_started = threading.Event()
+    binding_committed = threading.Event()
+    paused = False
+    real_read_bytes = Path.read_bytes
+
+    def _pause_delayed_loader(path, *args, **kwargs):
+        nonlocal paused
+        payload = real_read_bytes(path, *args, **kwargs)
+        if path == session_path and threading.current_thread().name == "workspace-loader" and not paused:
+            paused = True
+            loader_read.set()
+            assert release_loader.wait(timeout=5)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", _pause_delayed_loader)
+    errors = []
+
+    def _load_and_repair():
+        try:
+            models.Session.load(sid)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def _bind_workspace():
+        try:
+            binding_started.set()
+            models.persist_recovered_workspace_binding(
+                SimpleNamespace(session_id=sid, workspace=str(old_workspace)),
+                new_workspace,
+                expected_workspace=str(old_workspace),
+            )
+            binding_committed.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    loader = threading.Thread(target=_load_and_repair, name="workspace-loader")
+    binder = threading.Thread(target=_bind_workspace, name="workspace-binder")
+    loader.start()
+    assert loader_read.wait(timeout=5)
+    binder.start()
+    assert binding_started.wait(timeout=5)
+    assert not binding_committed.wait(timeout=0.2)
+
+    release_loader.set()
+    loader.join(timeout=5)
+    binder.join(timeout=5)
+
+    assert not loader.is_alive()
+    assert not binder.is_alive()
+    assert errors == []
+    assert binding_committed.is_set()
+    persisted = json.loads(session_path.read_text(encoding="utf-8"))
+    assert persisted["workspace"] == str(new_workspace.resolve())
+    assert [message["id"] for message in persisted["messages"]] == [1701]
+
+
+def test_lifecycle_retirement_cannot_be_republished_by_delayed_load_repair(
+    tmp_path, monkeypatch
+):
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "_write_session_index", lambda *_args, **_kwargs: None)
+
+    sid = "load-repair-lifecycle-retirement"
+    first = _incomplete_reasoning_only(1701)
+    session_path = session_dir / f"{sid}.json"
+    session_path.write_text(
+        json.dumps({"session_id": sid, "messages": [first, dict(first)]}),
+        encoding="utf-8",
+    )
+
+    loader_read = threading.Event()
+    release_loader = threading.Event()
+    retirement_started = threading.Event()
+    retirement_committed = threading.Event()
+    paused = False
+    real_read_bytes = Path.read_bytes
+
+    def _pause_delayed_loader(path, *args, **kwargs):
+        nonlocal paused
+        payload = real_read_bytes(path, *args, **kwargs)
+        if path == session_path and threading.current_thread().name == "retirement-loader" and not paused:
+            paused = True
+            loader_read.set()
+            assert release_loader.wait(timeout=5)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", _pause_delayed_loader)
+    errors = []
+
+    def _load_and_repair():
+        try:
+            models.Session.load(sid)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def _retire():
+        try:
+            retirement_started.set()
+            assert models.retire_session_sidecar(
+                sid, record_deleted_tombstone=True
+            )
+            retirement_committed.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    loader = threading.Thread(target=_load_and_repair, name="retirement-loader")
+    retire = threading.Thread(target=_retire, name="session-retirement")
+    loader.start()
+    assert loader_read.wait(timeout=5)
+    retire.start()
+    assert retirement_started.wait(timeout=5)
+    assert not retirement_committed.wait(timeout=0.2)
+
+    release_loader.set()
+    loader.join(timeout=5)
+    retire.join(timeout=5)
+
+    assert not loader.is_alive()
+    assert not retire.is_alive()
+    assert errors == []
+    assert retirement_committed.is_set()
+    assert not session_path.exists()
+    assert sid in models._load_webui_deleted_session_tombstone()
 
 
 def test_context_dedupe_is_idempotent_for_alternating_incomplete_ids():

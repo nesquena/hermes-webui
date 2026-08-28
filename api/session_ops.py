@@ -607,7 +607,21 @@ def _stamp_intentional_shrink_generation(session, old_message_count: int, new_me
     """Stamp a new generation only when the visible message list shrinks."""
     if new_message_count >= old_message_count:
         return False
-    session.intentional_shrink_generation = uuid.uuid4().hex
+    generation = uuid.uuid4().hex
+    session.intentional_shrink_generation = generation
+    messages = getattr(session, 'messages', None) or []
+    if (
+        messages
+        and isinstance(messages[0], dict)
+        and messages[0].get('_squash_summary') is True
+    ):
+        # A manual squash owns a forward state.db projection only until the
+        # next explicit retry/undo/truncate generation. Persist both the
+        # superseding generation and its cutoff so reload/GET/branch paths do
+        # not resurrect projected rows that the user intentionally removed.
+        session.squash_projection_superseded_by = generation
+        if getattr(session, 'squash_projection_cutoff', None) is None:
+            session.squash_projection_cutoff = _truncation_watermark_for(messages)
     return True
 
 

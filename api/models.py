@@ -191,21 +191,33 @@ def _safe_replace(src: Path, dst: Path) -> None:
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
-_SESSION_SAVE_AUTHORITIES_LOCK = threading.Lock()
-_SESSION_SAVE_AUTHORITIES: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
+_SESSION_SIDECAR_AUTHORITIES_LOCK = threading.Lock()
+_SESSION_SIDECAR_AUTHORITIES: "weakref.WeakValueDictionary[str, threading.RLock]" = weakref.WeakValueDictionary()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 _SESSION_INDEX_REBUILD_THREAD_TARGET: tuple[Path, Path] | None = None
 
 
-def _session_save_authority(session_id: str) -> threading.RLock:
-    """Return the process-wide reentrant save authority for one session ID."""
-    with _SESSION_SAVE_AUTHORITIES_LOCK:
-        authority = _SESSION_SAVE_AUTHORITIES.get(session_id)
+def _session_sidecar_authority(session_id: str) -> threading.RLock:
+    """Return the process-wide sidecar mutation authority for one session ID.
+
+    This authority covers load reconciliation, save, backup recovery, workspace
+    binding and lifecycle retirement.  When a caller also needs
+    ``_get_session_agent_lock(sid)``, the global order is agent lock first,
+    sidecar authority second; this authority must never acquire an agent lock.
+    """
+    sid = str(session_id or "")
+    with _SESSION_SIDECAR_AUTHORITIES_LOCK:
+        authority = _SESSION_SIDECAR_AUTHORITIES.get(sid)
         if authority is None:
             authority = threading.RLock()
-            _SESSION_SAVE_AUTHORITIES[session_id] = authority
+            _SESSION_SIDECAR_AUTHORITIES[sid] = authority
         return authority
+
+
+# Compatibility alias for downstream private imports. New sidecar mutation
+# paths use the broader name above so their shared coordination is explicit.
+_session_save_authority = _session_sidecar_authority
 
 # Serializes ``_record_webui_zero_message_orphan_tombstone`` /
 # ``_clear_webui_zero_message_orphan_tombstone`` so two concurrent sidebar
@@ -838,6 +850,37 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
             logger.debug("Failed to remove empty webui deleted-session tombstone", exc_info=True)
 
 
+def retire_session_sidecar(
+    session_id: str,
+    *,
+    remove_backup: bool = True,
+    record_deleted_tombstone: bool = False,
+) -> bool:
+    """Retire one sidecar generation under the shared per-SID authority.
+
+    Callers holding the agent lock must acquire it before this helper.  Keeping
+    unlink and the durable deletion marker in one critical section prevents a
+    delayed repair load from republishing an old generation and clearing the
+    marker after retirement committed.
+    """
+    sid = str(session_id or "").strip()
+    if not is_safe_session_id(sid):
+        return False
+    path = SESSION_DIR / f"{sid}.json"
+    with _session_sidecar_authority(sid):
+        # Publish and verify the durable retirement authority before removing
+        # the live generation. If marker persistence fails, leave the sidecar
+        # intact rather than creating a recoverable-but-unmarked delete window.
+        if record_deleted_tombstone:
+            _record_webui_deleted_session_tombstone(sid)
+            if sid not in _load_webui_deleted_session_tombstone():
+                raise OSError(f"Failed to persist deletion marker for {sid}")
+        path.unlink(missing_ok=True)
+        if remove_backup:
+            path.with_suffix(".json.bak").unlink(missing_ok=True)
+        return not path.exists()
+
+
 def _content_has_reasoning_only_parts(content) -> bool:
     if not isinstance(content, list) or not content:
         return False
@@ -1327,6 +1370,9 @@ class Session:
                  truncation_boundary=None,
                  clear_generation=None,
                  intentional_shrink_generation=None,
+                 squash_projection_generation=None,
+                 squash_projection_cutoff=None,
+                 squash_projection_superseded_by=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
@@ -1425,6 +1471,9 @@ class Session:
         self.truncation_boundary = truncation_boundary
         self.clear_generation = clear_generation
         self.intentional_shrink_generation = intentional_shrink_generation
+        self.squash_projection_generation = squash_projection_generation
+        self.squash_projection_cutoff = squash_projection_cutoff
+        self.squash_projection_superseded_by = squash_projection_superseded_by
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -1471,6 +1520,9 @@ class Session:
         # Distinct Session objects can represent the same durable sidecar.  One
         # stable SID authority therefore spans snapshot creation, sidecar
         # replacement, and publication of the matching compact index row.
+        # Keep the compatibility alias at this call boundary so focused tests
+        # and downstream private monkeypatches still observe save entry. The
+        # alias resolves to the same shared sidecar authority in production.
         authority = _session_save_authority(self.session_id)
         with authority:
             self._save_owned_generation(touch_updated_at=touch_updated_at, skip_index=skip_index)
@@ -1504,6 +1556,26 @@ class Session:
         # equality decision and leak into this save's payload (#6600).
         if touch_updated_at:
             self.updated_at = time.time()
+        if (
+            self.messages
+            and isinstance(self.messages[0], dict)
+            and self.messages[0].get('_squash_summary') is True
+            and self.squash_projection_superseded_by is None
+        ):
+            # Claim explicit persisted generation+cutoff authority for
+            # legacy/manual squash producers. A later intentional shrink
+            # supersedes this exact projection authority.
+            if self.squash_projection_generation is None:
+                self.squash_projection_generation = str(uuid.uuid4())
+            if self.squash_projection_cutoff is None:
+                raw_cutoff = self.truncation_watermark
+                if raw_cutoff is None:
+                    self.squash_projection_cutoff = _last_message_timestamp(self.messages)
+                else:
+                    try:
+                        self.squash_projection_cutoff = float(raw_cutoff)
+                    except (TypeError, ValueError):
+                        self.squash_projection_cutoff = _last_message_timestamp(self.messages)
         # Freeze every persisted/indexed field, not only messages.  The sidecar
         # and compact row below are projections of this one immutable generation.
         generation = copy.copy(self)
@@ -1535,6 +1607,8 @@ class Session:
             'truncation_boundary',
             'clear_generation',
             'intentional_shrink_generation',
+            'squash_projection_generation', 'squash_projection_cutoff',
+            'squash_projection_superseded_by',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -1690,7 +1764,7 @@ class Session:
         # Loading may self-heal duplicate partial rows. Keep the sidecar read,
         # collapse, and write-back in the same per-session save generation so a
         # stale loader cannot overwrite a newer durable save.
-        with _session_save_authority(sid):
+        with _session_sidecar_authority(sid):
             return cls._load_under_save_authority(sid)
 
     @classmethod
@@ -1702,12 +1776,26 @@ class Session:
         # cache write is only committed if the file didn't change under us
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
-        data = json.loads(p.read_text(encoding='utf-8'))
+        source_payload = p.read_bytes()
+        data = json.loads(source_payload)
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data['messages'], _collapsed_incomplete_ids = _collapse_duplicate_incomplete_message_ids(data.get('messages'))
         session = cls(**data)
         if _collapsed_partials or _collapsed_incomplete_ids:
             try:
+                # Revalidate the exact source generation immediately before
+                # repair. Cooperative mutators are serialized by the sidecar
+                # authority; this check also prevents a non-cooperating atomic
+                # replace observed during parsing from being overwritten by a
+                # stale self-heal generation.
+                if not p.exists():
+                    return cls._load_under_save_authority(sid)
+                try:
+                    current_payload = p.read_bytes()
+                except OSError:
+                    return cls._load_under_save_authority(sid)
+                if current_payload != source_payload:
+                    return cls._load_under_save_authority(sid)
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
                 # intentionally shrinks the transcript (#2592).
@@ -5940,7 +6028,8 @@ def persist_recovered_workspace_binding(
     expected = str(expected_value or "")
     path = SESSION_DIR / f"{sid}.json"
     lock = _get_session_agent_lock(sid)
-    with lock:
+    # Global order: agent lock first, then the per-SID sidecar authority.
+    with lock, _session_sidecar_authority(sid):
         if not path.exists():
             # Recovery only repairs an existing WebUI sidecar. Creating a new
             # sidecar here can resurrect a session that was deleted after the

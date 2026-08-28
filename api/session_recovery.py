@@ -466,7 +466,16 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
 
 
 def recover_session(session_path: Path) -> dict:
-    """Restore session_path from its .bak when the bak has more messages.
+    """Inspect and restore one backup under the shared sidecar authority."""
+    from api.models import _session_sidecar_authority
+
+    sid = Path(session_path).stem
+    with _session_sidecar_authority(sid):
+        return _recover_session_under_sidecar_authority(session_path)
+
+
+def _recover_session_under_sidecar_authority(session_path: Path) -> dict:
+    """Owned implementation; caller holds the per-SID sidecar authority.
 
     Returns a status dict identical to ``inspect_session_recovery_status``
     plus a "restored" boolean.
@@ -732,6 +741,8 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
 
 def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Path | None) -> dict:
     """Materialize missing WebUI JSON sidecars from canonical state.db rows."""
+    from api.models import _session_sidecar_authority
+
     rows = _read_state_db_missing_sidecar_rows(session_dir, state_db_path)
     materialized = 0
     details: list[dict] = []
@@ -765,7 +776,16 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         # will win and we silently skip rather than overwrite a live sidecar.
         materialized_now = False
         try:
-            os.link(str(tmp), str(target))
+            with _session_sidecar_authority(sid):
+                # Revalidate lifecycle authority after the earlier state.db
+                # scan. A delete may have committed its durable tombstone while
+                # this reconciliation generation was being staged.
+                if (
+                    target.exists()
+                    or _durable_tombstone_marks_deleted_webui_session(session_dir, sid)
+                ):
+                    raise FileExistsError(str(target))
+                os.link(str(tmp), str(target))
             materialized_now = True
         except FileExistsError:
             # Live sidecar appeared between the check and the link — keep it.
