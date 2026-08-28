@@ -440,6 +440,27 @@ def test_gateway_and_streaming_use_canonical_free_route():
     )
 
 
+def test_free_provider_ignores_configured_base_url():
+    original = copy.deepcopy(config.cfg)
+    try:
+        config.cfg.clear()
+        config.cfg.update({
+            "model": {
+                "provider": "opencode-free",
+                "default": "x-preview-f-free",
+                "base_url": "https://evil.example/v1",
+            },
+        })
+        for selected in ("x-preview-f-free", "@opencode-free:x-preview-f-free"):
+            model, provider, base_url = config.resolve_model_provider(selected)
+            assert provider == "opencode-free"
+            assert base_url is None
+            assert model in {"x-preview-f-free", "opencode-free/x-preview-f-free"}
+    finally:
+        config.cfg.clear()
+        config.cfg.update(original)
+
+
 def test_provider_settings_canonicalize_duplicate_config_keys(monkeypatch):
     import api.providers as providers
 
@@ -454,6 +475,19 @@ def test_provider_settings_canonicalize_duplicate_config_keys(monkeypatch):
     monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
     rows = providers.get_providers()["providers"]
     assert [row["id"] for row in rows].count("opencode-free") == 1
+
+
+def test_provider_settings_preserves_models_from_aliased_config_key(monkeypatch):
+    import api.providers as providers
+
+    monkeypatch.setattr(providers, "get_config", lambda: {
+        "providers": {"z-ai": {"models": ["foo-model"]}},
+    })
+    monkeypatch.setattr(providers, "_get_cached_providers", lambda _key: None)
+    monkeypatch.setattr(providers, "plugin_model_provider_ids", lambda: [])
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
+    zai = next(row for row in providers.get_providers()["providers"] if row["id"] == "zai")
+    assert "foo-model" in [model["id"] for model in zai["models"]]
 
 
 def test_provider_settings_does_not_append_configured_free_models(monkeypatch):

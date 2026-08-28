@@ -2675,8 +2675,13 @@ def get_providers() -> dict[str, Any]:
 
     providers = []
     providers_cfg = cfg.get("providers") or {}
+    provider_cfgs_by_id: dict[str, list[dict[str, Any]]] = {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(_canonicalise_provider_id(pid) for pid in providers_cfg)
+        for raw_pid, provider_cfg in providers_cfg.items():
+            canonical_pid = _canonicalise_provider_id(raw_pid)
+            known_ids.add(canonical_pid)
+            if isinstance(provider_cfg, dict):
+                provider_cfgs_by_id.setdefault(canonical_pid, []).append(provider_cfg)
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
@@ -2885,8 +2890,9 @@ def get_providers() -> dict[str, Any]:
             models_total = len(models)
         # Also include models from config.yaml providers section
         if isinstance(providers_cfg, dict) and pid != "opencode-free":
-            provider_cfg = providers_cfg.get(pid, {})
-            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+            for provider_cfg in provider_cfgs_by_id.get(pid, []):
+                if "models" not in provider_cfg:
+                    continue
                 cfg_models = provider_cfg["models"]
                 if isinstance(cfg_models, dict):
                     models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
