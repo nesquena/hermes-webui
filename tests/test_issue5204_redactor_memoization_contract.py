@@ -41,3 +41,17 @@ def test_oversize_input_bypasses_cache_but_still_redacts():
 def test_clean_text_unchanged_through_cache():
     sample = "totally benign text with no secrets at all"
     assert helpers._redact_fn_cached(sample) == sample == helpers._redact_fn_uncached(sample)
+
+
+def test_huge_tool_dump_skips_agent_pass_but_still_masks_secrets():
+    """Megabyte URL-heavy dumps must not hang in agent.redact (GIL wedge)."""
+    import time
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    blob = ("http://example.com/foo " * 40000) + " " + secret
+    assert len(blob) > helpers._REDACT_AGENT_MAX_TEXT_LEN
+    t0 = time.monotonic()
+    out = helpers._redact_fn_cached(blob)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"huge-dump redact took {elapsed:.2f}s"
+    assert secret not in out
+    assert out == helpers._redact_fn_uncached(blob)

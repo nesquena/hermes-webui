@@ -304,6 +304,12 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
+# Agent redact (~15 regexes, including Telegram) is catastrophic on megabyte
+# tool dumps and wedges ThreadingHTTPServer behind the GIL. After a VM crash
+# Firefox reopened a 33MB session; GET /api/session spent ~117s in
+# redact_sensitive_text and even GET / timed out. Above this cap, only the
+# cheap local fallback runs (still catches ghp_/sk-/AKIA/headers/keys).
+_REDACT_AGENT_MAX_TEXT_LEN = 16384
 
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
@@ -448,10 +454,16 @@ def _build_redact_fn():
         # HERMES_REDACT_SECRETS opt-in. The local fallback then handles the
         # common short-prefix shapes the agent omits (ghp_, sk-, hf_, AKIA).
         try:
-            agent_redacted = redact_sensitive_text(text, force=True)
+            if len(text) > _REDACT_AGENT_MAX_TEXT_LEN:
+                agent_redacted = text
+            else:
+                agent_redacted = redact_sensitive_text(text, force=True)
         except TypeError:
             # Older hermes-agent builds that predate the force kwarg.
-            agent_redacted = redact_sensitive_text(text)
+            if len(text) > _REDACT_AGENT_MAX_TEXT_LEN:
+                agent_redacted = text
+            else:
+                agent_redacted = redact_sensitive_text(text)
         agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
         return _fallback_redact(agent_redacted)
 

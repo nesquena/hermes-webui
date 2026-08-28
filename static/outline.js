@@ -104,16 +104,13 @@ function _jumpToMessage(rawIdx) {
   }
 
   // Row is outside the render window — reload the full session and retry.
-  // Use the bare messages=1 path (no msg_limit) so the server returns the
-  // COMPLETE transcript: the target row is addressed by absolute index
-  // (msg-user-<rawIdx>), so a bounded tail window would miss early rows.
-  // (A previous version sent msg_limit=9999 as a "give me everything" hack,
-  // but the server now clamps msg_limit, so the bare path is the correct way
-  // to request the full transcript here.)
+  // Use ?full=1 so a huge sidecar is not auto-windowed to the 30-row tail.
+  // The target row is addressed by absolute index (msg-user-<rawIdx>), so a
+  // bounded tail would miss early rows.
   if (typeof api !== 'function') return;
   if (S.busy || S.activeStreamId) return;
   api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0')
+      '&messages=1&resolve_model=0&full=1')
     .then(function(data) {
       if (!data || !data.session) return;
       if (!S.session || S.session.session_id !== sid) return;  // session switched
