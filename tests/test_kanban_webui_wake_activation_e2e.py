@@ -73,7 +73,7 @@ def test_webui_wake_http_routes_and_sidecar_use_session_server_only():
                  delivery_mode, created_at, last_event_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, "webui", "chat", "", "research", "notify+wake", int(time.time()), 0),
+            (task_id, "webui", "chat", "", "default", "notify+wake", int(time.time()), 0),
         )
 
     second_enable_status, second_enabled = _request(

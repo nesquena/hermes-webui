@@ -23245,6 +23245,7 @@ def _start_chat_stream_for_session(
         "pending_started_at": s.pending_started_at,
         "turn_id": journal_event.get("turn_id"),
         "title": s.title,
+        "_status": 200,
     }
     if normalized_model:
         response["effective_model"] = model

@@ -186,9 +186,14 @@ def _kanban_webui_wake_topology(boards) -> dict[str, str]:
 
 
 def _baseline_kanban_webui_wake(kb) -> dict[str, int]:
+    from api.profiles import _is_root_profile
+
     topology = _kanban_webui_wake_topology(
         kb.list_boards(include_archived=False)
     )
+    hosted_names = _hosted_webui_notifier_profile_names()
+    hosted = set(hosted_names)
+    hosts_root = any(name == "default" or _is_root_profile(name) for name in hosted)
     boundaries: dict[str, int] = {}
     for db_path, board in sorted(topology.items()):
         if _DRAIN_STOP.is_set():
@@ -199,8 +204,14 @@ def _baseline_kanban_webui_wake(kb) -> dict[str, int]:
             boundary = _kanban_event_boundary(conn)
             boundaries[db_path] = boundary
             for _ in range(2):
-                for sub in kb.list_notify_subs(conn):
+                for sub in kb.list_notify_subs(
+                    conn,
+                    notifier_profiles=hosted_names,
+                    include_unowned=hosts_root,
+                ):
                     if str(sub.get("platform") or "").strip().lower() != "webui":
+                        continue
+                    if not _webui_notifier_row_owned(sub, hosted, hosts_root):
                         continue
                     cursor = int(sub.get("last_event_id") or 0)
                     if cursor >= boundary:
@@ -708,6 +719,28 @@ def _webui_wake_subscription(sub: dict) -> bool:
     )
 
 
+def _hosted_webui_notifier_profile_names() -> list[str]:
+    from api.profiles import _is_root_profile, list_profiles_api
+
+    hosted: set[str] = set()
+    for row in list_profiles_api() or []:
+        name = str((row or {}).get("name") or "").strip()
+        if not name:
+            continue
+        hosted.add(name)
+        if row.get("is_default") or name == "default" or _is_root_profile(name):
+            hosted.add("default")
+    return sorted(hosted)
+
+
+def _webui_notifier_row_owned(sub: dict, hosted, hosts_root: bool) -> bool:
+    # Blank notifier_profile is default only when this process hosts root.
+    profile = str(sub.get("notifier_profile") or "").strip()
+    if not profile:
+        return hosts_root
+    return profile in hosted
+
+
 def _format_kanban_wakeup_prompt(task: object, event: object) -> str:
     payload = getattr(event, "payload", None)
     payload = payload if isinstance(payload, dict) else {}
@@ -861,6 +894,7 @@ def _poll_webui_kanban_wakeups() -> None:
         from api.kanban_bridge import _kb
         from api.models import get_session
         from api.profiles import (
+            _is_root_profile,
             get_hermes_home_for_profile,
             profile_env_for_background_worker,
         )
@@ -871,6 +905,9 @@ def _poll_webui_kanban_wakeups() -> None:
         if set(topology) != set(state["db_boundaries"]):
             logger.warning("Kanban WebUI wake polling paused due to DB topology change")
             return
+        hosted_names = _hosted_webui_notifier_profile_names()
+        hosted = set(hosted_names)
+        hosts_root = any(name == "default" or _is_root_profile(name) for name in hosted)
         for metadata in boards or []:
             if _DRAIN_STOP.is_set():
                 return
@@ -878,8 +915,13 @@ def _poll_webui_kanban_wakeups() -> None:
             conn = kb.connect(board=board)
             try:
                 subs = [
-                    sub for sub in kb.list_notify_subs(conn)
+                    sub for sub in kb.list_notify_subs(
+                        conn,
+                        notifier_profiles=hosted_names,
+                        include_unowned=hosts_root,
+                    )
                     if _webui_wake_subscription(sub)
+                    and _webui_notifier_row_owned(sub, hosted, hosts_root)
                 ]
                 for sub in subs:
                     if _DRAIN_STOP.is_set():
@@ -887,8 +929,10 @@ def _poll_webui_kanban_wakeups() -> None:
                     task_id = str(sub.get("task_id") or "")
                     chat_id = str(sub.get("chat_id") or "")
                     profile = str(sub.get("notifier_profile") or "").strip()
-                    if not task_id or not chat_id or not profile:
+                    if not task_id or not chat_id:
                         continue
+                    if not profile:
+                        profile = "default"
                     if _DRAIN_STOP.is_set():
                         return
                     claimed = _claim_webui_kanban_events(conn, board, sub, kb)
@@ -2052,13 +2096,15 @@ def _start_server_side_wakeup_turn(
         error = None
         try:
             from api.routes import start_session_turn
-            from api.profiles import profile_env_for_background_worker
+            from api.profiles import profile_scope_for_detached_worker
 
-            with profile_env_for_background_worker(profile, "Kanban WebUI wake"):
+            with profile_scope_for_detached_worker(profile, "Kanban WebUI wake"):
                 resp = start_session_turn(
                     session_id, wakeup_prompt, source="process_wakeup"
                 )
             if not isinstance(resp, dict):
+                status = 500
+            elif resp.get("error") and "_status" not in resp:
                 status = 500
             else:
                 status = int(resp.get("_status", 200))

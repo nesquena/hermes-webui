@@ -15,6 +15,14 @@ def activation(monkeypatch, tmp_path):
     monkeypatch.setattr(api_config, "KANBAN_WEBUI_WAKE_STATE_FILE", state_file, raising=False)
     monkeypatch.setattr(bp, "_KANBAN_POLL_LOCK", bp.threading.Lock(), raising=False)
     monkeypatch.setattr(bp, "_KANBAN_WAKE_STATE_LOCK", bp.threading.Lock(), raising=False)
+    monkeypatch.setattr(
+        "api.profiles.list_profiles_api",
+        lambda: [
+            {"name": "research", "is_default": False},
+            {"name": "default", "is_default": True},
+        ],
+    )
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name == "default")
     return bp, state_file
 
 
@@ -55,7 +63,7 @@ def test_enable_baselines_all_webui_rows_at_one_boundary(activation, monkeypatch
         def connect(self, **kwargs):
             return Conn()
 
-        def list_notify_subs(self, conn):
+        def list_notify_subs(self, conn, **_kwargs):
             return list(rows)
 
         def advance_notify_cursor(self, conn, **kwargs):
@@ -73,6 +81,84 @@ def test_enable_baselines_all_webui_rows_at_one_boundary(activation, monkeypatch
     assert [item["task_id"] for item in advanced] == ["wake", "notify"]
     assert all(item["new_cursor"] == 7 for item in advanced)
     assert json.loads(state_file.read_text(encoding="utf-8"))["db_boundaries"]
+
+
+def test_enable_baselines_only_owned_webui_rows(activation, monkeypatch):
+    bp, state_file = activation
+    rows = [
+        {
+            "task_id": "blank",
+            "platform": "webui",
+            "chat_id": "c1",
+            "thread_id": "",
+            "last_event_id": 2,
+            "notifier_profile": "",
+        },
+        {
+            "task_id": "default",
+            "platform": "webui",
+            "chat_id": "c2",
+            "thread_id": "",
+            "last_event_id": 0,
+            "notifier_profile": "default",
+        },
+        {
+            "task_id": "other",
+            "platform": "webui",
+            "chat_id": "c3",
+            "thread_id": "",
+            "last_event_id": 0,
+            "notifier_profile": "other",
+        },
+        {
+            "task_id": "telegram",
+            "platform": "telegram",
+            "chat_id": "c4",
+            "thread_id": "",
+            "last_event_id": 0,
+            "notifier_profile": "default",
+        },
+    ]
+    advanced = []
+    list_kwargs = []
+
+    class Conn:
+        def execute(self, sql):
+            assert "MAX(id)" in sql
+            return SimpleNamespace(fetchone=lambda: {"latest": 9})
+
+        def close(self):
+            pass
+
+    class KB:
+        def list_boards(self, **kwargs):
+            return [{"slug": "default", "db_path": str(state_file.parent / "kanban.db")}]
+
+        def connect(self, **kwargs):
+            return Conn()
+
+        def list_notify_subs(self, conn, **kwargs):
+            list_kwargs.append(dict(kwargs))
+            return list(rows)
+
+        def advance_notify_cursor(self, conn, **kwargs):
+            advanced.append(kwargs)
+            for row in rows:
+                if all(
+                    row.get(key) == kwargs[key]
+                    for key in ("task_id", "platform", "chat_id", "thread_id")
+                ):
+                    row["last_event_id"] = kwargs["new_cursor"]
+
+    monkeypatch.setattr("api.kanban_bridge._kb", lambda: KB())
+    result = bp.set_kanban_webui_wake_enabled(True)
+
+    assert result["enabled"] is True
+    assert list_kwargs
+    assert set(list_kwargs[0]["notifier_profiles"]) >= {"default", "research"}
+    assert list_kwargs[0]["include_unowned"] is True
+    assert [item["task_id"] for item in advanced] == ["blank", "default"]
+    assert all(item["new_cursor"] == 9 for item in advanced)
 
 
 def test_enable_is_idempotent_and_disable_reenable_baselines_again(activation, monkeypatch):
@@ -96,7 +182,7 @@ def test_enable_is_idempotent_and_disable_reenable_baselines_again(activation, m
         def connect(self, **kwargs):
             return Conn()
 
-        def list_notify_subs(self, conn):
+        def list_notify_subs(self, conn, **_kwargs):
             return rows
 
         def advance_notify_cursor(self, conn, **kwargs):
@@ -142,7 +228,7 @@ def test_concurrent_enable_serializes_one_baseline(activation, monkeypatch):
                 assert release.wait(timeout=1.0)
             return Conn()
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return rows
 
         def advance_notify_cursor(self, _conn, **kwargs):
@@ -259,7 +345,7 @@ def test_poll_rewinds_missing_session_or_profile(activation, monkeypatch, missin
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return [sub]
 
         def claim_unseen_events_for_sub(self, _conn, **_kwargs):
@@ -327,7 +413,7 @@ def test_post_baseline_event_is_claimed_by_the_wake_consumer(activation, monkeyp
         def connect(self, **kwargs):
             return Conn()
 
-        def list_notify_subs(self, conn):
+        def list_notify_subs(self, conn, **_kwargs):
             return [row]
 
         def advance_notify_cursor(self, conn, **kwargs):

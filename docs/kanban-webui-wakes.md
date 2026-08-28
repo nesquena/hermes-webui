@@ -2,17 +2,19 @@
 
 WebUI Kanban wake delivery is disabled by default. It is independent of the browser-toast `notifications_enabled` setting.
 
+Sidecar + HTTP enablement (`GET`/`POST /api/kanban/webui-wake` writing `kanban_webui_wake_state.json` under `STATE_DIR`) is the activation protocol. YAML `kanban.webui_notifier` is comparison only and is not a second gate.
+
 ## Enable safely
 
 1. Stop the old WebUI process before upgrading.
 2. Back up the state sidecar and every Kanban DB path recorded by the sidecar:
    `kanban_webui_wake_state.json` under `STATE_DIR`.
-3. Start exactly one WebUI server for the installation.
+3. Start exactly one WebUI server for the installation. Exclusivity is SQLite `BEGIN IMMEDIATE` claim CAS plus the in-process poll lock; do not run two WebUI servers against the same board.
 4. Read the activation status:
    `GET /api/kanban/webui-wake`
 5. In an authenticated same-origin browser request, enable activation with the normal CSRF flow:
    `POST /api/kanban/webui-wake` with `{"action":"enable"}` and the existing `X-Hermes-CSRF-Token` header.
-6. Check the response and normal WebUI/server logs. Enable snapshots one event boundary per owned Kanban DB before writing the enabled marker; events accumulated before that boundary do not wake existing subscriptions.
+6. Check the response and normal WebUI/server logs. Enable snapshots one event boundary per owned Kanban DB before writing the enabled marker, and advances only `platform=webui` rows this process hosts (blank `notifier_profile` counts as `default` only when this process hosts root). Isolated processes must not wake or baseline foreign profiles. Events accumulated before that boundary do not wake existing subscriptions.
 
 A successful enable is idempotent. A failed baseline remains disabled and returns an activation error; retry after checking the DB and logs. New subscriptions use the normal current-event cursor initialization.
 
@@ -40,4 +42,4 @@ A real process restart and a real LLM wake remain outside this fixture boundary:
 
 Rollback only to a build that contains this activation gate. Keep the matching sidecar and Kanban DB backups together; never run a pre-gate default-on binary against the live DB. Restoring a DB backup without its matching gated sidecar does not preserve historical-wake safety.
 
-The existing delivery semantics remain unchanged: a hard process death after a cursor claim and before an exact HTTP 200 wake acknowledgement can lose that wake, while accepted/retry races can duplicate one. This feature does not provide a lease, outbox, or exactly-once guarantee.
+The existing delivery semantics remain unchanged: a hard process death after a cursor claim and before an exact HTTP 200 wake acknowledgement can lose that wake, while accepted/retry races can duplicate one. This feature does not provide a lease, outbox, journal, or exactly-once guarantee.

@@ -25,6 +25,11 @@ def _enable_webui_wake_consumer_for_legacy_tests(monkeypatch):
         ),
     )
     monkeypatch.setattr(bp, "_KANBAN_WAKE_STATE_LOCK", threading.Lock())
+    monkeypatch.setattr(
+        "api.profiles.list_profiles_api",
+        lambda: [{"name": "research", "is_default": False}],
+    )
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name == "default")
 
 
 def test_webui_kanban_prompt_contains_terminal_fields_and_handoff():
@@ -130,7 +135,7 @@ def test_webui_kanban_poll_ack_or_rewinds_claim(monkeypatch, tmp_path, status):
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return [sub]
 
         def claim_unseen_events_for_sub(self, _conn, **_kwargs):
@@ -215,7 +220,7 @@ def test_webui_kanban_poll_claims_terminal_batch_only_for_webui(monkeypatch, tmp
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return rows
 
         def claim_unseen_events_for_sub(self, _conn, **kwargs):
@@ -276,7 +281,7 @@ def test_webui_kanban_poll_rewinds_failures_and_retries_next_poll(
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return [sub]
 
         def claim_unseen_events_for_sub(self, _conn, **_kwargs):
@@ -334,7 +339,8 @@ def test_webui_kanban_paused_409_preserves_process_wakeup_source(monkeypatch):
         )
         or {"_status": 409, "error": "process_wakeup_paused"},
     )
-    monkeypatch.setattr(profiles, "profile_env_for_background_worker", lambda *_args: nullcontext())
+    monkeypatch.setattr(profiles, "profile_env_for_background_worker", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(bp.threading, "Thread", lambda **kwargs: type("T", (), {"start": lambda self: kwargs["target"]()})())
     monkeypatch.setattr(bp, "record_deferred_wakeup", lambda *_args: (_ for _ in ()).throw(AssertionError("deferred")))
 
@@ -376,7 +382,7 @@ def test_webui_kanban_stop_rewinds_inflight_claim_and_blocks_new_claims(monkeypa
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return [sub]
 
         def claim_unseen_events_for_sub(self, _conn, **_kwargs):
@@ -434,7 +440,7 @@ def test_webui_kanban_poll_does_not_start_wake_after_stop(monkeypatch, tmp_path)
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return [sub]
 
         def claim_unseen_events_for_sub(self, _conn, **_kwargs):
@@ -490,7 +496,7 @@ def test_webui_kanban_two_pollers_do_not_duplicate_claim(monkeypatch, tmp_path):
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return [sub]
 
         def claim_unseen_events_for_sub(self, _conn, **_kwargs):
@@ -553,7 +559,7 @@ def test_webui_kanban_poll_409_rewinds_without_deferred_queue(monkeypatch, tmp_p
         def connect(self, **_kwargs):
             return SimpleNamespace(close=lambda: None)
 
-        def list_notify_subs(self, _conn):
+        def list_notify_subs(self, _conn, **_kwargs):
             return [sub]
 
         def claim_unseen_events_for_sub(self, _conn, **_kwargs):
@@ -565,7 +571,8 @@ def test_webui_kanban_poll_409_rewinds_without_deferred_queue(monkeypatch, tmp_p
     monkeypatch.setattr("api.kanban_bridge._kb", lambda: FakeKB())
     monkeypatch.setattr("api.models.get_session", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: tmp_path)
-    monkeypatch.setattr(profiles, "profile_env_for_background_worker", lambda *_args: nullcontext())
+    monkeypatch.setattr(profiles, "profile_env_for_background_worker", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(
         routes,
         "start_session_turn",
@@ -625,3 +632,305 @@ def test_drain_runs_kanban_poll_off_completion_drain_thread(monkeypatch):
     assert not drain.is_alive()
     assert processed == [{"type": "completion"}]
     assert poll_started.is_set()
+
+
+def test_poll_passes_hosted_notifier_profiles_before_claim(monkeypatch, tmp_path):
+    from api import background_process as bp
+
+    task = SimpleNamespace(id="task-1", status="completed", result="done")
+    event = SimpleNamespace(id=7, task_id="task-1", kind="completed", payload={})
+    sub = {
+        "task_id": "task-1",
+        "platform": "webui",
+        "chat_id": "origin-chat",
+        "thread_id": "",
+        "delivery_mode": "notify+wake",
+        "notifier_profile": "research",
+    }
+    order = []
+
+    class FakeKB:
+        def list_boards(self, **_kwargs):
+            return [{"slug": "default"}]
+
+        def connect(self, **_kwargs):
+            return SimpleNamespace(close=lambda: None)
+
+        def list_notify_subs(self, _conn, **kwargs):
+            order.append(("list", dict(kwargs)))
+            return [sub]
+
+        def claim_unseen_events_for_sub(self, _conn, **kwargs):
+            order.append(("claim", kwargs))
+            return 3, 7, [event]
+
+        def get_task(self, _conn, _task_id):
+            return task
+
+    monkeypatch.setattr(
+        "api.profiles.list_profiles_api",
+        lambda: [{"name": "research", "is_default": False}],
+    )
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr("api.kanban_bridge._kb", lambda: FakeKB())
+    monkeypatch.setattr("api.models.get_session", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(
+        bp,
+        "_start_server_side_wakeup_turn",
+        lambda *_args, **kwargs: kwargs["on_result"](200, {"_status": 200}, None),
+    )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
+    monkeypatch.setattr(bp, "_KANBAN_INFLIGHT_CLAIMS", {})
+
+    bp._poll_webui_kanban_wakeups()
+
+    assert order and order[0][0] == "list"
+    assert set(order[0][1]["notifier_profiles"]) == {"research"}
+    assert order[0][1]["include_unowned"] is False
+    assert any(step[0] == "claim" for step in order)
+    assert order[0][0] != "claim"
+
+
+def test_poll_skips_foreign_profile_without_claiming(monkeypatch, tmp_path):
+    from api import background_process as bp
+
+    task = SimpleNamespace(id="task-1", status="completed", result="done")
+    event = SimpleNamespace(id=7, task_id="task-1", kind="completed", payload={})
+    hosted = {
+        "task_id": "task-1",
+        "platform": "webui",
+        "chat_id": "owned-chat",
+        "thread_id": "",
+        "delivery_mode": "notify+wake",
+        "notifier_profile": "research",
+    }
+    foreign = {
+        "task_id": "task-2",
+        "platform": "webui",
+        "chat_id": "foreign-chat",
+        "thread_id": "",
+        "delivery_mode": "notify+wake",
+        "notifier_profile": "other",
+    }
+    claims = []
+
+    class FakeKB:
+        def list_boards(self, **_kwargs):
+            return [{"slug": "default"}]
+
+        def connect(self, **_kwargs):
+            return SimpleNamespace(close=lambda: None)
+
+        def list_notify_subs(self, _conn, **_kwargs):
+            return [hosted, foreign]
+
+        def claim_unseen_events_for_sub(self, _conn, **kwargs):
+            claims.append(kwargs)
+            return 3, 7, [event]
+
+        def get_task(self, _conn, _task_id):
+            return task
+
+    monkeypatch.setattr(
+        "api.profiles.list_profiles_api",
+        lambda: [{"name": "research", "is_default": False}],
+    )
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr("api.kanban_bridge._kb", lambda: FakeKB())
+    monkeypatch.setattr("api.models.get_session", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(
+        bp,
+        "_start_server_side_wakeup_turn",
+        lambda *_args, **kwargs: kwargs["on_result"](200, {"_status": 200}, None),
+    )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
+    monkeypatch.setattr(bp, "_KANBAN_INFLIGHT_CLAIMS", {})
+
+    bp._poll_webui_kanban_wakeups()
+
+    assert len(claims) == 1
+    assert claims[0]["chat_id"] == "owned-chat"
+
+
+def test_poll_treats_blank_notifier_profile_as_default_only_when_hosting_root(
+    monkeypatch, tmp_path
+):
+    from api import background_process as bp
+
+    task = SimpleNamespace(id="task-1", status="completed", result="done")
+    event = SimpleNamespace(id=7, task_id="task-1", kind="completed", payload={})
+    sub = {
+        "task_id": "task-1",
+        "platform": "webui",
+        "chat_id": "origin-chat",
+        "thread_id": "",
+        "delivery_mode": "notify+wake",
+        "notifier_profile": "",
+    }
+    claims = []
+    starts = []
+
+    class FakeKB:
+        def list_boards(self, **_kwargs):
+            return [{"slug": "default"}]
+
+        def connect(self, **_kwargs):
+            return SimpleNamespace(close=lambda: None)
+
+        def list_notify_subs(self, _conn, **kwargs):
+            assert kwargs.get("include_unowned") is True
+            return [sub]
+
+        def claim_unseen_events_for_sub(self, _conn, **kwargs):
+            claims.append(kwargs)
+            return 3, 7, [event]
+
+        def get_task(self, _conn, _task_id):
+            return task
+
+    monkeypatch.setattr(
+        "api.profiles.list_profiles_api",
+        lambda: [{"name": "default", "is_default": True}],
+    )
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr("api.kanban_bridge._kb", lambda: FakeKB())
+    monkeypatch.setattr("api.models.get_session", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(
+        bp,
+        "_start_server_side_wakeup_turn",
+        lambda session_id, prompt, **kwargs: (
+            starts.append((session_id, kwargs.get("profile"))),
+            kwargs["on_result"](200, {"_status": 200}, None),
+        ),
+    )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
+    monkeypatch.setattr(bp, "_KANBAN_INFLIGHT_CLAIMS", {})
+
+    bp._poll_webui_kanban_wakeups()
+
+    assert len(claims) == 1
+    assert starts == [("origin-chat", "default")]
+
+
+def test_poll_isolated_non_root_skips_blank_notifier_profile(monkeypatch, tmp_path):
+    from api import background_process as bp
+
+    sub = {
+        "task_id": "task-1",
+        "platform": "webui",
+        "chat_id": "origin-chat",
+        "thread_id": "",
+        "delivery_mode": "notify+wake",
+        "notifier_profile": "",
+    }
+    list_kwargs = []
+    claims = []
+    starts = []
+
+    class FakeKB:
+        def list_boards(self, **_kwargs):
+            return [{"slug": "default"}]
+
+        def connect(self, **_kwargs):
+            return SimpleNamespace(close=lambda: None)
+
+        def list_notify_subs(self, _conn, **kwargs):
+            list_kwargs.append(dict(kwargs))
+            return [sub]
+
+        def claim_unseen_events_for_sub(self, _conn, **kwargs):
+            claims.append(kwargs)
+            return 3, 7, []
+
+        def get_task(self, _conn, _task_id):
+            return None
+
+    monkeypatch.setattr(
+        "api.profiles.list_profiles_api",
+        lambda: [{"name": "coder", "is_default": False}],
+    )
+    monkeypatch.setattr("api.profiles._is_root_profile", lambda name: name == "default")
+    monkeypatch.setattr("api.kanban_bridge._kb", lambda: FakeKB())
+    monkeypatch.setattr("api.models.get_session", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr(
+        bp,
+        "_start_server_side_wakeup_turn",
+        lambda *_args, **kwargs: starts.append(True),
+    )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
+    monkeypatch.setattr(bp, "_KANBAN_INFLIGHT_CLAIMS", {})
+
+    bp._poll_webui_kanban_wakeups()
+
+    assert list_kwargs
+    assert set(list_kwargs[0]["notifier_profiles"]) == {"coder"}
+    assert list_kwargs[0]["include_unowned"] is False
+    assert claims == []
+    assert starts == []
+
+
+def test_wakeup_missing_status_without_error_acks(monkeypatch):
+    from api import background_process as bp
+    import api.routes as routes
+
+    result = {}
+    monkeypatch.setattr(
+        routes,
+        "start_session_turn",
+        lambda *_args, **_kwargs: {"stream_id": "s"},
+    )
+    monkeypatch.setattr(
+        bp.threading,
+        "Thread",
+        lambda **kwargs: type("T", (), {"start": lambda self: kwargs["target"]()})(),
+    )
+
+    bp._start_server_side_wakeup_turn(
+        "chat-1",
+        "prompt",
+        profile="research",
+        on_result=lambda status, resp, error=None: result.update(
+            status=status, resp=resp, error=error
+        ),
+    )
+
+    assert result["status"] == 200
+    assert result["resp"]["stream_id"] == "s"
+
+
+def test_wakeup_error_body_without_status_does_not_ack(monkeypatch):
+    from api import background_process as bp
+    import api.routes as routes
+
+    result = {}
+    monkeypatch.setattr(
+        routes,
+        "start_session_turn",
+        lambda *_args, **_kwargs: {"error": "adapter", "stream_id": "s"},
+    )
+    monkeypatch.setattr(
+        bp,
+        "record_deferred_wakeup",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("deferred")),
+    )
+    monkeypatch.setattr(
+        bp.threading,
+        "Thread",
+        lambda **kwargs: type("T", (), {"start": lambda self: kwargs["target"]()})(),
+    )
+
+    bp._start_server_side_wakeup_turn(
+        "chat-1",
+        "prompt",
+        profile="research",
+        on_result=lambda status, resp, error=None: result.update(
+            status=status, resp=resp, error=error
+        ),
+    )
+
+    assert result["status"] != 200
+    assert result["resp"]["error"] == "adapter"
