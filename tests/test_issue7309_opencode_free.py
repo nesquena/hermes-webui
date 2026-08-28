@@ -82,19 +82,85 @@ def test_fallback_catalog_contains_only_curated_free_models(monkeypatch):
         config.cfg.update(original)
 
 
-def test_only_configured_keeps_keyless_free_and_paid_free_suffix_is_separate(monkeypatch):
+@pytest.mark.parametrize("catalog_builder", ["static", "live"])
+@pytest.mark.parametrize("active_provider,default_model", [
+    ("openai-codex", "gpt-5.5"),
+    ("anthropic", "claude-opus-4.7"),
+    ("opencode-zen", "claude-opus-4-6"),
+])
+@pytest.mark.parametrize("only_configured", [False, True])
+def test_keyless_free_catalog_matrix(
+    monkeypatch, tmp_path, catalog_builder, active_provider, default_model, only_configured,
+):
     import api.providers as providers
 
     monkeypatch.setattr(providers, "_provider_has_key", lambda pid: False)
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "missing-auth.json")
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: tmp_path / "missing-models.json")
+    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
+    monkeypatch.setattr(config, "reload_config_if_stale", lambda: None)
+    monkeypatch.setattr(config, "_read_live_provider_model_ids", lambda pid: [
+        model["id"] for model in config._PROVIDER_MODELS.get(pid, [])
+    ])
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models.list_available_providers = lambda: []
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.get_auth_status = lambda _pid: {}
+    fake_cli = types.ModuleType("hermes_cli")
+    fake_cli.__path__ = []
+    fake_cli.models = fake_models
+    fake_cli.auth = fake_auth
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+
+    original = copy.deepcopy(config.cfg)
+    try:
+        config.cfg.clear()
+        config.cfg.update({
+            "model": {"provider": active_provider, "default": default_model},
+            "providers": {"only_configured": only_configured},
+        })
+        config.invalidate_models_cache()
+        if catalog_builder == "static":
+            result = config._static_models_catalog_without_live_probes()
+        else:
+            result = config.get_available_models(force_refresh=True)
+
+        free_groups = [
+            group for group in result["groups"] if group["provider_id"] == "opencode-free"
+        ]
+        assert len(free_groups) == 1
+        free_ids = [
+            model["id"].split(":", 1)[-1]
+            for key in ("models", "extra_models")
+            for model in free_groups[0].get(key, [])
+        ]
+        expected_ids = [model["id"] for model in config._PROVIDER_MODELS["opencode-free"]]
+        assert free_ids == expected_ids
+        assert not {"opencode-free", "opencode_free", "free"} & config.cfg["providers"].keys()
+        assert config.cfg["model"]["provider"] == active_provider
+        assert result["active_provider"] == active_provider
+    finally:
+        config.invalidate_models_cache()
+        config.cfg.clear()
+        config.cfg.update(original)
+
+
+def test_paid_free_suffix_stays_separate_from_keyless_free(monkeypatch):
+    import api.providers as providers
+
+    monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
     original = copy.deepcopy(config.cfg)
     try:
         config.cfg.clear()
         config.cfg.update({"model": {}, "providers": {"only_configured": True}})
         result = config._static_models_catalog_without_live_probes()
-        ids = {g["provider_id"] for g in result["groups"]}
-        assert "opencode-free" in ids
-        go = next(g for g in result["groups"] if g["provider_id"] == "opencode-go") if "opencode-go" in ids else None
-        assert go is None or all("free" not in m["id"] for m in go["models"])
+        go = next(
+            (group for group in result["groups"] if group["provider_id"] == "opencode-go"),
+            None,
+        )
+        assert go is None or all("free" not in model["id"] for model in go["models"])
     finally:
         config.cfg.clear()
         config.cfg.update(original)
