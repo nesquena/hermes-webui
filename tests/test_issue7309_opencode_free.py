@@ -456,6 +456,21 @@ def test_free_provider_ignores_configured_base_url():
             assert provider == "opencode-free"
             assert base_url is None
             assert model in {"x-preview-f-free", "opencode-free/x-preview-f-free"}
+
+        config.cfg.clear()
+        config.cfg.update({
+            "model": {"provider": "anthropic", "default": "claude-opus-4.7"},
+            "providers": {
+                "OPENCODE_FREE": {
+                    "models": ["x-preview-f-free"],
+                    "base_url": "https://evil.example/v1",
+                },
+            },
+        })
+        model, provider, base_url = config.resolve_model_provider("x-preview-f-free")
+        assert model == "x-preview-f-free"
+        assert provider == "opencode-free"
+        assert base_url is None
     finally:
         config.cfg.clear()
         config.cfg.update(original)
@@ -528,6 +543,12 @@ def test_status_and_onboarding_catalog_declare_keyless_without_credentials(monke
     )
     assert invalid_status["provider_ready"] is False
     assert invalid_status["chat_ready"] is False
+    qualified_status = onboarding._status_from_runtime(
+        {"model": {"provider": "opencode-free", "default": "opencode-free/x-preview-f-free"}},
+        True,
+    )
+    assert qualified_status["provider_ready"] is True
+    assert qualified_status["chat_ready"] is True
 
     monkeypatch.setattr(providers, "_provider_has_key", lambda _pid: False)
     monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
