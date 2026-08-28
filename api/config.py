@@ -3009,6 +3009,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 raise ValueError(
                     "opencode-free only supports its six curated free models"
                 )
+            base_url = None
         if isinstance(provider, str) and provider.startswith("custom:"):
             _unique_custom_provider_entry(
                 cfg.get('custom_providers', []),
