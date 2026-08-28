@@ -7753,15 +7753,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                     if has_local_signal:
                         detected_providers.add(canonical)
 
-        if provider_is_keyless("opencode-free") and (
-            not active_provider
-            or active_provider == "opencode-free"
-            or any(
-                _canonicalise_provider_id(key) == "opencode-free"
-                for key in (cfg.get("providers") or {})
-                if isinstance(cfg.get("providers") or {}, dict)
-            )
-        ):
+        if provider_is_keyless("opencode-free"):
             detected_providers.add("opencode-free")
 
         for provider_id in set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY):
@@ -11033,15 +11025,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _pid_norm.startswith("custom:") and _pid_norm not in _named_custom_slugs:
                     detected_providers.discard(_pid)
 
-        if provider_is_keyless("opencode-free") and (
-            not active_provider
-            or active_provider == "opencode-free"
-            or any(
-                _canonicalise_provider_id(key) == "opencode-free"
-                for key in (cfg.get("providers") or {})
-                if isinstance(cfg.get("providers") or {}, dict)
-            )
-        ):
+        if provider_is_keyless("opencode-free"):
             detected_providers.add("opencode-free")
 
         # Filter providers if providers.only_configured is set
