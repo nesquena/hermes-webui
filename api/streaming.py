@@ -2588,7 +2588,12 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_user_source = None
     try:
         from api.models import retire_session_sidecar
-        retire_session_sidecar(session.session_id, record_deleted_tombstone=False)
+        sidecar_path = Path(session.path)
+        retire_session_sidecar(
+            getattr(session, "session_id", None) or sidecar_path.stem,
+            sidecar_path=sidecar_path,
+            record_deleted_tombstone=False,
+        )
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
@@ -11557,7 +11562,12 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     from api.models import retire_session_sidecar
-                    retire_session_sidecar(s.session_id, record_deleted_tombstone=False)
+                    sidecar_path = Path(s.path)
+                    retire_session_sidecar(
+                        s.session_id,
+                        sidecar_path=sidecar_path,
+                        record_deleted_tombstone=False,
+                    )
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions

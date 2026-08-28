@@ -853,6 +853,7 @@ def _clear_webui_deleted_session_tombstone(sid: str) -> None:
 def retire_session_sidecar(
     session_id: str,
     *,
+    sidecar_path: Path | str | None = None,
     remove_backup: bool = True,
     record_deleted_tombstone: bool = False,
 ) -> bool:
@@ -866,7 +867,9 @@ def retire_session_sidecar(
     sid = str(session_id or "").strip()
     if not is_safe_session_id(sid):
         return False
-    path = SESSION_DIR / f"{sid}.json"
+    path = Path(sidecar_path) if sidecar_path is not None else SESSION_DIR / f"{sid}.json"
+    if path.name != f"{sid}.json":
+        raise ValueError(f"Sidecar path does not match session ID {sid!r}")
     with _session_sidecar_authority(sid):
         # Publish and verify the durable retirement authority before removing
         # the live generation. If marker persistence fails, leave the sidecar
