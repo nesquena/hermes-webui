@@ -8997,6 +8997,46 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
             target[key] = copy.deepcopy(value)
 
 
+# Agent-store-only semantic payload: the model's actual reasoning/thinking
+# trace and the Codex-specific structured item lists. These are NOT display
+# metadata (_SESSION_MESSAGE_DISPLAY_METADATA_KEYS above) and are deliberately
+# NOT folded into it: that allowlist is reused by several merge paths beyond
+# the gateway dual-store reconciliation this one exists for, and widening it
+# would change behavior in call sites that never asked for reasoning/Codex
+# payload semantics. Kept as its own narrow, explicitly-named list instead.
+# `api_content` is deliberately excluded from both lists — its identity rules
+# elsewhere in this module are stricter for good reason and must not be
+# bypassed by a generic dict merge.
+_AGENT_SEMANTIC_PAYLOAD_KEYS = (
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "codex_reasoning_items",
+    "codex_message_items",
+)
+
+
+def _adopt_agent_semantic_payload(target: dict | None, source: dict | None) -> None:
+    """Copy Agent-store-only semantic payload onto the surviving sidecar row.
+
+    Used when a gateway dual-store reconciliation discards an unidentified
+    Agent-store copy of a turn in favor of the identified WebUI sidecar copy:
+    the discarded row can carry the model's real reasoning trace and Codex
+    item lists that the sidecar copy never received. Same fill-only-if-absent
+    policy as `_merge_session_display_metadata`: a field the survivor already
+    carries a non-empty value for is left alone rather than overwritten, so
+    Agent-side data never silently clobbers a sidecar-authored value.
+    """
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    for key in _AGENT_SEMANTIC_PAYLOAD_KEYS:
+        if _message_display_metadata_value_present(target.get(key)):
+            continue
+        value = source.get(key)
+        if _message_display_metadata_value_present(value):
+            target[key] = copy.deepcopy(value)
+
+
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:
     """Return ``(row_id, valid)`` for private state.db provenance aliases.
 

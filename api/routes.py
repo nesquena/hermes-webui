@@ -9764,6 +9764,16 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             # reconciled away, and only when an identified row with the same
             # visible identity is still unmatched — the same cross-store
             # identity the append-only merge above uses.
+            #
+            # Pairing is one-to-one, not "every match for this visible key
+            # goes to whichever identified row we saw first": two identical
+            # assistant answers (same visible key, different ids, different
+            # per-turn reasoning) must not have their Agent-store metadata
+            # cross-wired onto the wrong survivor. Each visible key gets its
+            # own FIFO queue of still-unmatched identified rows, built in
+            # transcript order in pass 1; pass 2 pops the oldest unmatched
+            # entry for a match, so repeats pair up in the order they
+            # actually occurred rather than collapsing onto one row.
             def _cross_store_visible_key(msg, from_sidecar):
                 return _session_message_visible_key(
                     msg, normalize_workspace_prefix=not from_sidecar
@@ -9779,12 +9789,11 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 ),
             )
             seen_message_keys = set()
-            unmatched_identified = {}
-            identified_by_visible_key = {}
+            unmatched_identified_queue = {}
             kept_positions = set()
-            # Pass 1 admits every identified row and records the visible
-            # identity it already accounts for; pass 2 admits the unidentified
-            # rows that no identified row already covers.
+            # Pass 1 admits every identified row and enqueues it under its
+            # visible identity; pass 2 admits the unidentified rows that no
+            # identified row already covers.
             for identified_pass in (True, False):
                 for position, (msg, from_sidecar) in enumerate(ordered):
                     has_identity = bool(msg.get("id") or msg.get("message_id"))
@@ -9795,16 +9804,14 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                         continue
                     visible_key = _cross_store_visible_key(msg, from_sidecar)
                     if has_identity:
-                        unmatched_identified[visible_key] = (
-                            unmatched_identified.get(visible_key, 0) + 1
-                        )
-                        identified_by_visible_key.setdefault(visible_key, msg)
-                    elif unmatched_identified.get(visible_key, 0) > 0:
-                        unmatched_identified[visible_key] -= 1
-                        _merge_session_display_metadata(
-                            identified_by_visible_key.get(visible_key), msg
-                        )
-                        continue
+                        unmatched_identified_queue.setdefault(visible_key, []).append(msg)
+                    else:
+                        queue = unmatched_identified_queue.get(visible_key)
+                        if queue:
+                            survivor = queue.pop(0)
+                            _merge_session_display_metadata(survivor, msg)
+                            _adopt_agent_semantic_payload(survivor, msg)
+                            continue
                     seen_message_keys.add(key)
                     kept_positions.add(position)
             return [
@@ -10338,6 +10345,7 @@ from api.models import (
     _active_stream_ids,
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
+    _adopt_agent_semantic_payload,
     _session_message_merge_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
