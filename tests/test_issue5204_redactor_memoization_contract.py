@@ -55,3 +55,43 @@ def test_huge_tool_dump_skips_agent_pass_but_still_masks_secrets():
     assert elapsed < 2.0, f"huge-dump redact took {elapsed:.2f}s"
     assert secret not in out
     assert out == helpers._redact_fn_uncached(blob)
+
+
+def test_residual_shapes_leak_above_agent_cap():
+    """Pin the known, accepted residual gap of the >16KB agent-pass bypass.
+
+    Above _REDACT_AGENT_MAX_TEXT_LEN a single field skips the agent redactor and
+    only the prefix/keyword-based local fallback runs. The prefix-less agent-only
+    shapes — bare JWT (eyJ...) and DB connection-string passwords — are therefore
+    NOT masked in an oversize field. This is intentional (a multi-MB single field
+    is a tool dump, not a credential store); this test documents the boundary so
+    the behavior is a deliberate, reviewed trade-off rather than a silent leak.
+    If a future change starts masking these above the cap, update the code
+    comment on _REDACT_AGENT_MAX_TEXT_LEN too.
+    """
+    jwt = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
+        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    )
+    db_pw = "s3cr3tDbPassw0rd"
+    connstr = f"postgres://dbuser:{db_pw}@db.internal:5432/prod"
+    filler = "x" * (helpers._REDACT_AGENT_MAX_TEXT_LEN + 100)
+
+    # Below the cap the agent pass runs and masks both shapes.
+    small = f"start {jwt} {connstr} end"
+    small_out = helpers._redact_fn_uncached(small)
+    assert jwt not in small_out
+    assert db_pw not in small_out
+
+    # Above the cap the agent pass is skipped: the prefix-less shapes leak.
+    big = f"{filler} {jwt} {connstr}"
+    assert len(big) > helpers._REDACT_AGENT_MAX_TEXT_LEN
+    big_out = helpers._redact_fn_uncached(big)
+    assert jwt in big_out, "JWT unexpectedly masked above cap - update the comment"
+    assert db_pw in big_out, "DB-connstr pw unexpectedly masked above cap - update the comment"
+
+    # But short-prefix secrets are still caught by the local fallback above the
+    # cap - the fallback is exactly what keeps the common shapes safe.
+    sk = "sk-ABCDEFGHIJKLMNOP1234567890"
+    assert sk not in helpers._redact_fn_uncached(f"{filler} {sk}")

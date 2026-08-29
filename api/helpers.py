@@ -309,6 +309,14 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 # Firefox reopened a 33MB session; GET /api/session spent ~117s in
 # redact_sensitive_text and even GET / timed out. Above this cap, only the
 # cheap local fallback runs (still catches ghp_/sk-/AKIA/headers/keys).
+#
+# Residual gap above the cap: the fallback is prefix/keyword-based, so the
+# *prefix-less* agent-only shapes are NOT masked in a single field larger than
+# this cap — specifically bare JWTs (eyJ…), Telegram bot tokens
+# (<digits>:<token>), and DB connection-string passwords (postgres://u:pw@host).
+# This is an accepted trade-off (a multi-MB single field is a tool dump, not a
+# credential store); pinned by test_residual_shapes_leak_above_agent_cap so a
+# future reader isn't surprised. Raising the cap trades latency for coverage.
 _REDACT_AGENT_MAX_TEXT_LEN = 16384
 
 def _build_redact_fn():
