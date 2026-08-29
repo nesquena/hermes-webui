@@ -275,6 +275,7 @@ global.document={{addEventListener:(name, fn)=>{{handlers[name]=fn;}}}};
 global.closeReasoningDropdown=()=>{{}};
 global._reasoningEffortContext=()=>({{}});
 global._reasoningMutationSeqBySession={{}};
+global._reasoningMutationRequestChainBySession={{}};
 global.fetchReasoningChip=()=>{{effects.push('fetch');}};
 global._applyReasoningChip=(effort)=>{{effects.push('apply:'+effort);}};
 global.showToast=(message)=>{{effects.push('toast:'+message);}};
@@ -331,6 +332,7 @@ global.document={{addEventListener:(name, fn)=>{{handlers[name]=fn;}}}};
 global.closeReasoningDropdown=()=>{{}};
 global._reasoningEffortContext=()=>({{}});
 global._reasoningMutationSeqBySession={{}};
+global._reasoningMutationRequestChainBySession={{}};
 global.fetchReasoningChip=()=>{{effects.push('fetch');}};
 global._applyReasoningChip=(effort)=>{{effects.push('apply:'+effort);}};
 global.showToast=(message)=>{{effects.push('toast:'+message);}};
@@ -346,31 +348,71 @@ const clickOn=(effort)=>{{
 }};
 clickOn('low');
 clickOn('high');
-if(settlers.length!==2) throw new Error('expected two dispatched mutations, got '+settlers.length);
-// Newer request ('high') settles FIRST…
-settlers[1].resolve({{reasoning_effort:'high'}});
+if(settlers.length!==1) throw new Error('expected one serialized mutation, got '+settlers.length);
+// The older request settles first, but its callback is stale because a newer
+// selection already owns the generation.
+settlers[0].resolve({{reasoning_effort:'low'}});
 setImmediate(()=>{{
-  if(S.session.reasoning_effort!=='high') throw new Error('newest selection not applied: '+S.session.reasoning_effort);
-  if(!effects.includes('apply:high')) throw new Error('newest selection did not update chip: '+effects.join(','));
-  const before=effects.slice();
-  // …then the OLDER request ('low') completes last and must be a no-op.
-  settlers[0].resolve({{reasoning_effort:'low'}});
+  if(settlers.length!==2) throw new Error('newest mutation did not dispatch after predecessor');
+  if(effects.length) throw new Error('superseded success produced UI effects: '+effects.join(','));
+  settlers[1].resolve({{reasoning_effort:'high'}});
   setImmediate(()=>{{
-    if(S.session.reasoning_effort!=='high') throw new Error('stale success overwrote session value: '+S.session.reasoning_effort);
-    if(effects.length!==before.length) throw new Error('stale success produced UI effects: '+effects.slice(before.length).join(','));
-    // Same ordering rule for a stale FAILURE: no misleading error toast.
+    if(S.session.reasoning_effort!=='high') throw new Error('newest selection not applied: '+S.session.reasoning_effort);
+    if(!effects.includes('apply:high')) throw new Error('newest selection did not update chip: '+effects.join(','));
+    // A stale failure must not toast, and must not block the queued selection.
     const failEffects=effects.length;
     clickOn('medium');
     clickOn('xhigh');
-    settlers[3].resolve({{reasoning_effort:'xhigh'}});
+    if(settlers.length!==3) throw new Error('expected first failure mutation to dispatch');
+    settlers[2].reject(new Error('superseded request failed'));
     setImmediate(()=>{{
-      const afterNewest=effects.length;
-      settlers[2].reject(new Error('late failure of superseded request'));
+      if(effects.length!==failEffects) throw new Error('stale failure produced UI effects: '+effects.slice(failEffects).join(','));
+      if(settlers.length!==4) throw new Error('newest mutation blocked by rejected predecessor');
+      settlers[3].resolve({{reasoning_effort:'xhigh'}});
       setImmediate(()=>{{
-        if(S.session.reasoning_effort!=='xhigh') throw new Error('stale failure disturbed session value');
-        if(effects.length!==afterNewest) throw new Error('stale failure produced UI effects: '+effects.slice(afterNewest).join(','));
+        if(S.session.reasoning_effort!=='xhigh') throw new Error('newest selection after failure not applied');
+        if(!effects.includes('apply:xhigh')) throw new Error('newest selection after failure did not update chip');
       }});
     }});
+  }});
+}});
+""",
+        encoding="utf-8",
+    )
+    subprocess.run(["node", str(script)], check=True, timeout=10)
+
+
+def test_same_id_refresh_mutation_updates_current_session_object(tmp_path):
+    """A refresh may replace S.session while preserving the same session ID."""
+    reasoning_start = UI.index("// ── Reasoning effort chip")
+    handler_start = UI.index("document.addEventListener('click',function(e){", reasoning_start)
+    handler_end = UI.index("// ── Session toolsets chip", handler_start)
+    handler = UI[handler_start:handler_end]
+    script = tmp_path / "reasoning_same_id_refresh.js"
+    script.write_text(
+        f"""
+const handlers={{}};
+global.document={{addEventListener:(name,fn)=>{{handlers[name]=fn;}}}};
+global.closeReasoningDropdown=()=>{{}};
+global._reasoningEffortContext=()=>({{}});
+global._reasoningMutationSeqBySession={{}};
+global._reasoningMutationRequestChainBySession={{}};
+global.fetchReasoningChip=()=>{{}};
+global._applyReasoningChip=()=>{{}};
+global.showToast=()=>{{}};
+let settle;
+global.api=()=>new Promise(resolve=>{{settle=resolve;}});
+global.S={{session:{{session_id:'session-a',reasoning_effort:'xhigh'}}}};
+eval({json.dumps(handler)});
+const oldSession=S.session;
+const option={{dataset:{{effort:'max'}}}};
+handlers.click({{target:{{closest:(selector)=>selector==='.reasoning-option'?option:null}}}});
+setImmediate(()=>{{
+  S.session={{session_id:'session-a',reasoning_effort:'xhigh'}};
+  settle({{reasoning_effort:'max'}});
+  setImmediate(()=>{{
+    if(S.session.reasoning_effort!=='max') throw new Error('current same-ID session stayed stale: '+S.session.reasoning_effort);
+    if(oldSession.reasoning_effort!=='xhigh') throw new Error('detached session object was mutated');
   }});
 }});
 """,
