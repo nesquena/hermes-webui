@@ -140,6 +140,129 @@ def test_multimegabyte_native_raster_still_bypasses_text_redactor(monkeypatch):
     assert calls == []
 
 
+def test_complete_concatenated_jpeg_returns_only_primary_stream(monkeypatch):
+    credential = _FAKE_AWS_KEY.encode("ascii")
+    comment = b"\xff\xfe" + (len(credential) + 2).to_bytes(2, "big") + credential
+    second_stream = _ONE_PIXEL_JPEG[:2] + comment + _ONE_PIXEL_JPEG[2:]
+    raw = _ONE_PIXEL_JPEG + second_stream
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+    primary_uri = (
+        "data:image/jpeg;base64,"
+        f"{base64.b64encode(_ONE_PIXEL_JPEG).decode('ascii')}"
+    )
+    calls = []
+    monkeypatch.setattr(
+        helpers,
+        "_redact_fn_cached",
+        lambda text: calls.append(text) or "unexpected-redaction",
+    )
+    monkeypatch.setattr(helpers, "_pillow_valid_jpeg", lambda _raw: True)
+
+    result = helpers.redact_session_data(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": uri}}],
+                }
+            ]
+        }
+    )
+    projected_url = result["messages"][0]["content"][0]["image_url"]["url"]
+    projected_raw = base64.b64decode(projected_url.split(",", 1)[1], validate=True)
+
+    assert helpers._is_native_raster_data_uri(uri) is False
+    assert projected_url == primary_uri
+    assert credential not in projected_raw
+    assert calls == []
+
+
+def test_decodable_mpo_returns_primary_image():
+    Image = pytest.importorskip("PIL.Image")
+    from io import BytesIO
+
+    primary = Image.new("RGB", (16, 16), (255, 0, 0))
+    secondary = Image.new("RGB", (16, 16), (0, 255, 0))
+    buffer = BytesIO()
+    primary.save(
+        buffer,
+        "MPO",
+        save_all=True,
+        append_images=[secondary],
+    )
+    raw = buffer.getvalue()
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+
+    projected = helpers._safe_public_raster_data_uri(uri)
+
+    assert projected is not None
+    projected_raw = base64.b64decode(projected.split(",", 1)[1], validate=True)
+    with Image.open(BytesIO(projected_raw)) as image:
+        image.load()
+        assert image.getpixel((0, 0))[0] > image.getpixel((0, 0))[1]
+
+
+def test_incomplete_concatenated_jpeg_fails_closed():
+    raw = _ONE_PIXEL_JPEG + _ONE_PIXEL_JPEG[:-2]
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+
+    assert helpers._is_native_raster_data_uri(uri) is False
+    assert helpers._safe_public_raster_data_uri(uri) is None
+
+
+def test_concatenated_jpeg_fails_closed_without_decoder(monkeypatch):
+    raw = _ONE_PIXEL_JPEG + _ONE_PIXEL_JPEG
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+    monkeypatch.setattr(helpers, "_pillow_valid_jpeg", lambda _raw: False)
+
+    assert helpers._safe_public_raster_data_uri(uri) is None
+
+
+def test_pillow_jpeg_pixel_limit(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+
+    class FakeImage:
+        format = "JPEG"
+
+        def __init__(self, size):
+            self.size = size
+            self.loaded = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc_value, _traceback):
+            return False
+
+        def load(self):
+            self.loaded = True
+
+    at_limit = FakeImage((5_000, 10_000))
+    monkeypatch.setattr(Image, "open", lambda _stream: at_limit)
+    assert helpers._pillow_valid_jpeg(b"jpeg") is True
+    assert at_limit.loaded is True
+
+    over_limit = FakeImage((5_000, 10_001))
+    monkeypatch.setattr(Image, "open", lambda _stream: over_limit)
+    assert helpers._pillow_valid_jpeg(b"jpeg") is False
+    assert over_limit.loaded is False
+
+
+def test_decoder_rejects_malformed_concatenated_jpeg():
+    pytest.importorskip("PIL")
+    malformed = (
+        b"\xff\xd8"
+        b"\xff\xc0\x00\x08" + b"\x00" * 6
+        + b"\xff\xda\x00\x02"
+        b"\xff\xd9"
+    )
+    raw = malformed + _ONE_PIXEL_JPEG
+    uri = f"data:image/jpeg;base64,{base64.b64encode(raw).decode('ascii')}"
+
+    assert helpers._pillow_valid_jpeg(malformed) is False
+    assert helpers._safe_public_raster_data_uri(uri) is None
+
+
 def test_native_raster_data_uri_accepts_uppercase_mime(monkeypatch):
     uri = _png_data_uri_with_sensitive_marker().replace(
         "data:image/png",

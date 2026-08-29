@@ -724,37 +724,37 @@ _JPEG_SOF_MARKERS = {
 }
 
 
-def _is_complete_jpeg(raw: bytes) -> bool:
-    if len(raw) < 4 or raw[:2] != b"\xff\xd8":
-        return False
-    pos = 2
+def _complete_jpeg_stream_end(raw: bytes, start: int = 0) -> int | None:
+    """Return the exclusive end of one complete JPEG stream."""
+    if start < 0 or start + 4 > len(raw) or raw[start:start + 2] != b"\xff\xd8":
+        return None
+    pos = start + 2
     saw_sof = False
     saw_scan = False
     while pos < len(raw):
-        marker_start = pos
         if raw[pos] != 0xFF:
-            return False
+            return None
         while pos < len(raw) and raw[pos] == 0xFF:
             pos += 1
         if pos >= len(raw):
-            return False
+            return None
         marker = raw[pos]
         pos += 1
         if marker == 0xD9:
-            return saw_sof and saw_scan and pos == len(raw)
+            return pos if saw_sof and saw_scan else None
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
-            return False
+            return None
         if pos + 2 > len(raw):
-            return False
+            return None
         segment_length = int.from_bytes(raw[pos:pos + 2], "big")
         if segment_length < 2:
-            return False
+            return None
         segment_end = pos + segment_length
         if segment_end > len(raw):
-            return False
+            return None
         if marker in _JPEG_SOF_MARKERS:
             if segment_length < 8:
-                return False
+                return None
             saw_sof = True
         if marker != 0xDA:
             pos = segment_end
@@ -770,7 +770,7 @@ def _is_complete_jpeg(raw: bytes) -> bool:
             while pos < len(raw) and raw[pos] == 0xFF:
                 pos += 1
             if pos >= len(raw):
-                return False
+                return None
             scan_marker = raw[pos]
             if scan_marker == 0x00 or 0xD0 <= scan_marker <= 0xD7:
                 pos += 1
@@ -778,8 +778,73 @@ def _is_complete_jpeg(raw: bytes) -> bool:
             pos = marker_start
             break
         else:
-            return False
-    return False
+            return None
+    return None
+
+
+def _is_complete_jpeg(raw: bytes) -> bool:
+    return _complete_jpeg_stream_end(raw) == len(raw)
+
+
+def _pillow_valid_jpeg(raw: bytes) -> bool:
+    try:
+        from io import BytesIO
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            if image.format not in {"JPEG", "MPO"}:
+                return False
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > 50_000_000:
+                return False
+            image.load()
+    except Exception:
+        return False
+    return True
+
+
+def _trim_complete_concatenated_jpeg_data_uri(value: str) -> str | None:
+    """Return the first stream when the URI contains only complete JPEG streams."""
+    if not isinstance(value, str):
+        return None
+    matched_prefix = None
+    for prefix, image_kind in _RASTER_IMAGE_DATA_URI_PREFIXES:
+        if image_kind == "jpeg" and value[:len(prefix)].lower() == prefix:
+            matched_prefix = prefix
+            break
+    if matched_prefix is None:
+        return None
+    payload = value[len(matched_prefix):]
+    if not payload or any(ch.isspace() for ch in payload):
+        return None
+    try:
+        raw = _base64.b64decode(payload, validate=True)
+    except (_binascii.Error, ValueError):
+        return None
+    if _base64.b64encode(raw).decode("ascii") != payload:
+        return None
+
+    first_end = _complete_jpeg_stream_end(raw)
+    if first_end is None or first_end == len(raw):
+        return None
+    pos = first_end
+    while pos < len(raw):
+        pos = _complete_jpeg_stream_end(raw, start=pos)
+        if pos is None:
+            return None
+    if not _pillow_valid_jpeg(raw[:first_end]):
+        return None
+
+    primary_payload = _base64.b64encode(raw[:first_end]).decode("ascii")
+    return f"{value[:len(matched_prefix)]}{primary_payload}"
+
+
+def _safe_public_raster_data_uri(value: str) -> str | None:
+    if _is_native_raster_data_uri(value):
+        return value
+    return _trim_complete_concatenated_jpeg_data_uri(value)
 
 
 def _gif_subblocks_end(raw: bytes, pos: int) -> int | None:
@@ -984,12 +1049,19 @@ def _redact_message_content_part(part, *, _enabled: bool):
         if key != "image_url":
             result[key] = _redact_value(value, _enabled=_enabled)
             continue
-        result[key] = {
-            image_key: image_value
-            if image_key == "url" and _is_native_raster_data_uri(image_value)
-            else _redact_value(image_value, _enabled=_enabled)
-            for image_key, image_value in value.items()
-        }
+        image_result = {}
+        for image_key, image_value in value.items():
+            safe_value = (
+                _safe_public_raster_data_uri(image_value)
+                if image_key == "url"
+                else None
+            )
+            image_result[image_key] = (
+                safe_value
+                if safe_value is not None
+                else _redact_value(image_value, _enabled=_enabled)
+            )
+        result[key] = image_result
     return result
 
 
