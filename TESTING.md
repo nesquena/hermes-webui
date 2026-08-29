@@ -1926,6 +1926,8 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Enter wrong password → error message, stay on login page.
 - Settings panel: set password via "Access Password" field. Auth activates.
 - "Sign Out" button visible when auth active. Click → redirected to /login.
+- While signed in, open `/login` directly → 302 back to `/` (or to a safe `?next=` path) instead of the form. Sign out first if you need the form.
+- Behind a trusted-header reverse proxy, open `/login` → 302 to `/`; the installed iOS Home Screen app relaunching on `/login` recovers on its own.
 - API calls without auth cookie → 401 JSON response.
 - Check response headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`.
 

@@ -2920,6 +2920,7 @@ from api.helpers import (
     read_body,
     MAX_BODY_BYTES,
     _security_headers,
+    flush_pending_auth_cookies,
     _sanitize_error,
     redact_session_data,
     public_session_projection,
@@ -12928,6 +12929,30 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/login":
+        from api.auth import ensure_trusted_auth_session, is_auth_enabled
+
+        # Already signed in — send the browser on instead of rendering a form it
+        # cannot use. `/login` is public (PUBLIC_PATHS), so check_auth() never
+        # reconciles the request's identity here; do it in the route. This
+        # covers both a trusted reverse-proxy header and a valid session
+        # cookie. It matters most for an installed web app: iOS relaunches a
+        # Home Screen app at its last URL, so a device that once landed on
+        # /login stays parked on the password form forever even though every
+        # request it makes is authenticated.
+        if is_auth_enabled() and ensure_trusted_auth_session(handler):
+            handler.send_response(302)
+            handler.send_header(
+                "Location",
+                _safe_login_redirect_path(
+                    parse_qs(parsed.query or "").get("next", [""])[0]
+                ),
+            )
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Content-Length", "0")
+            _security_headers(handler)
+            flush_pending_auth_cookies(handler)
+            handler.end_headers()
+            return True
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         _lang = _settings.get("language", "en")
