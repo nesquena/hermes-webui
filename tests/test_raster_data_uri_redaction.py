@@ -218,6 +218,36 @@ def test_concatenated_jpeg_fails_closed_without_decoder(monkeypatch):
     assert helpers._safe_public_raster_data_uri(uri) is None
 
 
+def test_pillow_jpeg_pixel_limit(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+
+    class FakeImage:
+        format = "JPEG"
+
+        def __init__(self, size):
+            self.size = size
+            self.loaded = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc_value, _traceback):
+            return False
+
+        def load(self):
+            self.loaded = True
+
+    at_limit = FakeImage((5_000, 10_000))
+    monkeypatch.setattr(Image, "open", lambda _stream: at_limit)
+    assert helpers._pillow_valid_jpeg(b"jpeg") is True
+    assert at_limit.loaded is True
+
+    over_limit = FakeImage((5_000, 10_001))
+    monkeypatch.setattr(Image, "open", lambda _stream: over_limit)
+    assert helpers._pillow_valid_jpeg(b"jpeg") is False
+    assert over_limit.loaded is False
+
+
 def test_decoder_rejects_malformed_concatenated_jpeg():
     pytest.importorskip("PIL")
     malformed = (
