@@ -65,9 +65,6 @@ def normalize_status_url(value: object) -> str | None:
     return urlunsplit((parts.scheme.lower(), netloc, parts.path or "", parts.query, ""))
 
 
-_normalize_status_url = normalize_status_url
-
-
 def _timestamp(value: object, now: datetime) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -131,15 +128,9 @@ def parse_status_payload(payload: object, *, now: datetime | None = None) -> dic
     return rows
 
 
-_parse_status_payload = parse_status_payload
-
-
 def select_provider_status(rows: dict[str, dict[str, str]], provider_slug: str) -> dict[str, str] | None:
     row = rows.get(provider_slug)
     return dict(row) if isinstance(row, dict) and row.get("slug") == provider_slug else None
-
-
-_select_provider_status = select_provider_status
 
 
 def _retry_seconds(headers: Any, default: int) -> int:
@@ -329,7 +320,11 @@ def get_public_provider_statuses(configured_url: object = None, known_slugs: obj
     if known_slugs is None:
         return rows
     allowed = set(known_slugs) if not isinstance(known_slugs, str) else {known_slugs}
-    return {slug: row for slug, row in rows.items() if slug in allowed}
+    return {
+        slug: selected
+        for slug in allowed
+        if (selected := select_provider_status(rows, slug)) is not None
+    }
 
 
 def clear_status_cache() -> None:

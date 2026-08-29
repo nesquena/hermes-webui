@@ -131,6 +131,20 @@ def test_exact_selection_rejects_adjacent_slugs():
     assert status.select_provider_status(rows, "openai-codex-preview") is None
 
 
+def test_public_status_filters_known_slugs_at_cache_boundary(monkeypatch):
+    status.clear_status_cache()
+    rows = {
+        "openai": {"slug": "openai", "status": "operational", "checkedAt": "now"},
+        "openai-codex": {"slug": "openai-codex", "status": "outage", "checkedAt": "now"},
+    }
+    monkeypatch.setattr(status, "_fetch", lambda url: (rows, 60, None))
+    selected = status.get_public_provider_statuses(
+        "https://status.example/feed", known_slugs={"openai"}, refresh=True
+    )
+    assert selected == {"openai": rows["openai"]}
+    assert selected["openai"] is not rows["openai"]
+
+
 def test_url_normalization_rejects_unsafe_parts():
     assert status.normalize_status_url("HTTPS://Status.Example:443/path?q=1") == "https://status.example/path?q=1"
     assert status.normalize_status_url("https://status.example:0/feed") == "https://status.example:0/feed"
@@ -178,6 +192,21 @@ def test_readme_environment_rows_remain_a_markdown_table():
     home = next(index for index in range(start, end) if lines[index].startswith("| `HERMES_HOME`"))
     provider = next(index for index in range(start, end) if lines[index].startswith("| `HERMES_WEBUI_PROVIDER_STATUS_URL`"))
     assert home > provider
+
+
+def test_public_status_i18n_keys_exist_for_all_locales():
+    text = (__import__("pathlib").Path(__file__).resolve().parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
+    keys = (
+        "provider_public_status_label",
+        "provider_public_status_operational",
+        "provider_public_status_degraded",
+        "provider_public_status_outage",
+        "provider_public_status_maintenance",
+        "provider_public_status_observed",
+        "provider_public_status_source",
+    )
+    for key in keys:
+        assert text.count(f"{key}:") == 15
 
 
 def test_valid_shape_with_zero_rows_is_cached_as_retryable_failure(monkeypatch):
@@ -402,6 +431,74 @@ def test_fetch_timeout_is_fail_soft(monkeypatch):
         def open(self, request, timeout): raise TimeoutError("timed out")
     monkeypatch.setattr(status.urllib.request, "build_opener", lambda handler: Opener())
     assert status._fetch("https://status.example/feed")[0] == {}
+
+
+def test_fetch_process_main_reports_result(monkeypatch):
+    expected = ({"openai": {"slug": "openai", "status": "operational", "checkedAt": "now"}}, 60, None)
+    monkeypatch.setattr(status, "_fetch_once", lambda url: expected)
+    seen = []
+
+    class ResultQueue:
+        def put(self, value):
+            seen.append(value)
+
+    status._fetch_process_main("https://status.example/feed", ResultQueue())
+    assert seen == [("ok", expected)]
+
+
+def test_fetch_killable_owns_successful_process_lifecycle(monkeypatch):
+    expected = ({"openai": {"slug": "openai", "status": "operational", "checkedAt": "now"}}, 60, None)
+    calls = []
+
+    class ResultQueue:
+        def get(self, timeout):
+            calls.append(("get", timeout))
+            return ("ok", expected)
+        def close(self): calls.append(("close",))
+        def join_thread(self): calls.append(("join_thread",))
+
+    class Process:
+        def start(self): calls.append(("start",))
+        def is_alive(self): return False
+        def join(self, timeout=None): calls.append(("join", timeout))
+        def terminate(self): calls.append(("terminate",))
+
+    class Context:
+        def Queue(self, maxsize): return ResultQueue()
+        def Process(self, target, args):
+            calls.append(("process", target, args))
+            return Process()
+
+    monkeypatch.setattr(status.multiprocessing, "get_context", lambda name: Context())
+    assert status._fetch_killable("https://status.example/feed") == expected
+    assert ("start",) in calls
+    assert ("close",) in calls
+    assert ("join_thread",) in calls
+
+
+def test_fetch_killable_terminates_timed_out_process(monkeypatch):
+    calls = []
+
+    class ResultQueue:
+        def get(self, timeout): raise status.queue.Empty()
+        def close(self): calls.append(("close",))
+        def join_thread(self): calls.append(("join_thread",))
+
+    class Process:
+        def start(self): calls.append(("start",))
+        def is_alive(self): return True
+        def join(self, timeout=None): calls.append(("join", timeout))
+        def terminate(self): calls.append(("terminate",))
+
+    class Context:
+        def Queue(self, maxsize): return ResultQueue()
+        def Process(self, target, args): return Process()
+
+    monkeypatch.setattr(status.multiprocessing, "get_context", lambda name: Context())
+    assert status._fetch_killable("https://status.example/feed") == ({}, status.MIN_CACHE_TTL, None)
+    assert ("terminate",) in calls
+    assert ("close",) in calls
+    assert ("join_thread",) in calls
 
 
 def test_slow_drip_body_hits_wall_clock_deadline_and_releases_waiters(monkeypatch):
