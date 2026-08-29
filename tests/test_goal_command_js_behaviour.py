@@ -157,7 +157,7 @@ const S = {
     // Pending pick matches the session model; server returns a real kickoff.
     rememberPending(SID, 'openai/gpt-5.4', 'openai');
     window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
-    _nextResponse = () => ({ stream_id: 's1', pending_started_at: 1,
+    _nextResponse = () => ({ ok: true, action: 'set', stream_id: 's1', pending_started_at: 1,
       effective_model: 'openai/gpt-5.4', effective_model_provider: 'openai' });
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
@@ -166,12 +166,13 @@ const S = {
     // Control-only /goal status: server responds WITHOUT stream_id.
     rememberPending(SID, 'openai/gpt-5.4', 'openai');
     window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
-    _nextResponse = () => ({ message: 'no active goal', message_key: 'goal_no_active' });
+    _nextResponse = () => ({ ok: true, action: 'status',
+      message: 'no active goal', message_key: 'goal_no_active' });
     await cmdGoal('status');
     out.controlPayload = _apiCalls[0].body;
     out.markerAfterControl = readPending(SID);
     // Next real send must still carry the marker and consume it on kickoff.
-    _nextResponse = () => ({ stream_id: 's2', pending_started_at: 1 });
+    _nextResponse = () => ({ ok: true, action: 'set', stream_id: 's2', pending_started_at: 1 });
     await cmdGoal('ship it');
     out.kickoffPayload = _apiCalls[1].body;
     out.markerAfterKickoff = readPending(SID);
@@ -181,7 +182,7 @@ const S = {
     window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
     _nextResponse = () => {
       rememberPending(SID, 'openai/gpt-6', 'openai');
-      return { stream_id: 's3', pending_started_at: 1 };
+      return { ok: true, action: 'set', stream_id: 's3', pending_started_at: 1 };
     };
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
@@ -190,7 +191,7 @@ const S = {
     // Untouched default session: no pending marker, no cross-provider pick.
     S.session.model = 'gpt-4o'; S.session.model_provider = 'openai';
     window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
-    _nextResponse = () => ({ stream_id: 's4', pending_started_at: 1 });
+    _nextResponse = () => ({ ok: true, action: 'set', stream_id: 's4', pending_started_at: 1 });
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
     out.markerAfter = readPending(SID);
@@ -205,7 +206,7 @@ const S = {
       S.messages = [{role:'user', content:'new pane prompt'}];
       S.toolCalls = [{name:'new-pane-tool'}];
       S.activeStreamId = 'new-stream';
-      return {stream_id:'goal-owner-stream', pending_started_at:2,
+      return {ok:true, action:'set', stream_id:'goal-owner-stream', pending_started_at:2,
         message:'Goal started for owner'};
     };
     await cmdGoal('ship it');
@@ -232,7 +233,7 @@ const S = {
       S.messages = [{role:'user', content:'reopened transcript still loading'}];
       S.toolCalls = [{name:'reopened-pane-tool'}];
       S.activeStreamId = null;
-      return {stream_id:'goal-owner-stream', pending_started_at:2,
+      return {ok:true, action:'set', stream_id:'goal-owner-stream', pending_started_at:2,
         message:'Goal started for owner'};
     };
     await cmdGoal('ship it');
@@ -254,6 +255,34 @@ const S = {
     out.result = await cmdGoal('ship it');
     out.messages = S.messages;
     out.effects = _effects;
+  } else if (scenario === 'control_matrix') {
+    rememberPending(SID, 'openai/gpt-5.4', 'openai');
+    window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
+    out.rows = {};
+    for (const action of ['status', 'pause', 'resume', 'clear']) {
+      _effects.length = 0;
+      S.messages = [];
+      S.toolCalls = [{name:'preserved-tool'}];
+      S.activeStreamId = null;
+      S.session.active_stream_id = null;
+      delete INFLIGHT[SID];
+      _nextResponse = () => ({
+        ok: true,
+        action,
+        message: `Goal ${action} succeeded`,
+      });
+      const result = await cmdGoal(action);
+      out.rows[action] = {
+        result,
+        messages: S.messages,
+        effects: _effects.slice(),
+        markerAfter: readPending(SID),
+        inflight: INFLIGHT[SID] || null,
+        activeStreamId: S.activeStreamId,
+        sessionActiveStreamId: S.session.active_stream_id,
+        toolCalls: S.toolCalls,
+      };
+    }
   } else if (scenario === 'accepted_without_stream') {
     S.messages = [{role:'assistant', content:'prior transcript'}];
     rememberPending(SID, 'openai/gpt-5.4', 'openai');
@@ -337,6 +366,46 @@ def test_goal_control_command_keeps_marker_and_next_send_still_picks(driver_path
     # Next real send: still carries the pick, then consumes the marker.
     assert out["kickoffPayload"].get("explicit_model_pick") is True
     assert out["markerAfterKickoff"] is None
+
+
+def test_goal_control_runtime_matrix_renders_feedback_without_starting_run(driver_path):
+    """Successful status/pause/resume/clear controls render exactly one status
+    response while leaving all run-only state and the pending model marker alone."""
+    rows = _run_scenario(driver_path, "control_matrix")["rows"]
+
+    assert set(rows) == {"status", "pause", "resume", "clear"}
+    run_only_effects = {
+        "clearLiveToolCards",
+        "appendThinking",
+        "setBusy",
+        "setComposerStatus",
+        "markInflight",
+        "saveInflightState",
+        "startApprovalPolling",
+        "startClarifyPolling",
+        "fetchYoloState",
+        "attachLiveStream",
+    }
+    for action, row in rows.items():
+        assert row["result"] is True, action
+        assert len(row["messages"]) == 1, action
+        message = row["messages"][0]
+        assert message["role"] == "assistant"
+        assert message["content"] == f"Goal {action} succeeded"
+        assert message["_goalStatus"] is True
+        assert message["_transient"] is True
+        assert isinstance(message["_ts"], (int, float))
+        assert [effect["kind"] for effect in row["effects"]].count("renderMessages") == 1
+        assert [effect["kind"] for effect in row["effects"]].count("toast") == 1
+        assert not any(effect["kind"] in run_only_effects for effect in row["effects"])
+        assert row["markerAfter"] == {
+            "model": "openai/gpt-5.4",
+            "model_provider": "openai",
+        }
+        assert row["inflight"] is None
+        assert row["activeStreamId"] is None
+        assert row["sessionActiveStreamId"] is None
+        assert row["toolCalls"] == [{"name": "preserved-tool"}]
 
 
 def test_goal_kickoff_keeps_newer_midflight_marker(driver_path):
