@@ -937,3 +937,193 @@ class TestAuxiliaryModelsBackend:
 
         assert result["status"] == 400
         assert "Unknown auxiliary task slot" in result["error"]
+
+    def test_aux_slot_base_url_uses_selected_provider_not_active_endpoint(
+        self, monkeypatch, tmp_path
+    ):
+        """Overlapping-id sibling fix: persisting an auxiliary slot for a named
+        custom provider must record THAT provider's own base_url, not the active
+        main provider's endpoint.
+
+        Repro: main provider is custom:dogapi (base_url dogapi), and both dogapi
+        and packyapi list 'shared-model'. Selecting custom:packyapi for the vision
+        slot previously persisted {provider: custom:packyapi, base_url: dogapi's}
+        because the base_url was resolved with a bare resolve_model_provider(model)
+        that ignores the selected provider. It must persist packyapi's base_url.
+        """
+        from api import config
+
+        shared_cfg = {
+            "model": {
+                "default": "shared-model",
+                "provider": "custom",
+                "base_url": "https://www.dogapi.cc/v1",
+            },
+            "custom_providers": [
+                {"name": "dogapi", "base_url": "https://www.dogapi.cc/v1",
+                 "models": ["shared-model"]},
+                {"name": "packyapi", "base_url": "https://www.packyapi.ai/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        import yaml
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        # base_url resolution reads the in-memory cfg / get_config snapshot.
+        monkeypatch.setattr(config, "cfg", dict(shared_cfg))
+        monkeypatch.setattr(config, "get_config", lambda: dict(shared_cfg))
+
+        config.set_auxiliary_model("vision", "custom:packyapi", "shared-model")
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved["provider"] == "custom:packyapi"
+        assert saved["base_url"] == "https://www.packyapi.ai/v1", (
+            f"aux slot must persist the SELECTED provider's base_url, got "
+            f"{saved.get('base_url')!r}"
+        )
+
+    def test_aux_slot_custom_provider_base_url_no_deadlock(self, monkeypatch, tmp_path):
+        """Regression: saving a named custom auxiliary model must not self-deadlock.
+
+        set_auxiliary_model() holds the non-reentrant _cfg_lock while resolving
+        the selected custom provider's base_url. The pre-fix code called
+        resolve_custom_provider_connection() -> get_config() ->
+        reload_config_if_stale(), which re-acquires _cfg_lock and hangs forever
+        whenever the config cache is stale or the profile path changed. This test
+        uses the REAL get_config (only reload_config, which runs AFTER the lock is
+        released, is stubbed) and forces get_config()'s reload branch, then runs
+        the call on a watchdog thread that fails the test if it hangs.
+        """
+        import threading
+
+        import yaml
+
+        from api import config
+
+        shared_cfg = {
+            "model": {
+                "default": "shared-model",
+                "provider": "custom",
+                "base_url": "https://www.dogapi.cc/v1",
+            },
+            "custom_providers": [
+                {"name": "dogapi", "base_url": "https://www.dogapi.cc/v1",
+                 "models": ["shared-model"]},
+                {"name": "packyapi", "base_url": "https://www.packyapi.ai/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        # reload_config runs AFTER _cfg_lock is released; stub it so the test
+        # doesn't mutate global module state. get_config stays REAL — that is the
+        # path the pre-fix code re-entered while holding the lock.
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        # Force the reload branch inside the real get_config the pre-fix code
+        # called: a mismatched cached path makes path_changed True.
+        monkeypatch.setattr(config, "_cfg_path", None, raising=False)
+
+        result_box: dict = {}
+        error_box: dict = {}
+
+        def _run():
+            try:
+                result_box["r"] = config.set_auxiliary_model(
+                    "vision", "custom:packyapi", "shared-model"
+                )
+            except Exception as exc:  # pragma: no cover - surfaced via join
+                error_box["e"] = exc
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), (
+            "set_auxiliary_model deadlocked while resolving a custom provider "
+            "base_url under _cfg_lock"
+        )
+        if "e" in error_box:
+            raise error_box["e"]
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved["provider"] == "custom:packyapi"
+        assert saved["base_url"] == "https://www.packyapi.ai/v1", (
+            f"aux slot must persist the SELECTED provider's base_url, got "
+            f"{saved.get('base_url')!r}"
+        )
+
+    def test_aux_slot_custom_provider_slug_collision_fails_closed(self, monkeypatch, tmp_path):
+        """Saving a named custom auxiliary model whose slug collides with another
+        config entry must fail closed, not silently persist the wrong endpoint.
+
+        The inline base_url resolution added for the deadlock fix shares the same
+        all-entry uniqueness helper, so a custom:foo-bar save with colliding
+        'Foo Bar' + 'foo-bar' entries raises AmbiguousCustomProviderError and
+        writes nothing (the slot stays 'auto'). Operates on the in-scope
+        config_data, so it remains lock-safe.
+        """
+        import yaml
+
+        from api import config
+
+        shared_cfg = {
+            "auxiliary": {"vision": {"provider": "auto", "model": ""}},
+            "custom_providers": [
+                {"name": "Foo Bar", "base_url": "https://a.example/v1"},
+                {"name": "foo-bar", "base_url": "https://b.example/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.set_auxiliary_model("vision", "custom:foo-bar", "shared-model")
+
+        # The ambiguous save must not have persisted: the slot stays 'auto'.
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved.get("provider") == "auto", (
+            f"ambiguous aux save must not persist, got {saved!r}"
+        )
+
+    def test_aux_slot_parenthesized_name_collision_fails_closed(self, monkeypatch, tmp_path):
+        """Finding #1 on the aux persistence path: a parenthesized-name collision
+        that a looser slug key MISSED ('Foo (Bar)' vs 'foo-bar', both producing
+        custom:foo-bar) must also fail closed on save.
+
+        This is the case the earlier collision key got wrong: it normalized
+        'Foo (Bar)' to 'foo-(bar)' and never saw the collision, so the aux save
+        could persist endpoint A while the credential lookup later returned B.
+        """
+        import yaml
+
+        from api import config
+
+        shared_cfg = {
+            "auxiliary": {"vision": {"provider": "auto", "model": ""}},
+            "custom_providers": [
+                {"name": "Foo (Bar)", "base_url": "https://a.example/v1"},
+                {"name": "foo-bar", "base_url": "https://b.example/v1",
+                 "models": ["shared-model"]},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.set_auxiliary_model("vision", "custom:foo-bar", "shared-model")
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved.get("provider") == "auto", (
+            f"ambiguous aux save must not persist, got {saved!r}"
+        )

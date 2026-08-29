@@ -161,7 +161,17 @@ def test_memory_models_cache_invalidates_when_static_catalog_changes(tmp_path, m
     result = config.get_available_models()
 
     opencode_group = next(g for g in result["groups"] if g.get("provider_id") == "opencode-go")
-    assert any(m.get("id") == "new-catalog-model" for m in opencode_group["models"])
+    # The opencode-go static catalog now exceeds the picker overflow threshold
+    # (_MODEL_PICKER_OVERFLOW_THRESHOLD), so the rebuilt group splits into a
+    # visible `models` head plus an `extra_models` overflow tail. The newly
+    # appended catalog entry is surfaced in that combined catalog — assert on
+    # the full surface, not just the visible head, so this stays a pure
+    # cache-invalidation regression check independent of the overflow cap.
+    surfaced_ids = {
+        m.get("id")
+        for m in (opencode_group.get("models", []) + opencode_group.get("extra_models", []))
+    }
+    assert "new-catalog-model" in surfaced_ids
 
 
 def test_disk_models_cache_invalidates_when_static_catalog_changes(tmp_path, monkeypatch):
@@ -179,4 +189,11 @@ def test_disk_models_cache_invalidates_when_static_catalog_changes(tmp_path, mon
 
     assert result != stale_opencode
     opencode_group = next(g for g in result["groups"] if g.get("provider_id") == "opencode-go")
-    assert any(m.get("id") == "new-disk-catalog-model" for m in opencode_group["models"])
+    # See sibling test: the oversized opencode-go catalog splits into
+    # `models` + `extra_models`, so assert the appended entry is surfaced
+    # across the combined picker catalog after cache invalidation.
+    surfaced_ids = {
+        m.get("id")
+        for m in (opencode_group.get("models", []) + opencode_group.get("extra_models", []))
+    }
+    assert "new-disk-catalog-model" in surfaced_ids

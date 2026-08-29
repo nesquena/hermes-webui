@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import sys
 import types
 from unittest import mock
@@ -22,28 +23,118 @@ def test_session_db_helper_uses_request_state_db_path():
     fake_state = types.ModuleType("hermes_state")
     fake_state.SessionDB = FakeSessionDB
 
-    with mock.patch.dict(sys.modules, {"hermes_state": fake_state}):
+    with (
+        mock.patch.dict(sys.modules, {"hermes_state": fake_state}),
+        mock.patch.object(streaming.time, "sleep") as sleep,
+    ):
         state_db_path = Path("/tmp/profile") / "state.db"
         db = streaming._build_session_db_for_stream(state_db_path)
 
     assert db is not None
     assert calls["db_path"] == state_db_path
     assert isinstance(db, FakeSessionDB)
+    sleep.assert_not_called()
 
 
-def test_session_db_helper_returns_none_when_constructor_fails():
+def test_session_db_helper_retries_transient_constructor_failure():
     import api.streaming as streaming
 
-    def failing_session_db(db_path=None):
-        raise RuntimeError("SessionDB unavailable")
-
+    state_db_path = Path("/tmp/profile/state.db")
+    created = mock.Mock(name="session_db")
     fake_state = types.ModuleType("hermes_state")
-    fake_state.SessionDB = mock.Mock(side_effect=failing_session_db)
+    fake_random = mock.Mock()
+    fake_random.uniform.return_value = 0.0
+    fake_state.SessionDB = mock.Mock(
+        side_effect=[
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.OperationalError("database is busy"),
+            created,
+        ]
+    )
 
-    with mock.patch.dict(sys.modules, {"hermes_state": fake_state}):
-        db = streaming._build_session_db_for_stream(Path("/tmp/profile/state.db"))
+    with (
+        mock.patch.dict(sys.modules, {"hermes_state": fake_state}),
+        mock.patch.object(streaming, "random", fake_random, create=True),
+        mock.patch.object(streaming.time, "sleep") as sleep,
+    ):
+        db = streaming._build_session_db_for_stream(state_db_path)
+
+    assert db is created
+    assert fake_state.SessionDB.call_args_list == [
+        mock.call(db_path=state_db_path),
+        mock.call(db_path=state_db_path),
+        mock.call(db_path=state_db_path),
+    ]
+    assert sleep.call_args_list == [mock.call(0.05), mock.call(0.1)]
+
+
+def test_session_db_helper_returns_none_after_exhausted_retries():
+    import api.streaming as streaming
+
+    state_db_path = Path("/tmp/profile/state.db")
+    fake_state = types.ModuleType("hermes_state")
+    fake_random = mock.Mock()
+    fake_random.uniform.return_value = 0.0
+    fake_state.SessionDB = mock.Mock(
+        side_effect=sqlite3.OperationalError("database is locked")
+    )
+
+    with (
+        mock.patch.dict(sys.modules, {"hermes_state": fake_state}),
+        mock.patch.object(streaming, "random", fake_random, create=True),
+        mock.patch.object(streaming.time, "sleep") as sleep,
+    ):
+        db = streaming._build_session_db_for_stream(state_db_path)
 
     assert db is None
+    assert fake_state.SessionDB.call_args_list == [
+        mock.call(db_path=state_db_path),
+        mock.call(db_path=state_db_path),
+        mock.call(db_path=state_db_path),
+    ]
+    assert sleep.call_args_list == [mock.call(0.05), mock.call(0.1)]
+
+
+def test_session_db_helper_does_not_retry_permanent_constructor_failure():
+    import api.streaming as streaming
+
+    state_db_path = Path("/tmp/profile/state.db")
+    permanent_error = TypeError("unsupported SessionDB argument")
+    fake_state = types.ModuleType("hermes_state")
+    fake_state.SessionDB = mock.Mock(side_effect=permanent_error)
+
+    with (
+        mock.patch.dict(sys.modules, {"hermes_state": fake_state}),
+        mock.patch.object(streaming, "random", mock.Mock(), create=True) as random,
+        mock.patch.object(streaming.time, "sleep") as sleep,
+    ):
+        db = streaming._build_session_db_for_stream(state_db_path)
+
+    assert db is None
+    fake_state.SessionDB.assert_called_once_with(db_path=state_db_path)
+    random.uniform.assert_not_called()
+    sleep.assert_not_called()
+
+
+def test_session_db_helper_does_not_retry_noncontention_operational_error():
+    import api.streaming as streaming
+
+    state_db_path = Path("/tmp/profile/state.db")
+    permanent_error = sqlite3.OperationalError("locking protocol")
+    fake_state = types.ModuleType("hermes_state")
+    fake_state.SessionDB = mock.Mock(side_effect=permanent_error)
+
+    with (
+        mock.patch.dict(sys.modules, {"hermes_state": fake_state}),
+        mock.patch.object(streaming, "random", mock.Mock(), create=True) as random,
+        mock.patch.object(streaming.time, "sleep") as sleep,
+    ):
+        db = streaming._build_session_db_for_stream(state_db_path)
+
+    assert db is None
+    fake_state.SessionDB.assert_called_once_with(db_path=state_db_path)
+    random.uniform.assert_not_called()
+    sleep.assert_not_called()
 
 
 def test_self_heal_session_db_handle_is_replaced_safely():

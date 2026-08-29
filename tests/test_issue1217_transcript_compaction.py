@@ -767,8 +767,21 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
     )
     session.save(touch_updated_at=False)
 
+    native_result = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "vision-1"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "vision-1",
+            "content": [
+                {"type": "text", "text": "Vision result"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "document", "document": {"id": "doc-1"}},
+            ],
+        },
+    ]
     replayed_result = previous_context + previous_context + [
         {"role": "user", "content": "simple follow-up"},
+        *native_result,
         {"role": "assistant", "content": "short answer"},
     ]
 
@@ -793,6 +806,7 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
 
     assert handler.status == 200
     reloaded = Session.load(session.session_id)
+    assert reloaded is not None
 
     # Stable per-message ids (#context-message-stable-id) are now stamped on
     # context rows; compare on the semantic fields so the dedup invariant is
@@ -807,9 +821,23 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
         {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
         {"role": "assistant", "content": "previous answer"},
         {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "vision-1"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "vision-1",
+            "content": [
+                {"type": "text", "text": "Vision result"},
+                {"type": "text", "text": "[screenshot]"},
+                {"type": "document", "document": {"id": "doc-1"}},
+            ],
+        },
         {"role": "assistant", "content": "short answer"},
     ]
     assert _no_id(reloaded.context_messages) == expected
+    assert "data:image" not in json.dumps(reloaded.context_messages)
+    assert "data:image" not in json.dumps(reloaded.messages)
+    assert any(row.get("tool_call_id") == "vision-1" for row in reloaded.context_messages)
+    assert any(row.get("tool_call_id") == "vision-1" for row in reloaded.messages)
     assert _no_id(reloaded.context_messages).count(expected[0]) == 1
     # The new turn's rows carry unique stable ids. (This session preloads
     # id-less legacy rows, which stay id-less until they age out of context;

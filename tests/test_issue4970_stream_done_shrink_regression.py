@@ -162,7 +162,7 @@ def test_forced_open_dom_is_not_cached_while_token_armed():
     )
 
 
-def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
+def test_stream_done_collapses_in_place_after_disarm_with_render_fallback():
     # Round 9 (#5260 gate-cert, RED x2): disarming the token alone leaves the
     # forced-open worklog on screen. The first re-push collapse-rendered only the
     # NON-following path and let a pinned follower fall through to scrollToBottom()
@@ -171,27 +171,55 @@ def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
     # UNCONDITIONALLY right after disarm (covers both pin states), THEN scrollToBottom()
     # only for followers to re-settle at the tail. This makes keep-open genuinely
     # one-frame for everyone.
-    disarm_idx = MESSAGES_JS.index("_disarmKeepSettledWorklogOpen()")
-    after = MESSAGES_JS[disarm_idx : disarm_idx + 700]
-    # The collapse pass must run after disarm for BOTH pin states.
-    assert "_renderMessagesWithScrollSnapshot()" in after, (
-        "after _disarmKeepSettledWorklogOpen() the STREAM_DONE handler must run a "
-        "scroll-preserving collapse pass (_renderMessagesWithScrollSnapshot) so the "
-        "forced-open worklog collapses back to the user/live state without the jump."
+    #
+    # Round 10 (#6385): capture the scroll snapshot from the LIVE DOM before arming
+    # keep-open, so the collapse render below anchors to the content the reader was
+    # actually viewing — not to a stale intermediate state where the worklog was
+    # temporarily expanded. The pre-capture variable must be defined before arm and
+    # threaded into the collapse pass as `_prescrollSnapshot`.
+    pre_capture_idx = MESSAGES_JS.index("_doneLiveScrollSnapshot")
+    arm_idx = MESSAGES_JS.index("_armKeepSettledWorklogOpen")
+    assert pre_capture_idx < arm_idx, (
+        "_doneLiveScrollSnapshot must be captured before _armKeepSettledWorklogOpen "
+        "to snapshot the live (not expanded-worklog) DOM positions."
     )
-    # The follower re-settle (scrollToBottom) must come AFTER the collapse render —
-    # otherwise a pinned follower keeps the forced-open DOM (scrollToBottom does not
-    # re-render). This is the exact pinned-path bug the second RED gate-cert caught.
-    collapse_pos = after.index("_renderMessagesWithScrollSnapshot()")
+    disarm_idx = MESSAGES_JS.index("_disarmKeepSettledWorklogOpen()")
+    after = MESSAGES_JS[disarm_idx : disarm_idx + 1100]
+    # #6414: the preferred collapse is now in-place. The old second full
+    # transcript render remains only as a fail-closed fallback when the exact
+    # settled Worklog cannot be identified or collapsed.
+    assert "_collapseJustSettledWorklogInPlace" in after
+    assert "&& _collapseJustSettledWorklogInPlace(_settledStreamId)" in after, (
+        "after _disarmKeepSettledWorklogOpen() the STREAM_DONE handler must first "
+        "collapse the just-settled Worklog in place, avoiding a second transcript "
+        "rebuild that removes the freshly-settled DOM."
+    )
+    assert "_restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot)" in after, (
+        "the in-place collapse path must still restore the pre-captured live scroll "
+        "snapshot so pinned and unpinned readers keep their viewport."
+    )
+    assert "_renderMessagesWithScrollSnapshot({_prescrollSnapshot:_doneLiveScrollSnapshot})" in after, (
+        "if in-place collapse cannot prove it owns the exact settled Worklog, the "
+        "STREAM_DONE handler must fall back to the old scroll-preserving render pass."
+    )
+    # The follower re-settle (scrollToBottom) must come AFTER the collapse/fallback
+    # handling; otherwise a pinned follower can keep the forced-open DOM
+    # (scrollToBottom does not re-render).
+    collapse_pos = after.index("_collapseJustSettledWorklogInPlace")
+    fallback_pos = after.index("_renderMessagesWithScrollSnapshot")
     follow_pos = after.index("shouldFollowOnDone")
     assert collapse_pos < follow_pos, (
-        "the collapse render must run BEFORE the shouldFollowOnDone scrollToBottom() "
+        "the in-place collapse must run BEFORE the shouldFollowOnDone scrollToBottom() "
         "so BOTH pinned and unpinned readers get the worklog collapsed; scrollToBottom() "
         "alone does not re-render and would leave a pinned follower forced-open."
     )
+    assert fallback_pos < follow_pos, (
+        "the fallback render pass must also stay before shouldFollowOnDone so the "
+        "fail-closed path preserves the prior #5260 invariant."
+    )
     assert "scrollToBottom()" in after, (
         "a pinned/near-bottom follower must scrollToBottom() after the collapse "
-        "render to re-settle exactly at the tail."
+        "handling to re-settle exactly at the tail."
     )
     # And the wrapper must exist and be scroll-preserving (capture → render →
     # restore same-frame), so the collapse height change is absorbed by the JS
@@ -200,3 +228,328 @@ def test_stream_done_runs_scroll_preserving_collapse_pass_after_disarm():
     assert "_captureMessageScrollSnapshot()" in wrapper
     assert "_restoreMessageScrollSnapshotSameFrame" in wrapper
 
+
+def test_in_place_settled_worklog_collapse_defers_rows_without_full_rebuild():
+    body = _function_body(UI_JS, "_collapseJustSettledWorklogInPlace")
+    assert "_assistantTurnHasVisibleRenderedSegment(ownerTurn)" in body
+    assert "if(ownerHasVisibleSegment===null) return false" in body
+    assert "const keepOpen=!ownerHasVisibleSegment" in body
+    assert "[data-anchor-settled-scene-owner=\"1\"]" in body
+    assert "data-anchor-stream-id" in body
+    assert "_deferredWorklogRowsFromGroup(group)" in body
+    assert "_captureWorklogDetailDisclosureState(group)" in body
+    assert "_worklogDetailsExpandedDefault()&&savedDisclosure!=='closed'" in body
+    assert "group._deferredWorklogRows=rows" in body
+    assert "group._deferredWorklogDisclosure=detailDisclosure&&detailDisclosure.size" in body
+    assert "data-worklog-rows-deferred" in body
+    assert "tool-call-group-collapsed" in body
+    assert "_syncToolCallGroupSummary(group)" in body
+    assert "requestAnimationFrame" in body
+    assert "list.replaceChildren()" in body
+    assert "renderMessages(" not in body
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
+    """The normal done handoff must not expose an empty live-worklog frame.
+
+    The settled transcript render owns replacement of the live DOM.  Calling the
+    shared cleanup helper in preserve-DOM mode may stop timers and reset intent,
+    but must leave the visible rows in place until that replacement occurs.
+    Default cleanup remains destructive for error/cancel paths.
+    """
+    clear_live = _extract("clearLiveToolCards")
+    done_start = MESSAGES_JS.index("source.addEventListener('done',e=>{")
+    done = MESSAGES_JS[done_start : done_start + 14000]
+    harness = textwrap.dedent(f"""
+        let removed = 0;
+        let timerClears = 0;
+        let intentClears = 0;
+        const rows = [{{remove() {{ removed++; }}}}, {{remove() {{ removed++; }}}}];
+        const inner = {{querySelectorAll() {{ return rows; }}}};
+        const legacy = {{innerHTML: 'legacy', style: {{display: ''}}}};
+        globalThis._clearActivityElapsedTimer = () => {{ timerClears++; }};
+        globalThis._clearLiveActivityUserIntent = () => {{ intentClears++; }};
+        globalThis._assistantTurnBlocks = () => inner;
+        globalThis.$ = (id) => id === 'liveAssistantTurn' ? {{}} : id === 'liveToolCards' ? legacy : null;
+        {clear_live}
+        clearLiveToolCards({{preserveDom: true}});
+        const preserved = {{removed, timerClears, intentClears, legacy: legacy.innerHTML, legacyDisplay: legacy.style.display}};
+        clearLiveToolCards();
+        const defaultCleared = {{removed, timerClears, intentClears, legacy: legacy.innerHTML, legacyDisplay: legacy.style.display}};
+        console.log(JSON.stringify({{preserved, defaultCleared}}));
+    """)
+    res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    assert out["preserved"] == {
+        "removed": 0,
+        "timerClears": 1,
+        "intentClears": 1,
+        "legacy": "",
+        "legacyDisplay": "none",
+    }, "preserveDom cleanup must leave the live worklog visible until the settled render replaces it"
+    assert out["defaultCleared"]["removed"] == 2, "error/cancel cleanup must still remove live rows"
+    assert out["defaultCleared"]["legacy"] == "", "default cleanup must still clear the legacy container"
+    assert out["defaultCleared"]["legacyDisplay"] == "none", "legacy cleanup must hide the container"
+    assert "clearLiveToolCards({preserveDom:true})" in done, (
+        "the normal done handler must preserve the visible live Worklog until its "
+        "settled transcript render replaces it"
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize():
+    """A just-settled in-place collapse must preserve nested detail open state.
+
+    The old full render path captured Worklog detail disclosure before rebuilding
+    and stashed that map on deferred groups. The new in-place path must do the
+    same before its rAF removes the rendered rows; otherwise a live-open tool
+    detail is lost when the user expands the collapsed settled Worklog.
+    """
+    collapse = _extract("_collapseJustSettledWorklogInPlace")
+    visible_segment = _extract("_assistantTurnHasVisibleRenderedSegment")
+    materialize = _extract("_materializeDeferredWorklogRows")
+    harness = textwrap.dedent(f"""
+        const assert = require('assert');
+        const rows = [{{id: 'row-1'}}];
+        let activeGroup = null;
+        let capturedGroup = null;
+        let renderedRows = null;
+        let restoredState = null;
+        let removedRows = false;
+        let syncCount = 0;
+        let ownerHasVisibleSegment = true;
+        const S = {{
+          session: {{session_id: 'session-1'}},
+          // Keep the session-wide no-response guard false: a normal answered
+          // turn precedes the completed tool/reasoning-only turn under test.
+          messages: [
+            {{role: 'assistant', content: 'previous final answer'}},
+            {{role: 'assistant', content: '', _anchor_activity_scene: {{terminal_state: 'completed'}}}},
+          ],
+        }};
+        const summary = {{
+          attrs: {{}},
+          setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+        }};
+        const list = {{
+          replaceChildren() {{ removedRows = true; }},
+        }};
+        const inner = {{
+          querySelectorAll(selector) {{
+            if (selector === '[data-anchor-settled-scene-owner="1"]') return [activeGroup];
+            return [];
+          }},
+        }};
+        const visibleSegment = {{
+          textContent: 'previous final answer',
+          classList: {{ contains() {{ return false; }} }},
+        }};
+        const ownerTurn = {{
+          querySelectorAll(selector) {{
+            assert.strictEqual(selector, '.assistant-segment');
+            return ownerHasVisibleSegment ? [visibleSegment] : [];
+          }},
+        }};
+        function makeGroup() {{
+          return {{
+            attrs: {{
+              'data-anchor-stream-id': 'stream-1',
+              'data-activity-disclosure-key': 'anchor-scene:1',
+            }},
+            isConnected: true,
+            _deferredWorklogRows: null,
+            _deferredWorklogDisclosure: 'stale',
+            closest(selector) {{
+              assert.strictEqual(selector, '.assistant-turn');
+              return ownerTurn;
+            }},
+            getAttribute(name) {{ return this.attrs[name] || ''; }},
+            setAttribute(name, value) {{ this.attrs[name] = String(value); }},
+            removeAttribute(name) {{ delete this.attrs[name]; }},
+            querySelector(selector) {{
+              if (selector.includes('tool-worklog-summary') || selector.includes('tool-call-group-summary')) return summary;
+              return null;
+            }},
+            querySelectorAll() {{ return []; }},
+            classList: {{
+              values: new Set(['open']),
+              add(name) {{ this.values.add(name); }},
+              remove(name) {{ this.values.delete(name); }},
+              contains(name) {{ return this.values.has(name); }},
+            }},
+          }};
+        }}
+        function $(id) {{ return id === 'msgInner' ? inner : null; }}
+        function _readActivityDisclosureState() {{ return detailState; }}
+        function _deferredWorklogRowsFromGroup(group) {{ assert.strictEqual(group, activeGroup); return rows; }}
+        function _anchorSceneHasErroredTerminalState() {{ return false; }}
+        function _syncToolCallGroupSummary(group) {{ assert.strictEqual(group, activeGroup); syncCount += 1; }}
+        function _toolWorklogListEl(group) {{ assert.strictEqual(group, activeGroup); return list; }}
+        function _renderAnchorSceneRowsIntoWorklog(group, materializedRows) {{
+          assert.strictEqual(group, activeGroup);
+          renderedRows = materializedRows;
+          return true;
+        }}
+        function _postProcessWithAnchorSuppression() {{}}
+        function _restoreWorklogDetailDisclosureState(group, state) {{
+          assert.strictEqual(group, activeGroup);
+          restoredState = state;
+        }}
+        function requestAnimationFrame(callback) {{ callback(); }}
+        let detailState = null;
+        let defaultExpanded = false;
+        function _captureWorklogDetailDisclosureState(group) {{
+          capturedGroup = group;
+          return detailState;
+        }}
+        function _worklogDetailsExpandedDefault() {{ return defaultExpanded; }}
+        {visible_segment}
+        {collapse}
+        {materialize}
+
+        activeGroup = makeGroup();
+        detailState = new Map([['tool:read_file#0', {{open: true, scrollTop: 18}}]]);
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(capturedGroup, activeGroup);
+        assert.strictEqual(activeGroup._deferredWorklogDisclosure, detailState);
+        assert.strictEqual(activeGroup._deferredWorklogRows, rows);
+        assert.strictEqual(activeGroup.attrs['data-worklog-rows-deferred'], '1');
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), true);
+        assert.strictEqual(removedRows, true);
+        assert.strictEqual(_materializeDeferredWorklogRows(activeGroup), true);
+        assert.strictEqual(restoredState, detailState);
+        assert.strictEqual(renderedRows, rows);
+
+        capturedGroup = null;
+        renderedRows = null;
+        restoredState = null;
+        removedRows = false;
+        activeGroup = makeGroup();
+        detailState = new Map();
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(capturedGroup, activeGroup);
+        assert.strictEqual(activeGroup._deferredWorklogDisclosure, null);
+        assert.strictEqual(_materializeDeferredWorklogRows(activeGroup), true);
+        assert.strictEqual(restoredState, null);
+        assert.strictEqual(renderedRows, rows);
+        assert.strictEqual(syncCount, 2);
+
+        removedRows = false;
+        activeGroup = makeGroup();
+        detailState = null;
+        defaultExpanded = true;
+        ownerHasVisibleSegment = true;
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(activeGroup._deferredWorklogRows, null);
+        assert.strictEqual(activeGroup.classList.contains('open'), true);
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), false);
+        assert.strictEqual(removedRows, false);
+
+        activeGroup = makeGroup();
+        detailState = 'closed';
+        ownerHasVisibleSegment = true;
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(activeGroup._deferredWorklogRows, rows);
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), true);
+        assert.strictEqual(removedRows, true);
+
+        removedRows = false;
+        activeGroup = makeGroup();
+        detailState = 'closed';
+        defaultExpanded = false;
+        ownerHasVisibleSegment = false;
+        assert.strictEqual(_collapseJustSettledWorklogInPlace('stream-1'), true);
+        assert.strictEqual(activeGroup._deferredWorklogRows, null);
+        assert.strictEqual(activeGroup.classList.contains('open'), true);
+        assert.strictEqual(activeGroup.classList.contains('tool-call-group-collapsed'), false);
+        assert.strictEqual(removedRows, false);
+        console.log(JSON.stringify({{ok: true}}));
+    """)
+    res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout.strip()) == {"ok": True}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")
+def test_prescroll_snapshot_bypasses_capture_no_option_fallback_still_captures():
+    """Sentinel _prescrollSnapshot reaches restore without re-capture.
+
+    Behavioral harness for _renderMessagesWithScrollSnapshot:
+
+    1. Supply a sentinel snapshot via _prescrollSnapshot, stub
+       _captureMessageScrollSnapshot with a counter — proves the
+       sentinel reaches _restoreMessageScrollSnapshotSameFrame
+       without a second capture.
+
+    2. Call with no options — proves the no-option fallback still
+       calls _captureMessageScrollSnapshot() normally (the contract
+       for callers at static/ui.js:9565, 14416, 14424).
+
+    3. Call with empty options {} — same fallback proof.
+    """
+    wrapper = _extract("_renderMessagesWithScrollSnapshot")
+    harness = textwrap.dedent(f"""
+        let captureCount = 0;
+        let restoredSnapshot = null;
+        let renderedOptions = null;
+        globalThis._captureMessageScrollSnapshot = () => {{
+            captureCount++;
+            return {{_sentinel: 'fresh-capture', bottom: 0, pinned: true}};
+        }};
+        globalThis.renderMessages = (opts) => {{ renderedOptions = opts; }};
+        globalThis._restoreMessageScrollSnapshotSameFrame = (snap) => {{ restoredSnapshot = snap; }};
+        {wrapper}
+        // Test 1: supplied _prescrollSnapshot -> use it, do NOT capture
+        const sentinel = {{_sentinel: 'pre-captured', bottom: 42, pinned: true}};
+        _renderMessagesWithScrollSnapshot({{_prescrollSnapshot: sentinel}});
+        const test1_usedPrescroll = restoredSnapshot === sentinel;
+        const test1_noCapture = captureCount === 0;
+        const test1_preservedArgs = renderedOptions && renderedOptions._prescrollSnapshot === sentinel;
+        // Reset
+        captureCount = 0; restoredSnapshot = null; renderedOptions = null;
+        // Test 2: no options -> fall back to _captureMessageScrollSnapshot()
+        _renderMessagesWithScrollSnapshot();
+        const test2_captured = captureCount === 1;
+        const test2_usedCapture = restoredSnapshot && restoredSnapshot._sentinel === 'fresh-capture';
+        // Reset
+        captureCount = 0; restoredSnapshot = null; renderedOptions = null;
+        // Test 3: empty options object -> still fall back to capture
+        _renderMessagesWithScrollSnapshot({{}});
+        const test3_captured = captureCount === 1;
+        const test3_usedCapture = restoredSnapshot && restoredSnapshot._sentinel === 'fresh-capture';
+        console.log(JSON.stringify({{
+            test1_usedPrescroll,
+            test1_noCapture,
+            test1_preservedArgs,
+            test2_captured,
+            test2_usedCapture,
+            test3_captured,
+            test3_usedCapture
+        }}));
+    """)
+    res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip())
+    assert out["test1_usedPrescroll"] is True, (
+        "supplied _prescrollSnapshot must reach _restoreMessageScrollSnapshotSameFrame"
+    )
+    assert out["test1_noCapture"] is True, (
+        "supplied _prescrollSnapshot must bypass _captureMessageScrollSnapshot()"
+    )
+    assert out["test1_preservedArgs"] is True, (
+        "options passed to _renderMessagesWithScrollSnapshot must be forwarded to renderMessages"
+    )
+    assert out["test2_captured"] is True, (
+        "no-option call must fall back to _captureMessageScrollSnapshot()"
+    )
+    assert out["test2_usedCapture"] is True, (
+        "no-option call's captured snapshot must reach _restoreMessageScrollSnapshotSameFrame"
+    )
+    assert out["test3_captured"] is True, (
+        "empty-options call must fall back to _captureMessageScrollSnapshot()"
+    )
+    assert out["test3_usedCapture"] is True, (
+        "empty-options call's captured snapshot must reach _restoreMessageScrollSnapshotSameFrame"
+    )

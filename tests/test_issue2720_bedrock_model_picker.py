@@ -22,6 +22,7 @@ def _force_env_fallback(monkeypatch):
 def _run_available_models_with_cfg(monkeypatch, tmp_path, cfg):
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    old_cfg_path = config._cfg_path
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
     monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: tmp_path, raising=False)
@@ -35,6 +36,12 @@ def _run_available_models_with_cfg(monkeypatch, tmp_path, cfg):
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
+        # get_available_models() stamps config._cfg_path to the monkeypatched
+        # tmp path as a side effect of its staleness check; restore it so a
+        # later test's get_available_models() doesn't see path_changed=True and
+        # reload config from disk over that test's in-memory cfg (isolation leak
+        # that flaked test_issue3691 / test_issue1426 under cross-file ordering).
+        config._cfg_path = old_cfg_path
         config.invalidate_models_cache()
 
 

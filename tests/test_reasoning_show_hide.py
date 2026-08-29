@@ -394,11 +394,15 @@ class TestReasoningConfigHelpers:
     def test_set_reasoning_effort_rejects_invalid(self, tmp_path, monkeypatch):
         import api.config as cfg
         monkeypatch.setattr(cfg, '_get_config_path', lambda: tmp_path / 'config.yaml')
+        monkeypatch.setattr(cfg, 'reload_config', lambda: None)
         import pytest as _pt
         with _pt.raises(ValueError):
             cfg.set_reasoning_effort('garbage')
-        with _pt.raises(ValueError):
-            cfg.set_reasoning_effort('')
+        # Empty effort is ACCEPTED as "clear the override" (the Default/On
+        # re-enable path for thinking-toggle-only models, #6219 round-3). It
+        # must not raise; it removes agent.reasoning_effort so the provider
+        # default takes effect.
+        cfg.set_reasoning_effort('')
 
     def test_get_reasoning_status_defaults_to_show_true(self, tmp_path, monkeypatch):
         """When config.yaml has no display section, show_reasoning defaults

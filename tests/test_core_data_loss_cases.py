@@ -499,7 +499,7 @@ def test_core_a_route_full_session_load_does_not_resurrect_deleted_turns(tmp_pat
             truncation_boundary=101.0,
         )
         s.save()
-        routes.get_state_db_session_messages = lambda sid, profile=None: list(state)
+        routes.get_state_db_session_messages = lambda sid, profile=None, since_timestamp=None, include_inactive=False, limit=None: list(state)
         routes._session_visible_to_active_profile = lambda profile, handler: True
         routes._clear_stale_stream_state = lambda s: None
         routes._resolve_effective_session_model_for_display = lambda s: getattr(s, "model", None)

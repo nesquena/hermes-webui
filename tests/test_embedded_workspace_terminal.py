@@ -247,8 +247,8 @@ def test_terminal_xterm_theme_follows_appearance_tokens():
     assert "function _terminalTheme" in terminal_js
     assert "_terminalCssVar('--code-bg'" in terminal_js
     assert "_terminalCssVar('--pre-text'" in terminal_js
-    assert "syncComposerTerminalTheme" in terminal_js
-    assert "attributeFilter:['class','data-skin']" in terminal_js
+    assert "syncComposerTerminalAppearance" in terminal_js
+    assert "attributeFilter:['class','data-skin','style']" in terminal_js
     assert "background:var(--code-bg)" in style_css
     assert "color:var(--pre-text)" in style_css
 
