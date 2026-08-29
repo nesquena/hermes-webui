@@ -115,6 +115,119 @@ def test_workspace_context_refresh_hooks():
     assert "loadWorkspaceContextBrief(true)" not in UI
 
 
+def _extract_context_brief_job_fns() -> str:
+    start = PANELS.index("async function _contextBriefRefresh")
+    end = PANELS.index("\nfunction _contextBriefGoalHostCurrent", start)
+    poll_start = PANELS.index("async function _pollContextBriefJob")
+    poll_end = PANELS.index("\n// Banner shown", poll_start)
+    return PANELS[start:end] + "\n" + PANELS[poll_start:poll_end]
+
+
+def _run_context_brief_job_case(host_id: str, completion: str = "current") -> dict:
+    """Launch regeneration from a real brief host and settle its production poller."""
+    fn_src = _extract_context_brief_job_fns()
+    script = f"""
+const vm = require('vm');
+const fnSrc = {json.dumps(fn_src)};
+const hostId = {json.dumps(host_id)};
+const completion = {json.dumps(completion)};
+const calls = [];
+let finishLoad;
+const loaded = new Promise(resolve => {{ finishLoad = resolve; }});
+const host = {{
+  id: hostId,
+  hidden: false,
+  isConnected: true,
+  offsetParent: {{}},
+  dataset: {{briefSid:'sid-brief-job', briefLoaded:'1'}},
+  querySelector: () => null,
+  prepend: node => calls.push({{cmd:'prepend', host:hostId, text:node.textContent}}),
+}};
+const sidebar = hostId === 'contextBriefPanel' ? host : {{
+  id:'contextBriefPanel', hidden:false, isConnected:true, offsetParent:{{}},
+  dataset:{{briefSid:'sid-brief-job', briefLoaded:'1'}},
+}};
+const btn = {{closest: () => host}};
+const S = {{session:{{session_id:'sid-brief-job'}}}};
+const document = {{
+  createElement: () => ({{className:'', textContent:''}}),
+  querySelectorAll: () => [{{remove:() => calls.push({{cmd:'removeNote'}})}}],
+}};
+async function api(url) {{
+  calls.push({{cmd:'api', url}});
+  if (url === '/api/session/context-brief/refresh') {{
+    return {{job:{{job_id:'job-1'}}}};
+  }}
+  if (completion === 'stale-session') S.session = {{session_id:'sid-other'}};
+  if (completion === 'stale-tab') {{ host.hidden = true; host.offsetParent = null; }}
+  return {{job:{{status:'done'}}}};
+}}
+async function _loadBriefInto(panel, force) {{
+  calls.push({{cmd:'load', host:panel.id, force}});
+  finishLoad();
+}}
+async function loadContextBrief(force) {{ await _loadBriefInto(sidebar, force); }}
+async function loadWorkspaceContextBrief(force) {{ await _loadBriefInto(host, force); }}
+const ctx = {{
+  S, document, btn, host,
+  api, _loadBriefInto, loadContextBrief, loadWorkspaceContextBrief,
+  _contextBriefSid:() => S.session && S.session.session_id,
+  _contextBriefJob:null,
+  _contextBriefPollTimer:null,
+  clearTimeout:() => {{}},
+  setTimeout:() => 1,
+  encodeURIComponent,
+  $:() => null,
+  t:key => key,
+  showToast:msg => calls.push({{cmd:'toast', msg}}),
+}};
+vm.createContext(ctx);
+vm.runInContext(fnSrc, ctx);
+(async () => {{
+  await vm.runInContext(`_contextBriefRefresh(btn)`, ctx);
+  if (completion === 'current') await loaded;
+  else await new Promise(resolve => setImmediate(resolve));
+  process.stdout.write(JSON.stringify({{calls}}));
+}})().catch(err => {{
+  console.error(err && err.stack || err);
+  process.exit(1);
+}});
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(script)
+        script_path = Path(handle.name)
+    try:
+        proc = subprocess.run(
+            ["node", str(script_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"node context-brief job driver failed: {proc.stderr}")
+    finally:
+        script_path.unlink(missing_ok=True)
+    return json.loads(proc.stdout)
+
+
+def test_context_brief_job_completion_refreshes_initiating_sidebar_and_workspace_hosts():
+    for host_id in ("contextBriefPanel", "workspaceContextPanel"):
+        result = _run_context_brief_job_case(host_id)
+        assert [call for call in result["calls"] if call["cmd"] == "load"] == [
+            {"cmd": "load", "host": host_id, "force": True}
+        ]
+
+
+def test_context_brief_job_completion_ignores_stale_session_and_workspace_tab():
+    stale_session = _run_context_brief_job_case("contextBriefPanel", "stale-session")
+    stale_tab = _run_context_brief_job_case("workspaceContextPanel", "stale-tab")
+
+    assert not any(call["cmd"] == "load" for call in stale_session["calls"])
+    assert not any(call["cmd"] == "load" for call in stale_tab["calls"])
+
+
 def _extract_hydrate_fn() -> str:
     start = PANELS.index("async function _hydrateContextBriefGoalFinish")
     end = PANELS.index("\nasync function _pollContextBriefJob")

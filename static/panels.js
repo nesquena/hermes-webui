@@ -3916,7 +3916,7 @@ function _legacyTodosFromMessages() {
 // ────────────────────────────────────────────────────────────────────────────
 // Context brief panel: deterministic session brief + LLM narrative layer
 // ────────────────────────────────────────────────────────────────────────────
-let _contextBriefJob = null;       // {jobId, sid} — one narrative job at a time
+let _contextBriefJob = null;       // {jobId, sid, panel} — one narrative job at a time
 let _contextBriefPollTimer = null;
 
 function _contextBriefSid(){
@@ -4097,7 +4097,7 @@ async function _contextBriefRefresh(btn){
     const data = await api('/api/session/context-brief/refresh', {method:'POST', body: JSON.stringify({session_id: sid})});
     const jobId = data && data.job && data.job.job_id;
     if (!jobId) return;
-    _contextBriefJob = {jobId, sid};
+    _contextBriefJob = {jobId, sid, panel};
     if (panel && !panel.querySelector('.ctx-brief-generating')){
       const note = document.createElement('div');
       note.className = 'ctx-brief-generating';
@@ -4108,6 +4108,14 @@ async function _contextBriefRefresh(btn){
   } catch(e){
     if (typeof showToast === 'function') showToast((e && e.message) || t('context_brief_error'));
   }
+}
+
+function _contextBriefJobPanelCurrent(panel, sid){
+  if (!panel || panel.isConnected === false || panel.hidden) return false;
+  if (panel.dataset.briefSid !== sid || _contextBriefSid() !== sid) return false;
+  // A host hidden by an inactive parent tab remains connected but has no
+  // offsetParent. Test doubles without this DOM property remain supported.
+  return typeof panel.offsetParent === 'undefined' || panel.offsetParent !== null;
 }
 
 function _contextBriefGoalHostCurrent(host, sid){
@@ -4278,9 +4286,9 @@ async function _pollContextBriefJob(){
     _contextBriefJob = null;
     document.querySelectorAll('.ctx-brief-generating').forEach(n => n.remove());
     if (status && status.status === 'done'){
-      // Reload only when the panel still shows the job's session.
-      if (_contextBriefSid() === job.sid){
-        loadContextBrief(true);
+      // Reload the initiating host only while it still owns the visible session.
+      if (_contextBriefJobPanelCurrent(job.panel, job.sid)){
+        await _loadBriefInto(job.panel, true);
       }
     } else if (typeof showToast === 'function'){
       showToast((status && status.error) || t('context_brief_error'));
