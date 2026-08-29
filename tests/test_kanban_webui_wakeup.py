@@ -635,6 +635,50 @@ def test_drain_runs_kanban_poll_off_completion_drain_thread(monkeypatch):
     assert poll_started.is_set()
 
 
+def test_drain_polls_kanban_when_completion_queue_never_empty(monkeypatch):
+    from tests._wakeup_helpers import install_fake_registry
+    from api import background_process as bp
+
+    expected_events = [{"type": "completion", "n": n} for n in range(5)]
+    processed = []
+    poll_calls = []
+    stop = threading.Event()
+
+    class CompletionQueue:
+        calls = 0
+
+        def get(self, timeout=None):
+            self.calls += 1
+            if self.calls <= len(expected_events):
+                return expected_events[self.calls - 1]
+            stop.set()
+            return {"type": "overflow"}
+
+    def poll():
+        poll_calls.append(True)
+
+    def process_one(event):
+        processed.append(event)
+        if len(processed) >= len(expected_events):
+            stop.set()
+
+    install_fake_registry(
+        monkeypatch,
+        SimpleNamespace(completion_queue=CompletionQueue()),
+    )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", stop)
+    monkeypatch.setattr(bp, "_poll_webui_kanban_wakeups", poll)
+    monkeypatch.setattr(bp, "_process_one", process_one)
+
+    drain = threading.Thread(target=bp._drain_loop, daemon=True)
+    drain.start()
+    drain.join(timeout=3.0)
+
+    assert not drain.is_alive()
+    assert processed == expected_events
+    assert len(poll_calls) >= 1
+
+
 def test_poll_passes_hosted_notifier_profiles_before_claim(monkeypatch, tmp_path):
     from api import background_process as bp
 

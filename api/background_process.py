@@ -2174,6 +2174,15 @@ def _drain_loop() -> None:
     logger.info("bg_task_complete drain thread started")
     next_kanban_poll = 0.0
     while not _DRAIN_STOP.is_set():
+        # Kanban cadence is independent of whether get() returned an event.
+        now = time.monotonic()
+        if now >= next_kanban_poll and not _DRAIN_STOP.is_set():
+            next_kanban_poll = now + _KANBAN_POLL_INTERVAL_SECS
+            threading.Thread(
+                target=_poll_webui_kanban_wakeups,
+                name="hermes-webui-kanban-wakeup-poll",
+                daemon=True,
+            ).start()
         # Read the queue defensively: a rebuilt/partially-initialized registry
         # may not expose ``completion_queue`` (mirrors streaming.py's
         # ``getattr(process_registry, 'completion_queue', None)`` guard). Direct
@@ -2182,28 +2191,11 @@ def _drain_loop() -> None:
         # backoff — a 100%-CPU tight loop. Back off on the stop event instead.
         q = getattr(process_registry, "completion_queue", None)
         if q is None:
-            now = time.monotonic()
-            if now >= next_kanban_poll and not _DRAIN_STOP.is_set():
-                next_kanban_poll = now + _KANBAN_POLL_INTERVAL_SECS
-                threading.Thread(
-                    target=_poll_webui_kanban_wakeups,
-                    name="hermes-webui-kanban-wakeup-poll",
-                    daemon=True,
-                ).start()
             _DRAIN_STOP.wait(1.0)
             continue
         try:
             evt = q.get(timeout=1.0)
         except queue.Empty:
-            now = time.monotonic()
-            if now >= next_kanban_poll and not _DRAIN_STOP.is_set():
-                next_kanban_poll = now + _KANBAN_POLL_INTERVAL_SECS
-                threading.Thread(
-                    target=_poll_webui_kanban_wakeups,
-                    name="hermes-webui-kanban-wakeup-poll",
-                    daemon=True,
-                ).start()
-            # Nothing to drain — poll Kanban only at idle cadence.
             continue
         except Exception:
             # Unexpected queue failure: log it (not silent) and back off on the
