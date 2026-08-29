@@ -5366,6 +5366,10 @@ let _reasoningFetchSeq=0;
 // misleading confirmation toast (Greptile P1 on #6629). Each click bumps its
 // session's generation and the callbacks only apply while still the newest.
 let _reasoningMutationSeqBySession={};
+// Keep same-session writes in dispatch order. The callback generation fence
+// protects the visible chip, but it cannot stop an older HTTP request that
+// reaches the server last from overwriting the newer persisted selection.
+let _reasoningMutationRequestChainBySession={};
 
 function fetchReasoningChip(keyOverride){
   // Set the cache key OPTIMISTICALLY before the request so rapid routine syncs
@@ -5518,13 +5522,32 @@ document.addEventListener('click',function(e){
         const currentSessionId=(S&&S.session&&S.session.session_id)||null;
         return currentSessionId===requestedSessionId&&_reasoningMutationSeqBySession[seqKey]===seq;
       };
-      const request=requestedSessionId
-        ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:requestedSessionId,reasoning_effort:effort})})
-        :api('/api/reasoning',{method:'POST',body:JSON.stringify(Object.assign({effort:effort},_reasoningEffortContext()))});
+      const dispatchRequest=function(){
+        return requestedSessionId
+          ?api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:requestedSessionId,reasoning_effort:effort})})
+          :api('/api/reasoning',{method:'POST',body:JSON.stringify(Object.assign({effort:effort},_reasoningEffortContext()))});
+      };
+      const previousRequest=_reasoningMutationRequestChainBySession[seqKey];
+      const request=previousRequest
+        ?previousRequest.then(dispatchRequest,dispatchRequest)
+        :dispatchRequest();
+      // Store an always-fulfilled tail so a failed older mutation cannot block
+      // the next user selection or create an unhandled rejection.
+      const settledRequest=request.then(function(){},function(){});
+      _reasoningMutationRequestChainBySession[seqKey]=settledRequest;
+      settledRequest.then(function(){
+        if(_reasoningMutationRequestChainBySession[seqKey]===settledRequest){
+          delete _reasoningMutationRequestChainBySession[seqKey];
+        }
+      });
       request
         .then(function(st){
           if(!isCurrentMutation()) return;
-          if(session) session.reasoning_effort=effort||null;
+          // A same-ID refresh replaces S.session while this request is in flight.
+          // Update the current object, not the detached object captured at click.
+          if(S&&S.session&&S.session.session_id===requestedSessionId){
+            S.session.reasoning_effort=effort||null;
+          }
           const display=effort||'Auto';
           if(!effort) fetchReasoningChip();
           else _applyReasoningChip(effort, st||{});
