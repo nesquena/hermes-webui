@@ -120,7 +120,7 @@ def plan_regeneration(session, *, expected_revision=None, lock_held=False):
     """Prepare one canonical display/context pair for a locked regeneration."""
     lock_context = nullcontext() if lock_held else _get_session_agent_lock(session.session_id)
     with lock_context:
-        rows, context = regeneration_state(session)
+        rows, context = regeneration_state(session, use_sidecar=True)
         revision = regeneration_revision_for(rows, session=session, context=context)
         if expected_revision is not None and expected_revision != revision:
             raise RegenerationUnavailable("stale_regeneration_revision")
@@ -217,17 +217,148 @@ def regeneration_context(session):
     return regeneration_state(session)[1]
 
 
-def regeneration_state(session):
-    """Read one immutable state.db snapshot and reconcile both transcript views."""
+_REGENERATION_SIDECAR_ANCHOR_BUDGET = 200
+
+
+def _sidecar_regeneration_read_floor(session):
+    """Return a state.db tail-read floor anchored by the already-loaded sidecar.
+
+    #6826: regenerating a large session must not re-materialize the full
+    state.db transcript (a >1min stall on big sessions).  When the in-memory
+    sidecar is a usable reconciliation base — append-only session with no
+    active truncation markers and timestamped rows — return the timestamp
+    floor for a bounded ``since_timestamp`` tail read.  Rows at/after the
+    floor (including any gateway/server-applied tail the sidecar has not seen
+    yet) are re-read and merged, and rows the sidecar already carries are
+    deduplicated by the append-only merge, so the #6611 reconciliation
+    authority is preserved on the fast path.
+
+    Returns ``None`` when the sidecar cannot anchor a tail read; callers then
+    fall back to the full state.db read (unchanged behavior).
+    """
+    if getattr(session, "truncation_watermark", None) not in (None, ""):
+        return None
+    if getattr(session, "truncation_boundary", None) not in (None, ""):
+        return None
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list) or not messages:
+        return None
+    from api.models import _message_timestamp_as_float
+
+    timestamps = [_message_timestamp_as_float(message) for message in messages]
+    if any(timestamp is None for timestamp in timestamps):
+        return None
+    # Conservative anchor: re-read a bounded tip window so sub-second/clock
+    # drift near the sidecar tip cannot hide a concurrently appended state.db
+    # row, while the raw read stays tiny for huge sessions.
+    return min(timestamps[-_REGENERATION_SIDECAR_ANCHOR_BUDGET:])
+
+
+def _bounded_tail_snapshot_if_safe(session, read_floor):
+    """Return the bounded tail rows ONLY when it is provably identical to the
+    full read; otherwise None (caller must fall back to the full read).
+
+    #6826 r3: the skipped state.db prefix (rows older than the floor) must be
+    represented identically in the sidecar — same count AND same ordered
+    visible identity — and the bounded tail must not repeat any skipped key
+    (occurrence-count collision: a new tail turn repeating an older prompt
+    would be mistaken for the old sidecar duplicate and dropped). The prefix
+    proof and the tail data come from ONE read transaction (no TOCTOU).
+
+    Any mismatch, missing database, or uncertainty returns None, so the #6611
+    regeneration authority never operates on an unreconciled view.
+    """
+    sid = getattr(session, "session_id", None)
+    if not sid:
+        return None
+    profile = getattr(session, "profile", None)
+    from api.models import (
+        _session_message_visible_key,
+        get_state_db_regeneration_tail_snapshot,
+    )
+
+    snap = get_state_db_regeneration_tail_snapshot(sid, read_floor, profile=profile)
+    if snap is None:
+        return None  # cannot obtain a stable single-snapshot → full read
+    # Compression-anchor coverage: if the anchor predates the floor the bounded
+    # read can drop compacted-tail context rows (display may still match).
+    anchor = getattr(session, "compression_anchor_message_key", None)
+    if isinstance(anchor, dict):
+        try:
+            anchor_ts = float(anchor.get("ts"))
+        except (TypeError, ValueError):
+            anchor_ts = None
+        if anchor_ts is None or anchor_ts < read_floor:
+            return None
+    prefix = snap["prefix"]
+    if prefix.get("count") == 0 and prefix.get("null_timestamp_count") == 0:
+        # Empty skipped prefix: the bounded read already covers every row.
+        return snap["tail"]
+    # Non-empty skipped prefix: prove identical ordered visible identity.
+    sidecar_keys = []
+    for message in getattr(session, "messages", None) or []:
+        if not isinstance(message, dict):
+            continue
+        try:
+            ts = float(message.get("timestamp"))
+        except (TypeError, ValueError):
+            ts = None
+        if ts is not None and ts < read_floor:
+            key = _session_message_visible_key(message)
+            if key is None:
+                return None
+            sidecar_keys.append(key)
+    if list(snap["prefix_keys"]) != sidecar_keys:
+        return None  # mismatch → full read
+    # Occurrence-count collision (#6826 r3 #1): if any bounded-tail key ALSO
+    # occurs in the skipped prefix, the reconciler may drop the repeated tail
+    # row — fall back conservatively.
+    prefix_key_set = set(snap["prefix_keys"])
+    for key in snap["tail_keys"]:
+        if key in prefix_key_set:
+            return None
+    # In-tail duplicates (#6826 r5): a repeated message wholly inside the
+    # bounded tail makes the reconciler's context dedup diverge from the full
+    # read (display may still match) → refuse the bounded path.
+    if len(snap["tail_keys"]) != len(set(snap["tail_keys"])):
+        return None
+    return snap["tail"]
+
+
+def regeneration_state(session, *, use_sidecar=False):
+    """Read one immutable state.db snapshot and reconcile both transcript views.
+
+    ``use_sidecar=True`` (#6826) anchors the state.db read to the already
+    loaded in-memory sidecar: only a bounded tail (``since_timestamp`` floor)
+    is re-read instead of the full transcript, and both views still route
+    through :func:`reconciled_state_db_messages_for_session`, so the #6611
+    reconciliation authority (recovered display/context pair survives local
+    and gateway apply) is preserved on the fast path.
+
+    The bounded tail is only trusted when
+    :func:`_bounded_tail_snapshot_if_safe` proves the skipped state.db prefix
+    is identical in the sidecar (count + ordered visible identity + no
+    occurrence collision + compression anchor coverage), and the tail rows
+    come from the SAME single read transaction as the proof (no TOCTOU);
+    otherwise the read falls back to the full transcript.
+    """
     from api.models import (
         get_state_db_session_messages,
         reconciled_state_db_messages_for_session,
     )
 
-    state_messages = get_state_db_session_messages(
-        getattr(session, "session_id", None),
-        profile=getattr(session, "profile", None),
-    )
+    bounded_tail = None
+    if use_sidecar:
+        read_floor = _sidecar_regeneration_read_floor(session)
+        if read_floor is not None:
+            bounded_tail = _bounded_tail_snapshot_if_safe(session, read_floor)
+    if bounded_tail is not None:
+        state_messages = bounded_tail
+    else:
+        state_messages = get_state_db_session_messages(
+            getattr(session, "session_id", None),
+            profile=getattr(session, "profile", None),
+        )
     return (
         reconciled_state_db_messages_for_session(
             session,
@@ -242,7 +373,7 @@ def regeneration_state(session):
 
 
 def regeneration_revision(session) -> str:
-    rows, context = regeneration_state(session)
+    rows, context = regeneration_state(session, use_sidecar=True)
     return regeneration_revision_for(
         rows,
         session=session,
