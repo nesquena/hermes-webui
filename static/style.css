@@ -5333,6 +5333,7 @@ main.main > #mainPlugin{display:none;}
 .provider-public-status-operational{border-left-color:var(--success,#22c55e);}
 .provider-public-status-degraded{border-left-color:var(--warning,#f59e0b);}
 .provider-public-status-outage{border-left-color:var(--error,#ef4444);}
+.provider-public-status-maintenance{border-left-color:var(--warning,#f59e0b);}
 .provider-public-status a{color:inherit;text-decoration:underline;}
 .provider-quota-pool{width:100%;min-width:0;border:1px solid var(--border);border-radius:10px;background:var(--sidebar);overflow:hidden;}
 .provider-quota-pool summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;list-style:none;padding:9px 10px;font-size:12px;color:var(--text);font-weight:650;}

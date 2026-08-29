@@ -24,7 +24,13 @@ DEFAULT_SUCCESS_TTL = 60
 MIN_CACHE_TTL = 15
 MAX_CACHE_TTL = 300
 MAX_DESCRIPTION_LENGTH = 500
-_STATUS_VALUES = frozenset({"operational", "degraded", "outage", "unknown"})
+_STATUS_MAP = {
+    "operational": "operational",
+    "degraded": "degraded",
+    "partial_outage": "outage",
+    "major_outage": "outage",
+    "maintenance": "maintenance",
+}
 _cache: dict[str, tuple[float, dict[str, dict[str, str]], datetime | None]] = {}
 _cache_lock = threading.RLock()
 _inflight: dict[str, threading.Event] = {}
@@ -81,37 +87,41 @@ def _parse_status_payload_with_deadline(
     payload: object, *, now: datetime
 ) -> tuple[dict[str, dict[str, str]], datetime | None]:
     now = now.astimezone(timezone.utc)
-    if (
-        not isinstance(payload, dict)
-        or type(payload.get("version")) is not int
-        or payload.get("version") != 1
-        or not isinstance(payload.get("providers"), list)
-    ):
+    if not isinstance(payload, dict):
         return {}, None
-    generated_at = _timestamp(payload.get("generatedAt"), now)
+    meta = payload.get("meta")
+    data = payload.get("data")
+    if not isinstance(meta, dict) or meta.get("version") != "v1" or not isinstance(data, dict) or not isinstance(data.get("providers"), list):
+        return {}, None
+    generated_at = _timestamp(meta.get("generatedAt"), now)
     if generated_at is None:
         return {}, None
     deadlines = [generated_at + timedelta(seconds=MAX_AGE_SECONDS)]
     result: dict[str, dict[str, str]] = {}
-    for row in payload["providers"]:
+    for row in data["providers"]:
         if not isinstance(row, dict):
             continue
-        slug, status, checked = row.get("slug"), row.get("status"), row.get("checkedAt")
-        if not isinstance(slug, str) or not slug or not isinstance(status, str) or status not in _STATUS_VALUES:
+        slug = row.get("slug")
+        current_status = row.get("currentStatus")
+        source = row.get("source")
+        code = current_status.get("code") if isinstance(current_status, dict) else None
+        status = _STATUS_MAP.get(code) if isinstance(code, str) else None
+        if not isinstance(slug, str) or not slug or status is None or not isinstance(source, dict):
             continue
+        checked = source.get("checkedAt")
         checked_at = _timestamp(checked, now)
-        if status == "unknown" or checked_at is None:
+        if checked_at is None:
             continue
         deadlines.append(checked_at + timedelta(seconds=MAX_AGE_SECONDS))
         clean: dict[str, str] = {"slug": slug, "status": status, "checkedAt": checked}
-        description = row.get("description")
+        description = current_status.get("summary")
         if isinstance(description, str):
             description = " ".join(description.split())[:MAX_DESCRIPTION_LENGTH]
             if description:
                 clean["description"] = description
-        source = normalize_status_url(row.get("url"))
-        if source:
-            clean["url"] = source
+        source_url = normalize_status_url(source.get("statusPageUrl")) or normalize_status_url(source.get("officialUrl"))
+        if source_url:
+            clean["url"] = source_url
         result[slug] = clean
     return result, min(deadlines) if result else None
 
@@ -189,7 +199,7 @@ def _fetch_once(url: str) -> tuple[dict[str, dict[str, str]], int, datetime | No
     opener = urllib.request.build_opener(_NoRedirectHandler)
     try:
         with opener.open(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
-            if getattr(response, "status", 200) < 200 or getattr(response, "status", 200) >= 300:
+            if getattr(response, "status", 200) != 200:
                 return {}, _retry_seconds(response.headers, MIN_CACHE_TTL), None
             body = _read_body(response, deadline=deadline)
             if len(body) > MAX_BODY_BYTES:

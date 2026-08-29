@@ -1,6 +1,7 @@
 """Behavioral contract tests for optional public provider status (#6805)."""
 
 from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 import json
 import threading
 import time
@@ -12,7 +13,11 @@ import api.provider_status as status
 
 def _payload(**row):
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    return {"version": 1, "generatedAt": now, "providers": [{"slug": "openai", "status": "operational", "checkedAt": now, **row}]}
+    summary = row.pop("description", "service ready")
+    url = row.pop("url", "https://status.example/inc")
+    status_code = row.pop("status", "operational")
+    checked = row.pop("checkedAt", now)
+    return {"meta": {"version": "v1", "generatedAt": now}, "data": {"providers": [{"slug": "openai", "currentStatus": {"code": status_code, "summary": summary}, "source": {"checkedAt": checked, "statusPageUrl": url}, **row}]}}
 
 
 def test_parser_accepts_schema_and_sanitizes_optional_fields():
@@ -21,16 +26,91 @@ def test_parser_accepts_schema_and_sanitizes_optional_fields():
     assert "url" not in rows["openai"]
 
 
+def test_nested_issue_payload_is_accepted_by_reworked_head():
+    rows = status.parse_status_payload(_payload())
+    assert rows["openai"]["status"] == "operational"
+
+
+@pytest.mark.parametrize("code, expected", [("operational", "operational"), ("degraded", "degraded"), ("partial_outage", "outage"), ("major_outage", "outage"), ("maintenance", "maintenance")])
+def test_parser_maps_nested_status_codes(code, expected):
+    payload = _payload(status=code)
+    assert status.parse_status_payload(payload)["openai"]["status"] == expected
+
+
+def test_parser_hides_unknown_and_unsupported_codes():
+    for code in ("unknown", "vendor_specific", 1, True):
+        assert status.parse_status_payload(_payload(status=code)) == {}
+
+
+def test_parser_uses_nested_source_url_precedence_and_fallback():
+    payload = _payload()
+    source = payload["data"]["providers"][0]["source"]
+    source["statusPageUrl"] = "https://status.example/preferred"
+    source["officialUrl"] = "https://status.example/fallback"
+    assert status.parse_status_payload(payload)["openai"]["url"] == "https://status.example/preferred"
+    source["statusPageUrl"] = "javascript:alert(1)"
+    assert status.parse_status_payload(payload)["openai"]["url"] == "https://status.example/fallback"
+
+
+def test_nested_payload_reaches_public_status_through_quota_route(monkeypatch):
+    import api.providers as providers
+    import api.routes as routes
+    import api.profiles as profiles
+    from urllib.parse import urlsplit
+    from contextlib import nullcontext
+
+    local = {"ok": True, "provider": "openai", "supported": True, "status": "available", "quota": {"limit": 1}}
+    monkeypatch.setattr(providers, "get_public_provider_statuses", lambda **kwargs: status.parse_status_payload(_payload()))
+    monkeypatch.setattr(providers, "_get_provider_quota_local", lambda provider, refresh=False: dict(local))
+    monkeypatch.setattr(providers, "_canonicalise_provider_id", lambda value: "openai")
+    monkeypatch.setattr(providers, "_is_known_model_provider", lambda value: True)
+    monkeypatch.setattr(routes, "get_provider_quota", providers.get_provider_quota)
+    monkeypatch.setattr(profiles, "profile_env_for_active_request_readonly", lambda *args, **kwargs: nullcontext())
+    captured = {}
+    def capture_json(handler, payload):
+        captured["payload"] = payload
+
+    monkeypatch.setattr(routes, "j", capture_json)
+    assert routes.handle_get(object(), urlsplit("http://test/api/provider/quota?provider=openai")) is None
+    assert captured["payload"]["public_status"]["status"] == "operational"
+    assert {key: captured["payload"][key] for key in local} == local
+
+
+def test_cache_control_and_retry_after_ttls_are_clamped(monkeypatch):
+    assert status._success_seconds({"Cache-Control": "public, max-age=2"}) == status.MIN_CACHE_TTL
+    assert status._success_seconds({"Cache-Control": "max-age=999"}) == status.MAX_CACHE_TTL
+    assert status._success_seconds({"Cache-Control": "max-age=120"}) == 120
+    assert status._retry_seconds({"Retry-After": "2"}, 60) == status.MIN_CACHE_TTL
+    assert status._retry_seconds({"Retry-After": "999"}, 60) == status.MAX_CACHE_TTL
+    now = 1_800_000_000
+    monkeypatch.setattr(status.time, "time", lambda: now)
+    low_date = format_datetime(datetime.fromtimestamp(now + 2, timezone.utc), usegmt=True)
+    high_date = format_datetime(datetime.fromtimestamp(now + 999, timezone.utc), usegmt=True)
+    assert status._retry_seconds({"Retry-After": low_date}, 60) == status.MIN_CACHE_TTL
+    assert status._retry_seconds({"Retry-After": high_date}, 60) == status.MAX_CACHE_TTL
+
+
+def test_parser_skips_malformed_nested_rows_but_keeps_valid_siblings():
+    payload = _payload()
+    payload["data"]["providers"] = [
+        {"slug": "bad-list", "currentStatus": {"code": []}, "source": {}},
+        {"slug": "bad-object", "currentStatus": {"code": {}}, "source": {}},
+        {"slug": "bad-missing", "currentStatus": {}, "source": {}},
+        payload["data"]["providers"][0],
+    ]
+    assert list(status.parse_status_payload(payload)) == ["openai"]
+
+
 def test_parser_hides_unknown_malformed_and_stale_rows():
     old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat().replace("+00:00", "Z")
     payload = _payload()
-    payload["providers"] = [{"slug": "openai", "status": "unknown", "checkedAt": payload["generatedAt"]}, {"slug": "anthropic", "status": "outage", "checkedAt": old}]
+    payload["data"]["providers"] = [{"slug": "openai", "currentStatus": {"code": "unknown"}, "source": {"checkedAt": payload["meta"]["generatedAt"]}}, {"slug": "anthropic", "currentStatus": {"code": "major_outage"}, "source": {"checkedAt": old}}]
     assert status.parse_status_payload(payload) == {}
 
 
 def test_parser_rejects_boolean_version_values():
     payload = _payload()
-    payload["version"] = True
+    payload["meta"]["version"] = True
     assert status.parse_status_payload(payload) == {}
 
 
@@ -39,9 +119,9 @@ def test_parser_hides_future_dated_payloads(field):
     payload = _payload()
     future = (datetime.now(timezone.utc) + timedelta(minutes=3)).isoformat().replace("+00:00", "Z")
     if field == "generatedAt":
-        payload[field] = future
+        payload["meta"][field] = future
     else:
-        payload["providers"][0][field] = future
+        payload["data"]["providers"][0]["source"][field] = future
     assert status.parse_status_payload(payload) == {}
 
 
@@ -103,7 +183,7 @@ def test_readme_environment_rows_remain_a_markdown_table():
 def test_valid_shape_with_zero_rows_is_cached_as_retryable_failure(monkeypatch):
     status.clear_status_cache()
     payload = _payload()
-    payload["providers"] = []
+    payload["data"]["providers"] = []
 
     class Response:
         status = 200
@@ -120,6 +200,53 @@ def test_valid_shape_with_zero_rows_is_cached_as_retryable_failure(monkeypatch):
     assert rows == {}
     assert ttl == status.MIN_CACHE_TTL
     assert deadline is None
+
+
+def test_fetch_once_applies_success_and_http_error_retry_headers(monkeypatch):
+    payload = json.dumps(_payload()).encode()
+
+    class SuccessResponse:
+        status = 200
+        headers = {"Cache-Control": "public, max-age=120"}
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, limit): return payload
+
+    class SuccessOpener:
+        def open(self, request, timeout): return SuccessResponse()
+
+    monkeypatch.setattr(status.urllib.request, "build_opener", lambda handler: SuccessOpener())
+    rows, ttl, _ = status._fetch_once("https://success.example/status")
+    assert rows["openai"]["status"] == "operational"
+    assert ttl == 120
+
+    class RetryOpener:
+        def open(self, request, timeout):
+            raise status.urllib.error.HTTPError(
+                request.full_url, 503, "unavailable", {"Retry-After": "999"}, None
+            )
+
+    monkeypatch.setattr(status.urllib.request, "build_opener", lambda handler: RetryOpener())
+    rows, ttl, _ = status._fetch_once("https://retry.example/status")
+    assert rows == {}
+    assert ttl == status.MAX_CACHE_TTL
+
+
+def test_fetch_once_rejects_partial_content(monkeypatch):
+    class PartialResponse:
+        status = 206
+        headers = {}
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, limit): raise AssertionError("partial response must not be parsed")
+
+    class Opener:
+        def open(self, request, timeout): return PartialResponse()
+
+    monkeypatch.setattr(status.urllib.request, "build_opener", lambda handler: Opener())
+    rows, ttl, _ = status._fetch_once("https://partial.example/status")
+    assert rows == {}
+    assert ttl == status.MIN_CACHE_TTL
 
 
 def test_same_key_refreshes_coalesce_and_different_urls_run_independently(monkeypatch):
