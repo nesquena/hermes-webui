@@ -642,6 +642,43 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     )
                 )
 
+    def test_session_media_token_allows_quoted_raw_space_path(self):
+        # #6580 re-gate: quoted MEDIA token with a RAW space outside global roots
+        # must be allowed when the exact path is in the session allow-list.
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            image = pathlib.Path(tmpd) / "my card.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f'MEDIA:"{image}"'}]
+            )
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_image_path(
+                        "s-media", image, {"image/png"}
+                    )
+                )
+
+    def test_session_media_token_allows_quoted_pct20_path(self):
+        # #6580 re-gate: an already-%20 quoted token must converge on the same
+        # canonical path as the raw-space form (normalized exactly once).
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            image = pathlib.Path(tmpd) / "my card.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            quoted_ref = f'MEDIA:"{str(image).replace(" ", "%20")}"'
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": quoted_ref}]
+            )
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_image_path(
+                        "s-media", image, {"image/png"}
+                    )
+                )
+
     def test_session_media_token_allows_exact_html_path_when_mime_is_safe(self):
         from api import routes
 
