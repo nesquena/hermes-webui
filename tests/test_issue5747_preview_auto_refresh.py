@@ -130,39 +130,35 @@ def test_text_mutation_tools_are_tracked():
 
 
 def test_text_path_tokens_extracts_dotted_paths():
-    """Path-like tokens in terminal/execute_code text must be extractable."""
-    start = WORKSPACE_JS.index("function _textPathTokens(")
-    brace = WORKSPACE_JS.index("{", start)
-    depth = 0
-    end = None
-    for i in range(brace, len(WORKSPACE_JS)):
-        c = WORKSPACE_JS[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    fn = WORKSPACE_JS[start:end]
+    """#5747 re-gate (F2): write-op targets in terminal/execute_code text must be
+    extracted, resolved against the tool's effective workdir, and rejected when
+    they escape the active workspace."""
+
+    def _block(name):
+        start = WORKSPACE_JS.index(f"function {name}(")
+        brace = WORKSPACE_JS.index("{", start)
+        depth = 0
+        end = None
+        for i in range(brace, len(WORKSPACE_JS)):
+            c = WORKSPACE_JS[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        return WORKSPACE_JS[start:end]
+
     ignore_re = _extract(r"const ARTIFACT_IGNORE_RE = /.*?/;")
-    norm_start = WORKSPACE_JS.index("function _normalizeArtifactPath(")
-    norm_brace = WORKSPACE_JS.index("{", norm_start)
-    depth = 0
-    norm_end = None
-    for i in range(norm_brace, len(WORKSPACE_JS)):
-        c = WORKSPACE_JS[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                norm_end = i + 1
-                break
-    norm_fn = WORKSPACE_JS[norm_start:norm_end]
     driver = (
-        ignore_re + "\n" + norm_fn + "\n" + fn + "\n"
-        + "const out = _textPathTokens(process.argv[1]);\n"
+        ignore_re + "\n"
+        + _block("_collapseDotSegments") + "\n"
+        + _block("_normalizeArtifactPath") + "\n"
+        + _block("_textWriteOpTargets") + "\n"
+        + _block("_textPathTokens") + "\n"
+        + "const S={session:{session_id:'s1',workspace:'/home/user/ws'},activeProfile:'default',activeStreamId:''};\n"
+        + "const out=_textPathTokens(process.argv[1], '/home/user/ws');\n"
         + "process.stdout.write(JSON.stringify(out));\n"
     )
     text = "sed -i 's/a/b/' static/style.css && echo done"
@@ -174,10 +170,26 @@ def test_text_path_tokens_extracts_dotted_paths():
     assert "static/style.css" in json.loads(r.stdout), (
         f"terminal text must yield the mutated path token (#5747)"
     )
+    # F2: a write target escaping the active workspace is rejected, not tracked.
+    r2 = subprocess.run(
+        [NODE, "-e", driver, "sed -i s/a/b/ /etc/passwd"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert r2.returncode == 0, f"node failed: {r2.stderr}"
+    assert "/etc/passwd" not in json.loads(r2.stdout), (
+        f"escaping path must be rejected (#5747 re-gate F2)"
+    )
 
 
 def test_preview_refresh_still_uses_open_file_with_bust_cache():
-    block = _function_block(WORKSPACE_JS, "refreshOpenPreviewIfMutated")
-    assert "openFile(_previewCurrentPath,{bustCache:true})" in block.replace(" ", ""), (
+    # #5747 re-gate (F3): the refresh loop must still reload the open preview
+    # through openFile() with cache busting, and refreshOpenPreviewIfMutated()
+    # must coalesce concurrent triggers onto that single in-flight loop.
+    loop = _function_block(WORKSPACE_JS, "_runPreviewRefreshLoop")
+    assert "openFile(_previewCurrentPath,{bustCache:true})" in loop.replace(" ", ""), (
         "mutated preview must reload through openFile() with cache busting (#5747)"
+    )
+    gate = _function_block(WORKSPACE_JS, "refreshOpenPreviewIfMutated")
+    assert "_runPreviewRefreshLoop" in gate, (
+        "refresh triggers must coalesce onto the in-flight refresh loop (#5747 re-gate F3)"
     )
