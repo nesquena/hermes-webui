@@ -13744,22 +13744,44 @@ def handle_get(handler, parsed) -> bool:
                 # 36k-row session) even when the merge itself was served from
                 # cache. Probe the cache first and skip the load on a hit.
                 #
-                # Deliberately narrow: only when msg_limit is set (the merge
-                # helper below is the sole consumer) and only for inactive
-                # sessions, matching the cache's own validity rule. Any miss
-                # falls through to the normal full load, so this can only skip
-                # work that would have produced an identical merged result.
+                # Two disjoint cache layers, split on the exact active/inactive
+                # boundary the caches themselves enforce:
+                #   - INACTIVE sessions -> the legacy display-merge cache
+                #     (behavior unchanged);
+                #   - ACTIVE sessions (live stream or pending user turn) ->
+                #     the streaming merge cache: mid-turn polls are pure
+                #     repeats of the previous merge (state.db rows land per
+                #     turn, not per token), so a TTL-bounded hit skips the
+                #     state.db load exactly like the inactive path does.
+                # #4070 trap: a msg_before page read has a different state.db
+                # scope than the tail read -- msg_before is not None bypasses
+                # BOTH layers and always takes the full load (hard rule; the
+                # legacy probe used to enforce this inside its own gate).
+                # Fail-closed: any miss falls through to the normal full load
+                # + merge below, so a hit can only skip work that would have
+                # produced an identical merged result.
                 _display_cache_hit = None
-                if (
-                    msg_limit is not None
-                    and not getattr(s, "active_stream_id", None)
-                    and not getattr(s, "pending_user_message", None)
-                ):
-                    _display_cache_hit = _display_merge_cached_messages(
-                        s,
-                        limited_sidecar_messages,
-                        msg_before=msg_before,
+                if msg_limit is not None and msg_before is None:
+                    _session_active_for_cache = bool(
+                        getattr(s, "active_stream_id", None)
+                        or getattr(s, "pending_user_message", None)
                     )
+                    if not _session_active_for_cache:
+                        _display_cache_hit = _display_merge_cached_messages(
+                            s,
+                            limited_sidecar_messages,
+                            msg_before=msg_before,
+                        )
+                    else:
+                        # Active session: probe the streaming cache. Safe to
+                        # skip the row load on a hit because the merge block
+                        # below consumes _display_cache_hit only under the
+                        # same `msg_limit is not None` gate this probe runs
+                        # under — a hit can never leak into the msg_limit=None
+                        # full-transcript branch (#4070 fail-closed rules).
+                        _display_cache_hit = probe_streaming_merge_entry(
+                            s, msg_limit=msg_limit
+                        )
                 if _display_cache_hit is not None:
                     state_db_messages = []
                 else:
