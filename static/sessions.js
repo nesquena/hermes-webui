@@ -1769,15 +1769,17 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
-    // The awaited draft save above yields the event loop. If another
-    // loadSession() started for a different session while we were waiting
-    // (rapid switch B→C), _loadingSessionId now points at that newer load —
-    // bail out before the destructive state-clearing block below so this stale
-    // continuation can't wipe S.messages / write the loading placeholder /
-    // close streams for the session the user actually landed on (#1060 guard,
-    // extended to cover the new pre-switch await).
-    if (!_isCurrentLoad()) return;
+    if(!opts.skipComposerDraftSave){
+      await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+      // The awaited draft save above yields the event loop. If another
+      // loadSession() started for a different session while we were waiting
+      // (rapid switch B→C), _loadingSessionId now points at that newer load —
+      // bail out before the destructive state-clearing block below so this stale
+      // continuation can't wipe S.messages / write the loading placeholder /
+      // close streams for the session the user actually landed on (#1060 guard,
+      // extended to cover the new pre-switch await).
+      if (!_isCurrentLoad()) return;
+    }
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
@@ -2497,13 +2499,47 @@ async function _ensureSidebarSessionProfile(session){
   return _profileMatchesActiveProfile(targetProfile,S.activeProfile||'default');
 }
 
+function _profileSwitchFirstSession(sessions, visibleSidebarIds, activeProfile, activeIsDefault){
+  const byId=new Map((Array.isArray(sessions)?sessions:[])
+    .filter(session=>session&&session.session_id)
+    .map(session=>[session.session_id,session]));
+  const target=(typeof activeProfile==='string'&&activeProfile.trim())?activeProfile.trim():'default';
+  for(const sid of (Array.isArray(visibleSidebarIds)?visibleSidebarIds:[])){
+    const session=byId.get(sid);
+    if(!session) continue;
+    const profile=(typeof session.profile==='string'&&session.profile.trim())?session.profile.trim():'default';
+    if(profile===target||(profile==='default'&&activeIsDefault)) return session;
+  }
+  return null;
+}
+
+async function _openFirstSessionForActiveProfile(options={}){
+  const session=_profileSwitchFirstSession(
+    _allSessions,
+    _sessionVisibleSidebarIds,
+    S.activeProfile||'default',
+    !!S.activeProfileIsDefault,
+  );
+  if(!session) return false;
+  // The profile cookie already points at the destination. Saving the source
+  // conversation's composer draft now would POST its session_id under the wrong
+  // profile, so keep loadSession's local cleanup/snapshot work but skip that write.
+  const loadOpts=Object.assign({},options,{
+    skipComposerDraftSave:true,
+    // A concurrent switch must not trigger recursive profile resolution here.
+    skipProfileResolve:true,
+  });
+  const opened=await _openSidebarSession(session,loadOpts);
+  return opened!==false;
+}
+
 async function _openSidebarSession(session, loadOpts={}){
-  if(!session||!session.session_id) return;
+  if(!session||!session.session_id) return false;
   // Extension pre-open hook — before any side-effects (external import, profile switching).
   // Handler returns {cancel:true} to prevent the open.
   if(!loadOpts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     var _preResult=_hermesNotifySessionOpen(session.session_id, null, {preload:true, opts:loadOpts});
-    if(_preResult&&_preResult.cancel===true) return;
+    if(_preResult&&_preResult.cancel===true) return false;
   }
   // #5409: close mobile sidebar AFTER veto guard passes — only close if open proceeds.
   if(typeof closeMobileSidebar==='function')closeMobileSidebar();
@@ -2511,10 +2547,11 @@ async function _openSidebarSession(session, loadOpts={}){
     try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(session))});}
     catch(_e){ /* import failed -- fall through to read-only view */ }
   }
-  await _ensureSidebarSessionProfile(session);
+  if(!loadOpts.skipProfileResolve) await _ensureSidebarSessionProfile(session);
   // Tell loadSession to skip its pre-hook — we already ran it above.
   await loadSession(session.session_id, Object.assign({}, loadOpts, {_preloadNotified:true}));
   renderSessionListFromCache();
+  return true;
 }
 
 function _isReadOnlySession(session) {

@@ -1388,6 +1388,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsOpenFirstSessionOnProfileSwitch" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_open_first_session_on_profile_switch">Open the first conversation when switching profiles</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_open_first_session_on_profile_switch">When on, switching profiles opens the destination profile's first visible conversation in the sidebar. If none is available, a new chat is created. When off (default), WebUI starts a new chat or shows the session browser as before.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_external_sessions">Show non-WebUI sessions</span>
               </label>
