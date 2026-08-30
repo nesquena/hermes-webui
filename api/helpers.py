@@ -3,12 +3,14 @@ Hermes Web UI -- HTTP helper functions.
 """
 import base64 as _base64
 import binascii as _binascii
+import collections
 import functools
 import json as _json
 import logging
 import os
 import re as _re
 import ssl
+import threading
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
@@ -1213,8 +1215,20 @@ def _copy_json_value(value):
     return value
 
 
-def redact_session_data(session_dict: dict) -> dict:
-    """Redact credentials in the public session response without mutation."""
+def redact_session_data(
+    session_dict: dict,
+    *,
+    _messages_override: list | None = None,
+) -> dict:
+    """Redact credentials in the public session response without mutation.
+
+    ``_messages_override`` is an additive perf hook for the hot GET /api/session
+    path: when the caller can prove the transcript window is unchanged, it
+    passes the exact previously-redacted ``messages`` list and this function
+    reuses it verbatim instead of re-walking every row. All other fields are
+    still redacted fresh. When omitted (default), behaviour is identical to
+    before — every transcript-bearing field is walked and redacted.
+    """
     from api.config import load_settings
     _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not isinstance(session_dict, dict):
@@ -1227,6 +1241,14 @@ def redact_session_data(session_dict: dict) -> dict:
             continue
         if key == 'title' and isinstance(value, str):
             result[key] = _redact_text(value, _enabled=_enabled)
+        elif key == 'messages' and _messages_override is not None:
+            # perf(webui/session-load-latency): cached redaction of an
+            # unchanged transcript window. The override is the EXACT output of
+            # a prior _redact_messages() walk over the identical window, so
+            # semantics are unchanged by construction (the merged+windowed
+            # row set is append-only for inactive sessions; the caller is
+            # responsible for proving that before supplying the override).
+            result[key] = _messages_override
         elif key in {'messages', 'context_messages'}:
             result[key] = _redact_messages(value, _enabled=_enabled, _active_turn_token=_active_turn_token)
         elif key == 'tool_calls' and isinstance(value, list):
@@ -1242,6 +1264,94 @@ def redact_session_data(session_dict: dict) -> dict:
             # above carry free-form user/model text worth redacting).
             result[key] = _copy_json_value(value)
     return result
+
+
+# ── Redaction memo (perf: GET /api/session transcript redact stage) ────────
+#
+# redact_session_data() walks EVERY message on every /api/session request the
+# moment it has mutable-copy cost (redact stage measured 2-3.4s on large
+# sessions). Messages are append-only for inactive sessions, so the redacted
+# window is stable between writes. This cache stores the redacted ``messages``
+# list keyed on a signature that changes whenever the window or the
+# underlying store changes. Fail-closed: if the signature cannot be built
+# (None), the caller must fall back to a fresh walk; entries are never
+# trusted across a signature mismatch.
+
+_SESSION_REDACT_CACHE_MAX = 256
+_session_redact_cache: "collections.OrderedDict[str, tuple[object, list]]" = (
+    collections.OrderedDict()
+)
+_session_redact_cache_lock = threading.Lock()
+
+
+def _session_redact_signature(
+    session_id: str,
+    *,
+    messages: list,
+    state_db_signature: object | None,
+    redact_enabled: bool,
+    msg_limit: object,
+    messages_offset: int,
+) -> object:
+    """Build a fail-closed cache key for the redacted transcripts window.
+
+    The state.db signature (WAL/SHM stat) is the same fail-closed guard the
+    display merge cache uses: any write to the session's state.db changes it,
+    so the cached redaction is only ever reused when the store provably has
+    not changed. The sidecar coordinate space is guarded by (count,
+    first/last row id+timestamp) which changes on every append. msg_limit +
+    offset bound which window was redacted, so paginated loads never share a
+    cache entry with a different window.
+    """
+    try:
+        if state_db_signature is None:
+            return None
+        msgs = messages if isinstance(messages, list) else []
+        n = len(msgs)
+        if n == 0:
+            tail_key = (0, None, None, None, None)
+        else:
+            first = msgs[0] if isinstance(msgs[0], dict) else {}
+            last = msgs[-1] if isinstance(msgs[-1], dict) else {}
+            tail_key = (
+                n,
+                first.get("id"),
+                first.get("timestamp"),
+                last.get("id"),
+                last.get("timestamp"),
+            )
+        return (
+            session_id,
+            state_db_signature,
+            redact_enabled,
+            msg_limit,
+            messages_offset,
+            tail_key,
+        )
+    except Exception:
+        return None
+
+
+def _session_redact_cached_get(session_id: str, signature: object):
+    """Return the previously-redacted messages list, or None on miss/mismatch."""
+    if signature is None:
+        return None
+    with _session_redact_cache_lock:
+        entry = _session_redact_cache.get(session_id)
+        if entry is None or entry[0] != signature:
+            return None
+        _session_redact_cache.move_to_end(session_id, last=True)
+        return entry[1]
+
+
+def _session_redact_cached_put(session_id: str, signature: object, redacted_messages: list) -> None:
+    if signature is None:
+        return
+    with _session_redact_cache_lock:
+        _session_redact_cache[session_id] = (signature, redacted_messages)
+        _session_redact_cache.move_to_end(session_id, last=True)
+        while len(_session_redact_cache) > _SESSION_REDACT_CACHE_MAX:
+            _session_redact_cache.popitem(last=False)
 
 
 def read_body(handler) -> dict:
