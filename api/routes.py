@@ -9254,6 +9254,192 @@ def _display_merge_cache_key(
     )
 
 
+# perf(webui/session-load-latency): streaming twin of the display-merge cache
+# above. ACTIVE sessions (live active_stream_id / pending_user_message) are
+# gated out of _display_merge_cache by _display_merge_session_is_active, so
+# every browser/phone poll mid-turn pays the full state.db load + merge. This
+# cache serves the exact repeat-poll shape (same in-memory transcript, no
+# state.db write between polls) within a tight TTL instead. Same fail-closed
+# contract as the inactive cache: any unresolvable key component disables it.
+# Lineage-key logic mirrors _display_merge_cache_key (see that function; the
+# block is inlined rather than shared so the inactive path's signature/unset
+# plumbing stays untouched).
+_DISPLAY_STREAMING_MERGE_CACHE_MAX = 16
+_display_streaming_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
+_display_streaming_merge_cache_lock = threading.Lock()
+
+
+def _display_streaming_lineage_parent_sigs(session, self_sig):
+    """Return validated lineage parent signatures for this session, or None.
+
+    Validation is a copy of the parent-sig block in _display_merge_cache_key:
+    reuse the signatures recorded by the (already memoized) lineage stitch so a
+    write to any parent snapshot invalidates this cache too. Returns () for a
+    lineage without snapshot parents, and None (fail closed) when the recorded
+    entry is stale, incomplete, or raced by a concurrent refresh.
+    """
+    sid = str(getattr(session, "session_id", "") or "")
+    parent_sigs = ()
+    with _lineage_display_cache_lock:
+        lineage_entry = _lineage_display_cache.get(sid)
+    if lineage_entry is not None:
+        if (
+            lineage_entry.get("provenance_complete") is not True
+            or lineage_entry.get("self_sig") != self_sig
+        ):
+            _evict_lineage_display_cache_entry(sid, lineage_entry)
+            return None
+        parent_sigs = tuple(
+            (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
+            for path, sig in (lineage_entry.get("parent_sigs") or [])
+        )
+        for parent_path, parent_sig in parent_sigs:
+            if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
+                _evict_lineage_display_cache_entry(sid, lineage_entry)
+                return None
+        with _lineage_display_cache_lock:
+            if _lineage_display_cache.get(sid) is not lineage_entry:
+                return None
+    if not parent_sigs and _display_merge_requires_lineage_provenance(session):
+        return None
+    return parent_sigs
+
+
+def _display_streaming_merge_cache_key(session, *, msg_limit):
+    """Return a fail-closed validity key for the streaming merge cache, or None.
+
+    Keys on every input the append-only merge consumes for an ACTIVE session:
+    the self sidecar stat signature, validated lineage parent signatures, the
+    in-memory tail marker (row count + last row timestamp/id) that catches
+    unsaved streaming deltas, the target-session state.db revision, the
+    truncation fields, and the display window (msg_limit). None means "do not
+    cache": any component that cannot be resolved exactly disables the cache
+    for this request rather than risking a stale transcript.
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if self_sig is None:
+        return None
+    parent_sigs = _display_streaming_lineage_parent_sigs(session, self_sig)
+    if parent_sigs is None:
+        return None
+    messages = list(getattr(session, "messages", []) or [])
+    last_marker = (None, None)
+    if messages:
+        last = messages[-1]
+        if isinstance(last, dict):
+            last_marker = (last.get("timestamp"), last.get("id"))
+    state_fp = _state_db_session_signature(
+        sid, getattr(session, "profile", None) or None
+    )
+    if state_fp is None:
+        return None
+    return (
+        ("streaming-active",),
+        self_sig,
+        parent_sigs,
+        len(messages),
+        last_marker,
+        state_fp,
+        getattr(session, "truncation_watermark", None),
+        getattr(session, "truncation_boundary", None),
+        msg_limit,
+    )
+
+
+def store_streaming_merge_entry(session, *, msg_limit, messages) -> None:
+    """Cache a full merge output for an ACTIVE session under its streaming key.
+
+    No-op (fail closed) whenever the key cannot be built. Rows are shallow
+    copied on the way in — the same contract as the inactive store, since
+    callers may attach display metadata to the rows they were handed.
+    """
+    try:
+        cache_key = _display_streaming_merge_cache_key(session, msg_limit=msg_limit)
+    except Exception:
+        cache_key = None
+    if cache_key is None:
+        return
+    merged = [dict(m) if isinstance(m, dict) else m for m in messages]
+    sid = str(getattr(session, "session_id", "") or "")
+    with _display_streaming_merge_cache_lock:
+        _display_streaming_merge_cache[sid] = {
+            "key": cache_key,
+            "messages": merged,
+            "stored_at": time.monotonic(),
+        }
+        _display_streaming_merge_cache.move_to_end(sid, last=True)
+        while len(_display_streaming_merge_cache) > _DISPLAY_STREAMING_MERGE_CACHE_MAX:
+            _display_streaming_merge_cache.popitem(last=False)
+
+
+def _streaming_entry_fresh(entry) -> bool:
+    """TTL gate for streaming entries (legacy keys keep the other helper)."""
+    try:
+        age = time.monotonic() - float(entry["stored_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return 0.0 <= age <= _DISPLAY_MERGE_STREAMING_TTL_SECONDS
+
+
+def probe_streaming_merge_entry(session, *, msg_limit):
+    """Return the cached merge rows for an ACTIVE session, or None on a miss.
+
+    Fail-closed by construction: inactive sessions belong to the legacy
+    display-merge cache and are refused here, an unbuildable key never probes,
+    and entries older than _DISPLAY_MERGE_STREAMING_TTL_SECONDS are evicted
+    rather than served (mid-turn token deltas land continuously, so the entry
+    only ever speaks for "same tail, repeat poll" traffic).
+    """
+    try:
+        if not _display_merge_session_is_active(session):
+            return None
+        cache_key = _display_streaming_merge_cache_key(session, msg_limit=msg_limit)
+        if cache_key is None:
+            return None
+        sid = str(getattr(session, "session_id", "") or "")
+        with _display_streaming_merge_cache_lock:
+            entry = _display_streaming_merge_cache.get(sid)
+            if entry is None or not _streaming_entry_fresh(entry):
+                if entry is not None:
+                    _display_streaming_merge_cache.pop(sid, None)
+                return None
+            if entry.get("key") != cache_key:
+                return None
+            _display_streaming_merge_cache.move_to_end(sid, last=True)
+            return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+    except Exception:
+        return None
+
+
+def evict_streaming_merge_entries(session_id) -> None:
+    """Drop the streaming merge entry for a session (turn-end belt, Task 4)."""
+    sid = str(session_id or "")
+    if not sid:
+        return
+    with _display_streaming_merge_cache_lock:
+        _display_streaming_merge_cache.pop(sid, None)
+
+
+def evict_streaming_redact_entry(session_id) -> None:
+    """Forward the turn-end belt to the redact memo (Task 5 wires its helper)."""
+    sid = str(session_id or "")
+    if not sid:
+        return
+    try:
+        from api import helpers as _helpers
+
+        pop = getattr(_helpers, "_session_redact_cache_pop", None)
+        if callable(pop):
+            pop(sid)
+    except Exception:
+        pass
+
+
 def _state_db_target_session_signature(db_path, session_id):
     """Hash every target-session row without materialising display dictionaries."""
     try:
