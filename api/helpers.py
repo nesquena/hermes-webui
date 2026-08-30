@@ -11,6 +11,7 @@ import os
 import re as _re
 import ssl
 import threading
+import time
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
 
@@ -1278,6 +1279,7 @@ def redact_session_data(
 # trusted across a signature mismatch.
 
 _SESSION_REDACT_CACHE_MAX = 256
+_SESSION_REDACT_STREAMING_TTL_SECONDS = 5.0
 _session_redact_cache: "collections.OrderedDict[str, tuple[object, list]]" = (
     collections.OrderedDict()
 )
@@ -1352,6 +1354,88 @@ def _session_redact_cached_put(session_id: str, signature: object, redacted_mess
         _session_redact_cache.move_to_end(session_id, last=True)
         while len(_session_redact_cache) > _SESSION_REDACT_CACHE_MAX:
             _session_redact_cache.popitem(last=False)
+
+
+def _session_redact_cache_pop(session_id: str) -> None:
+    """Drop a session's redact memo entries under lock (tolerant of absence).
+
+    Turn-end eviction belt (routes.evict_streaming_redact_entry): a session id
+    that only ever lived in one memo — or in neither — must not raise.
+    """
+    sid = str(session_id or "")
+    if not sid:
+        return
+    with _session_redact_cache_lock:
+        _session_redact_cache.pop(sid, None)
+    with _session_redact_streaming_cache_lock:
+        _session_redact_streaming_cache.pop(sid, None)
+
+
+# ── Streaming redact memo (plan cache layer B, TTL'd) ──────────────────────
+#
+# The inactive memo above must never serve an ACTIVE (streaming/pending)
+# session: its transcript tail mutates between deltas, so a signature-match
+# memo could pin a stale window for the entire turn. The streaming variant
+# reuses the SAME _session_redact_signature key family (window + store +
+# tail marker + redact flag) and adds a short TTL — mid-turn token deltas
+# churn the key continuously, so the cache only serves "same window, repeat
+# poll" traffic between deltas (phone-reconnect storms, multi-tab polls).
+#
+# Defense in depth (approved plan, cache layer B): a SEPARATE OrderedDict
+# with its OWN lock, same 256 cap. Streaming entries are turn-transient and
+# churn hard; sharing the inactive LRU would let one live turn evict hot
+# inactive entries — and if the upstream merge cache (layer A) were ever
+# mis-keyed, layer B must not compound the error, so its storage and probes
+# stay fully independent.
+#
+# Fail-closed: a missing, expired, mismatched, or exception-raising probe
+# returns None — the caller falls back to a fresh redact_session_data()
+# walk. Expired entries are evicted on probe rather than left to rot.
+
+_session_redact_streaming_cache: "collections.OrderedDict[str, dict]" = (
+    collections.OrderedDict()
+)
+_session_redact_streaming_cache_lock = threading.Lock()
+
+
+def _session_redact_streaming_cached_get(session_id: str, signature: object):
+    """Return the previously-redacted streaming window, or None (fail-closed)."""
+    if signature is None:
+        return None
+    try:
+        with _session_redact_streaming_cache_lock:
+            entry = _session_redact_streaming_cache.get(session_id)
+            if entry is None or entry.get("sig") != signature:
+                return None
+            age = time.monotonic() - float(entry.get("stored_at") or 0.0)
+            if not (0 <= age <= _SESSION_REDACT_STREAMING_TTL_SECONDS):
+                _session_redact_streaming_cache.pop(session_id, None)  # evict on probe
+                return None
+            _session_redact_streaming_cache.move_to_end(session_id, last=True)
+            return entry.get("messages")
+    except Exception:
+        return None
+
+
+def _session_redact_streaming_cached_put(
+    session_id: str, signature: object, redacted_messages: list
+) -> None:
+    """Store a redacted streaming window; no-op when the key failed closed."""
+    if signature is None:
+        return
+    try:
+        entry = {
+            "sig": signature,
+            "messages": redacted_messages,
+            "stored_at": time.monotonic(),
+        }
+    except Exception:
+        return
+    with _session_redact_streaming_cache_lock:
+        _session_redact_streaming_cache[session_id] = entry
+        _session_redact_streaming_cache.move_to_end(session_id, last=True)
+        while len(_session_redact_streaming_cache) > _SESSION_REDACT_CACHE_MAX:
+            _session_redact_streaming_cache.popitem(last=False)
 
 
 def read_body(handler) -> dict:
