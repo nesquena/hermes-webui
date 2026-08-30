@@ -9791,6 +9791,23 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             seen_message_keys = set()
             unmatched_identified_queue = {}
             kept_positions = set()
+            # An unidentified row that finds no queued survivor falls back to
+            # this pair of dedup checks instead of the round-to-the-second
+            # `_session_message_merge_key`. That coarse key exists so a
+            # cross-store duplicate of the SAME turn (one copy per store,
+            # sub-second clock drift, no id on either side -- sessions
+            # predating stable-id stamping) still collapses to one row.
+            # Using it directly here would also collapse two textually
+            # identical but genuinely DISTINCT unidentified rows from the
+            # SAME store landing in the same wall-clock second (e.g. two
+            # short repeated assistant replies), silently dropping the
+            # second one and its semantic payload. So: full-precision
+            # `_session_message_dedup_key` decides same-store duplicates (a
+            # store's own clock never needs second-level rounding
+            # tolerance), and the coarse key only collapses a row against a
+            # KEPT row from the OPPOSITE store.
+            seen_unmatched_exact_keys = set()
+            seen_unmatched_cross_store_owner = {}
             # Pass 1 admits every identified row and enqueues it under its
             # visible identity; pass 2 admits the unidentified rows that no
             # identified row already covers.
@@ -9799,20 +9816,30 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     has_identity = bool(msg.get("id") or msg.get("message_id"))
                     if has_identity != identified_pass:
                         continue
-                    key = _session_message_merge_key(msg)
-                    if key in seen_message_keys:
-                        continue
                     visible_key = _cross_store_visible_key(msg, from_sidecar)
                     if has_identity:
-                        unmatched_identified_queue.setdefault(visible_key, []).append(msg)
-                    else:
-                        queue = unmatched_identified_queue.get(visible_key)
-                        if queue:
-                            survivor = queue.pop(0)
-                            _merge_session_display_metadata(survivor, msg)
-                            _adopt_agent_semantic_payload(survivor, msg)
+                        key = _session_message_merge_key(msg)
+                        if key in seen_message_keys:
                             continue
-                    seen_message_keys.add(key)
+                        unmatched_identified_queue.setdefault(visible_key, []).append(msg)
+                        seen_message_keys.add(key)
+                        kept_positions.add(position)
+                        continue
+                    queue = unmatched_identified_queue.get(visible_key)
+                    if queue:
+                        survivor = queue.pop(0)
+                        _merge_session_display_metadata(survivor, msg)
+                        _adopt_agent_semantic_payload(survivor, msg)
+                        continue
+                    exact_key = (from_sidecar, _session_message_dedup_key(msg))
+                    if exact_key in seen_unmatched_exact_keys:
+                        continue
+                    cross_key = _session_message_merge_key(msg)
+                    owner = seen_unmatched_cross_store_owner.get(cross_key)
+                    if owner is not None and owner != from_sidecar:
+                        continue
+                    seen_unmatched_exact_keys.add(exact_key)
+                    seen_unmatched_cross_store_owner.setdefault(cross_key, from_sidecar)
                     kept_positions.add(position)
             return [
                 msg
@@ -10347,6 +10374,7 @@ from api.models import (
     _merge_session_display_metadata,
     _adopt_agent_semantic_payload,
     _session_message_merge_key,
+    _session_message_dedup_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,

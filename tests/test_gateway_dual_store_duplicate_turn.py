@@ -62,6 +62,26 @@ existed:
    survivor reference with a per-visible-key FIFO queue built in transcript
    order; each unidentified match pops the oldest still-unmatched entry, so
    repeats pair up one-to-one in the order they actually occurred.
+
+Second review round
+-------------------
+A follow-up review found the FIFO fix above was still gated behind the
+merge-key suppression that runs before it. ``_session_message_merge_key``
+rounds timestamps to whole seconds, so two unidentified rows with the same
+role/content inside one wall-clock second share a key: the first consumed a
+queued survivor, the second hit ``seen_message_keys`` and returned early
+without ever reaching the queue, so its twin kept none of the agent-only
+payload — and where no survivor was waiting at all, the row vanished from the
+transcript outright.
+
+Fixed by splitting duplicate suppression by store for unidentified rows.
+Cross-store matching now runs first; only a row that finds no survivor falls
+through to dedup, where full-precision ``_session_message_dedup_key`` decides
+same-store duplicates (one store's own clock needs no rounding tolerance) and
+the coarse second-granularity key only collapses a row against a kept row from
+the OPPOSITE store — which is the case that key was introduced for: a legacy
+both-unidentified turn written to both stores with sub-second drift between
+the two writes.
 """
 
 from __future__ import annotations
@@ -195,6 +215,94 @@ def test_repeated_identical_answers_pair_one_to_one_in_order():
     assert set(by_id) == {"a1", "a2"}
     assert by_id["a1"]["reasoning"] == "first reasoning"
     assert by_id["a2"]["reasoning"] == "second reasoning"
+
+
+def test_repeated_answers_inside_one_second_pair_one_to_one():
+    """Repeats within a single wall-clock second must still pair one-to-one.
+
+    ``_session_message_merge_key`` rounds timestamps to whole seconds, so two
+    agent rows with the same role/content landing in one second share a merge
+    key even though their fractional timestamps and payloads differ. Suppressing
+    the second one on that key alone would leave its sidecar twin without the
+    reasoning trace it is the sole owner of.
+    """
+    session = SimpleNamespace(
+        messages=[
+            {"id": "a1", "role": "assistant", "content": "same answer", "timestamp": 10.5},
+            {"id": "a2", "role": "assistant", "content": "same answer", "timestamp": 10.8},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "ask again", "timestamp": 5.0},
+        {
+            "role": "assistant",
+            "content": "same answer",
+            "timestamp": 10.4,
+            "reasoning": "first reasoning",
+            "codex_reasoning_items": [{"type": "reasoning", "n": 1}],
+        },
+        {
+            "role": "assistant",
+            "content": "same answer",
+            "timestamp": 10.7,
+            "reasoning": "second reasoning",
+            "codex_reasoning_items": [{"type": "reasoning", "n": 2}],
+        },
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    answers = [m for m in merged if m.get("content") == "same answer"]
+    assert [m.get("id") for m in answers] == ["a1", "a2"], "no duplicate visible row"
+    by_id = {m["id"]: m for m in answers}
+    assert by_id["a1"]["reasoning"] == "first reasoning"
+    assert by_id["a2"]["reasoning"] == "second reasoning"
+    assert by_id["a1"]["codex_reasoning_items"] == [{"type": "reasoning", "n": 1}]
+    assert by_id["a2"]["codex_reasoning_items"] == [{"type": "reasoning", "n": 2}]
+
+
+def test_surplus_unidentified_repeats_in_one_second_all_survive():
+    """Unpaired same-second repeats from one store are distinct messages.
+
+    When the agent store holds more copies of a text than the sidecar has
+    identified rows to pair them with, the surplus rows have no cross-store
+    twin — they are genuinely separate turns. Collapsing them on the
+    second-granularity merge key would delete a real message outright, not
+    merely its metadata.
+    """
+    session = SimpleNamespace(
+        messages=[{"id": "z1", "role": "assistant", "content": "unrelated", "timestamp": 1.0}]
+    )
+    cli_messages = [
+        {"role": "assistant", "content": "same answer", "timestamp": 10.2, "reasoning": "first"},
+        {"role": "assistant", "content": "same answer", "timestamp": 10.8, "reasoning": "second"},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    surplus = [m for m in merged if m.get("content") == "same answer"]
+    assert [m.get("reasoning") for m in surplus] == ["first", "second"]
+
+
+def test_unidentified_cross_store_twin_still_collapses_within_one_second():
+    """The coarse merge key's original job must survive this fix.
+
+    Sessions predating stable-id stamping hold the same turn in both stores
+    with neither copy identified and a few hundred microseconds of clock drift
+    between the two writes. Second-level rounding is what collapses those into
+    one row, so it still has to apply across stores — just not within one.
+    """
+    session = SimpleNamespace(
+        messages=[{"role": "assistant", "content": "legacy answer", "timestamp": 10.9}]
+    )
+    cli_messages = [
+        {"role": "user", "content": "the question", "timestamp": 1.0},
+        {"role": "assistant", "content": "legacy answer", "timestamp": 10.4},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m.get("content") for m in merged].count("legacy answer") == 1
 
 
 def test_conflicting_semantic_payload_keeps_survivors_own_value():
