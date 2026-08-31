@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -204,6 +205,72 @@ def test_probe_is_single_flight_and_cached_per_store(tmp_path):
     assert calls.read_text(encoding="utf-8") == "x"
 
 
+def test_fresh_probe_waits_for_a_probe_started_after_the_fresh_request(
+    tmp_path, monkeypatch
+):
+    import api.claude_code_bridge as bridge
+
+    descriptor = _descriptor(tmp_path, "exit 99\n")
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def controlled_probe(store):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            first_started.set()
+            assert release_first.wait(timeout=3)
+            return b"[]"
+        return json.dumps([_agent(descriptor.claude_session_id)]).encode("utf-8")
+
+    bridge.invalidate_claude_session_cache()
+    monkeypatch.setattr(bridge, "_run_agents_command", controlled_probe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pre_lease = pool.submit(bridge.probe_runtime_status, descriptor)
+        assert first_started.wait(timeout=3)
+        post_lease = pool.submit(
+            lambda: bridge.probe_runtime_status(descriptor, fresh=True)
+        )
+        release_first.set()
+
+        assert pre_lease.result(timeout=3).state == "inactive"
+        assert post_lease.result(timeout=3).state == "active_elsewhere"
+    assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "raw_payload",
+    [
+        lambda session_id: json.dumps(
+            [{**_agent(session_id), "unexpected": "retained-extra"}]
+        ),
+        lambda session_id: (
+            '[{"sessionId":"'
+            + session_id
+            + '","status":"busy","status":"idle","kind":"interactive",'
+            '"cwd":"/tmp/workspace","pid":1234,"name":"claude"}]'
+        ),
+    ],
+)
+def test_probe_rejects_unknown_properties_and_duplicate_json_keys(
+    tmp_path, raw_payload
+):
+    from api.claude_code_bridge import probe_runtime_status
+
+    descriptor = _descriptor(tmp_path, "exit 99\n")
+    payload = raw_payload(descriptor.claude_session_id)
+    descriptor.store.claude_bin.write_text(
+        "#!/bin/sh\nprintf '%s' " + shlex.quote(payload) + "\n",
+        encoding="utf-8",
+    )
+
+    assert probe_runtime_status(descriptor).state == "ownership_unknown"
+
+
 def test_build_resume_argv_uses_only_fixed_descriptor_values(tmp_path):
     from api.claude_code_bridge import build_resume_argv
 
@@ -372,7 +439,6 @@ def test_runner_rejects_transcript_or_wrapper_replaced_while_acquiring_lease(tmp
         (["-r={uuid}"], True, ["-r={uuid}"]),
         (["--resume"], False, ["--resume"]),
         (["--resume", "not-a-uuid"], False, ["--resume", "not-a-uuid"]),
-        (["--hermes-lease-held", "--resume", "{uuid}"], False, ["--resume", "{uuid}"]),
     ],
 )
 def test_wrapper_protocol_locks_only_explicit_uuid_resume_forms(
@@ -403,6 +469,28 @@ def test_wrapper_protocol_locks_only_explicit_uuid_resume_forms(
     assert completed.returncode == 0
     assert output.read_text(encoding="utf-8").splitlines() == expected
     assert resume_lock_path(config_dir, "local-models", session_id).exists() is expect_locked
+
+
+def test_wrapper_protocol_runs_from_the_session_workspace(tmp_path):
+    protocol = Path(__file__).parents[1] / "scripts" / "claude_local_resume_protocol.zsh"
+    config_dir = tmp_path / ".claude-local"
+    config_dir.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = tmp_path / "called"
+    command = _executable(
+        tmp_path / "raw-claude", f"printf called > {shlex.quote(str(output))}\n"
+    )
+
+    completed = subprocess.run(
+        [str(protocol), str(config_dir), "local-models", str(command)],
+        cwd=workspace,
+        check=False,
+        timeout=5,
+    )
+
+    assert completed.returncode == 0
+    assert output.read_text(encoding="utf-8") == "called"
 
 
 def test_direct_wrapper_and_runner_contend_for_the_same_lease(tmp_path):
@@ -455,6 +543,8 @@ def test_runner_private_flag_skips_wrapper_reacquisition(tmp_path):
     lease = acquire_resume_lease(config_dir, "local-models", session_id)
     assert lease is not None
     try:
+        environment = os.environ.copy()
+        environment["HERMES_RESUME_LEASE_FD"] = str(lease.fd)
         completed = subprocess.run(
             [
                 str(protocol),
@@ -466,6 +556,8 @@ def test_runner_private_flag_skips_wrapper_reacquisition(tmp_path):
                 session_id,
             ],
             check=False,
+            env=environment,
+            pass_fds=(lease.fd,),
             timeout=5,
         )
     finally:
@@ -473,6 +565,139 @@ def test_runner_private_flag_skips_wrapper_reacquisition(tmp_path):
 
     assert completed.returncode == 0
     assert output.read_text(encoding="utf-8") == "called"
+
+
+@pytest.mark.parametrize("failure", ["wrong_position", "missing", "closed", "wrong_inode"])
+def test_private_flag_never_bypasses_without_authenticated_expected_fd(
+    tmp_path, failure
+):
+    from api.claude_code_runner import acquire_resume_lease
+
+    protocol = Path(__file__).parents[1] / "scripts" / "claude_local_resume_protocol.zsh"
+    config_dir = tmp_path / ".claude-local"
+    config_dir.mkdir()
+    session_id = str(uuid4())
+    output = tmp_path / "called"
+    command = _executable(
+        tmp_path / "raw-claude", f"printf called > {shlex.quote(str(output))}\n"
+    )
+    lease = acquire_resume_lease(config_dir, "local-models", session_id)
+    assert lease is not None
+    lock_path = lease.path
+    lease.close()
+    environment = os.environ.copy()
+    pass_fds = ()
+    opened_fd = None
+    arguments = ["--hermes-lease-held", "--resume", session_id]
+    if failure == "wrong_position":
+        arguments.append("--verbose")
+    elif failure == "closed":
+        environment["HERMES_RESUME_LEASE_FD"] = "99"
+    elif failure == "wrong_inode":
+        wrong = tmp_path / "wrong-inode"
+        wrong.touch()
+        opened_fd = os.open(wrong, os.O_RDWR)
+        environment["HERMES_RESUME_LEASE_FD"] = str(opened_fd)
+        pass_fds = (opened_fd,)
+    try:
+        completed = subprocess.run(
+            [
+                str(protocol),
+                str(config_dir),
+                "local-models",
+                str(command),
+                *arguments,
+            ],
+            check=False,
+            env=environment,
+            pass_fds=pass_fds,
+            timeout=5,
+        )
+    finally:
+        if opened_fd is not None:
+            os.close(opened_fd)
+
+    assert completed.returncode != 0
+    assert not output.exists()
+    assert lock_path.exists()
+
+
+def test_unlocked_expected_inherited_fd_acquires_before_private_exec(tmp_path):
+    from api.claude_code_runner import acquire_resume_lease
+
+    protocol = Path(__file__).parents[1] / "scripts" / "claude_local_resume_protocol.zsh"
+    config_dir = tmp_path / ".claude-local"
+    config_dir.mkdir()
+    session_id = str(uuid4())
+    created = acquire_resume_lease(config_dir, "local-models", session_id)
+    assert created is not None
+    lock_path = created.path
+    created.close()
+    inherited_fd = os.open(lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    started = tmp_path / "started"
+    command = _executable(
+        tmp_path / "raw-claude",
+        f"printf x > {shlex.quote(str(started))}\n/bin/sleep 5\n",
+    )
+    environment = os.environ.copy()
+    environment["HERMES_RESUME_LEASE_FD"] = str(inherited_fd)
+    holder = subprocess.Popen(
+        [
+            str(protocol),
+            str(config_dir),
+            "local-models",
+            str(command),
+            "--hermes-lease-held",
+            "--resume",
+            session_id,
+        ],
+        env=environment,
+        pass_fds=(inherited_fd,),
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 3
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert started.exists()
+        assert acquire_resume_lease(config_dir, "local-models", session_id) is None
+    finally:
+        os.killpg(holder.pid, 15)
+        holder.wait(timeout=5)
+        os.close(inherited_fd)
+
+
+def test_lock_open_rejects_rename_symlink_substitution(tmp_path, monkeypatch):
+    import api.claude_code_runner as runner
+
+    config_dir = tmp_path / ".claude-local"
+    config_dir.mkdir()
+    session_id = str(uuid4())
+    initial = runner.acquire_resume_lease(config_dir, "local-models", session_id)
+    assert initial is not None
+    lock_path = initial.path
+    initial.close()
+    displaced = tmp_path / "displaced-lock"
+    replacement = tmp_path / "replacement-lock"
+    replacement.touch(mode=0o600)
+    real_open = runner.os.open
+    raced = False
+
+    def swap_after_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal raced
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if not raced and path == lock_path.name and dir_fd is not None:
+            raced = True
+            lock_path.rename(displaced)
+            lock_path.symlink_to(replacement)
+        return fd
+
+    monkeypatch.setattr(runner.os, "open", swap_after_open)
+
+    assert runner.acquire_resume_lease(config_dir, "local-models", session_id) is None
+    assert raced is True
+    assert lock_path.is_symlink()
+    assert displaced.stat().st_ino != replacement.stat().st_ino
 
 
 def test_runner_lease_survives_exec_through_wrapper_protocol(tmp_path):
@@ -486,6 +711,7 @@ def test_runner_lease_survives_exec_through_wrapper_protocol(tmp_path):
         "import os,sys; from pathlib import Path; "
         "from api.claude_code_runner import acquire_resume_lease; "
         "lease=acquire_resume_lease(Path(sys.argv[1]),'local-models',sys.argv[2]); "
+        "os.environ['HERMES_RESUME_LEASE_FD']=str(lease.fd); "
         "print('ready',flush=True); "
         "os.execv(sys.argv[3],[sys.argv[3],sys.argv[1],'local-models','/bin/sleep',"
         "'--hermes-lease-held','--resume',sys.argv[2],'5'])"

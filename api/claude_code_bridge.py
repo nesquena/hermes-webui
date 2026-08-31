@@ -73,8 +73,12 @@ CLAUDE_AGENTS_MAX_RECORDS = 256
 CLAUDE_AGENTS_CACHE_SECONDS = 1.0
 
 _AGENTS_CACHE_CONDITION = threading.Condition()
-_AGENTS_CACHE: dict[tuple[str, str, str], tuple[float, tuple[dict, ...] | None]] = {}
-_AGENTS_IN_FLIGHT: set[tuple[str, str, str]] = set()
+_AGENTS_CACHE: dict[
+    tuple[str, str, str], tuple[float, int, tuple[dict, ...] | None]
+] = {}
+_AGENTS_IN_FLIGHT: dict[tuple[str, str, str], int] = {}
+_AGENTS_GENERATION: dict[tuple[str, str, str], int] = {}
+_AGENT_ROW_KEYS = frozenset({"sessionId", "status", "kind", "cwd", "pid", "name"})
 
 _CANONICAL_MODEL_PROFILES = {
     "anthropic.qwen-aeon": (
@@ -694,8 +698,19 @@ def _run_agents_command(store: ClaudeStore) -> bytes | None:
 
 
 def _validated_agent_rows(payload: bytes) -> tuple[dict, ...] | None:
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON object key")
+            result[key] = value
+        return result
+
     try:
-        raw = json.loads(payload.decode("utf-8"))
+        raw = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
     except (UnicodeError, ValueError):
         return None
     if not isinstance(raw, list) or len(raw) > CLAUDE_AGENTS_MAX_RECORDS:
@@ -703,7 +718,7 @@ def _validated_agent_rows(payload: bytes) -> tuple[dict, ...] | None:
     rows: list[dict] = []
     seen: set[str] = set()
     for row in raw:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or set(row) != _AGENT_ROW_KEYS:
             return None
         session_id = _is_uuid(row.get("sessionId"))
         pid = row.get("pid")
@@ -731,22 +746,35 @@ def _store_probe_key(store: ClaudeStore) -> tuple[str, str, str]:
 def _probe_agent_rows(store: ClaudeStore, *, fresh: bool = False) -> tuple[dict, ...] | None:
     key = _store_probe_key(store)
     with _AGENTS_CACHE_CONDITION:
+        requested_after_generation = _AGENTS_GENERATION.get(key, 0) if fresh else None
         while True:
             cached = _AGENTS_CACHE.get(key)
-            if not fresh and cached is not None and time.monotonic() - cached[0] < CLAUDE_AGENTS_CACHE_SECONDS:
-                return cached[1]
+            if (
+                fresh
+                and cached is not None
+                and cached[1] > requested_after_generation
+            ):
+                return cached[2]
+            if (
+                not fresh
+                and cached is not None
+                and time.monotonic() - cached[0] < CLAUDE_AGENTS_CACHE_SECONDS
+            ):
+                return cached[2]
             if key not in _AGENTS_IN_FLIGHT:
-                _AGENTS_IN_FLIGHT.add(key)
+                generation = _AGENTS_GENERATION.get(key, 0) + 1
+                _AGENTS_GENERATION[key] = generation
+                _AGENTS_IN_FLIGHT[key] = generation
                 break
             _AGENTS_CACHE_CONDITION.wait()
-            fresh = False
     try:
         rows = _validated_agent_rows(_run_agents_command(store) or b"")
     except Exception:
         rows = None
     with _AGENTS_CACHE_CONDITION:
-        _AGENTS_CACHE[key] = (time.monotonic(), rows)
-        _AGENTS_IN_FLIGHT.discard(key)
+        _AGENTS_CACHE[key] = (time.monotonic(), generation, rows)
+        if _AGENTS_IN_FLIGHT.get(key) == generation:
+            _AGENTS_IN_FLIGHT.pop(key)
         _AGENTS_CACHE_CONDITION.notify_all()
     return rows
 
