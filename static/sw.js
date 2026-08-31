@@ -7,7 +7,9 @@
 
 // Cache version is injected by the server at request time (routes.py /sw.js handler).
 // Bumps automatically whenever the git commit changes — no manual edits needed.
+const CACHE_PREFIX = 'hermes-shell-';
 const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
+const STAGING_CACHE_NAME = CACHE_NAME + '-staging';
 
 // Static assets that form the app shell.
 //
@@ -16,9 +18,11 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 // here, every cache lookup against `?v=...` URLs would miss and fall through
 // to network, defeating the pre-cache.
 //
-// Do not pre-cache './' or login assets here: under password auth they can be
-// either the authenticated app shell or login code, and stale cached responses
-// can make valid password submits fail until the user clears browser cache.
+// Keep the critical chat shell small enough to pre-cache before first paint.
+// Non-chat/bootstrap-heavy bundles are version-pinned but loaded on demand.
+// Do not pre-cache './', manifest.json, or login assets: under password auth
+// they can be the authenticated app shell or login code, and stale cached
+// responses can make valid password submits fail until the user clears cache.
 // Navigations populate './' only after a successful non-redirect network load.
 const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
@@ -29,44 +33,72 @@ const SHELL_ASSETS = [
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
-  './static/panels.js' + VQ,
   './static/commands.js' + VQ,
   './static/icons.js' + VQ,
   './static/i18n.js' + VQ,
   './static/workspace.js' + VQ,
   './static/terminal.js' + VQ,
-  './static/onboarding.js' + VQ,
+  './static/outline.js' + VQ,
   './static/vendor/smd.min.js' + VQ,
   './static/vendor/katex/0.16.22/katex.min.css' + VQ,
   './static/vendor/katex/0.16.22/katex.min.js' + VQ,
   './static/favicon.svg',
   './static/favicon-32.png',
-  './manifest.json',
+];
+
+// These assets are cached only after the corresponding inert script in
+// index.html is activated by boot.js. Keeping them out of SHELL_ASSETS avoids
+// making first paint wait on settings/task/workspace code.
+const LAZY_ASSETS = [
+  './static/extension_settings.js' + VQ,
+  './static/panels.js' + VQ,
+  './static/onboarding.js' + VQ,
 ];
 
 function deleteOldShellCaches() {
   return caches.keys().then((keys) =>
     Promise.all(
-      keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
+      keys
+        .filter((k) => k.startsWith(CACHE_PREFIX) && k !== CACHE_NAME)
+        .map((k) => caches.delete(k))
     )
   );
 }
 
-// Install: prune old shell caches first, then pre-cache the app shell. Doing
-// this before caches.open(CACHE_NAME) avoids a temporary double-cache window on
-// quota-sensitive browsers during frequent version bumps.
+// Fill a staging cache first so a failed install cannot leave a partially
+// populated current-version cache. The old version remains available until the
+// new worker activates successfully.
+async function precacheShell() {
+  await caches.delete(STAGING_CACHE_NAME);
+  const stagingCache = await caches.open(STAGING_CACHE_NAME);
+  try {
+    await stagingCache.addAll(SHELL_ASSETS);
+    const stagedRequests = await stagingCache.keys();
+    const currentCache = await caches.open(CACHE_NAME);
+    await Promise.all(stagedRequests.map(async (request) => {
+      const response = await stagingCache.match(request);
+      if (!response || response.status !== 200 || response.redirected) {
+        throw new Error('invalid shell response: ' + request.url);
+      }
+      await currentCache.put(request, response);
+    }));
+    await caches.delete(STAGING_CACHE_NAME);
+  } catch (error) {
+    await caches.delete(STAGING_CACHE_NAME);
+    throw error;
+  }
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    deleteOldShellCaches().then(() =>
-      caches.open(CACHE_NAME).then((cache) => {
-        return cache.addAll(SHELL_ASSETS).catch((err) => {
-          // Non-fatal: if any asset fails, still activate
-          console.warn('[sw] Shell pre-cache partial failure:', err);
-        });
+    precacheShell()
+      .then(() => { self.skipWaiting(); })
+      .catch((err) => {
+        // Reject the install so the existing worker/cache remains usable.
+        console.warn('[sw] Shell pre-cache failed; keeping previous cache:', err);
+        throw err;
       })
-    )
   );
-  self.skipWaiting();
 });
 
 // Activate: keep the old-cache cleanup as a safety net in case install was
@@ -80,7 +112,7 @@ self.addEventListener('activate', (event) => {
 // - API calls (/api/*, /stream) → always network (never cache)
 // - Login assets → always network (never cache stale auth code)
 // - Page navigations → network-first so auth redirects/cookies are honored
-// - Shell assets → network-first with cache fallback
+// - Shell assets → stale-while-revalidate (current version served immediately)
 // - Everything else → network-only
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
@@ -127,11 +159,11 @@ self.addEventListener('fetch', (event) => {
           !response.redirected
         ) {
           const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('./', clone));
+          caches.open(CACHE_NAME).then((cache) => cache.put('./', clone)).catch(() => {});
         }
         return response;
       }).catch(() => {
-        return caches.match('./').then((cached) => cached || new Response(
+        return caches.match('./', { cacheName: CACHE_NAME }).then((cached) => cached || new Response(
           '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
           '<h2>You are offline</h2>' +
           '<p>Hermes requires a server connection. Please check your network and try again.</p>' +
@@ -151,25 +183,63 @@ self.addEventListener('fetch', (event) => {
     ? url.pathname.slice(scopePath.length)
     : url.pathname.replace(/^\/+/, '');
   const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
-  if (!SHELL_ASSETS.includes(shellPath)) return;
+  const isShellAsset = SHELL_ASSETS.includes(shellPath);
+  const isLazyAsset = LAZY_ASSETS.includes(shellPath);
+  if (!isShellAsset && !isLazyAsset) return;
 
-  // Shell assets: network-first with cache fallback. This keeps offline support
-  // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
-  // has not changed yet (e.g. before a guarded restart updates the ?v token).
+  if (isShellAsset) {
+    // Shell assets: stale-while-revalidate. The version query makes this safe:
+    // a deployment creates a new cache key, while repeat loads return the
+    // current immutable shell immediately and refresh it in the background.
+    event.respondWith(
+      caches.open(CACHE_NAME).then((cache) => cache.match(event.request).then((cached) => {
+        const refresh = fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
+          if (
+            event.request.method === 'GET' &&
+            response.status === 200 &&
+            !response.redirected
+          ) {
+            cache.put(event.request, response.clone()).catch(() => {});
+          }
+          return response;
+        });
+        if (cached) {
+          event.waitUntil(refresh.catch(() => {}));
+          return cached;
+        }
+        return refresh;
+      })).catch(() => new Response('Offline', {
+        status: 503,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      }))
+    );
+    return;
+  }
+
+  // Lazy panel bundles use the same versioned key but do not block first paint.
+  // Once requested, return a cached copy immediately and refresh it in the
+  // background for the next panel visit.
   event.respondWith(
-    fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
-      if (
-        event.request.method === 'GET' &&
-        response.status === 200
-      ) {
-        const clone = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+    caches.open(CACHE_NAME).then((cache) => cache.match(event.request).then((cached) => {
+      const refresh = fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
+        if (
+          event.request.method === 'GET' &&
+          response.status === 200 &&
+          !response.redirected
+        ) {
+          cache.put(event.request, response.clone()).catch(() => {});
+        }
+        return response;
+      });
+      if (cached) {
+        event.waitUntil(refresh.catch(() => {}));
+        return cached;
       }
-      return response;
-    }).catch(() => caches.match(event.request).then((cached) => cached || new Response('Offline', {
+      return refresh;
+    })).catch(() => new Response('Offline', {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-    })))
+    }))
   );
 });
 

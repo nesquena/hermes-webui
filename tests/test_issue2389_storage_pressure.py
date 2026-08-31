@@ -13,18 +13,27 @@ def _function_block(src: str, name: str, window: int = 1600) -> str:
     return src[idx : idx + window]
 
 
-def test_service_worker_install_deletes_old_caches_before_opening_new_cache():
+def test_service_worker_install_stages_before_activation_cleanup():
+    """A failed precache must leave the previous version available."""
     install_idx = SW_SRC.find("self.addEventListener('install'")
     assert install_idx != -1, "service worker must define an install handler"
     install_block = SW_SRC[install_idx : SW_SRC.find("self.addEventListener('activate'", install_idx)]
-    cleanup_idx = install_block.find("deleteOldShellCaches().then")
-    open_idx = install_block.find("caches.open(CACHE_NAME)")
-    assert cleanup_idx != -1, "install must delete stale shell caches before pre-cache"
-    assert open_idx != -1, "install must still pre-cache the current shell cache"
-    assert cleanup_idx < open_idx, (
-        "opening the new shell cache before deleting old ones creates a temporary "
-        "double-cache window that increases quota pressure"
+    precache_idx = install_block.find("precacheShell()")
+    skip_idx = install_block.find("self.skipWaiting()")
+    assert precache_idx != -1, "install must stage the current shell before activation"
+    assert skip_idx > precache_idx, "the worker must not skip waiting before precache succeeds"
+    assert "deleteOldShellCaches().then" not in install_block, (
+        "install must retain the previous cache until the staged worker activates"
     )
+
+    precache_idx = SW_SRC.find("async function precacheShell()")
+    precache_block = SW_SRC[precache_idx:install_idx]
+    staging_idx = precache_block.find("caches.open(STAGING_CACHE_NAME)")
+    current_idx = precache_block.find("caches.open(CACHE_NAME)")
+    assert staging_idx != -1 and current_idx != -1
+    assert staging_idx < current_idx, "current cache may only be populated after staging succeeds"
+    assert "await stagingCache.addAll(SHELL_ASSETS)" in precache_block
+    assert "await caches.delete(STAGING_CACHE_NAME)" in precache_block
 
 
 def test_service_worker_keeps_activate_cleanup_safety_net():
