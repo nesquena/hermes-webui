@@ -2135,7 +2135,7 @@ def _rows_with_profile_expensive_metadata(rows: list, active: str) -> list:
         metadata, event = _request_profile_expensive_metadata(profile_path, fallback)
         requests.append((row, profile_path, fallback, metadata, event))
 
-    for _row, _path, _fallback, event_metadata, event in requests:
+    for _row, _path, _fallback, _event_metadata, event in requests:
         if event is None:
             continue
         remaining = max(0.0, deadline - time.monotonic())
