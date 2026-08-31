@@ -1343,6 +1343,12 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        # #7381: persist + restore per-chat reasoning effort. Without this
+        # assignment the sidecar value was write-only: save() stored it (it is
+        # in METADATA_FIELDS) but load()/cls(**data) dropped it, so every
+        # reload or cache eviction silently reverted the chat to the global
+        # default effort while the override sat unused on disk.
+        self.reasoning_effort = reasoning_effort
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
