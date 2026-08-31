@@ -2706,7 +2706,7 @@ def _recover_journaled_output_and_terminal_error(
     session,
     stream_id: str | None,
     *,
-    dedupe_existing: bool = False,
+    dedupe_existing: bool = True,
     terminal_recovery: dict | None = None,
 ) -> tuple[bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error."""
@@ -2760,7 +2760,7 @@ def _append_journaled_partial_output(
     session,
     stream_id: str | None,
     *,
-    dedupe_existing: bool = False,
+    dedupe_existing: bool = True,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -3439,6 +3439,7 @@ def _apply_core_sync_or_error_marker(
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
+                dedupe_existing=True,
                 terminal_recovery=_terminal_recovery,
             )
         )
