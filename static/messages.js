@@ -2079,6 +2079,19 @@ function closeLiveStream(sessionId, streamId, source){
   // already deleted INFLIGHT[sessionId], so this is a safe no-op.
   if(INFLIGHT[sessionId]){
     INFLIGHT[sessionId].reattach=true;
+    if(typeof window!=='undefined'&&typeof window._recordSessionActivityProjection==='function'){
+      const _backgroundInflight=INFLIGHT[sessionId];
+      window._recordSessionActivityProjection(sessionId,{
+        streamId:live.streamId||streamId||'',
+        status:'running',
+        phase:Array.isArray(_backgroundInflight.toolCalls)&&_backgroundInflight.toolCalls.length
+          ? 'tool'
+          : (String(_backgroundInflight.lastAssistantText||'').trim()?'answer':'thinking'),
+        toolCount:Array.isArray(_backgroundInflight.toolCalls)?_backgroundInflight.toolCalls.length:0,
+        assistantChars:String(_backgroundInflight.lastAssistantText||'').length,
+        reasoningChars:String(_backgroundInflight.lastReasoningText||'').length,
+      });
+    }
     // The browser-side INFLIGHT snapshot is only a compact tail cache. After a
     // session switch it cannot be treated as the full live turn; rebuild from
     // the durable run journal instead so earlier prose/tool rows are not lost.
@@ -2208,18 +2221,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _liveInflightAssistant = _liveInflightAssistantMessages.length===1
     ? _liveInflightAssistantMessages[0]
     : null;
+  const _recoveryNeedsJournalReplay=!!(INFLIGHT[activeSid]&&(
+    INFLIGHT[activeSid].recoveryNeedsJournalReplay||
+    INFLIGHT[activeSid].journalReplayFromStart
+  ));
   const _fullInflightAssistant = (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastAssistantText) || '';
   const _joinedInflightSegments = _liveInflightAssistantMessages.length>1
     ? _liveInflightAssistantMessages.map(m=>m&&m.content?String(m.content).trim():'').filter(Boolean).join('\n\n')
     : '';
-  const _lastLiveAssistant = reconnecting
+  const _lastLiveAssistant = reconnecting&&!_recoveryNeedsJournalReplay
     ? (_liveInflightAssistantMessages.length>1
       ? (_fullInflightAssistant || _joinedInflightSegments)
       : (_liveInflightAssistant
         ? (_fullInflightAssistant || _liveInflightAssistant.content || '')
         : _fullInflightAssistant))
     : '';
-  const _lastLiveReasoning = reconnecting
+  const _lastLiveReasoning = reconnecting&&!_recoveryNeedsJournalReplay
     ? (_liveInflightAssistant&&_liveInflightAssistant.reasoning)
       || (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastReasoningText)
       || ''
@@ -2267,6 +2284,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
+  function _recordLiveActivityProjection(patch={}){
+    if(typeof window==='undefined'||typeof window._recordSessionActivityProjection!=='function') return;
+    const inflight=INFLIGHT[activeSid];
+    window._recordSessionActivityProjection(activeSid,{
+      streamId,
+      status:'running',
+      toolCount:Array.isArray(inflight&&inflight.toolCalls)?inflight.toolCalls.length:0,
+      assistantChars:String(assistantText||'').length,
+      reasoningChars:String(reasoningText||'').length,
+      ...patch,
+    });
+  }
+  _recordLiveActivityProjection({
+    phase:String(assistantText||'').trim()?'answer':(String(reasoningText||'').trim()?'thinking':'working'),
+  });
   function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground()) return false;
     // This stale stream no longer owns the session — schedule cleanup of ITS own
@@ -2454,6 +2486,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+    if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'completed',phase:'done'});
     _clearOwnerInflightState();
     _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _clearStreamNotificationBackground(activeSid, streamId);
@@ -2535,6 +2568,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!inflight) return;
     inflight.lastAssistantText=assistantText;
     inflight.lastReasoningText=reasoningText;
+    if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({
+      phase:String(assistantText||'').trim()?'answer':'thinking',
+    });
     if(!Array.isArray(inflight.messages)) inflight.messages=[];
     let assistantIdx=-1;
     for(let i=inflight.messages.length-1;i>=0;i--){
@@ -5581,6 +5617,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     S.toolCalls=inflight.toolCalls;
+    if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({
+      phase:'tool',
+      toolName:name,
+    });
     persistInflightState();
     return tc;
   }
@@ -5963,6 +6003,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
+      if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'waiting',phase:'approval'});
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
@@ -5971,6 +6012,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
+      if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'waiting',phase:'clarify'});
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
@@ -6161,6 +6203,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _markSessionCompletionUnread(completedSid, completedMessageCount);
         }
         if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
+        if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'completed',phase:'done'});
         _clearOwnerInflightState();
         if(typeof _markSessionCompletedInList==='function'){
           _markSessionCompletedInList(completedSession, activeSid);
@@ -6569,6 +6612,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+      if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'error',phase:'error'});
       _clearOwnerInflightState();
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearStreamNotificationBackground(activeSid, streamId);
@@ -6829,6 +6873,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
+      if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'cancelled',phase:'cancelled'});
       _clearOwnerInflightState();
       _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearStreamNotificationBackground(activeSid, streamId);
@@ -6993,6 +7038,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+      if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'completed',phase:'done'});
       _clearOwnerInflightState();
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup();
@@ -7090,6 +7136,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _cancelAnimationFramePendingStreamRender();
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+    if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'error',phase:'error'});
     _clearOwnerInflightState();
     _closeSource(source);
     _clearApprovalForOwner();
@@ -7159,6 +7206,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!st.active&&st.replay_available){
           replayOnly=true;
         }else if(!st.active){
+          if(typeof _recordLiveActivityProjection==='function') _recordLiveActivityProjection({status:'error',phase:'error'});
           _clearOwnerInflightState();
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');

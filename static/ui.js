@@ -9336,6 +9336,25 @@ function autoReadLastAssistant(){
 // ── Reconnect banner (B4/B5: reload resilience) ──
 const INFLIGHT_KEY = 'hermes-webui-inflight'; // localStorage key for in-flight session tracking
 const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'; // localStorage snapshots for mid-stream reload recovery
+// The browser cache is only a recovery accelerator. The run journal and the
+// canonical session payload remain authoritative, so the cache must never
+// mirror the whole growing transcript. Keep these hard ceilings independent of
+// the older server-configurable limits: a permissive setting must not turn a
+// token stream into an unbounded localStorage writer.
+const INFLIGHT_STATE_SCHEMA_VERSION = 2;
+const INFLIGHT_STATE_HARD_LIMITS = {
+  maxSessions:8,
+  messages:12,
+  toolCalls:16,
+  uploaded:20,
+  activityBurstAnchors:32,
+  todos:20,
+  textTailChars:8192,
+  fieldChars:512,
+  stringChars:16000,
+  entryJsonChars:76000,
+  jsonChars:262144,
+};
 const INFLIGHT_STATE_DEFAULT_LIMITS = {
   maxSessions:8,
   messages:24,
@@ -9379,10 +9398,13 @@ function _isStorageQuotaError(err){
 }
 function _truncateInflightValue(value, maxChars){
   const limits=_getInflightStateLimits();
-  const stringLimit=_boundedInflightInt(maxChars, limits.stringChars, 1000, 500000);
+  const stringLimit=Math.min(
+    _boundedInflightInt(maxChars, limits.stringChars, 1000, 500000),
+    INFLIGHT_STATE_HARD_LIMITS.stringChars
+  );
   if(typeof value==='string'){
     if(value.length<=stringLimit) return value;
-    return value.slice(0,stringLimit)+'\n\n[truncated for browser recovery storage]';
+    return '[truncated for browser recovery storage]\n\n'+value.slice(-stringLimit);
   }
   if(Array.isArray(value)) return value.map(v=>_truncateInflightValue(v, Math.max(2000, Math.floor(stringLimit/2))));
   if(value&&typeof value==='object'){
@@ -9392,47 +9414,176 @@ function _truncateInflightValue(value, maxChars){
   }
   return value;
 }
+function _inflightRecoveryTail(value, maxChars=INFLIGHT_STATE_HARD_LIMITS.textTailChars){
+  const text=String(value||'');
+  return text.length<=maxChars?text:text.slice(-maxChars);
+}
+function _inflightRecoveryValue(value, maxChars=INFLIGHT_STATE_HARD_LIMITS.fieldChars, depth=0){
+  if(value==null||typeof value==='number'||typeof value==='boolean') return value;
+  if(typeof value==='string') return _inflightRecoveryTail(value,maxChars);
+  if(depth>4) return '[nested recovery value omitted]';
+  if(Array.isArray(value)){
+    return value.slice(-8).map(item=>_inflightRecoveryValue(item,maxChars,depth+1));
+  }
+  if(typeof value==='object'){
+    const out={};
+    Object.entries(value).slice(0,12).forEach(([key,item])=>{
+      out[String(key).slice(0,80)]=_inflightRecoveryValue(item,maxChars,depth+1);
+    });
+    return out;
+  }
+  return String(value).slice(0,maxChars);
+}
+function _compactInflightMessage(message){
+  if(!message||typeof message!=='object'||!message.role) return null;
+  const role=String(message.role);
+  const compact={role};
+  if(message._live) compact._live=true;
+  if(message._ts!=null) compact._ts=message._ts;
+  const rawContent=message.content;
+  if(typeof rawContent==='string'){
+    // A user prompt benefits from its prefix for identity/deduplication; a
+    // live assistant message benefits from its newest suffix. Neither is a
+    // substitute for the canonical transcript or journal replay.
+    compact.content=role==='assistant'
+      ? _inflightRecoveryTail(rawContent,INFLIGHT_STATE_HARD_LIMITS.fieldChars)
+      : String(rawContent).slice(0,INFLIGHT_STATE_HARD_LIMITS.fieldChars);
+    if(rawContent.length>INFLIGHT_STATE_HARD_LIMITS.fieldChars) compact._recovery_truncated=true;
+    compact._recovery_text_length=rawContent.length;
+  }else if(Array.isArray(rawContent)){
+    compact.content=rawContent.slice(-8).map(part=>_inflightRecoveryValue(part,INFLIGHT_STATE_HARD_LIMITS.fieldChars));
+  }else if(rawContent!=null){
+    compact.content=_inflightRecoveryValue(rawContent,INFLIGHT_STATE_HARD_LIMITS.fieldChars);
+  }
+  if(typeof message.reasoning==='string'&&message.reasoning){
+    compact.reasoning=_inflightRecoveryTail(message.reasoning,INFLIGHT_STATE_HARD_LIMITS.fieldChars);
+    if(message.reasoning.length>INFLIGHT_STATE_HARD_LIMITS.fieldChars) compact._recovery_reasoning_truncated=true;
+  }
+  if(Array.isArray(message.attachments)&&message.attachments.length){
+    compact.attachments=message.attachments.slice(-8).map(item=>{
+      if(typeof item==='string') return item.slice(0,INFLIGHT_STATE_HARD_LIMITS.fieldChars);
+      const name=item&&typeof item==='object'?(item.name||item.filename||item.path||''):'';
+      return String(name).slice(0,INFLIGHT_STATE_HARD_LIMITS.fieldChars);
+    }).filter(Boolean);
+  }
+  return compact;
+}
+function _compactInflightToolCall(toolCall){
+  if(!toolCall||typeof toolCall!=='object') return null;
+  const compact={};
+  for(const key of [
+    'tid','id','tool_call_id','tool_use_id','call_id','name','done','is_error',
+    'started_at','completed_at','assistant_msg_idx','activityBurstId',
+    'activitySegmentSeq',
+  ]){
+    if(toolCall[key]!==undefined&&toolCall[key]!==null) compact[key]=toolCall[key];
+  }
+  if(toolCall.args!==undefined) compact.args=_inflightRecoveryValue(toolCall.args);
+  if(toolCall.snippet!==undefined) compact.snippet=_inflightRecoveryTail(toolCall.snippet,INFLIGHT_STATE_HARD_LIMITS.fieldChars);
+  return compact;
+}
+function _compactInflightTodo(todo){
+  if(!todo||typeof todo!=='object') return null;
+  const compact={};
+  for(const key of ['id','content','text','status','state','priority']){
+    if(todo[key]!==undefined&&todo[key]!==null){
+      compact[key]=typeof todo[key]==='string'
+        ? String(todo[key]).slice(0,INFLIGHT_STATE_HARD_LIMITS.fieldChars)
+        : todo[key];
+    }
+  }
+  return compact;
+}
 function _compactInflightState(state){
   const limits=_getInflightStateLimits();
-  const messages=Array.isArray(state.messages)?state.messages.slice(-limits.messages):[];
-  const toolCalls=Array.isArray(state.toolCalls)?state.toolCalls.slice(-limits.toolCalls):[];
+  const messages=Array.isArray(state.messages)
+    ? state.messages.slice(-limits.messages).slice(-INFLIGHT_STATE_HARD_LIMITS.messages)
+    : [];
+  const toolCalls=Array.isArray(state.toolCalls)
+    ? state.toolCalls.slice(-limits.toolCalls).slice(-INFLIGHT_STATE_HARD_LIMITS.toolCalls)
+    : [];
   // Phase 2: persist the live todo snapshot so reload / SSE reattach
   // restores the panel without waiting for the next live `todo` write.
-  // The list is bounded by the agent (typically <20 items) and each
-  // item is small, so no per-list cap is needed beyond the existing
-  // stringChars truncation in _truncateInflightValue.
-  const todos=Array.isArray(state.todos)?state.todos:null;
+  // Keep only the latest bounded todo items; the canonical session payload is
+  // the source for the complete list after reload.
+  const todos=Array.isArray(state.todos)
+    ? state.todos.slice(-Math.min(limits.messages,INFLIGHT_STATE_HARD_LIMITS.todos)).map(_compactInflightTodo).filter(Boolean)
+    : null;
   const todoStateMeta=(state.todoStateMeta&&typeof state.todoStateMeta==='object')?state.todoStateMeta:null;
+  let assistantText=String(state.lastAssistantText||'');
+  let reasoningText=String(state.lastReasoningText||'');
+  if(!assistantText||!reasoningText){
+    for(let i=messages.length-1;i>=0;i--){
+      const message=messages[i];
+      if(!message||message.role!=='assistant') continue;
+      if(!assistantText&&typeof message.content==='string') assistantText=message.content;
+      if(!reasoningText&&typeof message.reasoning==='string') reasoningText=message.reasoning;
+      if(assistantText&&reasoningText) break;
+    }
+  }
+  const assistantTextTail=_inflightRecoveryTail(assistantText);
+  const reasoningTextTail=_inflightRecoveryTail(reasoningText);
+  const compactMessages=messages.map(_compactInflightMessage).filter(Boolean);
+  const compactToolCalls=toolCalls.map(_compactInflightToolCall).filter(Boolean);
+  const compactAnchors=Array.isArray(state.activityBurstAnchors)
+    ? state.activityBurstAnchors.slice(-Math.min(50,INFLIGHT_STATE_HARD_LIMITS.activityBurstAnchors)).map(anchor=>({
+      id:Number(anchor&&anchor.id)||0,
+      textEnd:Number(anchor&&anchor.textEnd)||0,
+    })).filter(anchor=>anchor.id>0)
+    : [];
   return _truncateInflightValue({
+    recoveryVersion:INFLIGHT_STATE_SCHEMA_VERSION,
+    recoveryMode:'journal-tail',
     streamId:state.streamId||null,
-    messages,
-    uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
-    toolCalls,
-    lastAssistantText:state.lastAssistantText||'',
-    lastReasoningText:state.lastReasoningText||'',
+    // Keep these legacy field names as bounded suffixes so older readers can
+    // still reattach. New readers also use the explicit length/tail metadata
+    // to know that the value is not a complete assistant transcript.
+    messages:compactMessages,
+    uploaded:Array.isArray(state.uploaded)
+      ? state.uploaded.slice(-Math.min(20,INFLIGHT_STATE_HARD_LIMITS.uploaded)).map(item=>String(item).slice(0,INFLIGHT_STATE_HARD_LIMITS.fieldChars))
+      : [],
+    toolCalls:compactToolCalls,
+    lastAssistantText:assistantTextTail,
+    lastReasoningText:reasoningTextTail,
+    assistantTextTail,
+    assistantTextLength:assistantText.length,
+    assistantTextTruncated:assistantText.length>assistantTextTail.length,
+    reasoningTextTail,
+    reasoningTextLength:reasoningText.length,
+    reasoningTextTruncated:reasoningText.length>reasoningTextTail.length,
+    recoveryCursor:{
+      seq:Number(state.lastRunJournalSeq||0)||0,
+      eventId:String(state.lastRunJournalEventId||''),
+    },
     lastRunJournalSeq:state.lastRunJournalSeq||0,
     lastRunJournalEventId:state.lastRunJournalEventId||'',
     journalReplayFromStart:!!state.journalReplayFromStart,
     currentActivityBurstId:state.currentActivityBurstId||0,
     currentLiveSegmentSeq:state.currentLiveSegmentSeq||0,
-    activityBurstAnchors:Array.isArray(state.activityBurstAnchors)?state.activityBurstAnchors.slice(-50):[],
+    activityBurstAnchors:compactAnchors,
     todos,
-    todoStateMeta,
-  }, limits.stringChars);
+    todoStateMeta:todoStateMeta?{
+      ts:Number(todoStateMeta.ts||0)||0,
+      source:String(todoStateMeta.source||'').slice(0,80),
+      version:Number(todoStateMeta.version||1)||1,
+    }:null,
+  }, Math.min(limits.stringChars,INFLIGHT_STATE_HARD_LIMITS.stringChars));
 }
 function _writeInflightStateMap(all){
   const limits=_getInflightStateLimits();
+  const maxSessions=Math.min(limits.maxSessions,INFLIGHT_STATE_HARD_LIMITS.maxSessions);
+  const maxJsonChars=Math.min(limits.jsonChars,INFLIGHT_STATE_HARD_LIMITS.jsonChars);
   const entries=Object.entries(all||{})
     .sort((a,b)=>Number(b[1]&&b[1].updated_at||0)-Number(a[1]&&a[1].updated_at||0))
-    .slice(0,limits.maxSessions);
+    .slice(0,maxSessions);
   const compact={};
   for(const [sid,entry] of entries) compact[sid]=entry;
   let json=JSON.stringify(compact);
-  if(json.length>limits.jsonChars){
+  if(json.length>maxJsonChars){
     const current=entries[0];
     json=JSON.stringify(current?{[current[0]]:current[1]}:{});
   }
-  if(json.length>limits.jsonChars){
+  if(json.length>maxJsonChars){
     localStorage.removeItem(INFLIGHT_STATE_KEY);
     return false;
   }
@@ -9474,7 +9625,7 @@ function clearInflightState(sid){
     const all=_readInflightStateMap();
     if(!(sid in all)) return;
     delete all[sid];
-    if(Object.keys(all).length) localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
+    if(Object.keys(all).length) _writeInflightStateMap(all);
     else localStorage.removeItem(INFLIGHT_STATE_KEY);
   }catch(_){ }
 }
