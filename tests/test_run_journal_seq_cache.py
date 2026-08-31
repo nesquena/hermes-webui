@@ -6,6 +6,7 @@ O(n^2) over a run. The cache seeds once per path and then increments in memory
 while staying consistent with ``RunJournalWriter`` (both share one cache under
 the same per-path lock).
 """
+import json
 import threading
 
 import pytest  # noqa: F401  # top-level import keeps pytest collection unambiguous
@@ -173,3 +174,73 @@ def test_concurrent_appends_produce_unique_gapless_seqs(tmp_path):
         t.join()
 
     assert sorted(results) == list(range(1, 41))
+
+
+def test_concurrent_writers_append_in_reserved_order_and_replay_gaplessly(tmp_path, monkeypatch):
+    session_id = "sess_writer_order"
+    run_id = "run_writer_order"
+    writer_a = run_journal.RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+    writer_b = run_journal.RunJournalWriter(session_id, run_id, session_dir=tmp_path)
+
+    first_append_entered = threading.Event()
+    second_append_written = threading.Event()
+    results = {}
+    errors = []
+    results_lock = threading.Lock()
+    real_append = run_journal.append_run_event
+
+    def gated_append(*args, **kwargs):
+        seq = kwargs.get("seq")
+        if seq == 1:
+            first_append_entered.set()
+            lock = run_journal._lock_for(
+                tmp_path / run_journal.RUN_JOURNAL_DIR_NAME / session_id / f"{run_id}.jsonl"
+            )
+            # The pre-fix writer released the per-run lock before calling the
+            # public append function. Hold seq 1 at that boundary so seq 2 can
+            # reserve and append first. The fixed writer owns its re-entrant
+            # lock through the nested append and therefore must not wait here.
+            if not getattr(lock, "_is_owned", lambda: False)():
+                assert second_append_written.wait(timeout=5), "seq 2 did not append"
+        event = real_append(*args, **kwargs)
+        if seq == 2:
+            second_append_written.set()
+        return event
+
+    monkeypatch.setattr(run_journal, "append_run_event", gated_append)
+
+    def append_from(writer, label, text):
+        try:
+            event = writer.append_sse_event("token", {"text": text})
+            with results_lock:
+                results[label] = event
+        except BaseException as exc:  # noqa: BLE001 - report thread failures below
+            with results_lock:
+                errors.append(exc)
+
+    thread_a = threading.Thread(target=append_from, args=(writer_a, "a", "first"))
+    thread_a.start()
+    assert first_append_entered.wait(timeout=5), "seq 1 append did not start"
+
+    thread_b = threading.Thread(target=append_from, args=(writer_b, "b", "second"))
+    thread_b.start()
+    thread_a.join(timeout=10)
+    thread_b.join(timeout=10)
+
+    assert not thread_a.is_alive() and not thread_b.is_alive(), "writer threads did not finish"
+    assert not errors, f"concurrent writer failed: {errors!r}"
+    assert {event["seq"] for event in results.values()} == {1, 2}
+
+    journal_path = tmp_path / run_journal.RUN_JOURNAL_DIR_NAME / session_id / f"{run_id}.jsonl"
+    on_disk = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+    assert [event["seq"] for event in on_disk] == [1, 2]
+    assert [event["payload"]["text"] for event in on_disk] == ["first", "second"]
+
+    replay = run_journal.read_session_run_events(
+        session_id,
+        after_event_id=f"{run_id}:1",
+        session_dir=tmp_path,
+    )
+    assert replay["status"] == "ok"
+    assert [event["event_id"] for event in replay["events"]] == [f"{run_id}:2"]
+    assert [event["payload"]["text"] for event in replay["events"]] == ["second"]
