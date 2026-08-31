@@ -697,3 +697,130 @@ def test_short_visual_viewport_clamps_claude_terminal_without_overshoot():
     css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "--claude-terminal-min-height" in css
     assert "--claude-terminal-max-height" in css
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_claude_cursor_accepts_only_canonical_int64_event_ids():
+    result = _run_node(
+        _terminal_harness(
+            """
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  await resumeClaudeSession(session);
+  const source=FakeEventSource.instances[0];
+  source.emit('output',JSON.stringify({text:'zero'}),'0');
+  assert.strictEqual(TERMINAL_UI.claudeCursor,'0');
+  source.emit('output',JSON.stringify({text:'max'}),'9223372036854775807');
+  assert.strictEqual(TERMINAL_UI.claudeCursor,'9223372036854775807');
+  for(const invalid of ['9223372036854775808','0001',' 9 ','1.5','x','9'.repeat(100000)]){
+    source.emit('output',JSON.stringify({text:'ignored'}),invalid);
+    assert.strictEqual(TERMINAL_UI.claudeCursor,'9223372036854775807');
+  }
+  _disconnectTerminalSource();
+  await _reconnectClaudeTerminal();
+  const boundaryUrl=FakeEventSource.instances[1].url;
+  assert.strictEqual(new URL(boundaryUrl).searchParams.get('cursor'),'9223372036854775807');
+  _disconnectTerminalSource();
+  TERMINAL_UI.claudeCursor='9'.repeat(100000);
+  await _reconnectClaudeTerminal();
+  const safeUrl=FakeEventSource.instances[2].url;
+  assert.strictEqual(new URL(safeUrl).searchParams.has('cursor'),false);
+  assert(!safeUrl.includes('capability'));
+  console.log(JSON.stringify({boundary:new URL(boundaryUrl).searchParams.get('cursor'),safeHasCursor:new URL(safeUrl).searchParams.has('cursor')}));
+"""
+        )
+    )
+    assert result == {
+        "boundary": "9223372036854775807",
+        "safeHasCursor": False,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_hiding_during_resume_prevents_attach_until_visible_without_stop():
+    result = _run_node(
+        _terminal_harness(
+            """
+  function deferred(){let resolve;const promise=new Promise(ok=>{resolve=ok;});return {promise,resolve};}
+  const resumeGate=deferred();
+  let resumeCalls=0;
+  global.api=async(path,options={})=>{
+    const body=options.body?JSON.parse(options.body):null;
+    calls.push({path,body,focusAtCall:focusCalls});
+    if(path==='/api/claude-code/resume'){
+      resumeCalls+=1;
+      if(resumeCalls===1)return resumeGate.promise;
+      return {ok:true,attached:true,handle:'safe-handle',generation:'generation-1'};
+    }
+    return {ok:true};
+  };
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  const pending=resumeClaudeSession(session);
+  assert.strictEqual(focusCalls,1);
+  document.hidden=true;
+  listeners['document:visibilitychange']();
+  resumeGate.resolve({ok:true,attached:false,handle:'safe-handle',generation:'generation-1'});
+  assert.strictEqual(await pending,false);
+  assert.strictEqual(FakeEventSource.instances.length,0);
+  assert(!calls.some(call=>call.path==='/api/claude-code/stop'));
+  document.hidden=false;
+  listeners['document:visibilitychange']();
+  await new Promise(resolve=>setImmediate(resolve));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.strictEqual(FakeEventSource.instances.length,1);
+  assert.strictEqual(resumeCalls,2);
+  console.log(JSON.stringify({hiddenSources:0,visibleSources:FakeEventSource.instances.length,resumeCalls,stops:calls.filter(call=>call.path==='/api/claude-code/stop').length}));
+"""
+        )
+    )
+    assert result == {
+        "hiddenSources": 0,
+        "visibleSources": 1,
+        "resumeCalls": 2,
+        "stops": 0,
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_hiding_during_reconnect_token_mint_prevents_hidden_eventsource():
+    result = _run_node(
+        _terminal_harness(
+            """
+  function deferred(){let resolve;const promise=new Promise(ok=>{resolve=ok;});return {promise,resolve};}
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  await resumeClaudeSession(session);
+  const streamGate=deferred();
+  let streamMints=0;
+  const originalApi=global.api;
+  global.api=async(path,options={})=>{
+    if(path==='/api/claude-code/terminal-token'&&JSON.parse(options.body).operation==='stream'){
+      calls.push({path,body:JSON.parse(options.body)});
+      streamMints+=1;
+      if(streamMints===1)return streamGate.promise;
+      return {ok:true};
+    }
+    return originalApi(path,options);
+  };
+  const pending=_reconnectClaudeTerminal();
+  await new Promise(resolve=>setImmediate(resolve));
+  document.hidden=true;
+  listeners['document:visibilitychange']();
+  streamGate.resolve({ok:true});
+  assert.strictEqual(await pending,false);
+  assert.strictEqual(FakeEventSource.instances.length,1);
+  assert(FakeEventSource.instances[0].closed);
+  assert(!calls.some(call=>call.path==='/api/claude-code/stop'));
+  document.hidden=false;
+  listeners['document:visibilitychange']();
+  await new Promise(resolve=>setImmediate(resolve));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.strictEqual(FakeEventSource.instances.length,2);
+  console.log(JSON.stringify({hiddenSources:1,visibleSources:FakeEventSource.instances.length,streamMints,stops:calls.filter(call=>call.path==='/api/claude-code/stop').length}));
+"""
+        )
+    )
+    assert result == {
+        "hiddenSources": 1,
+        "visibleSources": 2,
+        "streamMints": 2,
+        "stops": 0,
+    }

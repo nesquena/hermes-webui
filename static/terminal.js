@@ -534,9 +534,18 @@ function _isClaudeTerminalContextCurrent(context,requireIdentity=true){
   return TERMINAL_UI.handle===context.handle&&TERMINAL_UI.generation===context.generation;
 }
 
+function _canonicalClaudeTerminalCursor(value){
+  const cursor=String(value===undefined||value===null?'':value);
+  const max='9223372036854775807';
+  if(!cursor||cursor.length>max.length)return null;
+  if(!/^(0|[1-9]\d*)$/.test(cursor))return null;
+  if(cursor.length===max.length&&cursor>max)return null;
+  return cursor;
+}
+
 function _rememberClaudeTerminalCursor(ev){
-  const cursor=String(ev&&ev.lastEventId||'').trim();
-  if(/^\d+$/.test(cursor))TERMINAL_UI.claudeCursor=cursor;
+  const cursor=_canonicalClaudeTerminalCursor(ev&&ev.lastEventId);
+  if(cursor!==null)TERMINAL_UI.claudeCursor=cursor;
 }
 
 async function _mintClaudeTerminalToken(operation,identity){
@@ -619,13 +628,15 @@ function _retireClaudeTerminal(state,message){
 function _connectClaudeTerminalOutput(context){
   const identity=_claudeTerminalIdentity();
   context=context||_claudeTerminalContext(identity);
-  if(!identity||!_isClaudeTerminalContextCurrent(context))return false;
+  if(!identity||!_isClaudeTerminalContextCurrent(context)||document.hidden)return false;
   _disconnectTerminalSource();
-  if(!_isClaudeTerminalContextCurrent(context))return false;
+  if(!_isClaudeTerminalContextCurrent(context)||document.hidden)return false;
   const url=new URL('api/claude-code/terminal/output',document.baseURI||location.href);
   url.searchParams.set('handle',identity.handle);
   url.searchParams.set('generation',identity.generation);
-  if(TERMINAL_UI.claudeCursor!==null)url.searchParams.set('cursor',TERMINAL_UI.claudeCursor);
+  const cursor=_canonicalClaudeTerminalCursor(TERMINAL_UI.claudeCursor);
+  if(cursor!==null)url.searchParams.set('cursor',cursor);
+  else TERMINAL_UI.claudeCursor=null;
   const source=new EventSource(url.href,{withCredentials:true});
   TERMINAL_UI.source=source;
   source.addEventListener('output',ev=>{
@@ -1229,10 +1240,16 @@ if(document&&typeof document.addEventListener==='function'){
   document.addEventListener('visibilitychange',()=>{
     if(TERMINAL_UI.mode!=='claude_code'||!TERMINAL_UI.open)return;
     if(document.hidden){
+      TERMINAL_UI.claudeOpenEpoch+=1;
       _disconnectTerminalSource();
       return;
     }
-    if(!TERMINAL_UI.source)_reconnectClaudeTerminal().catch(()=>{});
+    if(TERMINAL_UI.source)return;
+    if(TERMINAL_UI.claudeState==='starting'&&TERMINAL_UI.claudeSession){
+      resumeClaudeSession(TERMINAL_UI.claudeSession).catch(()=>{});
+      return;
+    }
+    if(_claudeTerminalIdentity())_reconnectClaudeTerminal().catch(()=>{});
   });
 }
 

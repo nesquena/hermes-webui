@@ -919,7 +919,29 @@ def test_stream_cursor_behind_backlog_floor_emits_terminal_reset(
     assert signal_calls
 
 
-@pytest.mark.parametrize("cursor", ["", "-1", "1.5", "nope", "1&cursor=2"])
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "",
+        "-1",
+        "1.5",
+        "nope",
+        "1&cursor=2",
+        "9223372036854775808",
+        "9" * 20,
+        "9" * 100_000,
+    ],
+    ids=(
+        "empty",
+        "negative",
+        "fractional",
+        "non_decimal",
+        "duplicate",
+        "int64_overflow",
+        "overlength",
+        "huge",
+    ),
+)
 def test_stream_cursor_query_fails_closed(cursor, managed_terminals):
     term, _other = managed_terminals
     path = (
@@ -928,6 +950,40 @@ def test_stream_cursor_query_fails_closed(cursor, managed_terminals):
     )
 
     response = _get(path)
+
+    assert response.status == 400
+    assert response.json() == {"error": "invalid_request"}
+
+
+@pytest.mark.parametrize(
+    ("cursor", "expected"),
+    [("0", 0), ("9223372036854775807", 2**63 - 1)],
+)
+def test_stream_cursor_query_accepts_int64_boundaries(cursor, expected):
+    parsed = urlparse(
+        "/api/claude-code/terminal/output"
+        f"?handle=safe-handle&generation=safe-generation&cursor={cursor}"
+    )
+
+    assert routes._claude_terminal_stream_query(parsed) == (
+        "safe-handle",
+        "safe-generation",
+        expected,
+    )
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    ["9" * 100_000, "9223372036854775808"],
+    ids=("huge", "int64_overflow"),
+)
+def test_stream_last_event_id_fails_closed_before_attach(cursor, managed_terminals):
+    term, _other = managed_terminals
+    response = _get(
+        "/api/claude-code/terminal/output"
+        f"?handle={term.handle}&generation={term.generation}",
+        headers={"Last-Event-ID": cursor},
+    )
 
     assert response.status == 400
     assert response.json() == {"error": "invalid_request"}

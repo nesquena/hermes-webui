@@ -19432,6 +19432,23 @@ def _handle_claude_code_stop(handler, body):
     return j(handler, {"ok": True, "stopped": True})
 
 
+_CLAUDE_TERMINAL_CURSOR_MAX = "9223372036854775807"
+
+
+def _claude_terminal_cursor(value) -> int | None:
+    raw_cursor = "" if value is None else str(value)
+    if not raw_cursor or len(raw_cursor) > len(_CLAUDE_TERMINAL_CURSOR_MAX):
+        return None
+    if not raw_cursor.isascii() or not raw_cursor.isdecimal():
+        return None
+    if (
+        len(raw_cursor) == len(_CLAUDE_TERMINAL_CURSOR_MAX)
+        and raw_cursor > _CLAUDE_TERMINAL_CURSOR_MAX
+    ):
+        return None
+    return int(raw_cursor)
+
+
 def _claude_terminal_stream_query(
     parsed,
 ) -> tuple[str, str, int | None] | None:
@@ -19451,11 +19468,8 @@ def _claude_terminal_stream_query(
     if "cursor" in values:
         if len(values["cursor"]) != 1:
             return None
-        raw_cursor = str(values["cursor"][0] or "").strip()
-        if not raw_cursor.isascii() or not raw_cursor.isdecimal():
-            return None
-        cursor = int(raw_cursor)
-        if cursor > 2**63 - 1:
+        cursor = _claude_terminal_cursor(values["cursor"][0])
+        if cursor is None:
             return None
     return handle, generation, cursor
 
@@ -19481,11 +19495,10 @@ def _handle_claude_code_terminal_output(handler, parsed):
         attach_managed_terminal,
     )
 
-    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "").strip()
+    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "")
     if after_seq is None and last_event_id:
-        try:
-            after_seq = max(0, int(last_event_id))
-        except ValueError:
+        after_seq = _claude_terminal_cursor(last_event_id)
+        if after_seq is None:
             return j(handler, {"error": "invalid_request"}, status=400)
     try:
         term, output = attach_managed_terminal(
