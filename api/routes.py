@@ -14106,7 +14106,77 @@ def handle_get(handler, parsed) -> bool:
                 )
                 if revision:
                     raw["regeneration_revision"] = revision
-            redact = redact_session_data(raw)
+            # perf(webui/session-load-latency): memoize the transcript redact
+            # stage. Fail-closed: caches split on the active/inactive boundary -
+            # INACTIVE sessions reuse the base memo; ACTIVE (streaming/pending)
+            # sessions reuse the streaming TTL memo - mid-turn repeat polls skip
+            # a full walk while the state.db signature is available和 unchanged
+            # (any write invalidates); msg_before paging is not in play. On any
+            # uncertainty the
+            # override is skipped and redact_session_data() walks everything.
+            _redact_session_active = False
+            _redact_cache_sig = None
+            _redact_cached_msgs = None
+            _redact_cache_put = None
+            _redact_cache_get = None
+            try:
+                _redact_session_active = _display_merge_session_is_active(s)
+                if (
+                    load_messages
+                    and msg_before is None
+                    and not (_display_cache_hit is not None and _redact_session_active)
+                ):
+                    from api.helpers import (
+                        _session_redact_signature,
+                        _session_redact_cached_get,
+                        _session_redact_cached_put,
+                        _session_redact_streaming_cached_get,
+                        _session_redact_streaming_cached_put,
+                    )
+                    from api.config import load_settings as _load_settings_for_redact
+
+                    if _redact_session_active:
+                        _redact_cache_get = _session_redact_streaming_cached_get
+                        _redact_cache_put = _session_redact_streaming_cached_put
+                    else:
+                        _redact_cache_get = _session_redact_cached_get
+                        _redact_cache_put = _session_redact_cached_put
+                    _redact_enabled = bool(
+                        _load_settings_for_redact().get("api_redact_enabled", True)
+                    )
+                    _db_sig = _state_db_session_signature(
+                        getattr(s, "session_id", None),
+                        getattr(s, "profile", None) or None,
+                    )
+                    _redact_cache_sig = _session_redact_signature(
+                        sid,
+                        messages=_truncated_msgs,
+                        state_db_signature=_db_sig,
+                        redact_enabled=_redact_enabled,
+                        msg_limit=msg_limit,
+                        messages_offset=_messages_offset,
+                    )
+                    _redact_cached_msgs = _redact_cache_get(
+                        sid, _redact_cache_sig
+                    )
+            except Exception:
+                _redact_cache_sig = None
+                _redact_cached_msgs = None
+                _redact_cache_put = None
+                _redact_cache_get = None
+            if _redact_cached_msgs is None:
+                redact = redact_session_data(raw)
+                if _redact_cache_sig is not None and _redact_cache_put is not None:
+                    _redact_cache_put(
+                        sid, _redact_cache_sig, redact.get("messages", [])
+                    )
+            else:
+                redact = redact_session_data(
+                    raw,
+                    _messages_override=[
+                        dict(m) if isinstance(m, dict) else m for m in _redact_cached_msgs
+                    ],
+                )
             _t5 = _time.monotonic()
             if _diag: _diag.stage("t5_after_redact")
             resp = j(handler, {"session": redact})

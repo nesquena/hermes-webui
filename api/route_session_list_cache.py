@@ -34,8 +34,8 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
-_SESSIONS_CACHE_WAIT_SECONDS = 0.25
-_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+_SESSIONS_CACHE_WAIT_SECONDS = 15.0  # waiters hold past a concurrent rebuild (observed 1.3-6s; at 0.25s they timed out into synchronous fallback_rebuild → N-way stampede
+_SESSIONS_CACHE_STALE_WAIT_SECONDS=0.10
 _SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
