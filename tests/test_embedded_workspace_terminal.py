@@ -193,6 +193,16 @@ def test_terminal_ui_handles_shell_close_commands():
     assert "closeComposerTerminal();" in terminal_js
 
 
+def test_claude_terminal_mode_keeps_generic_terminal_contract_separate():
+    terminal_js = _read("static/terminal.js")
+
+    assert "mode:'shell'" in terminal_js
+    assert "function detachClaudeTerminal" in terminal_js
+    assert "function stopClaudeTerminal" in terminal_js
+    assert "function resumeClaudeSession" in terminal_js
+    assert "TERMINAL_UI.mode==='claude_code'" in terminal_js
+
+
 def test_terminal_restart_ignores_stale_sse_events():
     terminal_js = _read("static/terminal.js")
 

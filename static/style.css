@@ -2802,11 +2802,16 @@
   .composer-terminal-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;}
   .composer-terminal-action{border:1px solid transparent;background:transparent;color:var(--muted);border-radius:8px;padding:5px 8px;font-size:11px;font-weight:600;cursor:pointer;transition:color .15s,background .15s,border-color .15s;}
   .composer-terminal-action:hover{color:var(--text);background:var(--hover-bg);border-color:var(--border2);}
+  .composer-terminal-action.danger{color:var(--error);}
   .composer-terminal-viewport{flex:1;min-height:0;overflow:hidden;background:var(--code-bg);padding:8px 10px;color:var(--pre-text);cursor:text;}
   .composer-terminal-surface{width:100%;height:100%;min-height:0;}
   .composer-terminal-surface .xterm{height:100%;padding:0;}
   .composer-terminal-surface .xterm-viewport{background:transparent!important;}
   .composer-terminal-surface .xterm-screen{height:100%;}
+  .claude-terminal-keys{display:flex;gap:4px;padding:5px 8px;overflow-x:auto;background:var(--surface);border-top:1px solid var(--border);flex:0 0 auto;-webkit-overflow-scrolling:touch;}
+  .claude-terminal-keys[hidden]{display:none!important;}
+  .claude-terminal-key{min-width:44px;min-height:44px;box-sizing:border-box;border:1px solid var(--border2);border-radius:8px;background:var(--input-bg);color:var(--text);font:600 11px var(--font-ui);touch-action:manipulation;}
+  .claude-terminal-key:active{background:var(--hover-bg);}
   @keyframes send-pop-in{from{opacity:0;transform:scale(.55);}to{opacity:1;transform:scale(1);}}
   .upload-bar-wrap{display:none;height:3px;background:var(--hover-bg);border-radius:0 0 16px 16px;overflow:hidden;}
   .upload-bar-wrap.active{display:block;}
@@ -3176,6 +3181,7 @@
     .composer-terminal-header{padding:7px 8px;}
     .composer-terminal-actions{gap:2px;overflow-x:auto;}
     .composer-terminal-action{padding:5px 7px;font-size:10px;white-space:nowrap;}
+    .composer-terminal-panel.claude-terminal-mode .composer-terminal-inner{max-height:min(420px,calc(var(--claude-terminal-viewport-height,100vh) - 96px));}
     #terminalWorkspaceLabel{max-width:110px;}
     #terminalDockWorkspaceLabel{max-width:96px;}
     .sidebar-nav{position:absolute;left:0;top:0;bottom:0;width:52px;display:flex;flex-direction:column;gap:4px;padding:8px 4px;border-right:1px solid var(--border);border-bottom:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}

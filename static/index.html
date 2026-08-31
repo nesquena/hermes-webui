@@ -544,7 +544,7 @@
           <div class="composer-terminal-resize-handle" id="terminalResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" tabindex="0"></div>
           <div class="composer-terminal-header">
             <div class="composer-terminal-title">
-              <span data-i18n="terminal_title">Terminal</span>
+              <span id="terminalTitleLabel" data-i18n="terminal_title">Terminal</span>
               <span class="composer-terminal-dot" aria-hidden="true">·</span>
               <span id="terminalWorkspaceLabel"></span>
             </div>
@@ -552,12 +552,22 @@
               <button type="button" class="composer-terminal-action" id="btnTerminalClear" onclick="clearComposerTerminal()" data-i18n="terminal_clear">Clear</button>
               <button type="button" class="composer-terminal-action" id="btnTerminalCopy" onclick="copyComposerTerminalOutput()" data-i18n="terminal_copy_output">Copy output</button>
               <button type="button" class="composer-terminal-action" id="btnTerminalRestart" onclick="restartComposerTerminal()" data-i18n="terminal_restart">Restart</button>
+              <button type="button" class="composer-terminal-action danger" id="btnTerminalStopClaude" onclick="stopClaudeTerminal()" data-i18n="claude_terminal_stop" hidden>Stop Claude</button>
               <button type="button" class="composer-terminal-action" id="btnTerminalCollapse" onclick="collapseComposerTerminal()" data-i18n="terminal_collapse">Collapse</button>
               <button type="button" class="composer-terminal-action" id="btnTerminalClose" onclick="closeComposerTerminal()" data-i18n="terminal_close">Close</button>
             </div>
           </div>
-          <div class="composer-terminal-viewport" id="terminalViewport" onclick="focusComposerTerminalInput()">
+          <div class="composer-terminal-viewport" id="terminalViewport" onpointerdown="focusComposerTerminalInput()" onclick="focusComposerTerminalInput()">
             <div class="composer-terminal-surface" id="terminalSurface" aria-label="Workspace terminal"></div>
+          </div>
+          <div class="claude-terminal-keys" id="claudeTerminalKeys" aria-label="Claude terminal controls" hidden>
+            <button type="button" class="claude-terminal-key" data-terminal-key="esc" onclick="sendClaudeTerminalKey('esc')">Esc</button>
+            <button type="button" class="claude-terminal-key" data-terminal-key="tab" onclick="sendClaudeTerminalKey('tab')">Tab</button>
+            <button type="button" class="claude-terminal-key" data-terminal-key="ctrl-c" onclick="sendClaudeTerminalKey('ctrl-c')">Ctrl-C</button>
+            <button type="button" class="claude-terminal-key" data-terminal-key="up" aria-label="Up arrow" onclick="sendClaudeTerminalKey('up')">↑</button>
+            <button type="button" class="claude-terminal-key" data-terminal-key="down" aria-label="Down arrow" onclick="sendClaudeTerminalKey('down')">↓</button>
+            <button type="button" class="claude-terminal-key" data-terminal-key="left" aria-label="Left arrow" onclick="sendClaudeTerminalKey('left')">←</button>
+            <button type="button" class="claude-terminal-key" data-terminal-key="right" aria-label="Right arrow" onclick="sendClaudeTerminalKey('right')">→</button>
           </div>
         </div>
         <div class="composer-terminal-dock" id="composerTerminalDock" hidden>
