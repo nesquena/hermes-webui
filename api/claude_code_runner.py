@@ -20,6 +20,8 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.claude_code_bridge import (
+    CLAUDE_MANAGED_POST_EXEC_CONFIRM_DELAY_SECONDS,
+    CLAUDE_MANAGED_POST_EXEC_HANDOFF_TIMEOUT_SECONDS,
     ClaudeSessionDescriptor,
     build_resume_argv,
     probe_runtime_owner_pids,
@@ -33,8 +35,6 @@ READINESS_MAX_BYTES = 256
 LEASE_FD_ENVIRONMENT_KEY = "HERMES_RESUME_LEASE_FD"
 WRAPPER_FD_ENVIRONMENT_KEY = "HERMES_RESUME_WRAPPER_FD"
 PRIVATE_LEASE_FLAG = "--hermes-lease-held"
-POST_EXEC_HANDOFF_TIMEOUT_SECONDS = 2.0
-POST_EXEC_CONFIRM_DELAY_SECONDS = 0.1
 
 
 @dataclass
@@ -354,22 +354,27 @@ def _launch_path_signature(descriptor: ClaudeSessionDescriptor) -> tuple | None:
             info = os.lstat(path)
             if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
                 return None
-            identity = (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
-            if stat.S_ISREG(info.st_mode):
-                identity += (
-                    info.st_size,
-                    info.st_nlink,
-                    info.st_mtime_ns,
-                    info.st_ctime_ns,
-                )
-            identities.append(identity)
+            identities.append(_path_identity(info))
     except OSError:
         return None
     return tuple(identities)
 
 
+def _path_identity(info) -> tuple:
+    identity = (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
+    if stat.S_ISREG(info.st_mode):
+        identity += (
+            info.st_size,
+            info.st_nlink,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+    return identity
+
+
 def _open_verified_wrapper(
     descriptor: ClaudeSessionDescriptor,
+    expected_identity: tuple,
 ) -> int | None:
     if descriptor.profile is None or not descriptor.profile.argv:
         return None
@@ -384,9 +389,9 @@ def _open_verified_wrapper(
             or opened.st_uid != os.getuid()
             or opened.st_nlink != 1
             or not opened.st_mode & stat.S_IXUSR
-            or opened.st_dev != named.st_dev
-            or opened.st_ino != named.st_ino
             or stat.S_ISLNK(named.st_mode)
+            or _path_identity(opened) != expected_identity
+            or _path_identity(named) != expected_identity
         ):
             os.close(fd)
             return None
@@ -450,7 +455,10 @@ def _execute_verified_wrapper(
 
 
 def _read_post_exec_handoff(fd: int) -> bool:
-    deadline = time.monotonic() + POST_EXEC_HANDOFF_TIMEOUT_SECONDS
+    deadline = (
+        time.monotonic()
+        + CLAUDE_MANAGED_POST_EXEC_HANDOFF_TIMEOUT_SECONDS
+    )
     payload = bytearray()
     while len(payload) <= 2:
         remaining = deadline - time.monotonic()
@@ -487,7 +495,7 @@ def _post_exec_ownership_state(
         if foreign_owner:
             return "ownership_conflict"
         if attempt == 0:
-            time.sleep(POST_EXEC_CONFIRM_DELAY_SECONDS)
+            time.sleep(CLAUDE_MANAGED_POST_EXEC_CONFIRM_DELAY_SECONDS)
     return "ready"
 
 
@@ -660,10 +668,14 @@ def run_session(
         ):
             _write_readiness(readiness_fd, "invalid_session")
             return 1
-        wrapper_fd = _open_verified_wrapper(launch_descriptor)
-        if wrapper_fd is None:
+        opened_wrapper_fd = _open_verified_wrapper(
+            launch_descriptor,
+            path_signature[3],
+        )
+        if opened_wrapper_fd is None:
             _write_readiness(readiness_fd, "invalid_session")
             return 1
+        wrapper_fd = opened_wrapper_fd
         argv = build_resume_argv(launch_descriptor)
         previous_cwd = Path.cwd()
         try:

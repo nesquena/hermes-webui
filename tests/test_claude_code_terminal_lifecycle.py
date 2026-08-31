@@ -105,6 +105,27 @@ def _drain(output):
             return items
 
 
+def test_managed_readiness_accepts_valid_launch_near_probe_budget(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b'{"state":"ready"}\n')
+    os.close(write_fd)
+    clock = [100.0]
+    valid_launch_seconds = 11.0
+
+    monkeypatch.setattr(terminal.time, "monotonic", lambda: clock[0])
+
+    def delayed_select(readers, _writers, _errors, timeout):
+        if timeout < valid_launch_seconds:
+            clock[0] += timeout
+            return [], [], []
+        clock[0] += valid_launch_seconds
+        return readers, [], []
+
+    monkeypatch.setattr(terminal.select, "select", delayed_select)
+
+    assert terminal._read_managed_runner_readiness(read_fd) == "ready"
+
+
 def test_managed_terminal_spawns_task2_runner_as_exact_argv_without_shell(
     monkeypatch, tmp_path
 ):

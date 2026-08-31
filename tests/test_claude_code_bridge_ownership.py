@@ -478,6 +478,55 @@ def test_runner_rejects_transcript_or_wrapper_replaced_while_acquiring_lease(tmp
     assert exec_call == []
 
 
+def test_runner_rejects_wrapper_replaced_immediately_before_verified_open(
+    tmp_path,
+    monkeypatch,
+):
+    import api.claude_code_runner as runner
+    from api.claude_code_bridge import ClaudeRuntimeStatus
+
+    descriptor = _descriptor(tmp_path, "printf '%s' '[]'\n")
+    wrapper_path = Path(descriptor.profile.argv[0])
+    replacement = _executable(tmp_path / "replacement-at-open", "exit 42\n")
+    monkeypatch.setattr(runner, "resolve_session", lambda _public_id: descriptor)
+    monkeypatch.setattr(
+        runner,
+        "probe_runtime_status",
+        lambda _descriptor, fresh: ClaudeRuntimeStatus("inactive"),
+    )
+    real_open = runner.os.open
+    replaced = False
+
+    def replace_immediately_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal replaced
+        if not replaced and Path(path) == wrapper_path:
+            replaced = True
+            os.replace(replacement, wrapper_path)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def ready_without_fork(_descriptor, readiness_fd, _pgid, _close_fds):
+        runner._write_readiness(readiness_fd, "ready")
+        return -1
+
+    monkeypatch.setattr(runner.os, "open", replace_immediately_before_open)
+    read_fd, write_fd = os.pipe()
+    exec_call = []
+
+    result = runner.run_session(
+        descriptor.public_id,
+        write_fd,
+        exec_fn=lambda executable, argv: exec_call.append((executable, tuple(argv))),
+        post_exec_check_fn=ready_without_fork,
+    )
+    readiness = os.read(read_fd, 1024)
+    os.close(read_fd)
+
+    assert replaced is True
+    assert result == 1
+    assert readiness == b'{"state":"invalid_session"}\n'
+    assert exec_call == []
+
+
 def test_post_exec_probe_preserves_duplicate_session_owners_for_collision_check(
     tmp_path,
     monkeypatch,
@@ -559,7 +608,9 @@ def test_retained_wrapper_fd_executes_verified_inode_after_named_replacement(
 
     descriptor = _descriptor(tmp_path, "printf '%s' '[]'\n")
     wrapper_path = Path(descriptor.profile.argv[0])
-    wrapper_fd = runner._open_verified_wrapper(descriptor)
+    path_signature = runner._launch_path_signature(descriptor)
+    assert path_signature is not None
+    wrapper_fd = runner._open_verified_wrapper(descriptor, path_signature[3])
     assert wrapper_fd is not None
     replacement = _executable(tmp_path / "replacement-final", "exit 42\n")
     os.replace(replacement, wrapper_path)

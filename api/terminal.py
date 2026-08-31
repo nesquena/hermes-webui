@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+from api.claude_code_bridge import CLAUDE_MANAGED_LAUNCH_TIMEOUT_SECONDS
+
 _TERMINAL_SUPPORTED = sys.platform != "win32"
 
 if _TERMINAL_SUPPORTED:
@@ -73,7 +75,6 @@ _MANAGED_CAPABILITY_OPERATIONS = frozenset(
     {"stream", "input", "resize", "stop"}
 )
 _MANAGED_RUNNER_READINESS_MAX_BYTES = 256
-_MANAGED_RUNNER_READINESS_TIMEOUT_SECONDS = 5.0
 
 
 class ManagedTerminalLimitError(RuntimeError):
@@ -772,7 +773,7 @@ def _spawn_pty_process(
 
 
 def _read_managed_runner_readiness(fd: int) -> str:
-    deadline = time.monotonic() + _MANAGED_RUNNER_READINESS_TIMEOUT_SECONDS
+    deadline = time.monotonic() + CLAUDE_MANAGED_LAUNCH_TIMEOUT_SECONDS
     payload = bytearray()
     try:
         while b"\n" not in payload:
