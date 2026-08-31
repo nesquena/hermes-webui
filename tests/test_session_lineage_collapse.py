@@ -560,6 +560,121 @@ console.log(JSON.stringify(rows));
 
 
 
+
+def test_delegated_subagent_source_precedence_ignores_stale_metadata():
+    """Only the first nonblank raw-role marker may assert delegation."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{
+  session_id:'messaging_parent',
+  title:'Messaging parent',
+  raw_source:'weixin',
+  source_tag:'weixin',
+  session_source:'messaging',
+}};
+function runCase(name, overrides, includeChildInCollapsed=false) {{
+  const child = {{
+    session_id:name,
+    title:name,
+    parent_session_id:'messaging_parent',
+    relationship_type:'child_session',
+    raw_source:'api_server',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'api',
+    _parent_lineage_root_id:'messaging_parent',
+    _cross_surface_child_session:true,
+    ...overrides,
+  }};
+  const collapsed = includeChildInCollapsed ? [{{...parent}}, child] : [{{...parent}}];
+  const rows = _attachChildSessionsToSidebarRows(collapsed, [collapsed[0], child]);
+  const parentRow = rows.find(row => row.session_id === 'messaging_parent');
+  return {{
+    name,
+    topLevel:rows.map(row => row.session_id),
+    nested:(parentRow._child_sessions || []).map(row => row.session_id),
+  }};
+}}
+const results = [
+  runCase('stale_source_tag', {{
+    raw_source:'api_server',
+    source_tag:'subagent',
+  }}),
+  runCase('stale_session_source', {{
+    raw_source:'api_server',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'subagent',
+  }}),
+  runCase('source_tag_fallback', {{
+    raw_source:'   ',
+    source_tag:' SubAgent ',
+    source:'api_server',
+    session_source:'other',
+  }}),
+  runCase('authentic_raw_source', {{
+    raw_source:'subagent',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'other',
+  }}),
+  runCase('not_child_session', {{
+    relationship_type:null,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    source:'subagent',
+    session_source:'other',
+  }}, true),
+];
+console.log(JSON.stringify(results));
+"""
+    assert json.loads(_run_node(source)) == [
+        {
+            "name": "stale_source_tag",
+            "topLevel": ["messaging_parent", "stale_source_tag"],
+            "nested": [],
+        },
+        {
+            "name": "stale_session_source",
+            "topLevel": ["messaging_parent", "stale_session_source"],
+            "nested": [],
+        },
+        {
+            "name": "source_tag_fallback",
+            "topLevel": ["messaging_parent"],
+            "nested": ["source_tag_fallback"],
+        },
+        {
+            "name": "authentic_raw_source",
+            "topLevel": ["messaging_parent"],
+            "nested": ["authentic_raw_source"],
+        },
+        {
+            "name": "not_child_session",
+            "topLevel": ["messaging_parent", "not_child_session"],
+            "nested": [],
+        },
+    ]
+
+
 def test_cross_surface_subagent_child_stacks_under_visible_fork_parent():
     """Forked WebUI conversations can still own subagent child rows."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")

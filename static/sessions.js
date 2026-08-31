@@ -7134,12 +7134,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
     if(child&&child.session_id&&visibleBySid.has(child.session_id)) continue;
     const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList)&&!(child&&child.pinned);
-    const childIsDelegatedSubagent=_isChildSession(child)&&[
+    const childRawRole=[
       child&&child.raw_source,
       child&&child.source_tag,
       child&&child.source,
-      child&&child.session_source,
-    ].some(source=>String(source||'').trim().toLowerCase()==='subagent');
+    ].map(source=>String(source||'').trim().toLowerCase()).find(Boolean)||'';
+    const childIsDelegatedSubagent=_isChildSession(child)&&childRawRole==='subagent';
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
