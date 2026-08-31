@@ -6,7 +6,12 @@ import hashlib
 import json
 import math
 import os
+import selectors
+import signal
 import stat
+import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -49,6 +54,11 @@ class ClaudeSessionDescriptor:
     can_remote_resume: bool
 
 
+@dataclass(frozen=True)
+class ClaudeRuntimeStatus:
+    state: str
+
+
 CLAUDE_CODE_MAX_FILES = 200
 CLAUDE_CODE_MAX_FILE_BYTES = 10 * 1024 * 1024
 CLAUDE_CODE_MAX_MESSAGES_PER_FILE = 1000
@@ -57,6 +67,14 @@ CLAUDE_CODE_MAX_LINES_PER_FILE = 100_000
 CLAUDE_CODE_MAX_CANDIDATES = 1_000
 CLAUDE_CODE_MAX_PROJECT_DIRS = 1_000
 CLAUDE_STORES_FILE_MAX_BYTES = 64 * 1024
+CLAUDE_AGENTS_TIMEOUT_SECONDS = 3.0
+CLAUDE_AGENTS_MAX_OUTPUT_BYTES = 1024 * 1024
+CLAUDE_AGENTS_MAX_RECORDS = 256
+CLAUDE_AGENTS_CACHE_SECONDS = 1.0
+
+_AGENTS_CACHE_CONDITION = threading.Condition()
+_AGENTS_CACHE: dict[tuple[str, str, str], tuple[float, tuple[dict, ...] | None]] = {}
+_AGENTS_IN_FLIGHT: set[tuple[str, str, str]] = set()
 
 _CANONICAL_MODEL_PROFILES = {
     "anthropic.qwen-aeon": (
@@ -238,7 +256,8 @@ def load_claude_stores() -> tuple[ClaudeStore, ...]:
 
 def invalidate_claude_session_cache() -> None:
     """Compatibility hook for callers that refresh Claude session projections."""
-    return None
+    with _AGENTS_CACHE_CONDITION:
+        _AGENTS_CACHE.clear()
 
 
 def _parse_timestamp(value) -> float | None:
@@ -584,3 +603,175 @@ def resolve_session(public_id) -> ClaudeSessionDescriptor | None:
         if descriptor.public_id == str(public_id or ""):
             return descriptor
     return None
+
+
+def _probe_environment(store: ClaudeStore) -> dict[str, str]:
+    return {
+        "CLAUDE_CONFIG_DIR": str(store.config_dir),
+        "HOME": str(store.config_dir.parent),
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+
+
+def _terminate_probe(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=1.0)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _run_agents_command(store: ClaudeStore) -> bytes | None:
+    try:
+        proc = subprocess.Popen(
+            (str(store.claude_bin), "agents", "--json"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(store.config_dir),
+            env=_probe_environment(store),
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    if proc.stdout is None or proc.stderr is None:
+        _terminate_probe(proc)
+        return None
+
+    selector = selectors.DefaultSelector()
+    stdout_chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + CLAUDE_AGENTS_TIMEOUT_SECONDS
+    try:
+        selector.register(proc.stdout, selectors.EVENT_READ, True)
+        selector.register(proc.stderr, selectors.EVENT_READ, False)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_probe(proc)
+                return None
+            for key, _event in selector.select(min(remaining, 0.05)):
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                except OSError:
+                    _terminate_probe(proc)
+                    return None
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(chunk)
+                if total > CLAUDE_AGENTS_MAX_OUTPUT_BYTES:
+                    _terminate_probe(proc)
+                    return None
+                if key.data:
+                    stdout_chunks.append(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_probe(proc)
+            return None
+        try:
+            returncode = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            _terminate_probe(proc)
+            return None
+        if returncode != 0:
+            return None
+        return b"".join(stdout_chunks)
+    finally:
+        selector.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+def _validated_agent_rows(payload: bytes) -> tuple[dict, ...] | None:
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        return None
+    if not isinstance(raw, list) or len(raw) > CLAUDE_AGENTS_MAX_RECORDS:
+        return None
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for row in raw:
+        if not isinstance(row, dict):
+            return None
+        session_id = _is_uuid(row.get("sessionId"))
+        pid = row.get("pid")
+        if (
+            session_id is None
+            or session_id in seen
+            or not isinstance(row.get("status"), str)
+            or not isinstance(row.get("kind"), str)
+            or not isinstance(row.get("cwd"), str)
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+            or not isinstance(row.get("name"), str)
+        ):
+            return None
+        seen.add(session_id)
+        rows.append({**row, "sessionId": session_id})
+    return tuple(rows)
+
+
+def _store_probe_key(store: ClaudeStore) -> tuple[str, str, str]:
+    return store.store_id, str(store.config_dir), str(store.claude_bin)
+
+
+def _probe_agent_rows(store: ClaudeStore, *, fresh: bool = False) -> tuple[dict, ...] | None:
+    key = _store_probe_key(store)
+    with _AGENTS_CACHE_CONDITION:
+        while True:
+            cached = _AGENTS_CACHE.get(key)
+            if not fresh and cached is not None and time.monotonic() - cached[0] < CLAUDE_AGENTS_CACHE_SECONDS:
+                return cached[1]
+            if key not in _AGENTS_IN_FLIGHT:
+                _AGENTS_IN_FLIGHT.add(key)
+                break
+            _AGENTS_CACHE_CONDITION.wait()
+            fresh = False
+    try:
+        rows = _validated_agent_rows(_run_agents_command(store) or b"")
+    except Exception:
+        rows = None
+    with _AGENTS_CACHE_CONDITION:
+        _AGENTS_CACHE[key] = (time.monotonic(), rows)
+        _AGENTS_IN_FLIGHT.discard(key)
+        _AGENTS_CACHE_CONDITION.notify_all()
+    return rows
+
+
+def probe_runtime_status(
+    descriptor: ClaudeSessionDescriptor,
+    *,
+    fresh: bool = False,
+) -> ClaudeRuntimeStatus:
+    """Fail closed unless a bounded store-wide ownership probe is valid."""
+    rows = _probe_agent_rows(descriptor.store, fresh=fresh)
+    if rows is None:
+        return ClaudeRuntimeStatus("ownership_unknown")
+    if any(row["sessionId"] == descriptor.claude_session_id for row in rows):
+        return ClaudeRuntimeStatus("active_elsewhere")
+    return ClaudeRuntimeStatus("inactive")
+
+
+def build_resume_argv(descriptor: ClaudeSessionDescriptor) -> tuple[str, ...]:
+    """Build the fixed wrapper argv; no browser-supplied launch data is accepted."""
+    if not descriptor.can_remote_resume or descriptor.profile is None or descriptor.cwd is None:
+        raise ValueError("session is not remotely resumable")
+    return (
+        *descriptor.profile.argv,
+        "--hermes-lease-held",
+        "--resume",
+        descriptor.claude_session_id,
+    )
