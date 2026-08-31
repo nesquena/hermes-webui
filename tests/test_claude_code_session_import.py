@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,51 @@ def test_get_claude_code_sessions_reads_fixture_jsonl_without_real_home(tmp_path
     assert messages == [
         {"role": "user", "content": "Can Hermes show this Claude Code history read-only?", "timestamp": 1776513601.0},
         {"role": "assistant", "content": "Yes — it appears with a Claude Code source badge.", "timestamp": 1776513602.0},
+    ]
+
+
+def test_configured_claude_store_replaces_default_importer_with_safe_bridge_rows(tmp_path, monkeypatch):
+    import api.models as models
+
+    config_dir = tmp_path / ".claude-local"
+    workspace = tmp_path / "workspace"
+    (config_dir / "projects" / "project-a").mkdir(parents=True)
+    workspace.mkdir()
+    claude_bin = tmp_path / "claude"
+    wrapper = tmp_path / "claude-qwen"
+    for executable in (claude_bin, wrapper):
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
+    registry = tmp_path / "stores.json"
+    registry.write_text(json.dumps({"stores": [{
+        "id": "local-models",
+        "label": "Claude Local",
+        "config_dir": str(config_dir),
+        "claude_bin": str(claude_bin),
+        "workspace_roots": [str(workspace)],
+        "models": {"anthropic.qwen-aeon": {"label": "Claude Qwen", "argv": [str(wrapper)]}},
+    }]}), encoding="utf-8")
+    registry.chmod(0o600)
+    transcript_uuid = str(uuid4())
+    transcript = config_dir / "projects" / "project-a" / f"{transcript_uuid}.jsonl"
+    _write_jsonl(transcript, [
+        {"sessionId": transcript_uuid, "cwd": str(workspace), "message": {"role": "user", "content": "bridge history"}},
+        {"sessionId": transcript_uuid, "message": {"role": "assistant", "model": "anthropic.qwen-aeon", "content": "bridge answer"}},
+    ])
+    monkeypatch.setenv("HERMES_WEBUI_CLAUDE_STORES_FILE", str(registry))
+    models.clear_cli_sessions_cache()
+
+    (session,) = models.get_claude_code_sessions()
+    assert session["source_tag"] == "claude_code"
+    assert session["read_only"] is True
+    assert session["profile"] == "qwen"
+    assert session["label"] == "Claude Qwen"
+    assert session["can_remote_resume"] is True
+    assert str(config_dir) not in json.dumps(session)
+    assert transcript_uuid not in json.dumps(session)
+    assert models.get_claude_code_session_messages(session["session_id"]) == [
+        {"role": "user", "content": "bridge history"},
+        {"role": "assistant", "content": "bridge answer"},
     ]
 
 

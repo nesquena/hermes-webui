@@ -7030,6 +7030,11 @@ def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_file
     listing. Tests pass ``projects_dir`` fixtures so Michael's real ~/.claude is
     never read during test runs.
     """
+    if projects_dir is None:
+        from api.claude_code_bridge import list_public_sessions, load_claude_stores
+
+        if load_claude_stores():
+            return list_public_sessions()
     sessions = []
     # ``get_last_workspace()`` is loop-invariant (the same active workspace for
     # every Claude Code row) but internally stats config.yaml + probes terminal
@@ -7085,6 +7090,12 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
     sid = str(sid or '')
     if not sid.startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return []
+    if projects_dir is None:
+        from api.claude_code_bridge import load_claude_stores, resolve_session
+
+        if load_claude_stores():
+            descriptor = resolve_session(sid)
+            return list(descriptor.messages) if descriptor is not None else []
     for path in _iter_claude_code_jsonl_files(projects_dir) or []:
         if _claude_code_session_id(path) != sid:
             continue
