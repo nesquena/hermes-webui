@@ -158,6 +158,65 @@ def test_managed_idle_uses_later_of_detach_and_last_io_activity(monkeypatch):
     }
 
 
+def test_completed_managed_input_wins_race_with_stale_idle_selection(monkeypatch):
+    now = time.time()
+    term = _make_registered_term(
+        monkeypatch,
+        "managed-input-race",
+        alive=True,
+        unwatched_since=now - terminal._MANAGED_TERMINAL_IDLE_SECONDS - 10,
+    )
+    term.kind = "claude_code"
+    term.handle = term.session_id
+    term.generation = "a2ac6402-0cc5-4c5e-9d21-593b84e27736"
+    term.pgid = term.proc.pid
+    term.persistent_when_unwatched = True
+    term.last_activity = now - terminal._MANAGED_TERMINAL_IDLE_SECONDS - 10
+    capability = terminal.issue_terminal_capability(
+        term.handle, term.generation, "input"
+    )
+    victims = terminal._terminals_to_reap(now)
+    assert [sid for sid, _term in victims] == [term.handle]
+
+    entered_write = threading.Event()
+    release_write = threading.Event()
+
+    def blocking_write(_fd, data):
+        entered_write.set()
+        assert release_write.wait(timeout=5)
+        return len(data)
+
+    monkeypatch.setattr(terminal.os, "write", blocking_write)
+    writer = threading.Thread(
+        target=terminal.write_managed_terminal,
+        kwargs={
+            "handle": term.handle,
+            "generation": term.generation,
+            "capability": capability,
+            "data": "input",
+        },
+    )
+    writer.start()
+    assert entered_write.wait(timeout=5)
+
+    result = {}
+
+    def claim():
+        result["claimed"] = terminal._claim_reap_victim(term.handle, term, now)
+
+    reaper = threading.Thread(target=claim)
+    reaper.start()
+    time.sleep(0.05)
+    release_write.set()
+    writer.join(timeout=5)
+    reaper.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reaper.is_alive()
+    assert result["claimed"] is None
+    assert terminal._TERMINALS.get(term.handle) is term
+
+
 # ── _reap_idle_terminals effect ──────────────────────────────────────────────
 
 def test_reap_closes_and_removes(monkeypatch):

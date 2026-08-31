@@ -1,8 +1,10 @@
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -176,6 +178,7 @@ def test_stop_managed_terminal_escalates_owned_group_and_drains_reader(monkeypat
     term.handle = term.session_id
     term.generation = "5f47cc5d-ec48-4ed8-973b-5972f115c9cc"
     term.pgid = proc.pid
+    term.owned_pgid_verified = True
     term.persistent_when_unwatched = True
     term.reader = reader
     terminal._TERMINALS[term.handle] = term
@@ -200,7 +203,6 @@ def test_stop_managed_terminal_escalates_owned_group_and_drains_reader(monkeypat
         signal.SIGKILL,
     ]
     assert {pgid for pgid, _sig in kills} == {term.pgid}
-    assert len(proc.wait_calls) == 3
     assert reader.joins
     with pytest.raises(OSError):
         os.fstat(read_fd)
@@ -226,6 +228,155 @@ def test_managed_teardown_never_signals_unverified_process_group(monkeypatch):
     terminal._teardown_terminal(term)
 
     assert signals == []
+
+
+def _process_group_exists(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def _wait_for_path(path: Path, timeout=3):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {path}")
+
+
+def test_stop_continues_after_leader_exit_until_owned_group_is_extinct(tmp_path):
+    child_pid_path = tmp_path / "child.pid"
+    code = (
+        "import os,signal,time; from pathlib import Path; "
+        "child=os.fork(); "
+        "(os._exit(0) if child else None); "
+        "signal.signal(signal.SIGHUP,signal.SIG_IGN); "
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        f"Path({str(child_pid_path)!r}).write_text(str(os.getpid())); "
+        "time.sleep(30)"
+    )
+    master_fd, slave_fd = os.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+        start_new_session=True,
+    )
+    os.close(slave_fd)
+    try:
+        _wait_for_path(child_pid_path)
+        proc.wait(timeout=3)
+        assert _process_group_exists(proc.pid)
+        term = terminal.TerminalSession(
+            session_id="managed-real-group",
+            workspace=str(tmp_path),
+            proc=proc,
+            master_fd=master_fd,
+            kind="claude_code",
+            generation="114ab946-af08-4ba0-8713-a15118716ad1",
+            handle="managed-real-group",
+            pgid=proc.pid,
+            persistent_when_unwatched=True,
+        )
+        term.owned_pgid_verified = True
+        terminal._TERMINALS[term.handle] = term
+        capability = terminal.issue_terminal_capability(
+            term.handle, term.generation, "stop"
+        )
+
+        assert terminal.stop_managed_terminal(
+            handle=term.handle,
+            generation=term.generation,
+            capability=capability,
+        )
+
+        deadline = time.monotonic() + 2
+        while _process_group_exists(proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not _process_group_exists(proc.pid)
+    finally:
+        if _process_group_exists(proc.pid):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_reader_drains_final_child_output_after_leader_exit(tmp_path):
+    child_pid_path = tmp_path / "writer.pid"
+    release_path = tmp_path / "release"
+    # A small script file keeps the child wait finite and makes the final write
+    # happen only after the reader starts with an already-dead group leader.
+    script = tmp_path / "final_writer.py"
+    script.write_text(
+        "import os,time\n"
+        "from pathlib import Path\n"
+        "child=os.fork()\n"
+        "if child:\n"
+        "    os._exit(0)\n"
+        f"Path({str(child_pid_path)!r}).write_text(str(os.getpid()))\n"
+        f"release=Path({str(release_path)!r})\n"
+        "while not release.exists():\n"
+        "    time.sleep(0.01)\n"
+        "os.write(1,b'final-write\\n')\n",
+        encoding="utf-8",
+    )
+    master_fd, slave_fd = os.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+        start_new_session=True,
+    )
+    os.close(slave_fd)
+    try:
+        _wait_for_path(child_pid_path)
+        proc.wait(timeout=3)
+        terminal._set_nonblocking(master_fd)
+        term = terminal.TerminalSession(
+            session_id="managed-final-output",
+            workspace=str(tmp_path),
+            proc=proc,
+            master_fd=master_fd,
+            kind="claude_code",
+            generation="5fece16c-88c8-4c93-bc4f-271850f63589",
+            handle="managed-final-output",
+            pgid=proc.pid,
+            persistent_when_unwatched=True,
+        )
+        term.owned_pgid_verified = True
+        output = term.subscribe(generation=term.generation)
+        term.reader = threading.Thread(target=terminal._reader_loop, args=(term,))
+        term.reader.start()
+        release_path.touch()
+        term.reader.join(timeout=3)
+
+        assert not term.reader.is_alive()
+        texts = [
+            payload["text"]
+            for _seq, event, payload in list(output.queue)
+            if event == "output"
+        ]
+        assert "final-write" in "".join(texts)
+    finally:
+        if _process_group_exists(proc.pid):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
 
 
 def test_close_all_terminals_closes_snapshot(monkeypatch):

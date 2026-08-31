@@ -416,6 +416,14 @@ def run_session(
             _write_readiness(readiness_fd, "ownership_unknown")
             return 1
         argv = build_resume_argv(current)
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(current.cwd)
+        except (OSError, TypeError):
+            _write_readiness(readiness_fd, "invalid_session")
+            return 1
+        previous_pwd = os.environ.get("PWD")
+        os.environ["PWD"] = str(current.cwd)
         _write_readiness(readiness_fd, "ready")
         previous_lease_fd = os.environ.get(LEASE_FD_ENVIRONMENT_KEY)
         os.environ[LEASE_FD_ENVIRONMENT_KEY] = str(lease.fd)
@@ -426,6 +434,11 @@ def run_session(
                 os.environ.pop(LEASE_FD_ENVIRONMENT_KEY, None)
             else:
                 os.environ[LEASE_FD_ENVIRONMENT_KEY] = previous_lease_fd
+            if previous_pwd is None:
+                os.environ.pop("PWD", None)
+            else:
+                os.environ["PWD"] = previous_pwd
+            os.chdir(previous_cwd)
         return 0
     except (OSError, ValueError):
         return 1

@@ -398,6 +398,35 @@ def test_runner_sends_one_bounded_ready_record_then_execs_fixed_wrapper(tmp_path
     ))]
 
 
+def test_runner_execs_from_revalidated_descriptor_workspace(tmp_path, monkeypatch):
+    import api.claude_code_runner as runner
+
+    descriptor = _descriptor(tmp_path, "printf '%s' '[]'\n")
+    wrong_workspace = tmp_path / "caller-selected"
+    wrong_workspace.mkdir()
+    monkeypatch.setattr(runner, "resolve_session", lambda public_id: descriptor)
+    read_fd, write_fd = os.pipe()
+    exec_contexts = []
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(wrong_workspace)
+        result = runner.run_session(
+            descriptor.public_id,
+            write_fd,
+            exec_fn=lambda _executable, _argv: exec_contexts.append(
+                (Path.cwd(), os.environ.get("PWD"))
+            ),
+        )
+    finally:
+        os.chdir(original_cwd)
+    readiness = os.read(read_fd, 1024)
+    os.close(read_fd)
+
+    assert result == 0
+    assert readiness == b'{"state":"ready"}\n'
+    assert exec_contexts == [(descriptor.cwd, str(descriptor.cwd))]
+
+
 def test_runner_rejects_transcript_or_wrapper_replaced_while_acquiring_lease(tmp_path, monkeypatch):
     import api.claude_code_runner as runner
 

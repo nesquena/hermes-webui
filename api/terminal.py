@@ -88,6 +88,50 @@ class ManagedTerminalStartError(RuntimeError):
         super().__init__(state)
 
 
+class _ManagedSubscriberQueue(queue.Queue):
+    """A non-blocking, byte-bounded queue for one managed-terminal viewer."""
+
+    def __init__(self, byte_limit: int):
+        super().__init__(maxsize=0)
+        self.byte_limit = byte_limit
+        self.buffered_bytes = 0
+        self.lagged = False
+
+    def publish(self, item: tuple, generation: str | None) -> bool:
+        size = _managed_output_size(item[1], item[2])
+        with self.not_full:
+            if self.lagged:
+                return False
+            if self.buffered_bytes + size > self.byte_limit:
+                dropped = len(self.queue)
+                self.queue.clear()
+                self.unfinished_tasks = max(0, self.unfinished_tasks - dropped)
+                reset = (
+                    item[0],
+                    "terminal_reset",
+                    {"generation": generation},
+                )
+                self._put(reset)
+                self.unfinished_tasks += 1
+                self.buffered_bytes = _managed_output_size(reset[1], reset[2])
+                self.lagged = True
+                self.not_empty.notify()
+                return False
+            self._put(item)
+            self.unfinished_tasks += 1
+            self.buffered_bytes += size
+            self.not_empty.notify()
+            return True
+
+    def _get(self):
+        item = super()._get()
+        self.buffered_bytes = max(
+            0,
+            self.buffered_bytes - _managed_output_size(item[1], item[2]),
+        )
+        return item
+
+
 @dataclass
 class ManagedTerminalSingleton:
     fd: int
@@ -195,11 +239,18 @@ class TerminalSession:
     persistent_when_unwatched: bool = False
     runner_owns_lease: bool = False
     lease_owner_pid: int | None = None
+    owned_pgid_verified: bool = False
     backlog_bytes: int = 0
     _capabilities: dict[str, tuple[str, str, float]] = field(default_factory=dict)
+    _activity_lock: threading.Lock = field(default_factory=threading.Lock)
+    _activity_epoch: int = 0
 
     def is_alive(self) -> bool:
-        return not self.closed.is_set() and self.proc.poll() is None
+        if self.closed.is_set():
+            return False
+        if self.kind == "claude_code" and self.owned_pgid_verified:
+            return _owned_group_exists(self)
+        return self.proc.poll() is None
 
     def subscribe(
         self,
@@ -214,7 +265,11 @@ class TerminalSession:
         unset and receives the full bounded backlog.
         """
         managed = self.kind == "claude_code"
-        q: queue.Queue = queue.Queue(maxsize=0 if managed else _OUTPUT_BUFFER_MAXLEN)
+        q: queue.Queue = (
+            _ManagedSubscriberQueue(_MANAGED_OUTPUT_BACKLOG_BYTES)
+            if managed
+            else queue.Queue(maxsize=_OUTPUT_BUFFER_MAXLEN)
+        )
         reset = False
         with self._sub_lock:
             if managed and len(self._subscribers) >= _MANAGED_TERMINAL_MAX_VIEWERS:
@@ -227,17 +282,23 @@ class TerminalSession:
                     and (after_seq < floor or after_seq > latest)
                 )
             if reset:
-                q.put_nowait(
-                    (
-                        self._next_output_seq - 1,
-                        "terminal_reset",
-                        {"generation": self.generation},
-                    )
+                reset_item = (
+                    self._next_output_seq - 1,
+                    "terminal_reset",
+                    {"generation": self.generation},
                 )
+                if managed:
+                    q.publish(reset_item, self.generation)
+                else:
+                    q.put_nowait(reset_item)
             else:
                 for item in self._backlog:
                     if after_seq is None or item[0] > after_seq:
-                        q.put_nowait(item)
+                        if managed:
+                            if not q.publish(item, self.generation):
+                                break
+                        else:
+                            q.put_nowait(item)
             self._subscribers.append(q)
             self.unwatched_since = None  # a viewer is attached
         if reset:
@@ -254,8 +315,10 @@ class TerminalSession:
                 self.unwatched_since = time.time()
 
     def put_output(self, event: str, payload: dict) -> None:
-        self.last_activity = time.time()
         with self._sub_lock:
+            with self._activity_lock:
+                self.last_activity = time.time()
+                self._activity_epoch += 1
             item = (self._next_output_seq, event, payload)
             self._next_output_seq += 1
             self._backlog.append(item)
@@ -272,7 +335,12 @@ class TerminalSession:
             # Keep sequence assignment, backlog append, and non-blocking fanout in
             # one publication order. Releasing this lock before fanout lets two
             # producers enqueue seq N+1 before seq N to a live subscriber.
+            lagged = []
             for q in self._subscribers:
+                if self.kind == "claude_code":
+                    if not q.publish(item, self.generation):
+                        lagged.append(q)
+                    continue
                 try:
                     q.put_nowait(item)
                 except queue.Full:
@@ -287,6 +355,10 @@ class TerminalSession:
                         q.put_nowait(item)
                     except queue.Full:
                         pass
+            for q in lagged:
+                self._subscribers.remove(q)
+            if lagged and not self._subscribers:
+                self.unwatched_since = time.time()
 
 
 def _managed_output_size(event: str, payload: dict) -> int:
@@ -301,15 +373,32 @@ def _managed_output_size(event: str, payload: dict) -> int:
     )
 
 
-def _signal_owned_group(term: TerminalSession, sig: int) -> bool:
-    """Signal only the process group still led by the process we spawned."""
-    if term.pgid is None or term.pgid <= 0 or term.proc.poll() is not None:
+def _owned_group_exists(term: TerminalSession) -> bool:
+    """Check the immutable process group that was verified immediately after spawn."""
+    if (
+        not term.owned_pgid_verified
+        or term.pgid is None
+        or term.pgid <= 0
+        or term.pgid != term.proc.pid
+    ):
         return False
+    if term.proc.poll() is None:
+        try:
+            return os.getpgid(term.proc.pid) == term.pgid
+        except (OSError, ProcessLookupError):
+            return False
     try:
-        current_pgid = os.getpgid(term.proc.pid)
+        os.killpg(term.pgid, 0)
+        return True
+    except PermissionError:
+        return True
     except (OSError, ProcessLookupError):
         return False
-    if current_pgid != term.pgid or term.pgid != term.proc.pid:
+
+
+def _signal_owned_group(term: TerminalSession, sig: int) -> bool:
+    """Signal only the runner-owned group verified immediately after spawn."""
+    if not _owned_group_exists(term):
         return False
     try:
         os.killpg(term.pgid, sig)
@@ -318,8 +407,20 @@ def _signal_owned_group(term: TerminalSession, sig: int) -> bool:
         return False
 
 
+def _wait_for_owned_group_exit(term: TerminalSession, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _owned_group_exists(term):
+        _reap_terminal_descendants(term.pgid or term.proc.pid)
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+_MANAGED_START_RESERVATIONS = 0
+_MANAGED_RESERVED_HANDLES: set[str] = set()
 # Hard cap on concurrently live embedded terminals. Each holds a shell process,
 # a pty master fd, and a reader thread; a client that drops its output stream
 # without POSTing /api/terminal/close (tab close, crash, network drop) leaves
@@ -629,7 +730,7 @@ def _reader_loop(term: TerminalSession) -> None:
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     try:
         while not term.closed.is_set():
-            if term.proc.poll() is not None:
+            if term.kind != "claude_code" and term.proc.poll() is not None:
                 break
             try:
                 ready, _, _ = select.select([term.master_fd], [], [], 0.25)
@@ -748,7 +849,8 @@ def _terminal_idle_expired(term: TerminalSession, now: float) -> bool:
     if term.unwatched_since is None:
         return False
     if term.kind == "claude_code" and term.persistent_when_unwatched:
-        idle_since = max(term.unwatched_since, term.last_activity)
+        with term._activity_lock:
+            idle_since = max(term.unwatched_since, term.last_activity)
         return (now - idle_since) >= _MANAGED_TERMINAL_IDLE_SECONDS
     return (now - term.unwatched_since) >= _TERMINAL_IDLE_GRACE_SECONDS
 
@@ -781,8 +883,15 @@ def _claim_reap_victim(sid: str, term: TerminalSession, now: float) -> TerminalS
             with term._sub_lock:
                 if term._subscribers:
                     return None
-                if not _terminal_idle_expired(term, now):
-                    return None
+                with term._activity_lock:
+                    if term.unwatched_since is None:
+                        return None
+                    if term.kind == "claude_code" and term.persistent_when_unwatched:
+                        idle_since = max(term.unwatched_since, term.last_activity)
+                        if (now - idle_since) < _MANAGED_TERMINAL_IDLE_SECONDS:
+                            return None
+                    elif (now - term.unwatched_since) < _TERMINAL_IDLE_GRACE_SECONDS:
+                        return None
         del _TERMINALS[sid]
     return term
 
@@ -902,6 +1011,7 @@ def start_managed_terminal(
     cols: int = 80,
 ) -> TerminalSession:
     """Start the fixed Task 2 runner under a persistent managed PTY."""
+    global _MANAGED_START_RESERVATIONS
     if not _TERMINAL_SUPPORTED:
         raise NotImplementedError("Managed terminals are not supported on Windows")
     public_id = str(public_session_id or "").strip()
@@ -916,13 +1026,21 @@ def start_managed_terminal(
             term.kind == "claude_code" and term.is_alive()
             for term in _TERMINALS.values()
         )
-        if managed_count >= _MANAGED_TERMINAL_MAX:
+        if managed_count + _MANAGED_START_RESERVATIONS >= _MANAGED_TERMINAL_MAX:
             raise ManagedTerminalLimitError("managed terminal limit")
-
         handle = secrets.token_urlsafe(32)
-        while handle in _TERMINALS:
+        while handle in _TERMINALS or handle in _MANAGED_RESERVED_HANDLES:
             handle = secrets.token_urlsafe(32)
-        generation = str(uuid4())
+        _MANAGED_RESERVED_HANDLES.add(handle)
+        _MANAGED_START_RESERVATIONS += 1
+
+    generation = str(uuid4())
+    master_fd = slave_fd = readiness_read_fd = readiness_write_fd = -1
+    proc = None
+    term = None
+    rolled_back = False
+    published = False
+    try:
         master_fd, slave_fd = os.openpty()
         readiness_read_fd, readiness_write_fd = os.pipe()
         runner_path = Path(__file__).with_name("claude_code_runner.py").resolve()
@@ -933,37 +1051,23 @@ def start_managed_terminal(
             str(readiness_write_fd),
         )
         env = _safe_terminal_env(cwd, rows, cols, managed=True)
-        proc = None
-        try:
-            proc = _spawn_pty_process(
-                argv=argv,
-                cwd=cwd,
-                env=env,
-                slave_fd=slave_fd,
-                pass_fds=(readiness_write_fd,),
-            )
-        except BaseException:
-            _safe_close_fd(master_fd)
-            _safe_close_fd(slave_fd)
-            _safe_close_fd(readiness_read_fd)
-            _safe_close_fd(readiness_write_fd)
-            raise
+        proc = _spawn_pty_process(
+            argv=argv,
+            cwd=cwd,
+            env=env,
+            slave_fd=slave_fd,
+            pass_fds=(readiness_write_fd,),
+        )
         _safe_close_fd(slave_fd)
+        slave_fd = -1
         _safe_close_fd(readiness_write_fd)
-        _set_nonblocking(master_fd)
+        readiness_write_fd = -1
 
         try:
             actual_pgid = os.getpgid(proc.pid)
         except OSError:
             actual_pgid = None
         if actual_pgid != proc.pid:
-            _safe_close_fd(readiness_read_fd)
-            _safe_close_fd(master_fd)
-            try:
-                proc.kill()
-                proc.wait(timeout=1.0)
-            except (AttributeError, OSError, subprocess.TimeoutExpired):
-                pass
             raise ManagedTerminalStartError("ownership_unknown")
 
         term = TerminalSession(
@@ -981,19 +1085,48 @@ def start_managed_terminal(
             persistent_when_unwatched=True,
             runner_owns_lease=True,
             lease_owner_pid=proc.pid,
+            owned_pgid_verified=True,
             _backlog=collections.deque(),
         )
-        state = _read_managed_runner_readiness(readiness_read_fd)
+        _set_nonblocking(master_fd)
+        try:
+            state = _read_managed_runner_readiness(readiness_read_fd)
+        finally:
+            _safe_close_fd(readiness_read_fd)
+            readiness_read_fd = -1
         if state != "ready":
-            _teardown_terminal(term)
             raise ManagedTerminalStartError(state)
 
         _ensure_terminal_reaper()
         _set_size(term, rows, cols)
         term.reader = threading.Thread(target=_reader_loop, args=(term,), daemon=True)
         term.reader.start()
-        _TERMINALS[handle] = term
+        with _LOCK:
+            if term.closed.is_set():
+                raise ManagedTerminalStartError("ownership_unknown")
+            _TERMINALS[handle] = term
+            published = True
         return term
+    except BaseException:
+        if term is not None:
+            _teardown_managed_terminal(term)
+            rolled_back = True
+        elif proc is not None:
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except (AttributeError, OSError, subprocess.TimeoutExpired):
+                pass
+        raise
+    finally:
+        if not rolled_back and not published:
+            _safe_close_fd(master_fd)
+        _safe_close_fd(slave_fd)
+        _safe_close_fd(readiness_read_fd)
+        _safe_close_fd(readiness_write_fd)
+        with _LOCK:
+            _MANAGED_RESERVED_HANDLES.discard(handle)
+            _MANAGED_START_RESERVATIONS -= 1
 
 
 def _authorised_managed_terminal(
@@ -1002,8 +1135,9 @@ def _authorised_managed_terminal(
     generation: str,
     capability: str,
     operation: str,
+    allow_generation_mismatch: bool = False,
 ) -> TerminalSession:
-    now = time.time()
+    now = time.monotonic()
     digest = hashlib.sha256(str(capability or "").encode("utf-8")).hexdigest()
     with _LOCK:
         term = _TERMINALS.get(str(handle or ""))
@@ -1011,7 +1145,7 @@ def _authorised_managed_terminal(
             term is None
             or term.kind != "claude_code"
             or term.handle != handle
-            or term.generation != generation
+            or (not allow_generation_mismatch and term.generation != generation)
             or not term.is_alive()
         ):
             raise KeyError("terminal not found")
@@ -1019,12 +1153,10 @@ def _authorised_managed_terminal(
         if record is None:
             raise KeyError("terminal not found")
         record_operation, record_generation, expires_at = record
-        if (
-            record_operation != operation
-            or record_generation != generation
-            or expires_at <= now
-        ):
+        if expires_at <= now:
             term._capabilities.pop(digest, None)
+            raise KeyError("terminal not found")
+        if record_operation != operation or record_generation != term.generation:
             raise KeyError("terminal not found")
         return term
 
@@ -1036,7 +1168,7 @@ def issue_terminal_capability(
 ) -> str:
     if operation not in _MANAGED_CAPABILITY_OPERATIONS:
         raise ValueError("invalid terminal capability operation")
-    now = time.time()
+    now = time.monotonic()
     with _LOCK:
         term = _TERMINALS.get(str(handle or ""))
         if (
@@ -1075,6 +1207,7 @@ def attach_managed_terminal(
             generation=generation,
             capability=capability,
             operation="stream",
+            allow_generation_mismatch=True,
         )
         return term, term.subscribe(after_seq=after_seq, generation=generation)
 
@@ -1092,11 +1225,16 @@ def write_managed_terminal(
         capability=capability,
         operation="input",
     )
-    with term.io_lock:
-        if term.closed.is_set():
-            raise KeyError("terminal not found")
-        os.write(term.master_fd, str(data or "").encode("utf-8", errors="replace"))
-    term.last_activity = time.time()
+    with term._activity_lock:
+        with term.io_lock:
+            if term.closed.is_set():
+                raise KeyError("terminal not found")
+            os.write(
+                term.master_fd,
+                str(data or "").encode("utf-8", errors="replace"),
+            )
+        term.last_activity = time.time()
+        term._activity_epoch += 1
 
 
 def resize_managed_terminal(
@@ -1289,20 +1427,21 @@ def _teardown_terminal(term: TerminalSession) -> None:
 
 def _teardown_managed_terminal(term: TerminalSession) -> None:
     """Stop only the verified runner-owned group, then drain and close its PTY."""
-    if term.proc.poll() is None:
-        escalation = (
-            (signal.SIGHUP, 0.75),
-            (signal.SIGTERM, 0.75),
-            (signal.SIGKILL, 1.0),
-        )
-        for sig, timeout in escalation:
-            if not _signal_owned_group(term, sig):
-                break
-            try:
-                term.proc.wait(timeout=timeout)
-                break
-            except (subprocess.TimeoutExpired, ProcessLookupError):
-                continue
+    escalation = (
+        (signal.SIGHUP, 0.75),
+        (signal.SIGTERM, 0.75),
+        (signal.SIGKILL, 1.0),
+    )
+    for sig, timeout in escalation:
+        if not _signal_owned_group(term, sig):
+            break
+        if _wait_for_owned_group_exit(term, timeout):
+            break
+
+    try:
+        term.proc.wait(timeout=0)
+    except (subprocess.TimeoutExpired, ProcessLookupError):
+        pass
 
     reader = term.reader
     if (

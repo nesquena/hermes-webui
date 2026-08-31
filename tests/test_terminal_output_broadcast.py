@@ -45,6 +45,7 @@ def _make_managed_term(sid="managed-bcast"):
     term.handle = sid
     term.generation = "d1f0b824-6973-46db-b898-d075ec492474"
     term.pgid = term.proc.pid
+    term.owned_pgid_verified = True
     term.persistent_when_unwatched = True
     term._backlog = terminal.collections.deque()
     return term
@@ -316,6 +317,27 @@ def test_managed_terminal_rejects_ninth_viewer_without_dropping_existing():
         term.subscribe(generation=term.generation)
 
     assert term._subscribers == viewers
+
+
+def test_stalled_managed_viewer_is_byte_bounded_and_healthy_viewer_continues(
+    monkeypatch,
+):
+    term = _make_managed_term("managed-slow-viewer")
+    monkeypatch.setattr(terminal, "_MANAGED_OUTPUT_BACKLOG_BYTES", 1024)
+    slow = term.subscribe(generation=term.generation)
+    healthy = term.subscribe(generation=term.generation)
+    healthy_sequences = []
+
+    for index in range(1000):
+        term.put_output("output", {"text": f"{index:04d}" + "x" * 60})
+        healthy_sequences.append(healthy.get_nowait()[0])
+
+    slow_events = [event for _seq, event, _payload in _drain(slow)]
+    assert slow.buffered_bytes <= 1024
+    assert slow_events == ["terminal_reset"]
+    assert slow not in term._subscribers
+    assert healthy in term._subscribers
+    assert healthy_sequences == list(range(1, 1001))
 
 
 def test_concurrent_producers_keep_monotonic_sequences_through_backlog_rollover():
