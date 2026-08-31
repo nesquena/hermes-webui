@@ -36,6 +36,7 @@ _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
+_SESSIONS_CACHE_RUNTIME_LOCK_TIMEOUT_SECONDS = 0.01
 _SESSIONS_CACHE: OrderedDict[tuple, tuple[float, tuple, dict]] = OrderedDict()
 _SESSIONS_CACHE_LOCK = threading.RLock()
 _SESSIONS_CACHE_INFLIGHT: dict[tuple, threading.Event] = {}
@@ -163,16 +164,68 @@ def _session_list_cache_running_cron_jobs() -> dict[str, float]:
         return {}
 
 
+def _session_list_cache_active_run_streams() -> dict[str, str]:
+    """Return the live ``session_id -> stream_id`` worker overlay.
+
+    ``ACTIVE_RUNS`` is the worker-lifecycle truth and can outlive both the
+    in-memory session object and the SSE registry. Snapshot it with a short
+    timeout: a sidebar response must never wait behind a worker registry
+    mutation. An empty result is safe because the regular active-stream and
+    cached-row paths still apply.
+    """
+    try:
+        import api.routes as _routes
+
+        runs = getattr(_routes, "ACTIVE_RUNS", None)
+        lock = getattr(_routes, "ACTIVE_RUNS_LOCK", None)
+        if not isinstance(runs, dict):
+            return {}
+        acquired = False
+        try:
+            if lock is not None:
+                try:
+                    acquired = lock.acquire(
+                        timeout=_SESSIONS_CACHE_RUNTIME_LOCK_TIMEOUT_SECONDS
+                    )
+                except TypeError:
+                    acquired = lock.acquire(False)
+                if not acquired:
+                    return {}
+            snapshot = dict(runs)
+        finally:
+            if acquired:
+                lock.release()
+    except Exception:
+        return {}
+
+    result: dict[str, str] = {}
+    for stream_id, raw in snapshot.items():
+        if not isinstance(raw, dict):
+            continue
+        session_id = str(raw.get("session_id") or "").strip()
+        normalized_stream_id = str(stream_id or "").strip()
+        if session_id and normalized_stream_id:
+            result[session_id] = normalized_stream_id
+    return result
+
+
 def _session_list_cache_resolved_source_stamp(key: tuple):
+    source_stamp = None
     try:
         import api.routes as _routes
 
         override = getattr(_routes, "_session_list_cache_source_stamp", None)
         if callable(override) and override is not _session_list_cache_source_stamp:
-            return override(key)
+            source_stamp = override(key)
     except Exception:
         pass
-    return _session_list_cache_source_stamp(key)
+    if source_stamp is None:
+        source_stamp = _session_list_cache_source_stamp(key)
+    # Keep invalidation separate from the filesystem/source stamp. A structural
+    # mutation must make the entry stale even when it is still within its TTL,
+    # but it must not discard the last-known payload before the background
+    # rebuild can replace it.
+    return (source_stamp, _session_list_cache_invalidation_stamp(key))
 
 
 def _session_list_cache_profile_scope(profile: str | None) -> str:
@@ -311,6 +364,29 @@ def _session_list_cache_clear(profile: str | None = None) -> None:
                 continue
             if _profiles_match(cache_profile, normalized_profile):
                 _SESSIONS_CACHE.pop(cache_key, None)
+
+
+def _session_list_cache_invalidate(profile: str | None = None) -> None:
+    """Mark matching entries stale while retaining their last-known payload.
+
+    ``_session_list_cache_clear`` remains the hard-reset helper used by tests
+    and recovery code. Runtime session-list events use this softer operation so
+    the next sidebar request can return immediately and let the expensive
+    historical projection rebuild in the background.
+    """
+    normalized_profile = _session_list_cache_profile_scope(profile) if profile else None
+    with _SESSIONS_CACHE_LOCK:
+        global _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION
+        global _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION
+        if not profile:
+            _SESSIONS_CACHE_GLOBAL_INVALIDATION_VERSION += 1
+            _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION += 1
+            _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION.clear()
+            return
+        _SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION += 1
+        _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION[normalized_profile] = (
+            _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION.get(normalized_profile, 0) + 1
+        )
 
 
 def _clear_session_list_cache(profile: str | None = None) -> None:
@@ -495,6 +571,10 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
         running_cron_jobs = _session_list_cache_running_cron_jobs()
     except Exception:
         running_cron_jobs = {}
+    try:
+        active_run_streams = _session_list_cache_active_run_streams()
+    except Exception:
+        active_run_streams = {}
     cron_job_prefixes = [(jid, f"cron_{jid}_", started_at) for jid, started_at in running_cron_jobs.items()]
     session_ids = [
         str(row.get("session_id") or "").strip()
@@ -503,19 +583,35 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
     ]
     live_sessions = {}
     if session_ids:
-        with LOCK:
-            for sid in session_ids:
-                live = SESSIONS.get(sid)
-                if live is not None:
-                    live_sessions[sid] = live
+        acquired = False
+        try:
+            try:
+                acquired = LOCK.acquire(
+                    timeout=_SESSIONS_CACHE_RUNTIME_LOCK_TIMEOUT_SECONDS
+                )
+            except TypeError:
+                acquired = LOCK.acquire(False)
+            if acquired:
+                for sid in session_ids:
+                    live = SESSIONS.get(sid)
+                    if live is not None:
+                        live_sessions[sid] = live
+        finally:
+            if acquired:
+                LOCK.release()
     overlaid = []
     for row in rows:
         item = dict(row) if isinstance(row, dict) else {}
         sid = str(item.get("session_id") or "").strip()
         live = live_sessions.get(sid)
+        active_run_stream_id = active_run_streams.get(sid)
+        if active_run_stream_id:
+            # The active-run registry can be fresher than both the cached row
+            # and the in-memory Session object during worker startup/reconnect.
+            item["active_stream_id"] = active_run_stream_id
         if live is not None:
             live_stream_id = getattr(live, "active_stream_id", None)
-            item["active_stream_id"] = live_stream_id or None
+            item["active_stream_id"] = active_run_stream_id or live_stream_id or None
             item["has_pending_user_message"] = bool(
                 getattr(live, "pending_user_message", None)
             )

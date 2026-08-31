@@ -15,6 +15,8 @@ import re
 import shutil
 import sys
 import threading
+import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -1654,6 +1656,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
 
     with _profile_lock:
         _SKILLS_STATS_CACHE.clear()
+        _invalidate_profile_expensive_metadata_cache(home)
         if process_wide:
             global _active_profile
             _active_profile = name
@@ -1951,12 +1954,209 @@ _LIST_PROFILES_CACHE: tuple[list, float] | None = None
 _LIST_PROFILES_CACHE_TTL = 4.0  # seconds. The perf(session-load-latency) pass bumped this to 60s, but that was reverted: profile-row mutations (defaults / providers / skills / gateway config) do NOT invalidate this cache, so a 60s TTL served stale profile rows for too long after such a change. 4s keeps the os.walk frequent enough that mutation→poll staleness is negligible while still making rapid dropdown re-opens free. The create/delete invalidation hooks below clear the cache immediately on those specific mutations.
 _LIST_PROFILES_CACHE_LOCK = threading.Lock()
 
+# Profile discovery and the profile dropdown are on a latency-sensitive path.
+# Keep the cheap row projection independent from gateway health checks and the
+# full skill-tree scan. Each profile refreshes independently so one slow gateway
+# or large skill tree cannot serialize the complete profile response.
+_PROFILE_EXPENSIVE_METADATA_TTL_SECONDS = 60.0
+_PROFILE_EXPENSIVE_METADATA_INITIAL_WAIT_SECONDS = 0.10
+_PROFILE_EXPENSIVE_METADATA_MAX_ENTRIES = 128
+_PROFILE_EXPENSIVE_METADATA_FIELDS = (
+    "gateway_running",
+    "skill_count",
+    "enabled_skills",
+    "total_skills",
+)
+_PROFILE_EXPENSIVE_METADATA_CACHE: OrderedDict[Path, tuple[float, tuple[int, int], dict]] = OrderedDict()
+_PROFILE_EXPENSIVE_METADATA_INFLIGHT: dict[Path, threading.Event] = {}
+_PROFILE_EXPENSIVE_METADATA_PROFILE_VERSION: dict[Path, int] = {}
+_PROFILE_EXPENSIVE_METADATA_GLOBAL_VERSION = 0
+_PROFILE_EXPENSIVE_METADATA_LOCK = threading.RLock()
+
+
+def _profile_expensive_metadata_path(profile_path) -> Path:
+    try:
+        return Path(profile_path).expanduser().resolve()
+    except Exception:
+        return Path(str(profile_path or "")).expanduser()
+
+
+def _profile_expensive_metadata_stamp(profile_path: Path) -> tuple[int, int]:
+    with _PROFILE_EXPENSIVE_METADATA_LOCK:
+        return (
+            _PROFILE_EXPENSIVE_METADATA_GLOBAL_VERSION,
+            _PROFILE_EXPENSIVE_METADATA_PROFILE_VERSION.get(profile_path, 0),
+        )
+
+
+def _invalidate_profile_expensive_metadata_cache(profile_path=None) -> None:
+    """Invalidate profile details without discarding the last-known values."""
+    global _PROFILE_EXPENSIVE_METADATA_GLOBAL_VERSION
+    with _PROFILE_EXPENSIVE_METADATA_LOCK:
+        if profile_path is None:
+            _PROFILE_EXPENSIVE_METADATA_GLOBAL_VERSION += 1
+            return
+        path = _profile_expensive_metadata_path(profile_path)
+        _PROFILE_EXPENSIVE_METADATA_PROFILE_VERSION[path] = (
+            _PROFILE_EXPENSIVE_METADATA_PROFILE_VERSION.get(path, 0) + 1
+        )
+
+
+def _profile_expensive_metadata_cache_get(profile_path: Path) -> dict | None:
+    now = time.monotonic()
+    stamp = _profile_expensive_metadata_stamp(profile_path)
+    with _PROFILE_EXPENSIVE_METADATA_LOCK:
+        entry = _PROFILE_EXPENSIVE_METADATA_CACHE.get(profile_path)
+        if entry is None:
+            return None
+        expiry, cached_stamp, metadata = entry
+        if cached_stamp != stamp or now >= expiry:
+            return None
+        _PROFILE_EXPENSIVE_METADATA_CACHE.move_to_end(profile_path)
+        return dict(metadata)
+
+
+def _compute_profile_expensive_metadata(profile_path: Path) -> dict:
+    """Probe one profile's expensive fields, failing closed per field."""
+    try:
+        from hermes_cli.profiles import _check_gateway_running
+        gateway_running = bool(_check_gateway_running(profile_path))
+    except Exception:
+        gateway_running = False
+    try:
+        enabled_count, total_count = _get_profile_skills_stats(profile_path)
+    except Exception:
+        enabled_count, total_count = 0, 0
+    return {
+        "gateway_running": gateway_running,
+        "skill_count": enabled_count,
+        "enabled_skills": enabled_count,
+        "total_skills": total_count,
+    }
+
+
+def _refresh_profile_expensive_metadata(
+    profile_path: Path,
+    event: threading.Event,
+    requested_stamp: tuple[int, int],
+) -> None:
+    try:
+        metadata = _compute_profile_expensive_metadata(profile_path)
+        with _PROFILE_EXPENSIVE_METADATA_LOCK:
+            if _profile_expensive_metadata_stamp(profile_path) == requested_stamp:
+                _PROFILE_EXPENSIVE_METADATA_CACHE[profile_path] = (
+                    time.monotonic() + _PROFILE_EXPENSIVE_METADATA_TTL_SECONDS,
+                    requested_stamp,
+                    dict(metadata),
+                )
+                _PROFILE_EXPENSIVE_METADATA_CACHE.move_to_end(profile_path)
+                while len(_PROFILE_EXPENSIVE_METADATA_CACHE) > _PROFILE_EXPENSIVE_METADATA_MAX_ENTRIES:
+                    _PROFILE_EXPENSIVE_METADATA_CACHE.popitem(last=False)
+    except Exception:
+        logger.debug(
+            "Profile expensive metadata refresh failed for %s",
+            profile_path,
+            exc_info=True,
+        )
+    finally:
+        with _PROFILE_EXPENSIVE_METADATA_LOCK:
+            if _PROFILE_EXPENSIVE_METADATA_INFLIGHT.get(profile_path) is event:
+                _PROFILE_EXPENSIVE_METADATA_INFLIGHT.pop(profile_path, None)
+        event.set()
+
+
+def _request_profile_expensive_metadata(
+    profile_path: Path,
+    fallback: dict,
+) -> tuple[dict, threading.Event | None]:
+    """Return cached details and ensure at most one refresh is running."""
+    now = time.monotonic()
+    requested_stamp = _profile_expensive_metadata_stamp(profile_path)
+    with _PROFILE_EXPENSIVE_METADATA_LOCK:
+        entry = _PROFILE_EXPENSIVE_METADATA_CACHE.get(profile_path)
+        if entry is not None:
+            expiry, cached_stamp, metadata = entry
+            if cached_stamp == requested_stamp and now < expiry:
+                _PROFILE_EXPENSIVE_METADATA_CACHE.move_to_end(profile_path)
+                return dict(metadata), None
+            # A stale or invalidated entry is still useful while its replacement
+            # is computed. It is intentionally not deleted here.
+            last_known = dict(metadata)
+        else:
+            last_known = dict(fallback)
+        event = _PROFILE_EXPENSIVE_METADATA_INFLIGHT.get(profile_path)
+        if event is None:
+            event = threading.Event()
+            _PROFILE_EXPENSIVE_METADATA_INFLIGHT[profile_path] = event
+            owner = True
+        else:
+            owner = False
+
+    if owner:
+        try:
+            thread = threading.Thread(
+                target=_refresh_profile_expensive_metadata,
+                args=(profile_path, event, requested_stamp),
+                name="profile-metadata-refresh",
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            with _PROFILE_EXPENSIVE_METADATA_LOCK:
+                if _PROFILE_EXPENSIVE_METADATA_INFLIGHT.get(profile_path) is event:
+                    _PROFILE_EXPENSIVE_METADATA_INFLIGHT.pop(profile_path, None)
+            event.set()
+    return last_known, event
+
+
+def _profile_expensive_metadata_fallback(row: dict) -> dict:
+    defaults = {
+        "gateway_running": False,
+        "skill_count": 0,
+        "enabled_skills": 0,
+        "total_skills": 0,
+    }
+    return {
+        field: row[field] if field in row else defaults[field]
+        for field in _PROFILE_EXPENSIVE_METADATA_FIELDS
+    }
+
+
+def _rows_with_profile_expensive_metadata(rows: list, active: str) -> list:
+    """Overlay bounded cached detail refreshes onto cheap profile rows."""
+    if not rows:
+        return []
+    requests = []
+    deadline = time.monotonic() + _PROFILE_EXPENSIVE_METADATA_INITIAL_WAIT_SECONDS
+    for raw_row in rows:
+        row = dict(raw_row) if isinstance(raw_row, dict) else {}
+        profile_path = _profile_expensive_metadata_path(row.get("path"))
+        fallback = _profile_expensive_metadata_fallback(row)
+        metadata, event = _request_profile_expensive_metadata(profile_path, fallback)
+        requests.append((row, profile_path, fallback, metadata, event))
+
+    for _row, _path, _fallback, event_metadata, event in requests:
+        if event is None:
+            continue
+        remaining = max(0.0, deadline - time.monotonic())
+        event.wait(remaining)
+
+    result = []
+    for row, profile_path, fallback, initial_metadata, _event in requests:
+        metadata = _profile_expensive_metadata_cache_get(profile_path)
+        merged = dict(row)
+        merged.update(metadata or initial_metadata or fallback)
+        merged["is_active"] = merged.get("name") == active
+        result.append(merged)
+    return result
+
 
 def _invalidate_list_profiles_cache() -> None:
     """Drop the cached profile list (call after create/delete/switch)."""
     global _LIST_PROFILES_CACHE
     with _LIST_PROFILES_CACHE_LOCK:
         _LIST_PROFILES_CACHE = None
+    _invalidate_profile_expensive_metadata_cache()
 
 
 def _build_profile_rows_fast() -> list | None:
@@ -1984,7 +2184,6 @@ def _build_profile_rows_fast() -> list | None:
             _get_default_hermes_home,
             _get_profiles_root,
             _read_config_model,
-            _check_gateway_running,
             _PROFILE_ID_RE as _UPSTREAM_PROFILE_ID_RE,
         )
     except Exception:
@@ -1995,24 +2194,15 @@ def _build_profile_rows_fast() -> list | None:
             model, provider = _read_config_model(home)
         except Exception:
             model, provider = None, None
-        try:
-            gateway_running = _check_gateway_running(home)
-        except Exception:
-            gateway_running = False
-        enabled_count, total_count = _get_profile_skills_stats(home)
         return {
             'name': name,
             'path': str(home),
             'is_default': is_default,
             'is_active': False,  # filled in by caller (cheap, varies per request)
-            'gateway_running': gateway_running,
             'model': model,
             'provider': provider,
             'has_env': (home / '.env').exists(),
             'visible': _profile_visible_from_meta(home),
-            'skill_count': enabled_count,
-            'enabled_skills': enabled_count,
-            'total_skills': total_count,
         }
 
     rows: list = []
@@ -2032,6 +2222,63 @@ def _build_profile_rows_fast() -> list | None:
             rows.append(_row(entry, entry.name, False))
 
     return rows
+
+
+def _profile_info_value(profile, field: str, default=None):
+    if isinstance(profile, dict):
+        return profile.get(field, default)
+    return getattr(profile, field, default)
+
+
+def _profile_row_from_upstream_info(profile) -> dict:
+    """Convert an upstream profile object without re-running expensive probes."""
+    path = _profile_info_value(profile, "path", "")
+    skill_count = _profile_info_value(profile, "skill_count", 0)
+    enabled_skills = _profile_info_value(profile, "enabled_skills", skill_count)
+    total_skills = _profile_info_value(profile, "total_skills", 0)
+    return {
+        "name": _profile_info_value(profile, "name", ""),
+        "path": str(path),
+        "is_default": bool(_profile_info_value(profile, "is_default", False)),
+        "is_active": False,
+        "gateway_running": bool(_profile_info_value(profile, "gateway_running", False)),
+        "model": _profile_info_value(profile, "model"),
+        "provider": _profile_info_value(profile, "provider"),
+        "has_env": bool(_profile_info_value(profile, "has_env", False)),
+        "visible": _profile_visible_from_meta(path),
+        "skill_count": skill_count,
+        "enabled_skills": enabled_skills,
+        "total_skills": total_skills,
+    }
+
+
+def _build_isolated_profile_row_fast(active: str, hermes_home: Path) -> dict | None:
+    """Build isolated-mode metadata without scanning all profiles."""
+    try:
+        from hermes_cli.profiles import _read_config_model
+    except Exception:
+        return None
+    try:
+        model, provider = _read_config_model(hermes_home)
+    except Exception:
+        model, provider = None, None
+    return {
+        "name": active,
+        "path": str(hermes_home),
+        # An isolated path is a named profile directory, even when its display
+        # name is literally ``default``; this matches the upstream path-based
+        # selection used by the compatibility fallback below.
+        "is_default": False,
+        "is_active": True,
+        "gateway_running": False,
+        "model": model,
+        "provider": provider,
+        "has_env": (hermes_home / ".env").exists(),
+        "visible": _profile_visible_from_meta(hermes_home),
+        "skill_count": 0,
+        "enabled_skills": 0,
+        "total_skills": 0,
+    }
 
 
 def list_profiles_api() -> list:
@@ -2055,6 +2302,9 @@ def list_profiles_api() -> list:
     if _is_isolated_profile_mode():
         active = _isolated_profile_name()
         hermes_home = Path(_INITIAL_HERMES_HOME).expanduser()
+        fast_row = _build_isolated_profile_row_fast(active, hermes_home)
+        if fast_row is not None:
+            return _rows_with_profile_expensive_metadata([fast_row], active)
         try:
             from hermes_cli.profiles import list_profiles
             infos = list_profiles()
@@ -2067,39 +2317,29 @@ def list_profiles_api() -> list:
                 except OSError:
                     same_home = False
                 if p.name == active and same_home:
-                    enabled_count, total_count = _get_profile_skills_stats(p.path)
-                    return [{
-                        'name': p.name,
-                        'path': str(p.path),
-                        'is_default': p.is_default,
-                        'is_active': True,  # Always true in isolated mode
-                        'gateway_running': p.gateway_running,
-                        'model': p.model,
-                        'provider': p.provider,
-                        'has_env': p.has_env,
-                        'visible': _profile_visible_from_meta(p.path),
-                        'skill_count': enabled_count,
-                        'enabled_skills': enabled_count,
-                        'total_skills': total_count,
-                    }]
+                    row = _profile_row_from_upstream_info(p)
+                    row["is_active"] = True  # Always true in isolated mode
+                    return _rows_with_profile_expensive_metadata([row], active)
         except (ImportError, OSError, PermissionError):
             pass
         # Fallback: construct profile dict with actual active name and hermes_home path
-        enabled_count, total_count = _get_profile_skills_stats(hermes_home)
-        return [{
-            'name': active,
-            'path': str(hermes_home),
-            'is_default': active == 'default',
-            'is_active': True,
-            'gateway_running': False,
-            'model': None,
-            'provider': None,
-            'has_env': (hermes_home / '.env').exists(),
-            'visible': _profile_visible_from_meta(hermes_home),
-            'skill_count': enabled_count,
-            'enabled_skills': enabled_count,
-            'total_skills': total_count,
-        }]
+        return _rows_with_profile_expensive_metadata(
+            [{
+                'name': active,
+                'path': str(hermes_home),
+                'is_default': False,
+                'is_active': True,
+                'gateway_running': False,
+                'model': None,
+                'provider': None,
+                'has_env': (hermes_home / '.env').exists(),
+                'visible': _profile_visible_from_meta(hermes_home),
+                'skill_count': 0,
+                'enabled_skills': 0,
+                'total_skills': 0,
+            }],
+            active,
+        )
 
     # Single-flight the build (#5364): hold the cache lock across the row build
     # so a cold-startup burst of concurrent requests collapses to ONE build while
@@ -2130,27 +2370,13 @@ def list_profiles_api() -> list:
             return [_default_profile_dict()]
 
         active = get_active_profile_name()
-        result = []
-        for p in infos:
-            enabled_count, total_count = _get_profile_skills_stats(p.path)
-            result.append({
-                'name': p.name,
-                'path': str(p.path),
-                'is_default': p.is_default,
-                'is_active': p.name == active,
-                'gateway_running': p.gateway_running,
-                'model': p.model,
-                'provider': p.provider,
-                'has_env': p.has_env,
-                'visible': _profile_visible_from_meta(p.path),
-                'skill_count': enabled_count,
-                'enabled_skills': enabled_count,
-                'total_skills': total_count,
-            })
-        return result
+        return _rows_with_profile_expensive_metadata(
+            [_profile_row_from_upstream_info(p) for p in infos],
+            active,
+        )
 
     active = get_active_profile_name()
-    return [{**p, 'is_active': p['name'] == active} for p in rows]
+    return _rows_with_profile_expensive_metadata(rows, active)
 
 
 def _profile_visible_from_meta(profile_path: Path) -> bool:
@@ -2170,8 +2396,7 @@ def _profile_visible_from_meta(profile_path: Path) -> bool:
 
 def _default_profile_dict() -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
-    enabled_count, compatible_count = _get_profile_skills_stats(_DEFAULT_HERMES_HOME)
-    return {
+    row = {
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
         'is_default': True,
@@ -2181,10 +2406,11 @@ def _default_profile_dict() -> dict:
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'visible': True,
-        'skill_count': enabled_count,
-        'enabled_skills': enabled_count,
-        'total_skills': compatible_count,
+        'skill_count': 0,
+        'enabled_skills': 0,
+        'total_skills': 0,
     }
+    return _rows_with_profile_expensive_metadata([row], 'default')[0]
 
 
 def _validate_profile_name(name: str):

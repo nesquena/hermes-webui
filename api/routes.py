@@ -222,8 +222,12 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
 
 
 def _on_session_list_changed(profile: str | None = None) -> None:
-    """Invalidate in-process /api/sessions cache when sidebar state mutates."""
-    _clear_session_list_cache(profile)
+    """Mark /api/sessions stale when sidebar state mutates.
+
+    Keep the last-known snapshot available to the next poll; the route cache
+    owns the single-flight background rebuild of historical projection data.
+    """
+    _session_list_cache_invalidate(profile)
     # #4842: also drop the inner CLI/cron projection cache. While a turn streams
     # that cache is frozen on a stable streaming marker (so per-token message
     # writes don't bust it), which means it no longer self-invalidates via the
@@ -477,6 +481,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     get_active_hermes_home,
     list_profiles_api,
     profile_scope_for_detached_worker,
+    _invalidate_profile_expensive_metadata_cache,
 )
 
 
@@ -1940,6 +1945,7 @@ _SESSIONS_CACHE_TTL_SECONDS = _route_session_list_cache._SESSIONS_CACHE_TTL_SECO
 _SESSIONS_CACHE_WAIT_SECONDS = _route_session_list_cache._SESSIONS_CACHE_WAIT_SECONDS
 _clear_session_list_cache = _route_session_list_cache._clear_session_list_cache
 _session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
+_session_list_cache_invalidate = _route_session_list_cache._session_list_cache_invalidate
 _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
@@ -2731,8 +2737,12 @@ def _get_cached_session_list_payload(
         return cached
 
     stale = cached  # now actually a stale payload when one exists, else None
-    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
-    if stale is not None and stale_reason != "source":
+    # Both age and source/invalidation changes are stale-while-revalidate cases.
+    # The source stamp can cover state.db, WAL, and a SQLite fingerprint, so do
+    # not synchronously rebuild merely because it changed. Runtime overlays are
+    # applied below on every response; the historical projection is refreshed
+    # by this single-flight background owner.
+    if stale is not None:
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:
             if diag is not None:
@@ -27959,6 +27969,7 @@ def _handle_skill_save(handler, body):
         return bad(handler, "Cannot save to a symlinked skill file")
     skill_file.write_text(body["content"], encoding="utf-8")
     _SKILLS_STATS_CACHE.clear()
+    _invalidate_profile_expensive_metadata_cache(skills_dir.parent)
     return j(handler, {"ok": True, "name": skill_name, "path": str(skill_file)})
 
 
@@ -27979,6 +27990,7 @@ def _handle_skill_delete(handler, body):
     skill_dir = matches[0].parent
     shutil.rmtree(str(skill_dir))
     _SKILLS_STATS_CACHE.clear()
+    _invalidate_profile_expensive_metadata_cache(skills_dir.parent)
     return j(handler, {"ok": True, "name": body["name"]})
 
 
@@ -28054,6 +28066,7 @@ def _handle_skill_toggle(handler, body):
 
     reload_config()  # outside with block — reload_config() acquires the lock itself
     _SKILLS_STATS_CACHE.clear()
+    _invalidate_profile_expensive_metadata_cache(config_path.parent)
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
