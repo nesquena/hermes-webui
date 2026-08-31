@@ -46,6 +46,11 @@ def _make_managed_term(sid="managed-bcast"):
     term.generation = "d1f0b824-6973-46db-b898-d075ec492474"
     term.pgid = term.proc.pid
     term.owned_pgid_verified = True
+    term.leader_identity = terminal.ManagedProcessIdentity(
+        pid=term.proc.pid,
+        handle=SimpleNamespace(close=lambda: None),
+        backend="test",
+    )
     term.persistent_when_unwatched = True
     term._backlog = terminal.collections.deque()
     return term
@@ -282,7 +287,9 @@ def test_managed_reconnect_gap_emits_reset_and_redraws_owned_group(monkeypatch):
     signals = []
     monkeypatch.setattr(terminal.os, "getpgid", lambda pid: term.pgid)
     monkeypatch.setattr(
-        terminal.os, "killpg", lambda pgid, sig: signals.append((pgid, sig))
+        terminal.os,
+        "killpg",
+        lambda pgid, sig: signals.append((pgid, sig)) if sig else None,
     )
 
     replay = term.subscribe(after_seq=1, generation=term.generation)
@@ -295,8 +302,8 @@ def test_managed_reconnect_gap_emits_reset_and_redraws_owned_group(monkeypatch):
 
 def test_generation_mismatch_resets_without_signalling_foreign_group(monkeypatch):
     term = _make_managed_term()
+    term.leader_identity.closed = True
     signals = []
-    monkeypatch.setattr(terminal.os, "getpgid", lambda pid: term.pgid + 1)
     monkeypatch.setattr(
         terminal.os, "killpg", lambda pgid, sig: signals.append((pgid, sig))
     )

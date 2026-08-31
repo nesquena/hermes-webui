@@ -19163,6 +19163,34 @@ def _claude_status_projection(descriptor, coarse_status: str) -> dict:
     }
 
 
+def _claude_active_terminal_projection(term) -> dict | None:
+    projection = getattr(term, "claude_projection", None)
+    if not isinstance(projection, dict):
+        return None
+    expected = {
+        "kind",
+        "profile",
+        "label",
+        "can_remote_resume",
+        "workspace_label",
+    }
+    if set(projection) != expected or projection.get("kind") != "claude_code":
+        return None
+    profile = projection.get("profile")
+    label = projection.get("label")
+    workspace_label = projection.get("workspace_label")
+    if (
+        profile not in {"qwen", "ornith"}
+        or not isinstance(label, str)
+        or not label
+        or projection.get("can_remote_resume") is not True
+        or not isinstance(workspace_label, str)
+        or not workspace_label
+    ):
+        return None
+    return {**projection, "coarse_status": "active_here"}
+
+
 def _handle_claude_code_status(handler, parsed):
     if not _claude_bridge_gate(handler):
         return True
@@ -19172,12 +19200,16 @@ def _handle_claude_code_status(handler, parsed):
     from api import claude_code_bridge
     from api.terminal import get_managed_terminal_for_public_session
 
+    existing = get_managed_terminal_for_public_session(public_id)
+    if existing is not None:
+        projection = _claude_active_terminal_projection(existing)
+        if projection is None:
+            return j(handler, {"error": "not_found"}, status=404)
+        return j(handler, projection)
     descriptor = claude_code_bridge.resolve_session(public_id)
     if descriptor is None:
         return j(handler, {"error": "not_found"}, status=404)
-    if get_managed_terminal_for_public_session(public_id) is not None:
-        coarse_status = "active_here"
-    elif not getattr(descriptor, "can_remote_resume", False):
+    if not getattr(descriptor, "can_remote_resume", False):
         coarse_status = "unsafe_session"
     else:
         try:
@@ -19237,15 +19269,15 @@ def _handle_claude_code_resume(handler, body):
     from api import claude_code_bridge
     from api import terminal
 
+    existing = terminal.get_managed_terminal_for_public_session(public_id)
+    if existing is not None:
+        return _claude_terminal_response(handler, existing, attached=True)
+
     descriptor = claude_code_bridge.resolve_session(public_id)
     if descriptor is None:
         return j(handler, {"error": "not_found"}, status=404)
     if not getattr(descriptor, "can_remote_resume", False):
         return j(handler, {"error": "unsafe_session"}, status=422)
-
-    existing = terminal.get_managed_terminal_for_public_session(public_id)
-    if existing is not None:
-        return _claude_terminal_response(handler, existing, attached=True)
 
     try:
         state = claude_code_bridge.probe_runtime_status(
@@ -19259,7 +19291,13 @@ def _handle_claude_code_resume(handler, body):
         return j(handler, {"error": "ownership_unknown"}, status=503)
 
     try:
-        term = terminal.start_managed_terminal(public_id, descriptor.cwd)
+        projection = _claude_status_projection(descriptor, "inactive")
+        projection.pop("coarse_status", None)
+        term = terminal.start_managed_terminal(
+            public_id,
+            descriptor.cwd,
+            claude_projection=projection,
+        )
     except terminal.ManagedTerminalLimitError:
         return j(handler, {"error": "terminal_limit"}, status=429)
     except terminal.ManagedTerminalStartError as exc:
@@ -19497,11 +19535,16 @@ def _handle_claude_code_terminal_output(handler, parsed):
         attach_managed_terminal,
     )
 
-    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "")
-    if after_seq is None and last_event_id:
-        after_seq = _claude_terminal_cursor(last_event_id)
-        if after_seq is None:
+    last_event_id = handler.headers.get("Last-Event-ID")
+    if last_event_id is not None:
+        header_cursor = _claude_terminal_cursor(last_event_id)
+        if header_cursor is None:
             return j(handler, {"error": "invalid_request"}, status=400)
+        after_seq = (
+            header_cursor
+            if after_seq is None
+            else max(after_seq, header_cursor)
+        )
     try:
         term, output = attach_managed_terminal(
             handle=handle,
@@ -19548,7 +19591,11 @@ def _handle_claude_code_terminal_output(handler, parsed):
             elif event == "terminal_reset":
                 payload = {"generation": term.generation}
             _sse_with_id(handler, event, payload, event_id=event_seq)
-            if event in {"terminal_closed", "terminal_error"}:
+            if event in {
+                "terminal_closed",
+                "terminal_error",
+                "terminal_reset",
+            }:
                 break
     except _CLIENT_DISCONNECT_ERRORS:
         pass

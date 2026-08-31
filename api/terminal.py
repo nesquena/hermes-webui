@@ -198,6 +198,69 @@ def acquire_managed_terminal_singleton(
 
 
 @dataclass
+class ManagedProcessIdentity:
+    pid: int
+    handle: object
+    backend: str
+    closed: bool = False
+
+    def wait_for_exit(self, timeout: float) -> bool:
+        if self.closed:
+            return False
+        if self.backend == "kqueue":
+            return bool(self.handle.control(None, 1, max(0.0, timeout)))
+        if self.backend == "pidfd":
+            poller = select.poll()
+            poller.register(self.handle, select.POLLIN)
+            return bool(poller.poll(max(0, int(timeout * 1000))))
+        return False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.handle.close()
+        except AttributeError:
+            _safe_close_fd(self.handle)
+
+
+def _capture_managed_process_identity(
+    proc: subprocess.Popen,
+) -> ManagedProcessIdentity | None:
+    """Retain a kernel-bound handle for the exact child created by Popen."""
+    if getattr(proc, "returncode", None) is not None:
+        return None
+    if hasattr(os, "pidfd_open"):
+        try:
+            return ManagedProcessIdentity(
+                pid=proc.pid,
+                handle=os.pidfd_open(proc.pid),
+                backend="pidfd",
+            )
+        except OSError:
+            return None
+    if hasattr(select, "kqueue"):
+        watcher = select.kqueue()
+        try:
+            event = select.kevent(
+                proc.pid,
+                filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                fflags=select.KQ_NOTE_EXIT,
+            )
+            watcher.control([event], 0, 0)
+            return ManagedProcessIdentity(
+                pid=proc.pid,
+                handle=watcher,
+                backend="kqueue",
+            )
+        except (OSError, ValueError):
+            watcher.close()
+    return None
+
+
+@dataclass
 class TerminalSession:
     session_id: str
     workspace: str
@@ -249,6 +312,8 @@ class TerminalSession:
     runner_owns_lease: bool = False
     lease_owner_pid: int | None = None
     owned_pgid_verified: bool = False
+    leader_identity: ManagedProcessIdentity | None = None
+    claude_projection: dict | None = None
     backlog_bytes: int = 0
     _capabilities: dict[str, tuple[str, str, float]] = field(default_factory=dict)
     _activity_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -389,18 +454,29 @@ def _managed_output_size(event: str, payload: dict) -> int:
     )
 
 
-def _verified_process_group_exists(proc: subprocess.Popen, pgid: int | None) -> bool:
-    """Check a PGID that was verified as the spawned leader's immediately after spawn."""
+def _managed_leader_is_unreaped(
+    proc: subprocess.Popen,
+    identity: ManagedProcessIdentity | None,
+) -> bool:
+    """Keep the spawned leader's PID reserved while its group may be signalled."""
+    return bool(
+        identity is not None
+        and not identity.closed
+        and identity.pid == proc.pid
+        and getattr(proc, "returncode", None) is None
+    )
+
+
+def _verified_process_group_exists(
+    proc: subprocess.Popen,
+    pgid: int | None,
+    identity: ManagedProcessIdentity | None,
+) -> bool:
+    """Check a PGID while retaining the verified leader's child identity."""
     if pgid is None or pgid <= 0 or pgid != proc.pid:
         return False
-    if proc.poll() is None:
-        try:
-            return os.getpgid(proc.pid) == pgid
-        except ProcessLookupError:
-            pass
-        except OSError as exc:
-            if exc.errno != errno.ESRCH:
-                return False
+    if not _managed_leader_is_unreaped(proc, identity):
+        return False
     try:
         os.killpg(pgid, 0)
         return True
@@ -414,15 +490,20 @@ def _owned_group_exists(term: TerminalSession) -> bool:
     """Check the immutable process group that was verified immediately after spawn."""
     if not term.owned_pgid_verified:
         return False
-    return _verified_process_group_exists(term.proc, term.pgid)
+    return _verified_process_group_exists(
+        term.proc,
+        term.pgid,
+        term.leader_identity,
+    )
 
 
 def _signal_verified_process_group(
     proc: subprocess.Popen,
     pgid: int | None,
+    identity: ManagedProcessIdentity | None,
     sig: int,
 ) -> bool:
-    if not _verified_process_group_exists(proc, pgid):
+    if not _verified_process_group_exists(proc, pgid, identity):
         return False
     try:
         os.killpg(pgid, sig)
@@ -435,17 +516,22 @@ def _signal_owned_group(term: TerminalSession, sig: int) -> bool:
     """Signal only the runner-owned group verified immediately after spawn."""
     if not term.owned_pgid_verified:
         return False
-    return _signal_verified_process_group(term.proc, term.pgid, sig)
+    return _signal_verified_process_group(
+        term.proc,
+        term.pgid,
+        term.leader_identity,
+        sig,
+    )
 
 
 def _wait_for_verified_process_group_exit(
     proc: subprocess.Popen,
     pgid: int | None,
+    identity: ManagedProcessIdentity | None,
     timeout: float,
 ) -> bool:
     deadline = time.monotonic() + timeout
-    while _verified_process_group_exists(proc, pgid):
-        _reap_terminal_descendants(pgid or proc.pid)
+    while _verified_process_group_exists(proc, pgid, identity):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.01)
@@ -788,8 +874,11 @@ def _reader_loop(term: TerminalSession) -> None:
         term.put_output("terminal_error", {"error": str(exc)})
     finally:
         term.closed.set()
-        code = term.proc.poll()
-        _reap_terminal_descendants(term.pgid or term.proc.pid)
+        if term.kind == "claude_code":
+            code = None
+        else:
+            code = term.proc.poll()
+            _reap_terminal_descendants(term.pgid or term.proc.pid)
         term.put_output("terminal_closed", {"exit_code": code})
         # The shell has exited (or its pty broke): retire the session so its
         # master fd and _TERMINALS entry are released. Previously only an
@@ -1044,6 +1133,7 @@ def start_managed_terminal(
     workspace: Path,
     rows: int = 24,
     cols: int = 80,
+    claude_projection: dict | None = None,
 ) -> TerminalSession:
     """Start the fixed Task 2 runner under a persistent managed PTY."""
     global _MANAGED_START_RESERVATIONS
@@ -1074,6 +1164,7 @@ def start_managed_terminal(
     proc = None
     term = None
     actual_pgid = None
+    leader_identity = None
     rolled_back = False
     published = False
     try:
@@ -1105,6 +1196,9 @@ def start_managed_terminal(
             actual_pgid = None
         if actual_pgid != proc.pid:
             raise ManagedTerminalStartError("ownership_unknown")
+        leader_identity = _capture_managed_process_identity(proc)
+        if leader_identity is None:
+            raise ManagedTerminalStartError("ownership_unknown")
 
         term = TerminalSession(
             session_id=handle,
@@ -1123,6 +1217,12 @@ def start_managed_terminal(
             runner_owns_lease=True,
             lease_owner_pid=proc.pid,
             owned_pgid_verified=True,
+            leader_identity=leader_identity,
+            claude_projection=(
+                dict(claude_projection)
+                if isinstance(claude_projection, dict)
+                else None
+            ),
             _backlog=collections.deque(),
         )
         _set_nonblocking(master_fd)
@@ -1149,8 +1249,17 @@ def start_managed_terminal(
         if term is not None:
             _teardown_managed_terminal(term)
             rolled_back = True
-        elif proc is not None and actual_pgid == proc.pid:
-            _teardown_verified_managed_spawn(proc, actual_pgid, master_fd)
+        elif (
+            proc is not None
+            and actual_pgid == proc.pid
+            and leader_identity is not None
+        ):
+            _teardown_verified_managed_spawn(
+                proc,
+                actual_pgid,
+                master_fd,
+                leader_identity,
+            )
             rolled_back = True
         elif proc is not None:
             try:
@@ -1495,7 +1604,11 @@ def _teardown_terminal(term: TerminalSession) -> None:
 def _teardown_managed_terminal(term: TerminalSession) -> None:
     """Stop only the verified runner-owned group, then drain and close its PTY."""
     if term.owned_pgid_verified:
-        _stop_verified_managed_group(term.proc, term.pgid)
+        _stop_verified_managed_group(
+            term.proc,
+            term.pgid,
+            term.leader_identity,
+        )
 
     reader = term.reader
     if (
@@ -1513,28 +1626,37 @@ def _teardown_managed_terminal(term: TerminalSession) -> None:
     term.closed.set()
     with term.io_lock:
         _safe_close_fd(term.master_fd)
-    _reap_terminal_descendants(term.pgid or term.proc.pid)
+    if term.leader_identity is not None:
+        term.leader_identity.close()
 
 
 def _stop_verified_managed_group(
     proc: subprocess.Popen,
     pgid: int | None,
+    identity: ManagedProcessIdentity | None,
 ) -> None:
+    if not _managed_leader_is_unreaped(proc, identity):
+        return
     escalation = (
         (signal.SIGHUP, 0.75),
         (signal.SIGTERM, 0.75),
         (signal.SIGKILL, 1.0),
     )
     for sig, timeout in escalation:
-        if not _signal_verified_process_group(proc, pgid, sig):
+        if not _signal_verified_process_group(proc, pgid, identity, sig):
             break
-        if _wait_for_verified_process_group_exit(proc, pgid, timeout):
+        if _wait_for_verified_process_group_exit(
+            proc,
+            pgid,
+            identity,
+            timeout,
+        ):
             break
 
     try:
-        proc.wait(timeout=0)
+        proc.wait(timeout=0.25)
     except (AttributeError, OSError, subprocess.TimeoutExpired, ProcessLookupError):
-        pass
+        return
     _reap_terminal_descendants(pgid or proc.pid)
 
 
@@ -1561,14 +1683,16 @@ def _teardown_verified_managed_spawn(
     proc: subprocess.Popen,
     pgid: int,
     master_fd: int,
+    identity: ManagedProcessIdentity | None,
 ) -> None:
     """Roll back a verified spawn before a TerminalSession can own it."""
     try:
-        _stop_verified_managed_group(proc, pgid)
+        _stop_verified_managed_group(proc, pgid, identity)
         _drain_managed_pty_fd(master_fd)
     finally:
         _safe_close_fd(master_fd)
-        _reap_terminal_descendants(pgid)
+        if identity is not None:
+            identity.close()
 
 
 def close_all_terminals() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import select
 import shlex
 import subprocess
 import sys
@@ -379,10 +380,15 @@ def test_runner_sends_one_bounded_ready_record_then_execs_fixed_wrapper(tmp_path
     read_fd, write_fd = os.pipe()
     exec_call = []
 
+    def ready_without_fork(_descriptor, readiness_fd, _pgid, _close_fds):
+        runner._write_readiness(readiness_fd, "ready")
+        return -1
+
     result = runner.run_session(
         descriptor.public_id,
         write_fd,
         exec_fn=lambda executable, argv: exec_call.append((executable, tuple(argv))),
+        post_exec_check_fn=ready_without_fork,
     )
     readiness = os.read(read_fd, 1024)
     os.close(read_fd)
@@ -390,12 +396,20 @@ def test_runner_sends_one_bounded_ready_record_then_execs_fixed_wrapper(tmp_path
     assert result == 0
     assert readiness == b'{"state":"ready"}\n'
     assert len(readiness) <= runner.READINESS_MAX_BYTES
-    assert exec_call == [(descriptor.profile.argv[0], (
-        descriptor.profile.argv[0],
+    assert len(exec_call) == 1
+    assert exec_call[0][1][0] == descriptor.profile.argv[0]
+    wrapper_arguments = (
         "--hermes-lease-held",
         "--resume",
         descriptor.claude_session_id,
-    ))]
+    )
+    if sys.platform == "darwin":
+        assert exec_call[0][0] == "/bin/sh"
+        assert exec_call[0][1][1].startswith("/dev/fd/")
+        assert exec_call[0][1][2:] == wrapper_arguments
+    else:
+        assert exec_call[0][0].startswith("/dev/fd/")
+        assert exec_call[0][1][1:] == wrapper_arguments
 
 
 def test_runner_execs_from_revalidated_descriptor_workspace(tmp_path, monkeypatch):
@@ -407,6 +421,10 @@ def test_runner_execs_from_revalidated_descriptor_workspace(tmp_path, monkeypatc
     monkeypatch.setattr(runner, "resolve_session", lambda public_id: descriptor)
     read_fd, write_fd = os.pipe()
     exec_contexts = []
+    def ready_without_fork(_descriptor, readiness_fd, _pgid, _close_fds):
+        runner._write_readiness(readiness_fd, "ready")
+        return -1
+
     original_cwd = Path.cwd()
     try:
         os.chdir(wrong_workspace)
@@ -416,6 +434,7 @@ def test_runner_execs_from_revalidated_descriptor_workspace(tmp_path, monkeypatc
             exec_fn=lambda _executable, _argv: exec_contexts.append(
                 (Path.cwd(), os.environ.get("PWD"))
             ),
+            post_exec_check_fn=ready_without_fork,
         )
     finally:
         os.chdir(original_cwd)
@@ -457,6 +476,114 @@ def test_runner_rejects_transcript_or_wrapper_replaced_while_acquiring_lease(tmp
     assert result == 1
     assert readiness == b'{"state":"invalid_session"}\n'
     assert exec_call == []
+
+
+def test_post_exec_probe_preserves_duplicate_session_owners_for_collision_check(
+    tmp_path,
+    monkeypatch,
+):
+    import api.claude_code_bridge as bridge
+
+    descriptor = _descriptor(tmp_path, "printf '%s' '[]'\n")
+    rows = [
+        {
+            "sessionId": descriptor.claude_session_id,
+            "status": "busy",
+            "kind": "interactive",
+            "cwd": str(descriptor.cwd),
+            "pid": 101,
+            "name": "Hermes",
+        },
+        {
+            "sessionId": descriptor.claude_session_id,
+            "status": "idle",
+            "kind": "interactive",
+            "cwd": str(descriptor.cwd),
+            "pid": 202,
+            "name": "Local",
+        },
+    ]
+    monkeypatch.setattr(
+        bridge,
+        "_run_agents_command",
+        lambda _store: json.dumps(rows).encode("utf-8"),
+    )
+
+    assert bridge.probe_runtime_owner_pids(descriptor) == (101, 202)
+
+
+def test_post_exec_checker_waits_for_exec_then_reports_foreign_owner(
+    tmp_path,
+    monkeypatch,
+):
+    import api.claude_code_runner as runner
+
+    descriptor = _descriptor(tmp_path, "printf '%s' '[]'\n")
+    expected_pgid = 303
+    foreign_pid = 404
+    monkeypatch.setattr(
+        runner,
+        "probe_runtime_owner_pids",
+        lambda _descriptor: (expected_pgid, foreign_pid),
+    )
+    monkeypatch.setattr(
+        runner.os,
+        "getpgid",
+        lambda pid: expected_pgid if pid == expected_pgid else foreign_pid,
+    )
+    readiness_read, readiness_write = os.pipe()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        exec_status = runner._start_post_exec_ownership_check(
+            descriptor,
+            readiness_write,
+            expected_pgid,
+            (),
+        )
+    try:
+        assert select.select([readiness_read], [], [], 0.05)[0] == []
+        os.write(exec_status, b"E")
+        os.close(exec_status)
+        exec_status = -1
+        assert os.read(readiness_read, 1024) == b'{"state":"ownership_conflict"}\n'
+    finally:
+        if exec_status >= 0:
+            os.close(exec_status)
+        os.close(readiness_read)
+
+
+def test_retained_wrapper_fd_executes_verified_inode_after_named_replacement(
+    tmp_path,
+):
+    import api.claude_code_runner as runner
+
+    descriptor = _descriptor(tmp_path, "printf '%s' '[]'\n")
+    wrapper_path = Path(descriptor.profile.argv[0])
+    wrapper_fd = runner._open_verified_wrapper(descriptor)
+    assert wrapper_fd is not None
+    replacement = _executable(tmp_path / "replacement-final", "exit 42\n")
+    os.replace(replacement, wrapper_path)
+    argv = (
+        str(wrapper_path),
+        "--hermes-lease-held",
+        "--resume",
+        descriptor.claude_session_id,
+    )
+    captured = {}
+    try:
+        runner._execute_verified_wrapper(
+            wrapper_fd,
+            argv,
+            fexec_fn=lambda fd, args, _env: captured.update(
+                body=os.pread(fd, 1024, 0),
+                argv=tuple(args),
+            ),
+        )
+    finally:
+        os.close(wrapper_fd)
+
+    assert captured["body"] == b"#!/bin/sh\nexit 0\n"
+    assert captured["argv"] == argv
 
 
 @pytest.mark.parametrize(

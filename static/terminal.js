@@ -653,6 +653,16 @@ function _connectClaudeTerminalOutput(context){
     try{generation=(JSON.parse(ev.data)||{}).generation||'';}catch(_){ }
     if(generation&&generation!==TERMINAL_UI.generation)return;
     if(TERMINAL_UI.term)TERMINAL_UI.term.clear();
+    try{if(source.readyState!==EventSource.CLOSED)source.close();}catch(_){ }
+    if(TERMINAL_UI.source===source)TERMINAL_UI.source=null;
+    Promise.resolve().then(()=>{
+      if(!_isClaudeTerminalContextCurrent(context)||document.hidden||TERMINAL_UI.source)return false;
+      return _reconnectClaudeTerminal();
+    }).catch(err=>{
+      if(!_isClaudeTerminalContextCurrent(context))return;
+      if(typeof recordClientSSEError==='function')recordClientSSEError('claude-terminal',{reason:'Claude terminal reset reconnect failed'});
+      if(TERMINAL_UI.term)TERMINAL_UI.term.writeln('\r\n[terminal reconnect failed]\r\n');
+    });
   });
   source.addEventListener('terminal_closed',ev=>{
     if(TERMINAL_UI.source!==source)return;

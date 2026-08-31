@@ -48,11 +48,25 @@ class _ReadyProc:
         return 0
 
 
+class _IdentityHandle:
+    def close(self):
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _clean_registry(monkeypatch):
     with terminal._LOCK:
         terminal._TERMINALS.clear()
     monkeypatch.setattr(terminal.os, "killpg", lambda *_args: None)
+    monkeypatch.setattr(
+        terminal,
+        "_capture_managed_process_identity",
+        lambda proc: terminal.ManagedProcessIdentity(
+            pid=proc.pid,
+            handle=_IdentityHandle(),
+            backend="test",
+        ),
+    )
     yield
     with terminal._LOCK:
         terms = list(terminal._TERMINALS.values())
@@ -205,7 +219,9 @@ def test_stale_stream_generation_receives_reset_through_authorised_attach(
     )
     signals = []
     monkeypatch.setattr(
-        terminal.os, "killpg", lambda pgid, sig: signals.append((pgid, sig))
+        terminal.os,
+        "killpg",
+        lambda pgid, sig: signals.append((pgid, sig)) if sig else None,
     )
 
     attached, output = terminal.attach_managed_terminal(

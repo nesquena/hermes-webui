@@ -145,6 +145,13 @@ def managed_terminals():
             _backlog=collections.deque(),
         )
         term.public_session_id = public_id
+        term.claude_projection = {
+            "kind": "claude_code",
+            "profile": "qwen",
+            "label": "Claude Qwen",
+            "can_remote_resume": True,
+            "workspace_label": "QwenLocal",
+        }
         with terminal._LOCK:
             terminal._TERMINALS[handle] = term
         return term
@@ -306,7 +313,8 @@ def test_resume_reuses_existing_hermes_terminal_without_probe_or_spawn(
 ):
     existing, _other = managed_terminals
     monkeypatch.setattr(
-        "api.claude_code_bridge.resolve_session", lambda _public_id: _descriptor()
+        "api.claude_code_bridge.resolve_session",
+        lambda _public_id: pytest.fail("existing terminal must not rescan transcript"),
     )
     monkeypatch.setattr(
         "api.claude_code_bridge.probe_runtime_status",
@@ -336,6 +344,34 @@ def test_resume_reuses_existing_hermes_terminal_without_probe_or_spawn(
         header.startswith(f"{stream_cookie_name}=")
         for header in response.headers_named("Set-Cookie")
     )
+
+
+def test_active_status_uses_retained_projection_during_transcript_write(
+    monkeypatch,
+    managed_terminals,
+):
+    existing, _other = managed_terminals
+    existing.put_output("output", {"text": "transcript still writing"})
+    monkeypatch.setattr(
+        "api.claude_code_bridge.resolve_session",
+        lambda _public_id: pytest.fail("active status must not rescan transcript"),
+    )
+    monkeypatch.setattr(
+        "api.claude_code_bridge.probe_runtime_status",
+        lambda *_args, **_kwargs: pytest.fail("active status must not probe"),
+    )
+
+    response = _get(f"/api/claude-code/status?session_id={PUBLIC_ID}")
+
+    assert response.status == 200
+    assert response.json() == {
+        "kind": "claude_code",
+        "profile": "qwen",
+        "label": "Claude Qwen",
+        "can_remote_resume": True,
+        "coarse_status": "active_here",
+        "workspace_label": "QwenLocal",
+    }
 
 
 def test_resume_attach_race_returns_indistinguishable_not_found(
@@ -543,7 +579,10 @@ def test_resume_starts_only_authoritative_descriptor_workspace(monkeypatch):
     monkeypatch.setattr(
         terminal,
         "start_managed_terminal",
-        lambda public_id, workspace: started.append((public_id, workspace)) or created,
+        lambda public_id, workspace, **kwargs: started.append(
+            (public_id, workspace, kwargs["claude_projection"])
+        )
+        or created,
     )
     monkeypatch.setattr(
         terminal,
@@ -555,7 +594,19 @@ def test_resume_starts_only_authoritative_descriptor_workspace(monkeypatch):
 
     assert response.status == 200
     assert response.json()["attached"] is False
-    assert started == [(PUBLIC_ID, descriptor.cwd)]
+    assert started == [
+        (
+            PUBLIC_ID,
+            descriptor.cwd,
+            {
+                "kind": "claude_code",
+                "profile": "qwen",
+                "label": "Claude Qwen",
+                "can_remote_resume": True,
+                "workspace_label": "QwenLocal",
+            },
+        )
+    ]
 
 
 def test_terminal_token_is_cookie_only_and_operation_scoped(managed_terminals):
@@ -880,6 +931,87 @@ def test_stream_cursor_query_replays_only_unseen_output(
     assert "new-output" in stream
     assert "id: 2" in stream
     assert capability not in stream
+
+
+def test_stream_prefers_newer_last_event_id_over_stale_query_cursor(
+    monkeypatch,
+    managed_terminals,
+):
+    term, _other = managed_terminals
+    capability = terminal.issue_terminal_capability(
+        term.handle, term.generation, "stream"
+    )
+    term.put_output("output", {"text": "query-already-rendered"})
+    term.put_output("output", {"text": "header-already-rendered"})
+    term.put_output("output", {"text": "new-output"})
+    term.put_output("terminal_closed", {"exit_code": 0})
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+    path = (
+        "/api/claude-code/terminal/output"
+        f"?handle={term.handle}&generation={term.generation}&cursor=1"
+    )
+    headers = _cookie_header(term, "stream", capability)
+    headers["Last-Event-ID"] = "2"
+
+    response = _get(path, headers=headers)
+
+    assert response.status == 200
+    stream = response.wfile.getvalue().decode("utf-8")
+    assert "query-already-rendered" not in stream
+    assert "header-already-rendered" not in stream
+    assert "new-output" in stream
+
+
+@pytest.mark.parametrize("last_event_id", ["00", " 1", "1.0", "+1"])
+def test_stream_rejects_invalid_last_event_id_even_with_valid_query_cursor(
+    last_event_id,
+    managed_terminals,
+):
+    term, _other = managed_terminals
+    path = (
+        "/api/claude-code/terminal/output"
+        f"?handle={term.handle}&generation={term.generation}&cursor=1"
+    )
+
+    response = _get(path, headers={"Last-Event-ID": last_event_id})
+
+    assert response.status == 400
+    assert response.json() == {"error": "invalid_request"}
+
+
+def test_overflow_reset_terminates_managed_sse_stream(
+    monkeypatch,
+    managed_terminals,
+):
+    term, _other = managed_terminals
+    capability = terminal.issue_terminal_capability(
+        term.handle, term.generation, "stream"
+    )
+    monkeypatch.setattr(terminal, "_MANAGED_OUTPUT_BACKLOG_BYTES", 32)
+    overflowed = term.subscribe(generation=term.generation)
+    term.put_output("output", {"text": "x" * 64})
+    assert overflowed not in term._subscribers
+    term.closed.set()
+    monkeypatch.setattr(
+        terminal,
+        "attach_managed_terminal",
+        lambda **_kwargs: (term, overflowed),
+    )
+    monkeypatch.setattr(routes, "_SSE_HEARTBEAT_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+    path = (
+        "/api/claude-code/terminal/output"
+        f"?handle={term.handle}&generation={term.generation}"
+    )
+
+    response = _get(
+        path,
+        headers=_cookie_header(term, "stream", capability),
+    )
+
+    stream = response.wfile.getvalue().decode("utf-8")
+    assert stream.count("event: terminal_reset") == 1
+    assert "event: terminal_closed" not in stream
 
 
 def test_stream_cursor_behind_backlog_floor_emits_terminal_reset(

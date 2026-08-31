@@ -38,6 +38,19 @@ class _FakeProc:
         return 0
 
 
+class _IdentityHandle:
+    def close(self):
+        pass
+
+
+def _fake_identity(proc):
+    return terminal.ManagedProcessIdentity(
+        pid=proc.pid,
+        handle=_IdentityHandle(),
+        backend="test",
+    )
+
+
 def test_terminal_shell_does_not_use_pdeathsig_preexec(monkeypatch, tmp_path):
     """Regression for #2853.
 
@@ -150,8 +163,6 @@ def test_stop_managed_terminal_escalates_owned_group_and_drains_reader(monkeypat
 
         def wait(self, timeout=None):
             self.wait_calls.append(timeout)
-            if len(self.wait_calls) < 3:
-                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
             return -9
 
     class Reader:
@@ -179,14 +190,26 @@ def test_stop_managed_terminal_escalates_owned_group_and_drains_reader(monkeypat
     term.generation = "5f47cc5d-ec48-4ed8-973b-5972f115c9cc"
     term.pgid = proc.pid
     term.owned_pgid_verified = True
+    term.leader_identity = _fake_identity(proc)
     term.persistent_when_unwatched = True
     term.reader = reader
     term.reader_started = True
     terminal._TERMINALS[term.handle] = term
-    monkeypatch.setattr(terminal.os, "getpgid", lambda pid: term.pgid)
+    monkeypatch.setattr(
+        terminal,
+        "_managed_leader_is_unreaped",
+        lambda _proc, _identity: True,
+    )
+    monkeypatch.setattr(
+        terminal,
+        "_wait_for_verified_process_group_exit",
+        lambda _proc, _pgid, _identity, _timeout: False,
+    )
     kills = []
     monkeypatch.setattr(
-        terminal.os, "killpg", lambda pgid, sig: kills.append((pgid, sig))
+        terminal.os,
+        "killpg",
+        lambda pgid, sig: kills.append((pgid, sig)) if sig else None,
     )
     capability = terminal.issue_terminal_capability(
         term.handle, term.generation, "stop"
@@ -231,17 +254,12 @@ def test_managed_teardown_never_signals_unverified_process_group(monkeypatch):
     assert signals == []
 
 
-def test_owned_group_check_survives_leader_exit_between_poll_and_getpgid(
+def test_owned_group_check_survives_unreaped_leader_exit(
     monkeypatch,
 ):
     class RacingProc:
         pid = 717_717
-
-        def __init__(self):
-            self.exited = False
-
-        def poll(self):
-            return 0 if self.exited else None
+        returncode = None
 
     proc = RacingProc()
     term = terminal.TerminalSession(
@@ -252,28 +270,58 @@ def test_owned_group_check_survives_leader_exit_between_poll_and_getpgid(
         kind="claude_code",
         pgid=proc.pid,
         owned_pgid_verified=True,
+        leader_identity=_fake_identity(proc),
     )
 
-    def leader_disappears(_pid):
-        proc.exited = True
-        raise ProcessLookupError
-
     signals = []
-    monkeypatch.setattr(terminal.os, "getpgid", leader_disappears)
+    monkeypatch.setattr(
+        terminal.os,
+        "killpg",
+        lambda pgid, sig: signals.append((pgid, sig)) if sig else None,
+    )
+
+    assert terminal._signal_owned_group(term, signal.SIGTERM) is True
+    assert signals == [(proc.pid, signal.SIGTERM)]
+
+
+def test_owned_group_check_never_signals_after_leader_identity_was_reaped(
+    monkeypatch,
+):
+    class ReapedProc:
+        pid = 717_718
+        returncode = 0
+
+        def poll(self):
+            raise AssertionError("managed ownership checks must not poll/reap")
+
+    proc = ReapedProc()
+    term = terminal.TerminalSession(
+        session_id="managed-reused-pgid",
+        workspace="/tmp",
+        proc=proc,
+        master_fd=-1,
+        kind="claude_code",
+        pgid=proc.pid,
+        owned_pgid_verified=True,
+        leader_identity=_fake_identity(proc),
+    )
+    signals = []
     monkeypatch.setattr(
         terminal.os,
         "killpg",
         lambda pgid, sig: signals.append((pgid, sig)),
     )
 
-    assert terminal._signal_owned_group(term, signal.SIGTERM) is True
-    assert signals == [(proc.pid, 0), (proc.pid, signal.SIGTERM)]
+    assert terminal._signal_owned_group(term, signal.SIGTERM) is False
+    assert signals == []
 
 
 def _process_group_exists(pgid):
     try:
         os.killpg(pgid, 0)
         return True
+    except PermissionError:
+        return False
     except ProcessLookupError:
         return False
 
@@ -285,6 +333,10 @@ def _wait_for_path(path: Path, timeout=3):
             return
         time.sleep(0.01)
     raise AssertionError(f"timed out waiting for {path}")
+
+
+def _wait_for_unreaped_exit(identity, timeout=3):
+    assert identity.wait_for_exit(timeout), "timed out waiting for unreaped process exit"
 
 
 def test_stop_continues_after_leader_exit_until_owned_group_is_extinct(tmp_path):
@@ -307,10 +359,12 @@ def test_stop_continues_after_leader_exit_until_owned_group_is_extinct(tmp_path)
         close_fds=True,
         start_new_session=True,
     )
+    identity = terminal._capture_managed_process_identity(proc)
+    assert identity is not None
     os.close(slave_fd)
     try:
         _wait_for_path(child_pid_path)
-        proc.wait(timeout=3)
+        _wait_for_unreaped_exit(identity)
         assert _process_group_exists(proc.pid)
         term = terminal.TerminalSession(
             session_id="managed-real-group",
@@ -324,6 +378,7 @@ def test_stop_continues_after_leader_exit_until_owned_group_is_extinct(tmp_path)
             persistent_when_unwatched=True,
         )
         term.owned_pgid_verified = True
+        term.leader_identity = identity
         terminal._TERMINALS[term.handle] = term
         capability = terminal.issue_terminal_capability(
             term.handle, term.generation, "stop"
@@ -340,7 +395,7 @@ def test_stop_continues_after_leader_exit_until_owned_group_is_extinct(tmp_path)
             time.sleep(0.01)
         assert not _process_group_exists(proc.pid)
     finally:
-        if _process_group_exists(proc.pid):
+        if proc.returncode is None and _process_group_exists(proc.pid):
             os.killpg(proc.pid, signal.SIGKILL)
         try:
             os.close(master_fd)
@@ -380,10 +435,12 @@ def test_reader_drains_final_child_output_after_leader_exit(tmp_path):
         close_fds=True,
         start_new_session=True,
     )
+    identity = terminal._capture_managed_process_identity(proc)
+    assert identity is not None
     os.close(slave_fd)
     try:
         _wait_for_path(child_pid_path)
-        proc.wait(timeout=3)
+        _wait_for_unreaped_exit(identity)
         terminal._set_nonblocking(master_fd)
         term = terminal.TerminalSession(
             session_id="managed-final-output",
@@ -397,6 +454,7 @@ def test_reader_drains_final_child_output_after_leader_exit(tmp_path):
             persistent_when_unwatched=True,
         )
         term.owned_pgid_verified = True
+        term.leader_identity = identity
         output = term.subscribe(generation=term.generation)
         term.reader = threading.Thread(target=terminal._reader_loop, args=(term,))
         term.reader.start()
@@ -411,7 +469,7 @@ def test_reader_drains_final_child_output_after_leader_exit(tmp_path):
         ]
         assert "final-write" in "".join(texts)
     finally:
-        if _process_group_exists(proc.pid):
+        if proc.returncode is None and _process_group_exists(proc.pid):
             os.killpg(proc.pid, signal.SIGKILL)
         try:
             os.close(master_fd)

@@ -593,13 +593,16 @@ def test_claude_reconnect_uses_last_sse_cursor_and_reset_clears_before_redraw():
   assert(second.url.includes('cursor=7'));
   assert(!second.url.includes('capability'));
   second.emit('terminal_reset',JSON.stringify({generation:'generation-1'}),'8');
-  second.emit('output',JSON.stringify({text:'redraw'}),'9');
+  await new Promise(resolve=>setImmediate(resolve));
+  const third=FakeEventSource.instances[2];
+  assert(second.closed);
+  assert(third.url.includes('cursor=8'));
+  second.emit('output',JSON.stringify({text:'stranded'}),'9');
+  third.emit('output',JSON.stringify({text:'redraw'}),'9');
   assert.strictEqual(clearCalls,1);
   assert.strictEqual(calls.filter(value=>value==='write:first').length,1);
   assert.strictEqual(calls.filter(value=>value==='write:redraw').length,1);
-  _disconnectTerminalSource();
-  await _reconnectClaudeTerminal();
-  assert(FakeEventSource.instances[2].url.includes('cursor=9'));
+  assert.strictEqual(calls.filter(value=>value==='write:stranded').length,0);
   console.log(JSON.stringify({urls:FakeEventSource.instances.map(source=>source.url),clearCalls,writes:calls.filter(value=>typeof value==='string'&&value.startsWith('write:'))}));
 """
         )
@@ -607,7 +610,7 @@ def test_claude_reconnect_uses_last_sse_cursor_and_reset_clears_before_redraw():
     assert result["clearCalls"] == 1
     assert result["writes"] == ["write:first", "write:redraw"]
     assert "cursor=7" in result["urls"][1]
-    assert "cursor=9" in result["urls"][2]
+    assert "cursor=8" in result["urls"][2]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

@@ -697,7 +697,11 @@ def _run_agents_command(store: ClaudeStore) -> bytes | None:
         proc.stderr.close()
 
 
-def _validated_agent_rows(payload: bytes) -> tuple[dict, ...] | None:
+def _validated_agent_rows(
+    payload: bytes,
+    *,
+    allow_duplicate_session_ids: bool = False,
+) -> tuple[dict, ...] | None:
     def reject_duplicate_keys(pairs):
         result = {}
         for key, value in pairs:
@@ -724,7 +728,7 @@ def _validated_agent_rows(payload: bytes) -> tuple[dict, ...] | None:
         pid = row.get("pid")
         if (
             session_id is None
-            or session_id in seen
+            or (session_id in seen and not allow_duplicate_session_ids)
             or not isinstance(row.get("status"), str)
             or not isinstance(row.get("kind"), str)
             or not isinstance(row.get("cwd"), str)
@@ -791,6 +795,29 @@ def probe_runtime_status(
     if any(row["sessionId"] == descriptor.claude_session_id for row in rows):
         return ClaudeRuntimeStatus("active_elsewhere")
     return ClaudeRuntimeStatus("inactive")
+
+
+def probe_runtime_owner_pids(
+    descriptor: ClaudeSessionDescriptor,
+) -> tuple[int, ...] | None:
+    """Return all matching owner PIDs for the bounded post-exec collision check."""
+    try:
+        payload = _run_agents_command(descriptor.store)
+        if payload is None:
+            return None
+        rows = _validated_agent_rows(
+            payload,
+            allow_duplicate_session_ids=True,
+        )
+    except Exception:
+        return None
+    if rows is None:
+        return None
+    return tuple(
+        row["pid"]
+        for row in rows
+        if row["sessionId"] == descriptor.claude_session_id
+    )
 
 
 def build_resume_argv(descriptor: ClaudeSessionDescriptor) -> tuple[str, ...]:

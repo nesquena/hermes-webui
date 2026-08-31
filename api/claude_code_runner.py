@@ -7,8 +7,10 @@ import fcntl
 import hashlib
 import json
 import os
+import select
 import stat
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -20,6 +22,7 @@ if __package__ in {None, ""}:
 from api.claude_code_bridge import (
     ClaudeSessionDescriptor,
     build_resume_argv,
+    probe_runtime_owner_pids,
     probe_runtime_status,
     resolve_session,
 )
@@ -28,7 +31,10 @@ from api.claude_code_bridge import (
 LOCK_DIRECTORY_NAME = ".hermes-resume-locks"
 READINESS_MAX_BYTES = 256
 LEASE_FD_ENVIRONMENT_KEY = "HERMES_RESUME_LEASE_FD"
+WRAPPER_FD_ENVIRONMENT_KEY = "HERMES_RESUME_WRAPPER_FD"
 PRIVATE_LEASE_FLAG = "--hermes-lease-held"
+POST_EXEC_HANDOFF_TIMEOUT_SECONDS = 2.0
+POST_EXEC_CONFIRM_DELAY_SECONDS = 0.1
 
 
 @dataclass
@@ -295,6 +301,14 @@ def run_wrapper_protocol(
             lease = acquire_resume_lease(Path(config_dir), store_id, session_id)
             if lease is None:
                 return 1
+    wrapper_fd_environment = os.environ.pop(WRAPPER_FD_ENVIRONMENT_KEY, None)
+    if wrapper_fd_environment is not None:
+        try:
+            wrapper_fd = int(wrapper_fd_environment)
+            if lease is None or wrapper_fd != lease.fd:
+                os.close(wrapper_fd)
+        except (OSError, ValueError):
+            pass
     inherited_fd_environment = os.environ.pop(LEASE_FD_ENVIRONMENT_KEY, None)
     try:
         exec_fn(command, (command, *args))
@@ -354,6 +368,223 @@ def _launch_path_signature(descriptor: ClaudeSessionDescriptor) -> tuple | None:
     return tuple(identities)
 
 
+def _open_verified_wrapper(
+    descriptor: ClaudeSessionDescriptor,
+) -> int | None:
+    if descriptor.profile is None or not descriptor.profile.argv:
+        return None
+    path = Path(descriptor.profile.argv[0])
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        opened = os.fstat(fd)
+        named = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or opened.st_nlink != 1
+            or not opened.st_mode & stat.S_IXUSR
+            or opened.st_dev != named.st_dev
+            or opened.st_ino != named.st_ino
+            or stat.S_ISLNK(named.st_mode)
+        ):
+            os.close(fd)
+            return None
+        os.set_inheritable(fd, True)
+        return fd
+    except OSError:
+        try:
+            os.close(fd)
+        except (OSError, UnboundLocalError):
+            pass
+        return None
+
+
+def _execute_verified_wrapper(
+    wrapper_fd: int,
+    argv: Sequence[str],
+    *,
+    exec_fn: Callable[[str, Sequence[str]], object] = os.execv,
+    fexec_fn: Callable[[int, Sequence[str], dict[str, str]], object] | None = None,
+) -> object:
+    previous_wrapper_fd = os.environ.get(WRAPPER_FD_ENVIRONMENT_KEY)
+    os.environ[WRAPPER_FD_ENVIRONMENT_KEY] = str(wrapper_fd)
+    try:
+        if fexec_fn is not None:
+            return fexec_fn(wrapper_fd, argv, os.environ)
+        native_fexec = getattr(os, "fexecve", None)
+        if native_fexec is not None:
+            return native_fexec(wrapper_fd, argv, os.environ)
+        descriptor_path = f"/dev/fd/{wrapper_fd}"
+        opened = os.fstat(wrapper_fd)
+        validation_fd = os.open(descriptor_path, os.O_RDONLY)
+        try:
+            retained = os.fstat(validation_fd)
+            if opened.st_dev != retained.st_dev or opened.st_ino != retained.st_ino:
+                raise OSError(errno.ESTALE, "verified wrapper descriptor changed")
+        finally:
+            os.close(validation_fd)
+        if sys.platform == "darwin":
+            first_line = os.pread(wrapper_fd, 512, 0).split(b"\n", 1)[0]
+            try:
+                shebang = first_line.decode("ascii")
+            except UnicodeError as exc:
+                raise OSError(errno.ENOEXEC, "invalid wrapper shebang") from exc
+            parts = shebang[2:].strip().split() if shebang.startswith("#!") else []
+            if len(parts) != 1 or not Path(parts[0]).is_absolute():
+                raise OSError(errno.ENOEXEC, "invalid wrapper shebang")
+            interpreter = parts[0]
+            allowed_interpreters = {"/bin/sh", "/bin/zsh", sys.executable}
+            if interpreter not in allowed_interpreters:
+                raise OSError(errno.ENOEXEC, "unsupported wrapper interpreter")
+            return exec_fn(
+                interpreter,
+                (argv[0], descriptor_path, *argv[1:]),
+            )
+        return exec_fn(descriptor_path, argv)
+    finally:
+        if previous_wrapper_fd is None:
+            os.environ.pop(WRAPPER_FD_ENVIRONMENT_KEY, None)
+        else:
+            os.environ[WRAPPER_FD_ENVIRONMENT_KEY] = previous_wrapper_fd
+
+
+def _read_post_exec_handoff(fd: int) -> bool:
+    deadline = time.monotonic() + POST_EXEC_HANDOFF_TIMEOUT_SECONDS
+    payload = bytearray()
+    while len(payload) <= 2:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            return False
+        chunk = os.read(fd, 3 - len(payload))
+        if not chunk:
+            return bytes(payload) == b"E"
+        payload.extend(chunk)
+    return False
+
+
+def _post_exec_ownership_state(
+    descriptor: ClaudeSessionDescriptor,
+    expected_pgid: int,
+) -> str:
+    for attempt in range(2):
+        owners = probe_runtime_owner_pids(descriptor)
+        if owners is None:
+            return "ownership_unknown"
+        foreign_owner = False
+        for pid in owners:
+            try:
+                owner_pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                return "ownership_unknown"
+            if owner_pgid != expected_pgid:
+                foreign_owner = True
+        if foreign_owner:
+            return "ownership_conflict"
+        if attempt == 0:
+            time.sleep(POST_EXEC_CONFIRM_DELAY_SECONDS)
+    return "ready"
+
+
+def _post_exec_ownership_check_child(
+    descriptor: ClaudeSessionDescriptor,
+    readiness_fd: int,
+    exec_status_fd: int,
+    expected_pgid: int,
+    close_fds: Sequence[int],
+) -> None:
+    for fd in close_fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        state = (
+            _post_exec_ownership_state(descriptor, expected_pgid)
+            if _read_post_exec_handoff(exec_status_fd)
+            else "ownership_unknown"
+        )
+    except Exception:
+        state = "ownership_unknown"
+    finally:
+        try:
+            os.close(exec_status_fd)
+        except OSError:
+            pass
+    _write_readiness(readiness_fd, state)
+
+
+def _start_post_exec_ownership_check(
+    descriptor: ClaudeSessionDescriptor,
+    readiness_fd: int,
+    expected_pgid: int,
+    close_fds: Sequence[int],
+) -> int | None:
+    exec_status_read, exec_status_write = os.pipe()
+    ack_read, ack_write = os.pipe()
+    try:
+        first_child = os.fork()
+    except OSError:
+        os.close(exec_status_read)
+        os.close(exec_status_write)
+        os.close(ack_read)
+        os.close(ack_write)
+        _write_readiness(readiness_fd, "ownership_unknown")
+        return None
+    if first_child == 0:
+        os.close(exec_status_write)
+        os.close(ack_read)
+        try:
+            checker = os.fork()
+        except OSError:
+            try:
+                os.write(ack_write, b"F")
+            except OSError:
+                pass
+            _write_readiness(readiness_fd, "ownership_unknown")
+            os._exit(1)
+        if checker:
+            os.close(ack_write)
+            os.close(exec_status_read)
+            os._exit(0)
+        try:
+            os.write(ack_write, b"O")
+        except OSError:
+            pass
+        os.close(ack_write)
+        _post_exec_ownership_check_child(
+            descriptor,
+            readiness_fd,
+            exec_status_read,
+            expected_pgid,
+            close_fds,
+        )
+        os._exit(0)
+
+    os.close(exec_status_read)
+    os.close(ack_write)
+    try:
+        acknowledged = os.read(ack_read, 1) == b"O"
+    except OSError:
+        acknowledged = False
+    finally:
+        os.close(ack_read)
+        try:
+            os.waitpid(first_child, 0)
+        except (ChildProcessError, OSError):
+            acknowledged = False
+    if not acknowledged:
+        os.close(exec_status_write)
+        return None
+    os.close(readiness_fd)
+    return exec_status_write
+
+
 def _write_readiness(fd: int, state: str) -> None:
     record = json.dumps({"state": state}, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(record) > READINESS_MAX_BYTES:
@@ -379,8 +610,11 @@ def run_session(
     readiness_fd: int,
     *,
     exec_fn: Callable[[str, Sequence[str]], object] = os.execv,
+    post_exec_check_fn: Callable[
+        [ClaudeSessionDescriptor, int, int, Sequence[int]], int | None
+    ] = _start_post_exec_ownership_check,
 ) -> int:
-    """Acquire, revalidate, probe, report readiness, then replace this process."""
+    """Acquire, revalidate, then report readiness after replacing this process."""
     descriptor = resolve_session(public_id)
     if descriptor is None or not descriptor.can_remote_resume:
         _write_readiness(readiness_fd, "invalid_session")
@@ -397,6 +631,8 @@ def run_session(
     if lease is None:
         _write_readiness(readiness_fd, "active_elsewhere")
         return 1
+    wrapper_fd = -1
+    exec_status_fd = -1
     try:
         current = resolve_session(public_id)
         if (
@@ -415,21 +651,57 @@ def run_session(
         if runtime.state != "inactive":
             _write_readiness(readiness_fd, "ownership_unknown")
             return 1
-        argv = build_resume_argv(current)
+        launch_descriptor = resolve_session(public_id)
+        if (
+            launch_descriptor is None
+            or _descriptor_signature(launch_descriptor)
+            != _descriptor_signature(current)
+            or _launch_path_signature(launch_descriptor) != path_signature
+        ):
+            _write_readiness(readiness_fd, "invalid_session")
+            return 1
+        wrapper_fd = _open_verified_wrapper(launch_descriptor)
+        if wrapper_fd is None:
+            _write_readiness(readiness_fd, "invalid_session")
+            return 1
+        argv = build_resume_argv(launch_descriptor)
         previous_cwd = Path.cwd()
         try:
-            os.chdir(current.cwd)
+            os.chdir(launch_descriptor.cwd)
         except (OSError, TypeError):
             _write_readiness(readiness_fd, "invalid_session")
             return 1
         previous_pwd = os.environ.get("PWD")
-        os.environ["PWD"] = str(current.cwd)
-        _write_readiness(readiness_fd, "ready")
+        os.environ["PWD"] = str(launch_descriptor.cwd)
         previous_lease_fd = os.environ.get(LEASE_FD_ENVIRONMENT_KEY)
         os.environ[LEASE_FD_ENVIRONMENT_KEY] = str(lease.fd)
         try:
-            exec_fn(argv[0], argv)
+            exec_status = post_exec_check_fn(
+                launch_descriptor,
+                readiness_fd,
+                os.getpgrp(),
+                (lease.fd, wrapper_fd),
+            )
+            if exec_status is None:
+                return 1
+            exec_status_fd = exec_status
+            if exec_status_fd >= 0:
+                os.write(exec_status_fd, b"E")
+            _execute_verified_wrapper(
+                wrapper_fd,
+                argv,
+                exec_fn=exec_fn,
+            )
         finally:
+            if exec_status_fd >= 0:
+                try:
+                    os.write(exec_status_fd, b"F")
+                except OSError:
+                    pass
+                try:
+                    os.close(exec_status_fd)
+                except OSError:
+                    pass
             if previous_lease_fd is None:
                 os.environ.pop(LEASE_FD_ENVIRONMENT_KEY, None)
             else:
@@ -443,6 +715,11 @@ def run_session(
     except (OSError, ValueError):
         return 1
     finally:
+        if wrapper_fd >= 0:
+            try:
+                os.close(wrapper_fd)
+            except OSError:
+                pass
         if lease is not None:
             lease.close()
 
