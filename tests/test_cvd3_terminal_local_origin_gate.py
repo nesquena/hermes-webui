@@ -111,6 +111,28 @@ def test_terminal_gate_honors_onboarding_open_escape_hatch(monkeypatch):
     assert routes._embedded_terminal_gate_allows(handler) is True
 
 
+def test_claude_bridge_gate_never_honors_onboarding_open(monkeypatch):
+    """The capability bridge requires configured auth even on a local/open install."""
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: False)
+    monkeypatch.setenv("HERMES_WEBUI_ONBOARDING_OPEN", "1")
+    handler = _Handler(client_ip="127.0.0.1", headers={})
+
+    assert routes._claude_bridge_authenticated(handler) is False
+
+
+def test_claude_bridge_gate_requires_verified_authenticated_state(monkeypatch):
+    from api import routes
+
+    monkeypatch.setattr("api.auth.is_auth_enabled", lambda: True)
+    monkeypatch.setattr("api.auth.parse_cookie", lambda _handler: "forged")
+    monkeypatch.setattr("api.auth.verify_session", lambda _cookie: False)
+    handler = _Handler(client_ip="127.0.0.1", headers={})
+
+    assert routes._claude_bridge_authenticated(handler) is False
+
+
 # --------------------------------------------------------------------------
 # Handler dispatch — the RCE-bearing endpoints refuse public clients (403)
 # without ever reaching the PTY-spawning code.

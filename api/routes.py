@@ -2926,6 +2926,8 @@ from api.helpers import (
     strip_public_internal_fields,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
+    get_claude_terminal_capability_cookie,
+    queue_claude_terminal_capability_cookie,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -12865,6 +12867,11 @@ def _render_index_shell_base() -> str:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    if parsed.path == "/api/claude-code/status":
+        return _handle_claude_code_status(handler, parsed)
+    if parsed.path == "/api/claude-code/terminal/output":
+        return _handle_claude_code_terminal_output(handler, parsed)
+
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
@@ -14891,6 +14898,8 @@ def _resolve_new_session_workspace(body, visible_prev_session_id):
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
+    if parsed.path.startswith("/api/claude-code/"):
+        _claude_bridge_response_headers(handler)
     if parsed.path == "/api/csp-report":
         if diag:
             diag.stage("csp_report")
@@ -14989,6 +14998,17 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+    if parsed.path == "/api/claude-code/resume":
+        return _handle_claude_code_resume(handler, body)
+    if parsed.path == "/api/claude-code/terminal-token":
+        return _handle_claude_code_terminal_token(handler, body)
+    if parsed.path == "/api/claude-code/terminal/input":
+        return _handle_claude_code_terminal_input(handler, body)
+    if parsed.path == "/api/claude-code/terminal/resize":
+        return _handle_claude_code_terminal_resize(handler, body)
+    if parsed.path == "/api/claude-code/stop":
+        return _handle_claude_code_stop(handler, body)
+
     if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):
         if diag:
             diag.finish()
@@ -19027,6 +19047,439 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
 
 _handle_session_sse_stream_for_session = _handle_session_run_journal_stream_for_session
+
+
+_CLAUDE_BRIDGE_SINGLETON = None
+_CLAUDE_BRIDGE_SINGLETON_LOCK = threading.Lock()
+_CLAUDE_BRIDGE_SINGLETON_PATH = STATE_DIR / ".claude-code-bridge.lock"
+_CLAUDE_TERMINAL_OPERATIONS = frozenset({"stream", "input", "resize", "stop"})
+
+
+def _claude_bridge_response_headers(handler) -> None:
+    handler._referrer_policy = "no-referrer"
+
+
+def _claude_bridge_authenticated(handler) -> bool:
+    """Require configured Hermes auth plus verified request-bound state."""
+    from api.auth import (
+        ensure_trusted_auth_session,
+        is_auth_enabled,
+        parse_cookie,
+        trusted_session_allows_active_profile,
+        verify_session,
+    )
+
+    if not is_auth_enabled():
+        return False
+    cookie_value = parse_cookie(handler) or getattr(
+        handler, "_trusted_auth_session_cookie_value", None
+    )
+    if cookie_value and verify_session(cookie_value):
+        return True
+    try:
+        session_info = ensure_trusted_auth_session(handler)
+    except Exception:
+        return False
+    return bool(
+        session_info and trusted_session_allows_active_profile(session_info)
+    )
+
+
+def _ensure_claude_bridge_singleton() -> bool:
+    """Hold Task 3's process lock for the lifetime of this WebUI process."""
+    global _CLAUDE_BRIDGE_SINGLETON
+    if _CLAUDE_BRIDGE_SINGLETON is not None:
+        return True
+    with _CLAUDE_BRIDGE_SINGLETON_LOCK:
+        if _CLAUDE_BRIDGE_SINGLETON is not None:
+            return True
+        from api.terminal import acquire_managed_terminal_singleton
+
+        singleton = acquire_managed_terminal_singleton(
+            _CLAUDE_BRIDGE_SINGLETON_PATH
+        )
+        if singleton is None:
+            return False
+        _CLAUDE_BRIDGE_SINGLETON = singleton
+        return True
+
+
+def _claude_bridge_gate(handler) -> bool:
+    _claude_bridge_response_headers(handler)
+    if not _claude_bridge_authenticated(handler):
+        j(handler, {"error": "authentication_required"}, status=403)
+        return False
+    if not _ensure_claude_bridge_singleton():
+        j(handler, {"error": "single_process_required"}, status=503)
+        return False
+    return True
+
+
+def _claude_exact_body(body, fields: set[str]) -> bool:
+    return isinstance(body, dict) and set(body) == fields
+
+
+def _claude_body_strings(body, *fields: str) -> tuple[str, ...] | None:
+    values = tuple(str(body.get(field) or "").strip() for field in fields)
+    return values if all(values) else None
+
+
+def _claude_query_value(parsed, field: str) -> str | None:
+    values = parse_qs(parsed.query, keep_blank_values=True)
+    if set(values) != {field} or len(values[field]) != 1:
+        return None
+    value = str(values[field][0] or "").strip()
+    return value or None
+
+
+def _claude_status_query_session_id(parsed) -> str | None:
+    return _claude_query_value(parsed, "session_id")
+
+
+def _claude_profile_name(descriptor) -> str | None:
+    model_id = getattr(getattr(descriptor, "profile", None), "model_id", None)
+    return {
+        "anthropic.qwen-aeon": "qwen",
+        "anthropic.ornith": "ornith",
+    }.get(model_id)
+
+
+def _claude_status_projection(descriptor, coarse_status: str) -> dict:
+    profile = getattr(descriptor, "profile", None)
+    store = getattr(descriptor, "store", None)
+    return {
+        "kind": "claude_code",
+        "profile": _claude_profile_name(descriptor),
+        "label": getattr(profile, "label", None)
+        or getattr(store, "label", "Claude Code"),
+        "can_remote_resume": bool(
+            getattr(descriptor, "can_remote_resume", False)
+        ),
+        "coarse_status": coarse_status,
+        "workspace_label": getattr(descriptor, "workspace_label", None)
+        or "Claude Code",
+    }
+
+
+def _handle_claude_code_status(handler, parsed):
+    if not _claude_bridge_gate(handler):
+        return True
+    public_id = _claude_status_query_session_id(parsed)
+    if public_id is None:
+        return j(handler, {"error": "invalid_request"}, status=400)
+    from api import claude_code_bridge
+    from api.terminal import get_managed_terminal_for_public_session
+
+    descriptor = claude_code_bridge.resolve_session(public_id)
+    if descriptor is None:
+        return j(handler, {"error": "not_found"}, status=404)
+    if get_managed_terminal_for_public_session(public_id) is not None:
+        coarse_status = "active_here"
+    elif not getattr(descriptor, "can_remote_resume", False):
+        coarse_status = "unsafe_session"
+    else:
+        try:
+            state = claude_code_bridge.probe_runtime_status(
+                descriptor, fresh=True
+            ).state
+        except Exception:
+            return j(handler, {"error": "ownership_unknown"}, status=503)
+        if state not in {"inactive", "active_elsewhere"}:
+            return j(handler, {"error": "ownership_unknown"}, status=503)
+        coarse_status = state
+    return j(handler, _claude_status_projection(descriptor, coarse_status))
+
+
+def _mint_claude_terminal_capability(handler, term, operation: str) -> None:
+    from api.terminal import issue_terminal_capability
+
+    capability = issue_terminal_capability(
+        term.handle,
+        term.generation,
+        operation,
+    )
+    queue_claude_terminal_capability_cookie(
+        handler,
+        operation,
+        capability,
+    )
+
+
+def _claude_terminal_response(handler, term, *, attached: bool) -> None:
+    try:
+        _mint_claude_terminal_capability(handler, term, "stream")
+    except (KeyError, ValueError):
+        return j(handler, {"error": "not_found"}, status=404)
+    return j(
+        handler,
+        {
+            "ok": True,
+            "attached": attached,
+            "handle": term.handle,
+            "generation": term.generation,
+        },
+    )
+
+
+def _handle_claude_code_resume(handler, body):
+    if not _claude_bridge_gate(handler):
+        return True
+    if not _claude_exact_body(body, {"session_id"}):
+        return j(handler, {"error": "invalid_request"}, status=400)
+    values = _claude_body_strings(body, "session_id")
+    if values is None:
+        return j(handler, {"error": "invalid_request"}, status=400)
+    public_id = values[0]
+    from api import claude_code_bridge
+    from api import terminal
+
+    descriptor = claude_code_bridge.resolve_session(public_id)
+    if descriptor is None:
+        return j(handler, {"error": "not_found"}, status=404)
+    if not getattr(descriptor, "can_remote_resume", False):
+        return j(handler, {"error": "unsafe_session"}, status=422)
+
+    existing = terminal.get_managed_terminal_for_public_session(public_id)
+    if existing is not None:
+        return _claude_terminal_response(handler, existing, attached=True)
+
+    try:
+        state = claude_code_bridge.probe_runtime_status(
+            descriptor, fresh=True
+        ).state
+    except Exception:
+        return j(handler, {"error": "ownership_unknown"}, status=503)
+    if state == "active_elsewhere":
+        return j(handler, {"error": "active_elsewhere"}, status=409)
+    if state != "inactive":
+        return j(handler, {"error": "ownership_unknown"}, status=503)
+
+    try:
+        term = terminal.start_managed_terminal(public_id, descriptor.cwd)
+    except terminal.ManagedTerminalLimitError:
+        return j(handler, {"error": "terminal_limit"}, status=429)
+    except terminal.ManagedTerminalStartError as exc:
+        if exc.state in {"active_elsewhere", "ownership_conflict"}:
+            return j(handler, {"error": "active_elsewhere"}, status=409)
+        if exc.state == "invalid_session":
+            return j(handler, {"error": "not_found"}, status=404)
+        if exc.state == "unsafe_session":
+            return j(handler, {"error": "unsafe_session"}, status=422)
+        return j(handler, {"error": "ownership_unknown"}, status=503)
+    except NotImplementedError:
+        return j(handler, {"error": "single_process_required"}, status=503)
+    except OSError:
+        return j(handler, {"error": "ownership_unknown"}, status=503)
+    except (KeyError, ValueError):
+        return j(handler, {"error": "not_found"}, status=404)
+    except Exception:
+        logger.exception("Claude managed terminal start failed")
+        return j(handler, {"error": "ownership_unknown"}, status=503)
+    return _claude_terminal_response(handler, term, attached=False)
+
+
+def _handle_claude_code_terminal_token(handler, body):
+    if not _claude_bridge_gate(handler):
+        return True
+    if not _claude_exact_body(body, {"handle", "generation", "operation"}):
+        return j(handler, {"error": "invalid_request"}, status=400)
+    values = _claude_body_strings(body, "handle", "generation", "operation")
+    if values is None:
+        return j(handler, {"error": "invalid_request"}, status=400)
+    handle, generation, operation = values
+    if operation not in _CLAUDE_TERMINAL_OPERATIONS:
+        return j(handler, {"error": "invalid_request"}, status=400)
+    from api.terminal import issue_terminal_capability
+
+    try:
+        capability = issue_terminal_capability(handle, generation, operation)
+    except KeyError:
+        return j(handler, {"error": "not_found"}, status=404)
+    queue_claude_terminal_capability_cookie(handler, operation, capability)
+    return j(
+        handler,
+        {
+            "ok": True,
+            "handle": handle,
+            "generation": generation,
+            "operation": operation,
+        },
+    )
+
+
+def _claude_terminal_authority(handler, operation: str) -> str | None:
+    return get_claude_terminal_capability_cookie(handler, operation)
+
+
+def _handle_claude_code_terminal_input(handler, body):
+    if not _claude_bridge_gate(handler):
+        return True
+    if not _claude_exact_body(body, {"handle", "generation", "data"}):
+        return j(handler, {"error": "invalid_request"}, status=400)
+    values = _claude_body_strings(body, "handle", "generation")
+    if values is None or not isinstance(body.get("data"), str):
+        return j(handler, {"error": "invalid_request"}, status=400)
+    data = body["data"]
+    if len(data.encode("utf-8")) > 8192:
+        return j(handler, {"error": "invalid_request"}, status=413)
+    handle, generation = values
+    capability = _claude_terminal_authority(handler, "input")
+    from api.terminal import write_managed_terminal
+
+    try:
+        write_managed_terminal(
+            handle=handle,
+            generation=generation,
+            capability=capability or "",
+            data=data,
+        )
+    except (KeyError, ValueError, OSError):
+        return j(handler, {"error": "not_found"}, status=404)
+    return j(handler, {"ok": True})
+
+
+def _handle_claude_code_terminal_resize(handler, body):
+    if not _claude_bridge_gate(handler):
+        return True
+    if not _claude_exact_body(
+        body, {"handle", "generation", "rows", "cols"}
+    ):
+        return j(handler, {"error": "invalid_request"}, status=400)
+    values = _claude_body_strings(body, "handle", "generation")
+    if values is None:
+        return j(handler, {"error": "invalid_request"}, status=400)
+    try:
+        rows = int(body["rows"])
+        cols = int(body["cols"])
+    except (TypeError, ValueError):
+        return j(handler, {"error": "invalid_request"}, status=400)
+    handle, generation = values
+    capability = _claude_terminal_authority(handler, "resize")
+    from api.terminal import resize_managed_terminal
+
+    try:
+        resize_managed_terminal(
+            handle=handle,
+            generation=generation,
+            capability=capability or "",
+            rows=rows,
+            cols=cols,
+        )
+    except (KeyError, ValueError, OSError):
+        return j(handler, {"error": "not_found"}, status=404)
+    return j(handler, {"ok": True})
+
+
+def _handle_claude_code_stop(handler, body):
+    if not _claude_bridge_gate(handler):
+        return True
+    if not _claude_exact_body(body, {"handle", "generation"}):
+        return j(handler, {"error": "invalid_request"}, status=400)
+    values = _claude_body_strings(body, "handle", "generation")
+    if values is None:
+        return j(handler, {"error": "invalid_request"}, status=400)
+    handle, generation = values
+    capability = _claude_terminal_authority(handler, "stop")
+    from api.terminal import stop_managed_terminal
+
+    try:
+        stop_managed_terminal(
+            handle=handle,
+            generation=generation,
+            capability=capability or "",
+        )
+    except (KeyError, ValueError, OSError):
+        return j(handler, {"error": "not_found"}, status=404)
+    return j(handler, {"ok": True, "stopped": True})
+
+
+def _claude_terminal_stream_query(parsed) -> tuple[str, str] | None:
+    values = parse_qs(parsed.query, keep_blank_values=True)
+    if set(values) != {"handle", "generation"}:
+        return None
+    if len(values["handle"]) != 1 or len(values["generation"]) != 1:
+        return None
+    handle = str(values["handle"][0] or "").strip()
+    generation = str(values["generation"][0] or "").strip()
+    return (handle, generation) if handle and generation else None
+
+
+def _handle_claude_code_terminal_output(handler, parsed):
+    # The handle/generation are not bearer secrets, but the managed stream query
+    # still has no diagnostic value in access logs. Strip it before any exit.
+    handler.path = parsed.path
+    if not _claude_bridge_gate(handler):
+        return True
+    stream_query = _claude_terminal_stream_query(parsed)
+    if stream_query is None:
+        return j(handler, {"error": "invalid_request"}, status=400)
+    handle, generation = stream_query
+    capability = _claude_terminal_authority(handler, "stream")
+    from api.terminal import (
+        ManagedTerminalViewerLimitError,
+        attach_managed_terminal,
+    )
+
+    after_seq = None
+    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "").strip()
+    if last_event_id:
+        try:
+            after_seq = max(0, int(last_event_id))
+        except ValueError:
+            return j(handler, {"error": "invalid_request"}, status=400)
+    try:
+        term, output = attach_managed_terminal(
+            handle=handle,
+            generation=generation,
+            capability=capability or "",
+            after_seq=after_seq,
+        )
+    except KeyError:
+        return j(handler, {"error": "not_found"}, status=404)
+    except ManagedTerminalViewerLimitError:
+        return j(handler, {"error": "terminal_limit"}, status=429)
+
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Referrer-Policy", "no-referrer")
+        handler.send_header("X-Accel-Buffering", "no")
+        end_sse_headers(handler)
+        _sse_set_write_deadline(handler)
+        while True:
+            try:
+                event_seq, event, payload = output.get(
+                    timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS
+                )
+            except queue.Empty:
+                handler.wfile.write(b": terminal heartbeat\n\n")
+                handler.wfile.flush()
+                if term.closed.is_set() and output.empty():
+                    _sse(
+                        handler,
+                        "terminal_closed",
+                        {"generation": term.generation},
+                    )
+                    break
+                continue
+            if event == "terminal_error":
+                payload = {
+                    "error": "terminal_error",
+                    "generation": term.generation,
+                }
+            elif event == "terminal_closed":
+                payload = {"generation": term.generation}
+            elif event == "terminal_reset":
+                payload = {"generation": term.generation}
+            _sse_with_id(handler, event, payload, event_id=event_seq)
+            if event in {"terminal_closed", "terminal_error"}:
+                break
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass
+    finally:
+        term.unsubscribe(output)
+    return True
 
 
 def _terminal_session_lookup(body_or_query):

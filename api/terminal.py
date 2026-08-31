@@ -69,7 +69,9 @@ _MANAGED_TERMINAL_MAX = 2
 _MANAGED_TERMINAL_MAX_VIEWERS = 8
 _MANAGED_TERMINAL_IDLE_SECONDS = 6 * 60 * 60
 _MANAGED_CAPABILITY_TTL_SECONDS = 10 * 60
-_MANAGED_CAPABILITY_OPERATIONS = frozenset({"stream", "input", "stop"})
+_MANAGED_CAPABILITY_OPERATIONS = frozenset(
+    {"stream", "input", "resize", "stop"}
+)
 _MANAGED_RUNNER_READINESS_MAX_BYTES = 256
 _MANAGED_RUNNER_READINESS_TIMEOUT_SECONDS = 5.0
 
@@ -238,6 +240,7 @@ class TerminalSession:
     # spans transient reconnects (a tab refresh re-attaches and clears it).
     unwatched_since: float | None = field(default_factory=time.time)
     kind: str = "shell"
+    public_session_id: str | None = None
     generation: str | None = None
     handle: str | None = None
     argv: tuple[str, ...] = ()
@@ -1105,6 +1108,7 @@ def start_managed_terminal(
 
         term = TerminalSession(
             session_id=handle,
+            public_session_id=public_id,
             workspace=cwd,
             proc=proc,
             master_fd=master_fd,
@@ -1286,9 +1290,27 @@ def resize_managed_terminal(
         handle=handle,
         generation=generation,
         capability=capability,
-        operation="input",
+        operation="resize",
     )
     _set_size(term, rows, cols)
+
+
+def get_managed_terminal_for_public_session(
+    public_session_id: str,
+) -> TerminalSession | None:
+    """Return only a live managed terminal for the opaque persisted row ID."""
+    public_id = str(public_session_id or "").strip()
+    if not public_id:
+        return None
+    with _LOCK:
+        for term in _TERMINALS.values():
+            if (
+                term.kind == "claude_code"
+                and term.public_session_id == public_id
+                and term.is_alive()
+            ):
+                return term
+    return None
 
 
 def stop_managed_terminal(
