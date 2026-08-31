@@ -80,7 +80,7 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
-_CLI_SESSIONS_CACHE_WAIT_SECONDS = 0.25
+_CLI_SESSIONS_CACHE_WAIT_SECONDS =  15.0  # waiters must hold past a concurrent rebuild (observed 3-6s+ on 1.2GB state.db; at 0.25s every tab timed out and ran the full query itself → N-way stampede(
 # Event waits that keep stale rows visible while a rebuild is in flight.
 _CLI_SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
 

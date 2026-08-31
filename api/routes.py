@@ -19569,9 +19569,59 @@ def _handle_gateway_sse_stream(handler, parsed):
 
     q = watcher.subscribe()
     try:
-        # Send initial snapshot immediately
-        from api.models import get_cli_sessions
-        initial = get_cli_sessions()
+        # Send initial snapshot immediately. Use the SAME session-list payload
+        # cache as /api/sessions (single-flight, stale-return, background
+        # rebuild) so N browser tabs / phone reconnects share ONE DB query instead
+        # of each SSE connect running get_cli_sessions() raw on the whole state.db
+        # (~4-5s each, all stacked). (#perf SSE /api/sessions consistency)
+        try:
+            from api import profiles as _profiles_api
+            _settings = load_settings()
+            _initial_payload = _get_cached_session_list_payload(
+                key=_session_list_cache_key(
+                    active_profile=_profiles_api.get_active_profile_name(),
+                    all_profiles=False,
+                    show_cli_sessions=bool(_settings.get("show_cli_sessions")),
+                    show_previous_messaging_sessions=bool(
+                        _settings.get("show_previous_messaging_sessions")
+                    ),
+                    show_cron_sessions=bool(_settings.get("show_cron_sessions")),
+                    show_claude_code_sessions=True,
+                    include_archived=False,
+                    exclude_hidden=False,
+                    visible_only=True,
+                    show_webhook_sessions=bool(_settings.get("show_webhook_sessions")),
+                    show_kanban_sessions=bool(_settings.get("show_kanban_sessions")),
+                    source_filter=_settings.get("agent_session_source_filter"),
+                    sidebar_source=None,
+                    archived_limit=None,
+                    archived_offset=0,
+                ),
+                builder=lambda: _build_session_list_cache_payload(
+                    active_profile=_profiles_api.get_active_profile_name(),
+                    all_profiles=False,
+                    show_cli_sessions=bool(_settings.get("show_cli_sessions")),
+                    show_previous_messaging_sessions=bool(
+                        _settings.get("show_previous_messaging_sessions")
+                    ),
+                    show_cron_sessions=bool(_settings.get("show_cron_sessions")),
+                    show_claude_code_sessions=True,
+                    include_archived=False,
+                    exclude_hidden=False,
+                    visible_only=True,
+                    show_webhook_sessions=bool(_settings.get("show_webhook_sessions")),
+                    show_kanban_sessions=bool(_settings.get("show_kanban_sessions")),
+                    source_filter=_settings.get("agent_session_source_filter"),
+                    sidebar_source=None,
+                    archived_limit=None,
+                    archived_offset=0,
+                ),
+            )
+            initial = _session_list_payload_to_response(_initial_payload).get("sessions", []) or []
+        except Exception:
+            logger.exception("SSE initial session snapshot via cache failed; falling back to direct load")
+            from api.models import get_cli_sessions
+            initial = get_cli_sessions()
         _sse(handler, 'sessions_changed', {'sessions': initial})
 
         while True:
