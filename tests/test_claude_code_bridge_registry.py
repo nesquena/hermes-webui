@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tracemalloc
 from pathlib import Path
 from uuid import uuid4
 
@@ -88,8 +89,8 @@ def _top_user(workspace: Path) -> dict:
     return {"cwd": str(workspace), "message": {"role": "user", "content": "hello"}}
 
 
-def _assistant(model: object, **extra) -> dict:
-    return {**extra, "message": {"role": "assistant", "model": model, "content": "answer"}}
+def _assistant(model: object, content: str = "answer", **extra) -> dict:
+    return {**extra, "message": {"role": "assistant", "model": model, "content": content}}
 
 
 def _configure_valid_store(tmp_path, monkeypatch) -> dict:
@@ -394,3 +395,79 @@ def test_transcript_file_and_line_limits_fail_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_LINES_PER_FILE", 100)
     monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_FILE_BYTES", 1)
     assert bridge.list_public_sessions() == []
+
+
+def test_project_directory_limit_fails_the_entire_store_closed(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")], project="one")
+    _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")], project="two")
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_PROJECT_DIRS", 1)
+
+    assert bridge.list_public_sessions() == []
+
+
+def test_hardlink_added_during_parsing_is_rejected_after_eof(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    session_id = _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")])
+    transcript = Path(store["config_dir"]) / "projects" / "project-a" / f"{session_id}.jsonl"
+    real_loads = bridge.json.loads
+    linked = False
+
+    def link_after_first_record(value):
+        nonlocal linked
+        parsed = real_loads(value)
+        if not linked and isinstance(value, str) and '"sessionId"' in value:
+            os.link(transcript, transcript.with_name(f"linked-{session_id}.jsonl"))
+            linked = True
+        return parsed
+
+    monkeypatch.setattr(bridge.json, "loads", link_after_first_record)
+
+    assert bridge.list_public_sessions() == []
+
+
+def test_nonfinite_transcript_timestamp_cannot_emit_a_public_row(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    _bridge_session(
+        store,
+        [
+            {"cwd": str(workspace), "timestamp": "NaN", "message": {"role": "user", "content": "hello"}},
+            {"timestamp": "Infinity", "message": {"role": "assistant", "model": "anthropic.qwen-aeon", "content": "answer"}},
+        ],
+    )
+
+    assert bridge.list_public_sessions() == []
+
+
+def test_listing_retains_messages_for_only_the_public_descriptor_cap(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    large_content = "x" * 1_000_000
+    for index in range(10):
+        _bridge_session(
+            store,
+            [_top_user(workspace), _assistant("anthropic.qwen-aeon", content=large_content)],
+            project=f"project-{index}",
+        )
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_FILES", 1)
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_CANDIDATES", 10)
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_CONTENT_CHARS", 1_000_000)
+
+    tracemalloc.start()
+    rows = bridge.list_public_sessions()
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert len(rows) == 1
+    assert peak < 8 * 1024 * 1024

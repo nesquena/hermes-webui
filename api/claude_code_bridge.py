@@ -41,6 +41,7 @@ class ClaudeSessionDescriptor:
     cwd: Path | None
     workspace_label: str | None
     messages: tuple[dict, ...]
+    message_count: int
     title: str
     created_at: float | None
     updated_at: float | None
@@ -257,6 +258,15 @@ def _parse_timestamp(value) -> float | None:
             return None
 
 
+def _is_nonfinite_timestamp(value) -> bool:
+    if not isinstance(value, (int, float, str)):
+        return False
+    try:
+        return not math.isfinite(float(value))
+    except ValueError:
+        return False
+
+
 def _extract_text(content) -> str:
     if isinstance(content, str):
         return content[:CLAUDE_CODE_MAX_CONTENT_CHARS]
@@ -306,7 +316,14 @@ def _allowed_workspace(store: ClaudeStore, value) -> Path | None:
     return None
 
 
-def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> ClaudeSessionDescriptor | None:
+def _descriptor_from_fd(
+    store: ClaudeStore,
+    path: Path,
+    fd: int,
+    file_info,
+    *,
+    retain_messages: bool,
+) -> ClaudeSessionDescriptor | None:
     stem_id = _is_uuid(path.stem)
     if stem_id is None or path.suffix.lower() != ".jsonl" or file_info.st_nlink != 1:
         os.close(fd)
@@ -316,6 +333,8 @@ def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> C
     first_timestamp: float | None = None
     last_timestamp: float | None = None
     transcript_ids: set[str] = set()
+    message_count = 0
+    first_user_title: str | None = None
     latest_model: str | None = None
     latest_cwd: Path | None = None
     invalid_cwd = False
@@ -347,13 +366,23 @@ def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> C
                 if normalized_id is None or normalized_id != stem_id:
                     return None
                 transcript_ids.add(normalized_id)
+            record = raw.get("message") if isinstance(raw.get("message"), dict) else raw
+            timestamp_value = next(
+                (
+                    value
+                    for value in (record.get("timestamp"), raw.get("timestamp"), raw.get("created_at"))
+                    if value is not None
+                ),
+                None,
+            )
+            if _is_nonfinite_timestamp(timestamp_value):
+                return None
             if raw.get("isSidechain") or raw.get("isSubagent"):
                 continue
             cwd_value = raw.get("cwd")
             if cwd_value is not None:
                 latest_cwd = _allowed_workspace(store, cwd_value)
                 invalid_cwd = latest_cwd is None
-            record = raw.get("message") if isinstance(raw.get("message"), dict) else raw
             role = str(record.get("role") or raw.get("role") or raw.get("type") or "").lower()
             if role == "human":
                 role = "user"
@@ -365,18 +394,20 @@ def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> C
                 summary = raw.get("summary") or raw.get("title")
                 if isinstance(summary, str) and summary.strip():
                     title = " ".join(summary.split())[:80]
-            if role not in {"user", "assistant", "system", "tool"} or len(messages) >= CLAUDE_CODE_MAX_MESSAGES_PER_FILE:
+            if role not in {"user", "assistant", "system", "tool"}:
                 continue
             content = _extract_text(record.get("content") if "content" in record else raw.get("content"))
             if not content.strip():
                 continue
-            timestamp = _parse_timestamp(
-                record.get("timestamp") or raw.get("timestamp") or raw.get("created_at")
-            )
+            timestamp = _parse_timestamp(timestamp_value)
             if timestamp is not None:
                 first_timestamp = timestamp if first_timestamp is None else min(first_timestamp, timestamp)
                 last_timestamp = timestamp if last_timestamp is None else max(last_timestamp, timestamp)
-            messages.append({"role": role, "content": content, **({"timestamp": timestamp} if timestamp is not None else {})})
+            message_count += 1
+            if role == "user" and first_user_title is None:
+                first_user_title = " ".join(content.split())[:80]
+            if retain_messages and len(messages) < CLAUDE_CODE_MAX_MESSAGES_PER_FILE:
+                messages.append({"role": role, "content": content, **({"timestamp": timestamp} if timestamp is not None else {})})
         if _identity(file_info) != _identity(os.fstat(fd)):
             return None
     except (OSError, UnicodeError):
@@ -388,7 +419,7 @@ def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> C
     profile = store.models.get(latest_model) if latest_model else None
     can_remote_resume = profile is not None and latest_cwd is not None and not invalid_cwd
     if not title:
-        title = next((" ".join(str(message["content"]).split())[:80] for message in messages if message["role"] == "user"), "Claude Code Session")
+        title = first_user_title or "Claude Code Session"
     return ClaudeSessionDescriptor(
         public_id=_public_id(store, stem_id),
         store=store,
@@ -398,6 +429,7 @@ def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> C
         cwd=latest_cwd,
         workspace_label=latest_cwd.name if latest_cwd else None,
         messages=tuple(messages),
+        message_count=message_count,
         title=title,
         created_at=first_timestamp,
         updated_at=last_timestamp,
@@ -406,13 +438,18 @@ def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> C
     )
 
 
-def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
+def _store_descriptors(
+    store: ClaudeStore,
+    *,
+    retain_messages_for: str | None = None,
+) -> list[ClaudeSessionDescriptor]:
     directory_flag = getattr(os, "O_DIRECTORY", 0)
     nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[ClaudeSessionDescriptor] = []
     root_fd = None
     project_count = 0
     candidate_count = 0
+    retained_requested_messages = False
     try:
         root_fd = os.open(store.projects_dir, os.O_RDONLY | directory_flag | nofollow_flag)
         with os.scandir(root_fd) as projects:
@@ -444,7 +481,19 @@ def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
                                 if _identity(before) != _identity(after) or after.st_uid != os.getuid():
                                     continue
                                 path = store.projects_dir / project.name / entry.name
-                                descriptor = _descriptor_from_fd(store, path, file_fd, after)
+                                transcript_id = _is_uuid(path.stem)
+                                retain_messages = (
+                                    transcript_id is not None
+                                    and not retained_requested_messages
+                                    and _public_id(store, transcript_id) == retain_messages_for
+                                )
+                                descriptor = _descriptor_from_fd(
+                                    store,
+                                    path,
+                                    file_fd,
+                                    after,
+                                    retain_messages=retain_messages,
+                                )
                                 file_fd = None
                             except OSError:
                                 continue
@@ -453,6 +502,7 @@ def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
                                     os.close(file_fd)
                             if descriptor is not None:
                                 descriptors.append(descriptor)
+                                retained_requested_messages = retained_requested_messages or retain_messages
                 finally:
                     os.close(project_fd)
     except OSError:
@@ -472,12 +522,14 @@ def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
     ][:CLAUDE_CODE_MAX_FILES]
 
 
-def _descriptors() -> list[ClaudeSessionDescriptor]:
+def _descriptors(*, retain_messages_for: str | None = None) -> list[ClaudeSessionDescriptor]:
     descriptors: list[ClaudeSessionDescriptor] = []
     for store in load_claude_stores():
         # UUID uniqueness is store-local. Opaque public IDs include the store
         # ID, keeping equal UUIDs from distinct configured stores unambiguous.
-        descriptors.extend(_store_descriptors(store))
+        descriptors.extend(
+            _store_descriptors(store, retain_messages_for=retain_messages_for)
+        )
     return descriptors
 
 
@@ -497,7 +549,7 @@ def _public_projection(descriptor: ClaudeSessionDescriptor) -> dict:
         "title": descriptor.title,
         "workspace": descriptor.workspace_label or "Claude Code",
         "model": "claude-code",
-        "message_count": len(descriptor.messages),
+        "message_count": descriptor.message_count,
         "created_at": descriptor.created_at or timestamp,
         "updated_at": timestamp,
         "last_message_at": timestamp,
@@ -528,7 +580,7 @@ def list_public_sessions() -> list[dict]:
 
 def resolve_session(public_id) -> ClaudeSessionDescriptor | None:
     """Re-resolve an opaque public row ID from configured stores."""
-    for descriptor in _descriptors():
+    for descriptor in _descriptors(retain_messages_for=str(public_id or "")):
         if descriptor.public_id == str(public_id or ""):
             return descriptor
     return None
