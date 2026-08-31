@@ -17,8 +17,8 @@ Usage: ./ctl.sh <command> [args]
 
 Commands:
   start [bootstrap args...]   Start Hermes WebUI as a background daemon
-  stop                        Stop the daemon started by ctl.sh
-  restart [bootstrap args...] Stop, then start again
+  stop [--force]              Stop the daemon started by ctl.sh
+  restart [--force]           Stop, then start again
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
@@ -704,6 +704,18 @@ _warn_if_unmanaged_instance_serving() {
 
 stop_cmd() {
   ensure_home
+  local force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force|-f) force=1 ;;
+      *)
+        echo "[ctl] Unknown stop option: $1" >&2
+        return 2
+        ;;
+    esac
+    shift
+  done
+
   local pid
   if ! pid="$(_pid_from_file 2>/dev/null)"; then
     echo "[ctl] Hermes WebUI is stopped"
@@ -720,10 +732,22 @@ stop_cmd() {
     return 0
   fi
 
+  if (( force )); then
+    echo "[ctl] Force-stopping Hermes WebUI (PID ${pid})"
+    _stop_webui_pid "${pid}" KILL
+    rm -f "${PID_FILE}" "${STATE_FILE}"
+    return 0
+  fi
+
   echo "[ctl] Stopping Hermes WebUI (PID ${pid})"
   _stop_webui_pid "${pid}" TERM
-  local i
-  for i in {1..50}; do
+  # server.py's graceful drain is bounded independently; leave enough time
+  # for its default ten-second deadline while keeping ctl.sh itself bounded.
+  local stop_timeout="${HERMES_WEBUI_STOP_TIMEOUT:-12}"
+  [[ "${stop_timeout}" =~ ^[0-9]+$ ]] || stop_timeout=12
+  (( stop_timeout > 0 )) || stop_timeout=12
+  local stop_steps=$(( stop_timeout * 10 )) i
+  for (( i=0; i<stop_steps; i++ )); do
     if ! _is_alive "${pid}"; then
       rm -f "${PID_FILE}" "${STATE_FILE}"
       echo "[ctl] Stopped"
@@ -853,8 +877,16 @@ fi
 
 case "${cmd}" in
   start) start_cmd "$@" ;;
-  stop) stop_cmd ;;
-  restart) stop_cmd; start_cmd "$@" ;;
+  stop) stop_cmd "$@" ;;
+  restart)
+    if [[ "${1:-}" == "--force" || "${1:-}" == "-f" ]]; then
+      shift
+      stop_cmd --force
+    else
+      stop_cmd
+    fi
+    start_cmd "$@"
+    ;;
   status) status_cmd ;;
   logs) logs_cmd "$@" ;;
   -h|--help|help|"") usage ;;

@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import threading
 from contextlib import closing
 from pathlib import Path
@@ -44,6 +45,23 @@ from api.turn_journal import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PRIVATE_STATE_FILE_MODE = 0o600
+
+
+def _create_private_state_temp(directory: Path, prefix: str) -> tuple[int, Path]:
+    """Create a same-directory private temporary file for recovery output."""
+    fd, raw_path = tempfile.mkstemp(prefix=prefix, dir=str(directory))
+    try:
+        os.fchmod(fd, _PRIVATE_STATE_FILE_MODE)
+    except Exception:
+        os.close(fd)
+        try:
+            Path(raw_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return fd, Path(raw_path)
 
 _INTENTIONAL_SHRINK_GENERATION_RE = re.compile(
     r"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
@@ -93,7 +111,7 @@ def _rebuild_recovery_session_index(session_dir: Path) -> None:
     ``Session`` cache entries whose backing JSON files are absent from this
     directory; those would immediately audit as ``index_missing_file`` rows.
     """
-    from api.models import _load_session_from_path
+    from api.models import _load_session_from_path, _safe_replace
 
     entry_map: dict[str, dict] = {}
     for path in sorted(session_dir.glob('*.json')):
@@ -116,16 +134,29 @@ def _rebuild_recovery_session_index(session_dir: Path) -> None:
         reverse=True,
     )
     index_path = session_dir / '_index.json'
-    tmp = index_path.with_suffix(f'.tmp.recovery.{os.getpid()}.{threading.current_thread().ident}')
+    fd = None
+    tmp = None
     try:
-        with open(tmp, 'w', encoding='utf-8') as fh:
+        fd, tmp = _create_private_state_temp(
+            session_dir,
+            prefix=f'.{index_path.name}.recovery.',
+        )
+        handle = os.fdopen(fd, 'w', encoding='utf-8')
+        fd = None
+        with handle as fh:
             fh.write(json.dumps(entries, ensure_ascii=False, indent=2))
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, index_path)
+        _safe_replace(tmp, index_path)
     except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
-            tmp.unlink(missing_ok=True)
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
         except Exception:
             pass
         raise
@@ -408,16 +439,37 @@ def recover_session(session_path: Path) -> dict:
     if status["recommend"] != "restore":
         return {**status, "restored": False}
     bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix('.json.recover.tmp')
+    # Stage the recovery via a private tmp copy + atomic replace so a crash
+    # mid-restore cannot leave a half-written session.json.
+    tmp_fd = None
+    tmp_path = None
     try:
-        shutil.copyfile(bak_path, tmp_path)
-        tmp_path.replace(session_path)
+        tmp_fd, tmp_path = _create_private_state_temp(
+            session_path.parent,
+            prefix=f'.{session_path.name}.recover.',
+        )
+        # Recovery also repairs legacy backups that were created under a
+        # permissive umask.  Harden the backup before staging the replacement;
+        # _safe_replace hardens the temporary live-sidecar inode before rename.
+        os.chmod(bak_path, 0o600)
+        target = os.fdopen(tmp_fd, 'wb')
+        tmp_fd = None
+        with open(bak_path, 'rb') as source, target:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+        from api.models import _safe_replace
+        _safe_replace(tmp_path, session_path)
     except OSError as exc:
         logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
         try:
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
         return {**status, "restored": False, "error": str(exc)}
@@ -661,17 +713,25 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         if target.exists():
             continue
         payload = _state_db_row_to_sidecar(row)
-        # Per-process/per-thread tmp suffix to avoid corruption under
-        # concurrent reconciliation calls (matches api/models.py:484
-        # Session.save() convention).
-        tmp_suffix = f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
-        tmp = target.with_suffix(tmp_suffix)
         detail_recorded = False
+        tmp_fd = None
+        tmp = None
         try:
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+            tmp_fd, tmp = _create_private_state_temp(
+                session_dir,
+                prefix=f'.{target.name}.reconcile.',
+            )
+            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as handle:
+                tmp_fd = None
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
         except OSError as exc:
             try:
-                tmp.unlink(missing_ok=True)
+                if tmp_fd is not None:
+                    os.close(tmp_fd)
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
             except OSError:
                 pass
             details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
@@ -692,7 +752,8 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
             detail_recorded = True
         finally:
             try:
-                tmp.unlink(missing_ok=True)
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
             except OSError:
                 pass
         if materialized_now:

@@ -162,10 +162,22 @@ _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 
 _WINDOWS_REPLACE_MAX_RETRIES = 5
 _WINDOWS_REPLACE_INITIAL_DELAY = 0.05  # 50 ms
+_PRIVATE_STATE_FILE_MODE = 0o600
+
+
+def _set_private_state_file_mode(path: Path) -> None:
+    """Keep persisted session metadata private regardless of the process umask."""
+    os.chmod(path, _PRIVATE_STATE_FILE_MODE)
 
 
 def _safe_replace(src: Path, dst: Path) -> None:
-    """Atomic replace with retries on Windows file-locking errors."""
+    """Private atomic replace with retries on Windows file-locking errors."""
+    # ``os.replace`` installs the source inode as-is.  Set its mode before the
+    # rename so a permissive umask can never expose a session sidecar, backup,
+    # or index with group/other permissions, even for the short replacement
+    # window.  A failed chmod aborts the replacement and callers clean up the
+    # staged file, preserving the old destination.
+    _set_private_state_file_mode(src)
     if os.name != 'nt':
         os.replace(src, dst)
         return
@@ -643,7 +655,7 @@ def _save_webui_zero_message_orphan_tombstone(ids) -> None:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(_tmp, p)
+        _safe_replace(_tmp, p)
     except Exception:
         logger.debug(
             "Failed to save webui zero-message orphan tombstone",
@@ -772,7 +784,7 @@ def _save_webui_deleted_session_tombstone(ids) -> None:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(_tmp, p)
+        _safe_replace(_tmp, p)
     except Exception:
         logger.debug("Failed to save webui deleted-session tombstone", exc_info=True)
         if _tmp is not None:
