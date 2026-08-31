@@ -464,6 +464,8 @@ const LOCALES = {
     claude_terminal_stop_title: 'Stop Claude?',
     claude_terminal_stop_message: 'This stops the managed Claude process. Closing or leaving this page only detaches the terminal.',
     claude_terminal_stopped: 'Claude stopped',
+    claude_terminal_closed: 'Claude terminal closed',
+    claude_terminal_error: 'Claude terminal error',
     workspace_empty_no_path: 'No workspace selected. Set a workspace in Settings \u2192 Workspace to browse files.',
     workspace_empty_dir: 'This workspace is empty.',
     workspace_show_hidden_files: 'Show hidden files',

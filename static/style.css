@@ -3181,7 +3181,7 @@
     .composer-terminal-header{padding:7px 8px;}
     .composer-terminal-actions{gap:2px;overflow-x:auto;}
     .composer-terminal-action{padding:5px 7px;font-size:10px;white-space:nowrap;}
-    .composer-terminal-panel.claude-terminal-mode .composer-terminal-inner{max-height:min(420px,calc(var(--claude-terminal-viewport-height,100vh) - 96px));}
+    .composer-terminal-panel.claude-terminal-mode .composer-terminal-inner{height:var(--claude-terminal-height,var(--composer-terminal-height,190px));min-height:var(--claude-terminal-min-height,72px);max-height:var(--claude-terminal-max-height,min(420px,calc(var(--claude-terminal-viewport-height,100vh) - 96px)));}
     #terminalWorkspaceLabel{max-width:110px;}
     #terminalDockWorkspaceLabel{max-width:96px;}
     .sidebar-nav{position:absolute;left:0;top:0;bottom:0;width:52px;display:flex;flex-direction:column;gap:4px;padding:8px 4px;border-right:1px solid var(--border);border-bottom:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;}

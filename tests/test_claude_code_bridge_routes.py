@@ -855,6 +855,84 @@ def test_stream_redacts_query_and_translates_terminal_reset(
     assert capability not in stream
 
 
+def test_stream_cursor_query_replays_only_unseen_output(
+    monkeypatch, managed_terminals
+):
+    term, _other = managed_terminals
+    capability = terminal.issue_terminal_capability(
+        term.handle, term.generation, "stream"
+    )
+    term.put_output("output", {"text": "already-rendered"})
+    term.put_output("output", {"text": "new-output"})
+    term.put_output("terminal_closed", {"exit_code": 0})
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+    path = (
+        "/api/claude-code/terminal/output"
+        f"?handle={term.handle}&generation={term.generation}&cursor=1"
+    )
+
+    response = _get(path, headers=_cookie_header(term, "stream", capability))
+
+    assert response.status == 200
+    assert response.path == "/api/claude-code/terminal/output"
+    stream = response.wfile.getvalue().decode("utf-8")
+    assert "already-rendered" not in stream
+    assert "new-output" in stream
+    assert "id: 2" in stream
+    assert capability not in stream
+
+
+def test_stream_cursor_behind_backlog_floor_emits_terminal_reset(
+    monkeypatch, managed_terminals
+):
+    term, _other = managed_terminals
+    capability = terminal.issue_terminal_capability(
+        term.handle, term.generation, "stream"
+    )
+    term.put_output("output", {"text": "stale-output"})
+    signal_calls = []
+    original_attach = terminal.attach_managed_terminal
+
+    def attach_then_close(**kwargs):
+        attached, output = original_attach(**kwargs)
+        output.put((2, "terminal_closed", {}))
+        return attached, output
+
+    monkeypatch.setattr(terminal, "attach_managed_terminal", attach_then_close)
+    monkeypatch.setattr(
+        terminal,
+        "_signal_owned_group",
+        lambda attached, signum: signal_calls.append((attached, signum)),
+    )
+    monkeypatch.setattr(routes, "_sse_set_write_deadline", lambda _handler: None)
+    path = (
+        "/api/claude-code/terminal/output"
+        f"?handle={term.handle}&generation={term.generation}&cursor=0"
+    )
+
+    response = _get(path, headers=_cookie_header(term, "stream", capability))
+
+    assert response.status == 200
+    stream = response.wfile.getvalue().decode("utf-8")
+    assert "event: terminal_reset" in stream
+    assert "stale-output" not in stream
+    assert signal_calls
+
+
+@pytest.mark.parametrize("cursor", ["", "-1", "1.5", "nope", "1&cursor=2"])
+def test_stream_cursor_query_fails_closed(cursor, managed_terminals):
+    term, _other = managed_terminals
+    path = (
+        "/api/claude-code/terminal/output"
+        f"?handle={term.handle}&generation={term.generation}&cursor={cursor}"
+    )
+
+    response = _get(path)
+
+    assert response.status == 400
+    assert response.json() == {"error": "invalid_request"}
+
+
 def test_bridge_mutation_cross_origin_is_rejected_before_body_dispatch(monkeypatch):
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: False)
 

@@ -1737,6 +1737,7 @@ async function loadSession(sid){
     }
     return;
   }
+  if(typeof syncClaudeTerminalNavigation==='function')syncClaudeTerminalNavigation(sid);
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;

@@ -238,6 +238,7 @@ const nodes={{
   terminalSurface:element('terminalSurface'),
   terminalWorkspaceLabel:element('terminalWorkspaceLabel'),
   terminalDockWorkspaceLabel:element('terminalDockWorkspaceLabel'),
+  terminalTitleLabel:element('terminalTitleLabel'),
   terminalResizeHandle:element('terminalResizeHandle'),
   btnTerminalStopClaude:element('btnTerminalStopClaude'),
   btnTerminalRestart:element('btnTerminalRestart'),
@@ -249,7 +250,8 @@ nodes.composerTerminalPanel.querySelector=selector=>selector==='.composer-termin
 nodes.messages.scrollHeight=0;nodes.messages.scrollTop=0;nodes.messages.clientHeight=0;
 
 class FakeTerminal{{
-  constructor(options){{this.options=options;this.cols=80;this.rows=24;this.buffer={{active:{{length:0}}}};}}
+  static instances=[];
+  constructor(options){{this.options=options;this.cols=80;this.rows=24;this.buffer={{active:{{length:0}}}};FakeTerminal.instances.push(this);}}
   loadAddon(){{}}
   open(surface){{calls.push('open:'+surface.id);}}
   onData(handler){{dataHandler=handler;return {{dispose(){{}}}};}}
@@ -266,7 +268,7 @@ class FakeEventSource{{
   static instances=[];
   constructor(url){{this.url=url;this.readyState=1;this.handlers={{}};this.closed=false;FakeEventSource.instances.push(this);calls.push('eventsource:'+url);}}
   addEventListener(name,handler){{(this.handlers[name]||(this.handlers[name]=[])).push(handler);}}
-  emit(name,data='{{}}'){{(this.handlers[name]||[]).forEach(handler=>handler({{data}}));}}
+  emit(name,data='{{}}',lastEventId=''){{(this.handlers[name]||[]).forEach(handler=>handler({{data,lastEventId}}));}}
   close(){{this.closed=true;this.readyState=2;calls.push('source-close');}}
 }}
 const visualViewport={{height:500,offsetTop:0,addEventListener(name,handler){{visualListeners[name]=handler;}}}};
@@ -437,3 +439,261 @@ def test_claude_terminal_mobile_controls_have_accessible_touch_targets():
     assert 'id="btnTerminalStopClaude"' in html
     assert 'onclick="stopClaudeTerminal()"' in html
     assert ".claude-terminal-key{min-width:44px;min-height:44px" in css
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_spa_session_navigation_detaches_claude_viewer_without_stopping_it():
+    result = _run_node(
+        _terminal_harness(
+            """
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  await resumeClaudeSession(session);
+  const source=FakeEventSource.instances[0];
+  syncClaudeTerminalNavigation('different-hermes-session');
+  assert(source.closed);
+  assert.strictEqual(TERMINAL_UI.term,null);
+  assert.strictEqual(TERMINAL_UI.mode,'shell');
+  assert(!calls.some(call=>call.path==='/api/claude-code/stop'));
+  console.log(JSON.stringify({closed:source.closed,disposed:calls.includes('dispose'),stops:calls.filter(call=>call.path==='/api/claude-code/stop').length}));
+"""
+        )
+    )
+    assert result == {"closed": True, "disposed": True, "stops": 0}
+    assert "syncClaudeTerminalNavigation(sid)" in _function_source(
+        SESSIONS_JS, "loadSession"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("stale_result", ["failure", "success"])
+def test_same_session_stale_resume_completion_cannot_replace_or_detach_new_viewer(
+    stale_result,
+):
+    result = _run_node(
+        _terminal_harness(
+            f"""
+  function deferred(){{let resolve,reject;const promise=new Promise((ok,no)=>{{resolve=ok;reject=no;}});return {{promise,resolve,reject}};}}
+  const resumes=[deferred(),deferred()];
+  let resumeIndex=0;
+  global.api=async(path,options={{}})=>{{
+    const body=options.body?JSON.parse(options.body):null;
+    calls.push({{path,body,focusAtCall:focusCalls}});
+    if(path==='/api/claude-code/resume')return resumes[resumeIndex++].promise;
+    return {{ok:true}};
+  }};
+  const session={{session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true}};
+  const stale=resumeClaudeSession(session);
+  const current=resumeClaudeSession(session);
+  resumes[1].resolve({{handle:'new-handle',generation:'new-generation'}});
+  assert.strictEqual(await current,true);
+  if('{stale_result}'==='failure')resumes[0].reject(Object.assign(new Error('owned elsewhere'),{{status:409}}));
+  else resumes[0].resolve({{handle:'old-handle',generation:'old-generation'}});
+  assert.strictEqual(await stale,false);
+  assert.strictEqual(TERMINAL_UI.handle,'new-handle');
+  assert.strictEqual(TERMINAL_UI.generation,'new-generation');
+  assert.strictEqual(TERMINAL_UI.mode,'claude_code');
+  assert.strictEqual(FakeEventSource.instances.length,1);
+  assert(FakeEventSource.instances[0].url.includes('new-handle'));
+  console.log(JSON.stringify({{handle:TERMINAL_UI.handle,sources:FakeEventSource.instances.length,mode:TERMINAL_UI.mode}}));
+"""
+        )
+    )
+    assert result == {"handle": "new-handle", "sources": 1, "mode": "claude_code"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_same_session_stale_failure_before_new_success_keeps_new_request_in_charge():
+    result = _run_node(
+        _terminal_harness(
+            """
+  function deferred(){let resolve,reject;const promise=new Promise((ok,no)=>{resolve=ok;reject=no;});return {promise,resolve,reject};}
+  const resumes=[deferred(),deferred()];
+  let resumeIndex=0;
+  global.api=async(path,options={})=>{
+    const body=options.body?JSON.parse(options.body):null;
+    calls.push({path,body,focusAtCall:focusCalls});
+    if(path==='/api/claude-code/resume')return resumes[resumeIndex++].promise;
+    return {ok:true};
+  };
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  const stale=resumeClaudeSession(session);
+  const current=resumeClaudeSession(session);
+  resumes[0].reject(Object.assign(new Error('owned elsewhere'),{status:409}));
+  assert.strictEqual(await stale,false);
+  assert.strictEqual(TERMINAL_UI.mode,'claude_code');
+  resumes[1].resolve({handle:'new-handle',generation:'new-generation'});
+  assert.strictEqual(await current,true);
+  assert.strictEqual(TERMINAL_UI.handle,'new-handle');
+  assert.strictEqual(FakeEventSource.instances.length,1);
+  console.log(JSON.stringify({handle:TERMINAL_UI.handle,sources:FakeEventSource.instances.length,mode:TERMINAL_UI.mode}));
+"""
+        )
+    )
+    assert result == {"handle": "new-handle", "sources": 1, "mode": "claude_code"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("operation", ["input", "resize", "reconnect"])
+def test_detach_during_token_mint_cannot_retry_or_reattach_claude_terminal(operation):
+    result = _run_node(
+        _terminal_harness(
+            f"""
+  function deferred(){{let resolve;const promise=new Promise(ok=>{{resolve=ok;}});return {{promise,resolve}};}}
+  const session={{session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true}};
+  await resumeClaudeSession(session);
+  const mint=deferred();
+  const beforeSources=FakeEventSource.instances.length;
+  let operationCalls=0;
+  global.api=async(path,options={{}})=>{{
+    const body=options.body?JSON.parse(options.body):null;
+    calls.push({{path,body,focusAtCall:focusCalls}});
+    if(path==='/api/claude-code/terminal-token')return mint.promise;
+    if(path==='/api/claude-code/terminal/input'||path==='/api/claude-code/terminal/resize'){{
+      operationCalls+=1;
+      throw Object.assign(new Error('expired'),{{status:404}});
+    }}
+    return {{ok:true}};
+  }};
+  let pending;
+  if('{operation}'==='input'){{dataHandler('x');pending=TERMINAL_UI.inputQueue;}}
+  else if('{operation}'==='resize')pending=_resizeClaudeTerminal();
+  else pending=_reconnectClaudeTerminal();
+  await new Promise(resolve=>setImmediate(resolve));
+  detachClaudeTerminal();
+  mint.resolve({{ok:true}});
+  await pending;
+  assert.strictEqual(operationCalls,'{operation}'==='reconnect'?0:1);
+  assert.strictEqual(FakeEventSource.instances.length,beforeSources);
+  assert.strictEqual(TERMINAL_UI.mode,'shell');
+  assert(!calls.some(call=>call.path==='/api/claude-code/stop'));
+  console.log(JSON.stringify({{operationCalls,sources:FakeEventSource.instances.length,beforeSources,mode:TERMINAL_UI.mode}}));
+"""
+        )
+    )
+    assert result["operationCalls"] == (0 if operation == "reconnect" else 1)
+    assert result["sources"] == result["beforeSources"]
+    assert result["mode"] == "shell"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_claude_reconnect_uses_last_sse_cursor_and_reset_clears_before_redraw():
+    result = _run_node(
+        _terminal_harness(
+            """
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  await resumeClaudeSession(session);
+  const first=FakeEventSource.instances[0];
+  first.emit('output',JSON.stringify({text:'first'}),'7');
+  document.hidden=true;
+  listeners['document:visibilitychange']();
+  document.hidden=false;
+  listeners['document:visibilitychange']();
+  await new Promise(resolve=>setImmediate(resolve));
+  const second=FakeEventSource.instances[1];
+  assert(second.url.includes('cursor=7'));
+  assert(!second.url.includes('capability'));
+  second.emit('terminal_reset',JSON.stringify({generation:'generation-1'}),'8');
+  second.emit('output',JSON.stringify({text:'redraw'}),'9');
+  assert.strictEqual(clearCalls,1);
+  assert.strictEqual(calls.filter(value=>value==='write:first').length,1);
+  assert.strictEqual(calls.filter(value=>value==='write:redraw').length,1);
+  _disconnectTerminalSource();
+  await _reconnectClaudeTerminal();
+  assert(FakeEventSource.instances[2].url.includes('cursor=9'));
+  console.log(JSON.stringify({urls:FakeEventSource.instances.map(source=>source.url),clearCalls,writes:calls.filter(value=>typeof value==='string'&&value.startsWith('write:'))}));
+"""
+        )
+    )
+    assert result["clearCalls"] == 1
+    assert result["writes"] == ["write:first", "write:redraw"]
+    assert "cursor=7" in result["urls"][1]
+    assert "cursor=9" in result["urls"][2]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("event,state", [("terminal_closed", "closed"), ("terminal_error", "error")])
+def test_terminal_retirement_clears_authority_and_reconnect_resumes_public_session(
+    event, state
+):
+    result = _run_node(
+        _terminal_harness(
+            f"""
+  const session={{session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true}};
+  await resumeClaudeSession(session);
+  const retired=FakeEventSource.instances[0];
+  retired.emit('{event}',JSON.stringify({{generation:'generation-1'}}),'11');
+  assert(retired.closed);
+  assert.strictEqual(TERMINAL_UI.claudeState,'{state}');
+  assert.strictEqual(TERMINAL_UI.handle,null);
+  assert.strictEqual(TERMINAL_UI.generation,null);
+  assert.strictEqual(TERMINAL_UI.claudePublicSessionId,'opaque-session');
+  const resumesBefore=calls.filter(call=>call.path==='/api/claude-code/resume').length;
+  await restartComposerTerminal();
+  assert.strictEqual(calls.filter(call=>call.path==='/api/claude-code/resume').length,resumesBefore+1);
+  assert.strictEqual(TERMINAL_UI.claudeState,'live');
+  assert.strictEqual(TERMINAL_UI.handle,'safe-handle');
+  assert(!calls.some(call=>call.path==='/api/claude-code/stop'));
+  console.log(JSON.stringify({{state:'{state}',resumed:calls.filter(call=>call.path==='/api/claude-code/resume').length,handle:TERMINAL_UI.handle}}));
+"""
+        )
+    )
+    assert result["state"] == state
+    assert result["resumed"] == 2
+    assert result["handle"] == "safe-handle"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_reconnect_404_retires_authority_and_next_reconnect_resumes_session():
+    result = _run_node(
+        _terminal_harness(
+            """
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  await resumeClaudeSession(session);
+  let failStream=true;
+  const originalApi=global.api;
+  global.api=async(path,options={})=>{
+    if(path==='/api/claude-code/terminal-token'&&JSON.parse(options.body).operation==='stream'&&failStream){
+      calls.push({path,body:JSON.parse(options.body)});
+      throw Object.assign(new Error('retired'),{status:404});
+    }
+    return originalApi(path,options);
+  };
+  await restartComposerTerminal();
+  assert.strictEqual(TERMINAL_UI.claudeState,'error');
+  assert.strictEqual(TERMINAL_UI.handle,null);
+  failStream=false;
+  await restartComposerTerminal();
+  assert.strictEqual(calls.filter(call=>call.path==='/api/claude-code/resume').length,2);
+  assert.strictEqual(TERMINAL_UI.claudeState,'live');
+  console.log(JSON.stringify({state:TERMINAL_UI.claudeState,resumes:calls.filter(call=>call.path==='/api/claude-code/resume').length}));
+"""
+        )
+    )
+    assert result == {"state": "live", "resumes": 2}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_short_visual_viewport_clamps_claude_terminal_without_overshoot():
+    result = _run_node(
+        _terminal_harness(
+            """
+  const session={session_id:'opaque-session',kind:'claude_code',profile:'qwen',label:'Claude Qwen',workspace_label:'Project',can_remote_resume:true};
+  await resumeClaudeSession(session);
+  visualViewport.height=130;
+  visualListeners.resize();
+  const values=nodes.terminalViewport.style.values;
+  const height=parseInt(values['--claude-terminal-height'],10);
+  const min=parseInt(values['--claude-terminal-min-height'],10);
+  const max=parseInt(values['--claude-terminal-max-height'],10);
+  assert(height>0&&height<=34);
+  assert(min>0&&min<=34);
+  assert(max>0&&max<=34);
+  assert(min<=height&&height<=max);
+  console.log(JSON.stringify({height,min,max}));
+"""
+        )
+    )
+    assert 0 < result["min"] <= result["height"] <= result["max"] <= 34
+    css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert "--claude-terminal-min-height" in css
+    assert "--claude-terminal-max-height" in css

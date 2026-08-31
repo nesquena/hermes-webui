@@ -19432,15 +19432,32 @@ def _handle_claude_code_stop(handler, body):
     return j(handler, {"ok": True, "stopped": True})
 
 
-def _claude_terminal_stream_query(parsed) -> tuple[str, str] | None:
+def _claude_terminal_stream_query(
+    parsed,
+) -> tuple[str, str, int | None] | None:
     values = parse_qs(parsed.query, keep_blank_values=True)
-    if set(values) != {"handle", "generation"}:
+    if set(values) not in (
+        {"handle", "generation"},
+        {"handle", "generation", "cursor"},
+    ):
         return None
     if len(values["handle"]) != 1 or len(values["generation"]) != 1:
         return None
     handle = str(values["handle"][0] or "").strip()
     generation = str(values["generation"][0] or "").strip()
-    return (handle, generation) if handle and generation else None
+    if not handle or not generation:
+        return None
+    cursor = None
+    if "cursor" in values:
+        if len(values["cursor"]) != 1:
+            return None
+        raw_cursor = str(values["cursor"][0] or "").strip()
+        if not raw_cursor.isascii() or not raw_cursor.isdecimal():
+            return None
+        cursor = int(raw_cursor)
+        if cursor > 2**63 - 1:
+            return None
+    return handle, generation, cursor
 
 
 def _handle_claude_code_terminal_output(handler, parsed):
@@ -19452,7 +19469,7 @@ def _handle_claude_code_terminal_output(handler, parsed):
     stream_query = _claude_terminal_stream_query(parsed)
     if stream_query is None:
         return j(handler, {"error": "invalid_request"}, status=400)
-    handle, generation = stream_query
+    handle, generation, after_seq = stream_query
     capability = _claude_terminal_authority(
         handler,
         handle,
@@ -19464,9 +19481,8 @@ def _handle_claude_code_terminal_output(handler, parsed):
         attach_managed_terminal,
     )
 
-    after_seq = None
     last_event_id = str(handler.headers.get("Last-Event-ID", "") or "").strip()
-    if last_event_id:
+    if after_seq is None and last_event_id:
         try:
             after_seq = max(0, int(last_event_id))
         except ValueError:
