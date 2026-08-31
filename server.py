@@ -95,13 +95,10 @@ try:
     import resource
 except ImportError:  # pragma: no cover - resource is Unix-only
     resource = None
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-_CLAUDE_BRIDGE_PATH_PREFIX = "/api/claude-code/"
-_CLAUDE_STREAM_PATH = "/api/claude-code/terminal/output"
-
+from api import claude_code_request
 from api.auth import check_auth, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
@@ -293,7 +290,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(claude_code_request.ClaudeCodeRequestMixin, BaseHTTPRequestHandler):
     # HTTP/1.1 keep-alive stays on, so every response must declare framing.
     protocol_version = "HTTP/1.1"
     timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
@@ -330,17 +327,6 @@ class Handler(BaseHTTPRequestHandler):
         return _build_csp_report_only_policy(extra_connect_src, extra_frame_src)
 
     def end_headers(self) -> None:
-        if getattr(self, "_is_claude_bridge_request", False):
-            buffered = getattr(self, "_headers_buffer", ())
-            header_names = {
-                line.split(b":", 1)[0].strip().lower()
-                for line in buffered
-                if b":" in line
-            }
-            if b"cache-control" not in header_names:
-                self.send_header("Cache-Control", "no-store")
-            if b"referrer-policy" not in header_names:
-                self.send_header("Referrer-Policy", "no-referrer")
         extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
@@ -376,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
             'method': getattr(self, 'command', None) or '-',
-            'path': getattr(self, '_access_log_path', None) or getattr(self, 'path', None) or '-',
+            'path': claude_code_request.request_log_path(self),
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         }
@@ -385,21 +371,9 @@ class Handler(BaseHTTPRequestHandler):
         record = _json.dumps(record_data)
         self._safe_webui_print(f'[webui] {record}')
 
-    def _prepare_request_metadata(self, parsed) -> None:
-        is_bridge = parsed.path.startswith(_CLAUDE_BRIDGE_PATH_PREFIX)
-        self._is_claude_bridge_request = is_bridge
-        self._access_log_path = (
-            parsed.path if parsed.path == _CLAUDE_STREAM_PATH else self.path
-        )
-        if is_bridge:
-            self._referrer_policy = "no-referrer"
-        elif hasattr(self, "_referrer_policy"):
-            del self._referrer_policy
-
     def do_GET(self) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        parsed = urlparse(self.path)
-        self._prepare_request_metadata(parsed)
+        parsed = claude_code_request.prepare_claude_code_request(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -412,8 +386,7 @@ class Handler(BaseHTTPRequestHandler):
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
-            request_path = getattr(self, '_access_log_path', self.path)
-            self._safe_webui_print(f'[webui] ERROR {self.command} {request_path}\n' + traceback.format_exc())
+            claude_code_request.log_request_error(self, traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
@@ -425,8 +398,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
-        parsed = urlparse(self.path)
-        self._prepare_request_metadata(parsed)
+        parsed = claude_code_request.prepare_claude_code_request(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
@@ -442,8 +414,7 @@ class Handler(BaseHTTPRequestHandler):
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
         except Exception:
-            request_path = getattr(self, '_access_log_path', self.path)
-            self._safe_webui_print(f'[webui] ERROR {self.command} {request_path}\n' + traceback.format_exc())
+            claude_code_request.log_request_error(self, traceback.format_exc())
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
             except _CLIENT_DISCONNECT_ERRORS:
