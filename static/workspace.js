@@ -1324,7 +1324,6 @@ async function openFile(path, opts={}){
   // S.session.workspace. A newer openFile() bumps _previewInFlightGen and any
   // owner switch invalidates the captured tuple, so a delayed read bails
   // instead of repainting the current preview.
-  const callGen = ++_previewInFlightGen;
   const callSessionId = S.session && S.session.session_id;
   const callProfileId = S.activeProfile || 'default';
   const callWorkspaceId = S.session && S.session.workspace;
@@ -1341,6 +1340,7 @@ async function openFile(path, opts={}){
     return;
   }
 
+  const callGen = ++_previewInFlightGen;
   _previewServerEditable = null;
   _previewSaveRoute = '/api/file/save';
   _previewOfficeFormat = '';
