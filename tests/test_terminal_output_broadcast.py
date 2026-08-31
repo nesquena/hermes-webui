@@ -39,6 +39,17 @@ def _make_term(sid="bcast"):
     )
 
 
+def _make_managed_term(sid="managed-bcast"):
+    term = _make_term(sid)
+    term.kind = "claude_code"
+    term.handle = sid
+    term.generation = "d1f0b824-6973-46db-b898-d075ec492474"
+    term.pgid = term.proc.pid
+    term.persistent_when_unwatched = True
+    term._backlog = terminal.collections.deque()
+    return term
+
+
 def _drain(q):
     out = []
     while True:
@@ -241,6 +252,70 @@ def test_unsubscribe_unknown_queue_is_safe():
     stray: queue.Queue = queue.Queue()
     term.unsubscribe(stray)  # must not raise
     assert term._subscribers == []
+
+
+def test_managed_backlog_is_byte_bounded_not_chunk_bounded(monkeypatch):
+    term = _make_managed_term()
+    monkeypatch.setattr(terminal, "_MANAGED_OUTPUT_BACKLOG_BYTES", 10)
+
+    term.put_output("output", {"text": "12345678"})
+    term.put_output("output", {"text": "abcdefgh"})
+
+    assert term.backlog_bytes <= 10
+    assert [payload["text"] for _seq, _event, payload in term._backlog] == [
+        "abcdefgh"
+    ]
+
+    monkeypatch.setattr(terminal, "_MANAGED_OUTPUT_BACKLOG_BYTES", 100)
+    term = _make_managed_term("managed-tiny-chunks")
+    for text in ("a", "b", "c"):
+        term.put_output("output", {"text": text})
+    assert len(term._backlog) == 3
+
+
+def test_managed_reconnect_gap_emits_reset_and_redraws_owned_group(monkeypatch):
+    term = _make_managed_term()
+    monkeypatch.setattr(terminal, "_MANAGED_OUTPUT_BACKLOG_BYTES", 10)
+    term.put_output("output", {"text": "12345678"})
+    term.put_output("output", {"text": "abcdefgh"})
+    signals = []
+    monkeypatch.setattr(terminal.os, "getpgid", lambda pid: term.pgid)
+    monkeypatch.setattr(
+        terminal.os, "killpg", lambda pgid, sig: signals.append((pgid, sig))
+    )
+
+    replay = term.subscribe(after_seq=1, generation=term.generation)
+
+    assert [event for _seq, event, _payload in _drain(replay)] == [
+        "terminal_reset"
+    ]
+    assert signals == [(term.pgid, terminal.signal.SIGWINCH)]
+
+
+def test_generation_mismatch_resets_without_signalling_foreign_group(monkeypatch):
+    term = _make_managed_term()
+    signals = []
+    monkeypatch.setattr(terminal.os, "getpgid", lambda pid: term.pgid + 1)
+    monkeypatch.setattr(
+        terminal.os, "killpg", lambda pgid, sig: signals.append((pgid, sig))
+    )
+
+    replay = term.subscribe(after_seq=None, generation="wrong-generation")
+
+    assert [event for _seq, event, _payload in _drain(replay)] == [
+        "terminal_reset"
+    ]
+    assert signals == []
+
+
+def test_managed_terminal_rejects_ninth_viewer_without_dropping_existing():
+    term = _make_managed_term()
+    viewers = [term.subscribe(generation=term.generation) for _ in range(8)]
+
+    with pytest.raises(terminal.ManagedTerminalViewerLimitError):
+        term.subscribe(generation=term.generation)
+
+    assert term._subscribers == viewers
 
 
 def test_concurrent_producers_keep_monotonic_sequences_through_backlog_rollover():

@@ -52,7 +52,7 @@ def _clean(monkeypatch):
         sids = list(terminal._TERMINALS)
     for sid in sids:
         try:
-            terminal.close_terminal(sid)
+            terminal._close_registered_terminal(sid, allow_managed=True)
         except Exception:
             pass
 
@@ -117,6 +117,45 @@ def test_reaps_dead_process_regardless(monkeypatch):
     _make_registered_term(monkeypatch, "dead", alive=False, unwatched_since=None)
     victims = {sid for sid, _ in terminal._terminals_to_reap(now)}
     assert "dead" in victims
+
+
+def test_unwatched_busy_managed_terminal_survives_generic_grace(monkeypatch):
+    now = 100_000.0
+    term = _make_registered_term(
+        monkeypatch,
+        "managed-busy",
+        alive=True,
+        unwatched_since=now - terminal._TERMINAL_IDLE_GRACE_SECONDS - 1,
+    )
+    term.kind = "claude_code"
+    term.persistent_when_unwatched = True
+    term.last_activity = now - 1
+
+    victims = {sid for sid, _ in terminal._terminals_to_reap(now)}
+
+    assert "managed-busy" not in victims
+
+
+def test_managed_idle_uses_later_of_detach_and_last_io_activity(monkeypatch):
+    now = 200_000.0
+    term = _make_registered_term(
+        monkeypatch,
+        "managed-idle",
+        alive=True,
+        unwatched_since=now - terminal._MANAGED_TERMINAL_IDLE_SECONDS - 10,
+    )
+    term.kind = "claude_code"
+    term.persistent_when_unwatched = True
+    term.last_activity = now - 5
+
+    assert "managed-idle" not in {
+        sid for sid, _ in terminal._terminals_to_reap(now)
+    }
+
+    term.last_activity = now - terminal._MANAGED_TERMINAL_IDLE_SECONDS - 1
+    assert "managed-idle" in {
+        sid for sid, _ in terminal._terminals_to_reap(now)
+    }
 
 
 # ── _reap_idle_terminals effect ──────────────────────────────────────────────

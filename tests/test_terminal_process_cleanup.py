@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -139,6 +140,92 @@ def test_close_terminal_waits_again_after_sigkill(monkeypatch):
 
     assert proc.wait_calls == [1.5, 1.0]
     assert kills == [(proc.pid, terminal.signal.SIGHUP), (proc.pid, terminal.signal.SIGKILL)]
+
+
+def test_stop_managed_terminal_escalates_owned_group_and_drains_reader(monkeypatch):
+    class EscalatedProc(_FakeProc):
+        pid = 771_771
+
+        def wait(self, timeout=None):
+            self.wait_calls.append(timeout)
+            if len(self.wait_calls) < 3:
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+            return -9
+
+    class Reader:
+        def __init__(self):
+            self.joins = []
+
+        def join(self, timeout=None):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return False
+
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    proc = EscalatedProc()
+    reader = Reader()
+    term = terminal.TerminalSession(
+        session_id="managed-stop",
+        workspace="/tmp",
+        proc=proc,
+        master_fd=read_fd,
+    )
+    term.kind = "claude_code"
+    term.handle = term.session_id
+    term.generation = "5f47cc5d-ec48-4ed8-973b-5972f115c9cc"
+    term.pgid = proc.pid
+    term.persistent_when_unwatched = True
+    term.reader = reader
+    terminal._TERMINALS[term.handle] = term
+    monkeypatch.setattr(terminal.os, "getpgid", lambda pid: term.pgid)
+    kills = []
+    monkeypatch.setattr(
+        terminal.os, "killpg", lambda pgid, sig: kills.append((pgid, sig))
+    )
+    capability = terminal.issue_terminal_capability(
+        term.handle, term.generation, "stop"
+    )
+
+    assert terminal.stop_managed_terminal(
+        handle=term.handle,
+        generation=term.generation,
+        capability=capability,
+    )
+
+    assert [sig for _pgid, sig in kills] == [
+        signal.SIGHUP,
+        signal.SIGTERM,
+        signal.SIGKILL,
+    ]
+    assert {pgid for pgid, _sig in kills} == {term.pgid}
+    assert len(proc.wait_calls) == 3
+    assert reader.joins
+    with pytest.raises(OSError):
+        os.fstat(read_fd)
+
+
+def test_managed_teardown_never_signals_unverified_process_group(monkeypatch):
+    proc = _FakeProc()
+    term = terminal.TerminalSession(
+        session_id="managed-foreign-group",
+        workspace="/tmp",
+        proc=proc,
+        master_fd=12345,
+    )
+    term.kind = "claude_code"
+    term.pgid = proc.pid
+    monkeypatch.setattr(terminal.os, "getpgid", lambda pid: proc.pid + 1)
+    signals = []
+    monkeypatch.setattr(
+        terminal.os, "killpg", lambda pgid, sig: signals.append((pgid, sig))
+    )
+    monkeypatch.setattr(terminal.os, "close", lambda fd: None)
+
+    terminal._teardown_terminal(term)
+
+    assert signals == []
 
 
 def test_close_all_terminals_closes_snapshot(monkeypatch):
