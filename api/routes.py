@@ -15556,7 +15556,9 @@ def handle_post(handler, parsed) -> bool:
                 session_id = str(body.get("session_id") or "").strip() or None
                 if session_id:
                     # Per-chat override: store on the session, leave global default untouched.
-                    from api.models import Session
+                    # NOTE: no local `from api.models import Session` here — a function-local
+                    # import would shadow the outer Session binding for this entire handler
+                    # and break the /api/session/branch path below (UnboundLocalError).
                     session = Session.load(session_id)
                     if session is None:
                         return bad(handler, f"session '{session_id}' not found")
