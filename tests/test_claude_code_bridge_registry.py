@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from uuid import uuid4
+
+
+QWEN_WRAPPER = Path("/Users/mohameddarwiche/bin/claude-qwen")
+ORNITH_WRAPPER = Path("/Users/mohameddarwiche/bin/claude-ornith")
 
 
 def _write_registry(path: Path, stores: list[dict]) -> None:
@@ -16,26 +21,20 @@ def _valid_store(tmp_path: Path) -> tuple[dict, Path]:
     workspace = tmp_path / "workspace"
     projects_dir.mkdir(parents=True)
     workspace.mkdir()
-    claude_bin = tmp_path / "claude"
-    qwen_wrapper = tmp_path / "claude-qwen"
-    ornith_wrapper = tmp_path / "claude-ornith"
-    for executable in (claude_bin, qwen_wrapper, ornith_wrapper):
-        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        executable.chmod(0o700)
     return {
         "id": "local-models",
         "label": "Claude Local",
         "config_dir": str(config_dir),
-        "claude_bin": str(claude_bin),
+        "claude_bin": str(QWEN_WRAPPER),
         "workspace_roots": [str(workspace)],
         "models": {
             "anthropic.qwen-aeon": {
                 "label": "Claude Qwen",
-                "argv": [str(qwen_wrapper)],
+                "argv": [str(QWEN_WRAPPER)],
             },
             "anthropic.ornith": {
                 "label": "Claude Local · Ornith",
-                "argv": [str(ornith_wrapper)],
+                "argv": [str(ORNITH_WRAPPER)],
             },
         },
     }, config_dir
@@ -194,3 +193,204 @@ def test_duplicate_or_mismatched_transcript_uuid_is_not_resolved(tmp_path, monke
     )
 
     assert list_public_sessions() == []
+
+
+def test_registry_requires_the_canonical_wrapper_for_each_model(tmp_path, monkeypatch):
+    from api.claude_code_bridge import invalidate_claude_session_cache, load_claude_stores
+
+    store, _config_dir = _valid_store(tmp_path)
+    arbitrary_wrapper = tmp_path / "wrapper"
+    arbitrary_wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    arbitrary_wrapper.chmod(0o700)
+    store["models"]["anthropic.qwen-aeon"]["argv"] = [str(arbitrary_wrapper)]
+    registry = tmp_path / "stores.json"
+    _write_registry(registry, [store])
+    monkeypatch.setenv("HERMES_WEBUI_CLAUDE_STORES_FILE", str(registry))
+    invalidate_claude_session_cache()
+
+    assert load_claude_stores() == ()
+
+
+def test_registry_requires_owner_execute_permission(tmp_path):
+    import api.claude_code_bridge as bridge
+
+    wrapper = tmp_path / "owner-not-executable"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o001)
+
+    assert bridge._safe_existing_path(str(wrapper), executable=True) is None
+
+
+def test_registry_rejects_paths_not_owned_by_the_webui_uid(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    owned_file = tmp_path / "owned-by-current-user"
+    owned_file.write_text("safe", encoding="utf-8")
+    current_uid = os.getuid()
+    monkeypatch.setattr(bridge.os, "getuid", lambda: current_uid + 1)
+
+    assert bridge._safe_existing_path(str(owned_file)) is None
+
+
+def test_registry_rejects_relative_parent_symlink_and_overlapping_store_paths(tmp_path, monkeypatch):
+    from api.claude_code_bridge import invalidate_claude_session_cache, load_claude_stores
+
+    store, config_dir = _valid_store(tmp_path)
+    registry = tmp_path / "stores.json"
+    store["config_dir"] = ".claude-local"
+    _write_registry(registry, [store])
+    monkeypatch.setenv("HERMES_WEBUI_CLAUDE_STORES_FILE", str(registry))
+    invalidate_claude_session_cache()
+    assert load_claude_stores() == ()
+
+    store, _config_dir = _valid_store(tmp_path / "parent-link")
+    target = tmp_path / "target"
+    target.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(target, target_is_directory=True)
+    store["workspace_roots"] = [str(linked_parent / "workspace")]
+    _write_registry(registry, [store])
+    invalidate_claude_session_cache()
+    assert load_claude_stores() == ()
+
+    first, _first_config = _valid_store(tmp_path / "first")
+    second, _second_config = _valid_store(tmp_path / "second")
+    second["id"] = "second"
+    second["config_dir"] = first["config_dir"]
+    _write_registry(registry, [first, second])
+    invalidate_claude_session_cache()
+    assert load_claude_stores() == ()
+
+
+def test_unknown_model_before_latest_valid_model_remains_resumable(tmp_path, monkeypatch):
+    from api.claude_code_bridge import list_public_sessions, resolve_session
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    _bridge_session(store, [_top_user(workspace), _assistant("unmapped"), _assistant("anthropic.qwen-aeon")])
+
+    (row,) = list_public_sessions()
+    descriptor = resolve_session(row["session_id"])
+    assert descriptor is not None
+    assert descriptor.can_remote_resume is True
+    assert descriptor.profile is not None
+    assert descriptor.profile.model_id == "anthropic.qwen-aeon"
+
+
+def test_duplicate_after_display_limit_is_rejected_and_candidate_limit_fails_closed(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    first = _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")], project="a")
+    duplicate_path = Path(store["config_dir"]) / "projects" / "b" / f"{first}.jsonl"
+    duplicate_path.parent.mkdir(parents=True)
+    duplicate_path.write_text(
+        json.dumps({"sessionId": first, "cwd": str(workspace), "message": {"role": "user", "content": "duplicate"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_FILES", 1)
+
+    assert bridge.list_public_sessions() == []
+
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_CANDIDATES", 1)
+    assert bridge.list_public_sessions() == []
+
+
+def test_cross_store_same_uuid_has_distinct_store_qualified_public_ids(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    first, _first_config = _valid_store(tmp_path / "first")
+    second, _second_config = _valid_store(tmp_path / "second")
+    second["id"] = "second-store"
+    registry = tmp_path / "stores.json"
+    _write_registry(registry, [first, second])
+    monkeypatch.setenv("HERMES_WEBUI_CLAUDE_STORES_FILE", str(registry))
+    session_id = str(uuid4())
+    for store in (first, second):
+        path = Path(store["config_dir"]) / "projects" / "project" / f"{session_id}.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"sessionId": session_id, "cwd": store["workspace_roots"][0], "message": {"role": "user", "content": "same UUID"}}) + "\n"
+            + json.dumps({"sessionId": session_id, "message": {"role": "assistant", "model": "anthropic.qwen-aeon", "content": "answer"}}) + "\n",
+            encoding="utf-8",
+        )
+
+    rows = bridge.list_public_sessions()
+    assert len(rows) == 2
+    assert len({row["session_id"] for row in rows}) == 2
+
+
+def test_transcript_hardlinks_nested_subagents_and_nonfinite_timestamps_are_rejected(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    hardlinked = _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")], project="hardlinked")
+    original = Path(store["config_dir"]) / "projects" / "hardlinked" / f"{hardlinked}.jsonl"
+    os.link(original, original.with_name(f"copy-{hardlinked}.jsonl"))
+    _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")], project="main/subagents")
+
+    assert bridge._parse_timestamp("NaN") is None
+    assert bridge._parse_timestamp("Infinity") is None
+    assert bridge.list_public_sessions() == []
+
+
+def test_transcript_mutated_while_parsing_is_rejected(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    session_id = _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")])
+    transcript = Path(store["config_dir"]) / "projects" / "project-a" / f"{session_id}.jsonl"
+    real_loads = bridge.json.loads
+    calls = 0
+
+    def append_after_first_record(value):
+        nonlocal calls
+        parsed = real_loads(value)
+        if isinstance(value, str) and '"sessionId"' in value:
+            calls += 1
+        if calls == 1 and isinstance(value, str) and '"sessionId"' in value:
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"sessionId": session_id, "message": {"role": "assistant", "model": "anthropic.qwen-aeon", "content": "late"}}) + "\n")
+        return parsed
+
+    monkeypatch.setattr(bridge.json, "loads", append_after_first_record)
+
+    assert bridge.list_public_sessions() == []
+
+
+def test_registry_mutated_while_parsing_is_rejected(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store, _config_dir = _valid_store(tmp_path)
+    registry = tmp_path / "stores.json"
+    _write_registry(registry, [store])
+    monkeypatch.setenv("HERMES_WEBUI_CLAUDE_STORES_FILE", str(registry))
+    real_loads = bridge.json.loads
+
+    def mutate_registry(value):
+        parsed = real_loads(value)
+        if isinstance(value, str) and '"stores"' in value:
+            with registry.open("a", encoding="utf-8") as handle:
+                handle.write(" ")
+        return parsed
+
+    monkeypatch.setattr(bridge.json, "loads", mutate_registry)
+
+    assert bridge.load_claude_stores() == ()
+
+
+def test_transcript_file_and_line_limits_fail_closed(tmp_path, monkeypatch):
+    import api.claude_code_bridge as bridge
+
+    store = _configure_valid_store(tmp_path, monkeypatch)
+    workspace = Path(store["workspace_roots"][0])
+    _bridge_session(store, [_top_user(workspace), _assistant("anthropic.qwen-aeon")])
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_LINES_PER_FILE", 1)
+    assert bridge.list_public_sessions() == []
+
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_LINES_PER_FILE", 100)
+    monkeypatch.setattr(bridge, "CLAUDE_CODE_MAX_FILE_BYTES", 1)
+    assert bridge.list_public_sessions() == []

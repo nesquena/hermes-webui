@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import math
 import os
 import stat
 from dataclasses import dataclass
@@ -52,6 +53,22 @@ CLAUDE_CODE_MAX_FILE_BYTES = 10 * 1024 * 1024
 CLAUDE_CODE_MAX_MESSAGES_PER_FILE = 1000
 CLAUDE_CODE_MAX_CONTENT_CHARS = 200_000
 CLAUDE_CODE_MAX_LINES_PER_FILE = 100_000
+CLAUDE_CODE_MAX_CANDIDATES = 1_000
+CLAUDE_CODE_MAX_PROJECT_DIRS = 1_000
+CLAUDE_STORES_FILE_MAX_BYTES = 64 * 1024
+
+_CANONICAL_MODEL_PROFILES = {
+    "anthropic.qwen-aeon": (
+        "qwen",
+        "Claude Qwen",
+        "/Users/mohameddarwiche/bin/claude-qwen",
+    ),
+    "anthropic.ornith": (
+        "ornith",
+        "Claude Local · Ornith",
+        "/Users/mohameddarwiche/bin/claude-ornith",
+    ),
+}
 
 
 def _safe_existing_path(value, *, directory: bool = False, executable: bool = False) -> Path | None:
@@ -77,7 +94,7 @@ def _safe_existing_path(value, *, directory: bool = False, executable: bool = Fa
             return None
     elif not stat.S_ISREG(info.st_mode):
         return None
-    if executable and not info.st_mode & 0o111:
+    if executable and not info.st_mode & stat.S_IXUSR:
         return None
     return path
 
@@ -116,18 +133,18 @@ def _load_store(raw) -> ClaudeStore | None:
         return None
     models: dict[str, ClaudeModelProfile] = {}
     for model_id, profile_raw in models_raw.items():
-        if not isinstance(model_id, str) or not model_id or not isinstance(profile_raw, dict):
+        canonical = _CANONICAL_MODEL_PROFILES.get(model_id)
+        if canonical is None or not isinstance(profile_raw, dict):
             return None
-        profile_label = profile_raw.get("label")
         argv_raw = profile_raw.get("argv")
-        if not isinstance(profile_label, str) or not profile_label or not isinstance(argv_raw, list) or not argv_raw:
+        if not isinstance(argv_raw, list) or not argv_raw or argv_raw[0] != canonical[2]:
             return None
         executable = _safe_existing_path(argv_raw[0], executable=True)
         if executable is None or any(not isinstance(arg, str) or not arg for arg in argv_raw):
             return None
         models[model_id] = ClaudeModelProfile(
             model_id=model_id,
-            label=profile_label,
+            label=canonical[1],
             argv=(str(executable), *argv_raw[1:]),
         )
     if not models:
@@ -143,17 +160,62 @@ def _load_store(raw) -> ClaudeStore | None:
     )
 
 
+def _identity(info) -> tuple:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mode,
+        info.st_uid,
+        info.st_nlink,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read_private_registry(registry: Path):
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(registry, os.O_RDONLY | nofollow_flag)
+    except OSError:
+        return None
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size > CLAUDE_STORES_FILE_MAX_BYTES
+        ):
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(8192, CLAUDE_STORES_FILE_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > CLAUDE_STORES_FILE_MAX_BYTES:
+                return None
+            chunks.append(chunk)
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+        after = os.fstat(fd)
+        if _identity(before) != _identity(after):
+            return None
+        return payload
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+    finally:
+        os.close(fd)
+
+
 def load_claude_stores() -> tuple[ClaudeStore, ...]:
     """Load only a private, operator-owned registry from the environment."""
     registry = _safe_existing_path(os.getenv("HERMES_WEBUI_CLAUDE_STORES_FILE"))
     if registry is None:
         return ()
-    try:
-        if stat.S_IMODE(os.stat(registry).st_mode) != 0o600:
-            return ()
-        with registry.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError, TypeError):
+    payload = _read_private_registry(registry)
+    if payload is None:
         return ()
     stores_raw = payload.get("stores") if isinstance(payload, dict) else None
     if not isinstance(stores_raw, list):
@@ -180,14 +242,17 @@ def invalidate_claude_session_cache() -> None:
 
 def _parse_timestamp(value) -> float | None:
     if isinstance(value, (int, float)):
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     except ValueError:
         try:
-            return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            return parsed if math.isfinite(parsed) else None
         except ValueError:
             return None
 
@@ -244,6 +309,7 @@ def _allowed_workspace(store: ClaudeStore, value) -> Path | None:
 def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> ClaudeSessionDescriptor | None:
     stem_id = _is_uuid(path.stem)
     if stem_id is None or path.suffix.lower() != ".jsonl" or file_info.st_nlink != 1:
+        os.close(fd)
         return None
     messages: list[dict] = []
     title: str | None = None
@@ -251,68 +317,75 @@ def _descriptor_from_fd(store: ClaudeStore, path: Path, fd: int, file_info) -> C
     last_timestamp: float | None = None
     transcript_ids: set[str] = set()
     latest_model: str | None = None
-    invalid_model = False
     latest_cwd: Path | None = None
     invalid_cwd = False
     line_count = 0
     try:
-        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                line_count += 1
-                if line_count > CLAUDE_CODE_MAX_LINES_PER_FILE:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(8192, CLAUDE_CODE_MAX_FILE_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > CLAUDE_CODE_MAX_FILE_BYTES:
+                return None
+            chunks.append(chunk)
+        for line in b"".join(chunks).splitlines():
+            line_count += 1
+            if line_count > CLAUDE_CODE_MAX_LINES_PER_FILE:
+                return None
+            try:
+                raw = json.loads(line.decode("utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            session_id = raw.get("sessionId")
+            if session_id is not None:
+                normalized_id = _is_uuid(session_id)
+                if normalized_id is None or normalized_id != stem_id:
                     return None
-                try:
-                    raw = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(raw, dict):
-                    continue
-                session_id = raw.get("sessionId")
-                if session_id is not None:
-                    normalized_id = _is_uuid(session_id)
-                    if normalized_id is None or normalized_id != stem_id:
-                        return None
-                    transcript_ids.add(normalized_id)
-                if raw.get("isSidechain") or raw.get("isSubagent"):
-                    continue
-                cwd_value = raw.get("cwd")
-                if cwd_value is not None:
-                    latest_cwd = _allowed_workspace(store, cwd_value)
-                    invalid_cwd = latest_cwd is None
-                record = raw.get("message") if isinstance(raw.get("message"), dict) else raw
-                role = str(record.get("role") or raw.get("role") or raw.get("type") or "").lower()
-                if role == "human":
-                    role = "user"
-                if role == "assistant" and "model" in record:
-                    model = record.get("model")
-                    if not isinstance(model, str):
-                        invalid_model = True
-                    elif model != "<synthetic>":
-                        if model not in store.models:
-                            invalid_model = True
-                        else:
-                            latest_model = model
-                if not title:
-                    summary = raw.get("summary") or raw.get("title")
-                    if isinstance(summary, str) and summary.strip():
-                        title = " ".join(summary.split())[:80]
-                if role not in {"user", "assistant", "system", "tool"} or len(messages) >= CLAUDE_CODE_MAX_MESSAGES_PER_FILE:
-                    continue
-                content = _extract_text(record.get("content") if "content" in record else raw.get("content"))
-                if not content.strip():
-                    continue
-                timestamp = _parse_timestamp(
-                    record.get("timestamp") or raw.get("timestamp") or raw.get("created_at")
-                )
-                if timestamp is not None:
-                    first_timestamp = timestamp if first_timestamp is None else min(first_timestamp, timestamp)
-                    last_timestamp = timestamp if last_timestamp is None else max(last_timestamp, timestamp)
-                messages.append({"role": role, "content": content, **({"timestamp": timestamp} if timestamp is not None else {})})
+                transcript_ids.add(normalized_id)
+            if raw.get("isSidechain") or raw.get("isSubagent"):
+                continue
+            cwd_value = raw.get("cwd")
+            if cwd_value is not None:
+                latest_cwd = _allowed_workspace(store, cwd_value)
+                invalid_cwd = latest_cwd is None
+            record = raw.get("message") if isinstance(raw.get("message"), dict) else raw
+            role = str(record.get("role") or raw.get("role") or raw.get("type") or "").lower()
+            if role == "human":
+                role = "user"
+            if role == "assistant" and "model" in record:
+                model = record.get("model")
+                if model != "<synthetic>":
+                    latest_model = model if isinstance(model, str) else None
+            if not title:
+                summary = raw.get("summary") or raw.get("title")
+                if isinstance(summary, str) and summary.strip():
+                    title = " ".join(summary.split())[:80]
+            if role not in {"user", "assistant", "system", "tool"} or len(messages) >= CLAUDE_CODE_MAX_MESSAGES_PER_FILE:
+                continue
+            content = _extract_text(record.get("content") if "content" in record else raw.get("content"))
+            if not content.strip():
+                continue
+            timestamp = _parse_timestamp(
+                record.get("timestamp") or raw.get("timestamp") or raw.get("created_at")
+            )
+            if timestamp is not None:
+                first_timestamp = timestamp if first_timestamp is None else min(first_timestamp, timestamp)
+                last_timestamp = timestamp if last_timestamp is None else max(last_timestamp, timestamp)
+            messages.append({"role": role, "content": content, **({"timestamp": timestamp} if timestamp is not None else {})})
+        if _identity(file_info) != _identity(os.fstat(fd)):
+            return None
     except (OSError, UnicodeError):
         return None
+    finally:
+        os.close(fd)
     if transcript_ids != {stem_id}:
         return None
-    profile = store.models.get(latest_model) if latest_model and not invalid_model else None
+    profile = store.models.get(latest_model) if latest_model else None
     can_remote_resume = profile is not None and latest_cwd is not None and not invalid_cwd
     if not title:
         title = next((" ".join(str(message["content"]).split())[:80] for message in messages if message["role"] == "user"), "Claude Code Session")
@@ -337,11 +410,17 @@ def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
     directory_flag = getattr(os, "O_DIRECTORY", 0)
     nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[ClaudeSessionDescriptor] = []
+    root_fd = None
+    project_count = 0
+    candidate_count = 0
     try:
         root_fd = os.open(store.projects_dir, os.O_RDONLY | directory_flag | nofollow_flag)
         with os.scandir(root_fd) as projects:
-            for project in sorted(projects, key=lambda entry: entry.name):
-                if len(descriptors) >= CLAUDE_CODE_MAX_FILES or not project.is_dir(follow_symlinks=False):
+            for project in projects:
+                project_count += 1
+                if project_count > CLAUDE_CODE_MAX_PROJECT_DIRS:
+                    return []
+                if not project.is_dir(follow_symlinks=False):
                     continue
                 try:
                     project_fd = os.open(project.name, os.O_RDONLY | directory_flag | nofollow_flag, dir_fd=root_fd)
@@ -349,9 +428,10 @@ def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
                     continue
                 try:
                     with os.scandir(project_fd) as files:
-                        for entry in sorted(files, key=lambda item: item.name):
-                            if len(descriptors) >= CLAUDE_CODE_MAX_FILES:
-                                break
+                        for entry in files:
+                            candidate_count += 1
+                            if candidate_count > CLAUDE_CODE_MAX_CANDIDATES:
+                                return []
                             if not entry.name.endswith(".jsonl") or not entry.is_file(follow_symlinks=False):
                                 continue
                             file_fd = None
@@ -361,11 +441,7 @@ def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
                                     continue
                                 file_fd = os.open(entry.name, os.O_RDONLY | nofollow_flag, dir_fd=project_fd)
                                 after = os.fstat(file_fd)
-                                before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                                after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-                                if before_identity != after_identity or after.st_uid != os.getuid():
-                                    os.close(file_fd)
-                                    file_fd = None
+                                if _identity(before) != _identity(after) or after.st_uid != os.getuid():
                                     continue
                                 path = store.projects_dir / project.name / entry.name
                                 descriptor = _descriptor_from_fd(store, path, file_fd, after)
@@ -384,17 +460,23 @@ def _store_descriptors(store: ClaudeStore) -> list[ClaudeSessionDescriptor]:
     finally:
         try:
             os.close(root_fd)
-        except (OSError, UnboundLocalError):
+        except (OSError, TypeError):
             pass
     by_uuid: dict[str, list[ClaudeSessionDescriptor]] = {}
     for descriptor in descriptors:
         by_uuid.setdefault(descriptor.claude_session_id, []).append(descriptor)
-    return [descriptor for descriptor in descriptors if len(by_uuid[descriptor.claude_session_id]) == 1]
+    return [
+        descriptor
+        for descriptor in descriptors
+        if len(by_uuid[descriptor.claude_session_id]) == 1
+    ][:CLAUDE_CODE_MAX_FILES]
 
 
 def _descriptors() -> list[ClaudeSessionDescriptor]:
     descriptors: list[ClaudeSessionDescriptor] = []
     for store in load_claude_stores():
+        # UUID uniqueness is store-local. Opaque public IDs include the store
+        # ID, keeping equal UUIDs from distinct configured stores unambiguous.
         descriptors.extend(_store_descriptors(store))
     return descriptors
 
@@ -402,12 +484,8 @@ def _descriptors() -> list[ClaudeSessionDescriptor]:
 def _profile_key(profile: ClaudeModelProfile | None) -> str | None:
     if profile is None:
         return None
-    model_id = profile.model_id.lower()
-    if "qwen" in model_id:
-        return "qwen"
-    if "ornith" in model_id:
-        return "ornith"
-    return "configured"
+    canonical = _CANONICAL_MODEL_PROFILES.get(profile.model_id)
+    return canonical[0] if canonical is not None else None
 
 
 def _public_projection(descriptor: ClaudeSessionDescriptor) -> dict:

@@ -70,17 +70,13 @@ def test_configured_claude_store_replaces_default_importer_with_safe_bridge_rows
     workspace = tmp_path / "workspace"
     (config_dir / "projects" / "project-a").mkdir(parents=True)
     workspace.mkdir()
-    claude_bin = tmp_path / "claude"
-    wrapper = tmp_path / "claude-qwen"
-    for executable in (claude_bin, wrapper):
-        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        executable.chmod(0o700)
+    wrapper = Path("/Users/mohameddarwiche/bin/claude-qwen")
     registry = tmp_path / "stores.json"
     registry.write_text(json.dumps({"stores": [{
         "id": "local-models",
         "label": "Claude Local",
         "config_dir": str(config_dir),
-        "claude_bin": str(claude_bin),
+        "claude_bin": str(wrapper),
         "workspace_roots": [str(workspace)],
         "models": {"anthropic.qwen-aeon": {"label": "Claude Qwen", "argv": [str(wrapper)]}},
     }]}), encoding="utf-8")
