@@ -4,6 +4,7 @@ Hermes Web UI -- HTTP helper functions.
 import base64 as _base64
 import binascii as _binascii
 import functools
+import hashlib as _hashlib
 import json as _json
 import logging
 import os
@@ -221,15 +222,34 @@ _CLAUDE_TERMINAL_CAPABILITY_COOKIE_PATH = "/api/claude-code"
 _CLAUDE_TERMINAL_CAPABILITY_MAX_AGE = 10 * 60
 
 
-def claude_terminal_capability_cookie_name(operation: str) -> str:
-    operation = str(operation or "").strip().lower()
+def claude_terminal_capability_cookie_name(
+    handle: str,
+    generation: str,
+    operation: str,
+) -> str:
+    if not isinstance(handle, str) or not handle.strip():
+        raise ValueError("invalid terminal handle")
+    if not isinstance(generation, str) or not generation.strip():
+        raise ValueError("invalid terminal generation")
+    if not isinstance(operation, str):
+        raise ValueError("invalid terminal capability operation")
+    handle = handle.strip()
+    generation = generation.strip()
+    operation = operation.strip().lower()
     if operation not in _CLAUDE_TERMINAL_CAPABILITY_OPERATIONS:
         raise ValueError("invalid terminal capability operation")
-    return f"{_CLAUDE_TERMINAL_CAPABILITY_COOKIE_PREFIX}{operation}"
+    scope = _hashlib.sha256(
+        f"{len(handle)}:{handle}{len(generation)}:{generation}:{operation}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+    return f"{_CLAUDE_TERMINAL_CAPABILITY_COOKIE_PREFIX}{operation}_{scope}"
 
 
 def queue_claude_terminal_capability_cookie(
     handler,
+    handle: str,
+    generation: str,
     operation: str,
     capability: str,
 ) -> None:
@@ -238,7 +258,11 @@ def queue_claude_terminal_capability_cookie(
 
     from api.auth import _is_secure_context
 
-    name = claude_terminal_capability_cookie_name(operation)
+    name = claude_terminal_capability_cookie_name(
+        handle,
+        generation,
+        operation,
+    )
     cookie = _hc.SimpleCookie()
     cookie[name] = str(capability or "")
     cookie[name]["path"] = _CLAUDE_TERMINAL_CAPABILITY_COOKIE_PATH
@@ -256,6 +280,8 @@ def queue_claude_terminal_capability_cookie(
 
 def get_claude_terminal_capability_cookie(
     handler,
+    handle: str,
+    generation: str,
     operation: str,
 ) -> str | None:
     """Read one operation-bound capability without accepting URL/body secrets."""
@@ -269,7 +295,13 @@ def get_claude_terminal_capability_cookie(
         cookie.load(raw)
     except _hc.CookieError:
         return None
-    morsel = cookie.get(claude_terminal_capability_cookie_name(operation))
+    morsel = cookie.get(
+        claude_terminal_capability_cookie_name(
+            handle,
+            generation,
+            operation,
+        )
+    )
     return morsel.value if morsel and morsel.value else None
 
 

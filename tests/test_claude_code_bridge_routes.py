@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import http.cookies
 import io
 import json
 import os
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from api import auth, routes, terminal
+from api import auth, helpers, routes, terminal
 
 
 PUBLIC_ID = "claude_code_0123456789abcdef01234567"
@@ -160,8 +161,19 @@ def managed_terminals():
             pass
 
 
-def _cookie_header(operation: str, capability: str) -> dict[str, str]:
-    return {"Cookie": f"hermes_claude_{operation}={capability}"}
+def _cookie_header(
+    term,
+    operation: str,
+    capability: str,
+    *,
+    generation: str | None = None,
+) -> dict[str, str]:
+    name = helpers.claude_terminal_capability_cookie_name(
+        term.handle,
+        generation or term.generation,
+        operation,
+    )
+    return {"Cookie": f"{name}={capability}"}
 
 
 def test_resume_requires_real_auth_even_when_onboarding_open(monkeypatch):
@@ -206,6 +218,23 @@ def test_client_cannot_override_launch_fields(monkeypatch):
             "uuid": str(uuid4()),
         },
     )
+
+    assert response.status == 400
+    assert response.json() == {"error": "invalid_request"}
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("/api/claude-code/resume", {"session_id": {"value": PUBLIC_ID}}),
+        ("/api/claude-code/resume", {"session_id": [PUBLIC_ID]}),
+        ("/api/claude-code/terminal-token", {"handle": 7, "generation": "g", "operation": "input"}),
+        ("/api/claude-code/terminal/input", {"handle": "h", "generation": True, "data": "x"}),
+        ("/api/claude-code/stop", {"handle": 1.5, "generation": "g"}),
+    ],
+)
+def test_bridge_rejects_non_string_identifiers(path, body):
+    response = _post(path, body)
 
     assert response.status == 400
     assert response.json() == {"error": "invalid_request"}
@@ -298,8 +327,13 @@ def test_resume_reuses_existing_hermes_terminal_without_probe_or_spawn(
         "handle": existing.handle,
         "generation": existing.generation,
     }
+    stream_cookie_name = helpers.claude_terminal_capability_cookie_name(
+        existing.handle,
+        existing.generation,
+        "stream",
+    )
     assert any(
-        header.startswith("hermes_claude_stream=")
+        header.startswith(f"{stream_cookie_name}=")
         for header in response.headers_named("Set-Cookie")
     )
 
@@ -539,7 +573,12 @@ def test_terminal_token_is_cookie_only_and_operation_scoped(managed_terminals):
     assert response.status == 200
     cookie_header = response.header("Set-Cookie")
     assert cookie_header is not None
-    assert cookie_header.startswith("hermes_claude_input=")
+    expected_name = helpers.claude_terminal_capability_cookie_name(
+        term.handle,
+        term.generation,
+        "input",
+    )
+    assert cookie_header.startswith(f"{expected_name}=")
     capability = cookie_header.split("=", 1)[1].split(";", 1)[0]
     assert capability
     assert capability not in response.wfile.getvalue().decode("utf-8")
@@ -585,6 +624,98 @@ def test_terminal_token_accepts_only_documented_operations(
     assert response.status == 200
 
 
+def test_two_terminal_cookie_jar_retains_every_operation_capability(
+    managed_terminals,
+):
+    first, second = managed_terminals
+    jar = http.cookies.SimpleCookie()
+
+    for term in (first, second):
+        for operation in ("stream", "input", "resize", "stop"):
+            response = _post(
+                "/api/claude-code/terminal-token",
+                {
+                    "handle": term.handle,
+                    "generation": term.generation,
+                    "operation": operation,
+                },
+            )
+            jar.load(response.header("Set-Cookie"))
+
+    assert len(jar) == 8
+    browser_cookie = "; ".join(
+        f"{name}={morsel.value}" for name, morsel in jar.items()
+    )
+    handler = _Handler(
+        "/api/claude-code/terminal/output",
+        headers={"Cookie": browser_cookie},
+    )
+    for operation in ("stream", "input", "resize", "stop"):
+        first_capability = routes._claude_terminal_authority(
+            handler,
+            first.handle,
+            first.generation,
+            operation,
+        )
+        second_capability = routes._claude_terminal_authority(
+            handler,
+            second.handle,
+            second.generation,
+            operation,
+        )
+        assert first_capability != second_capability
+        assert terminal._authorised_managed_terminal(
+            handle=first.handle,
+            generation=first.generation,
+            capability=first_capability,
+            operation=operation,
+        ) is first
+        assert terminal._authorised_managed_terminal(
+            handle=second.handle,
+            generation=second.generation,
+            capability=second_capability,
+            operation=operation,
+        ) is second
+        with pytest.raises(KeyError):
+            terminal._authorised_managed_terminal(
+                handle=second.handle,
+                generation=second.generation,
+                capability=first_capability,
+                operation=operation,
+            )
+
+
+def test_terminal_capability_remint_revokes_prior_token_and_stays_bounded(
+    managed_terminals,
+):
+    term, _other = managed_terminals
+    latest = {}
+
+    for operation in ("stream", "input", "resize", "stop"):
+        old = terminal.issue_terminal_capability(
+            term.handle, term.generation, operation
+        )
+        latest[operation] = terminal.issue_terminal_capability(
+            term.handle, term.generation, operation
+        )
+        with pytest.raises(KeyError):
+            terminal._authorised_managed_terminal(
+                handle=term.handle,
+                generation=term.generation,
+                capability=old,
+                operation=operation,
+            )
+
+    assert len(term._capabilities) == 4
+    for operation, capability in latest.items():
+        assert terminal._authorised_managed_terminal(
+            handle=term.handle,
+            generation=term.generation,
+            capability=capability,
+            operation=operation,
+        ) is term
+
+
 def test_capability_for_one_terminal_cannot_type_or_stop_another(
     managed_terminals,
 ):
@@ -603,12 +734,12 @@ def test_capability_for_one_terminal_cannot_type_or_stop_another(
             "generation": second.generation,
             "data": "x",
         },
-        headers=_cookie_header("input", input_capability),
+        headers=_cookie_header(first, "input", input_capability),
     )
     stopped = _post(
         "/api/claude-code/stop",
         {"handle": second.handle, "generation": second.generation},
-        headers=_cookie_header("stop", stop_capability),
+        headers=_cookie_header(first, "stop", stop_capability),
     )
 
     assert typed.status == 404
@@ -632,11 +763,46 @@ def test_resize_requires_resize_capability(managed_terminals):
             "rows": 30,
             "cols": 100,
         },
-        headers=_cookie_header("resize", input_capability),
+        headers=_cookie_header(term, "resize", input_capability),
     )
 
     assert response.status == 404
     assert response.json() == {"error": "not_found"}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("rows", True),
+        ("rows", 24.0),
+        ("rows", "24"),
+        ("rows", 7),
+        ("rows", 81),
+        ("cols", False),
+        ("cols", 80.0),
+        ("cols", "80"),
+        ("cols", 19),
+        ("cols", 241),
+    ],
+)
+def test_resize_rejects_non_integer_and_out_of_range_dimensions(
+    managed_terminals,
+    field,
+    value,
+):
+    term, _other = managed_terminals
+    body = {
+        "handle": term.handle,
+        "generation": term.generation,
+        "rows": 24,
+        "cols": 80,
+    }
+    body[field] = value
+
+    response = _post("/api/claude-code/terminal/resize", body)
+
+    assert response.status == 400
+    assert response.json() == {"error": "invalid_request"}
 
 
 def test_old_generation_and_capability_cannot_reconnect(managed_terminals):
@@ -650,7 +816,12 @@ def test_old_generation_and_capability_cannot_reconnect(managed_terminals):
     response = _get(
         "/api/claude-code/terminal/output"
         f"?handle={term.handle}&generation={old_generation}",
-        headers=_cookie_header("stream", old_capability),
+        headers=_cookie_header(
+            term,
+            "stream",
+            old_capability,
+            generation=old_generation,
+        ),
     )
 
     assert response.status == 404
@@ -672,7 +843,7 @@ def test_stream_redacts_query_and_translates_terminal_reset(
         f"?handle={term.handle}&generation={term.generation}"
     )
 
-    response = _get(path, headers=_cookie_header("stream", capability))
+    response = _get(path, headers=_cookie_header(term, "stream", capability))
 
     assert response.status == 200
     assert response.path == "/api/claude-code/terminal/output"

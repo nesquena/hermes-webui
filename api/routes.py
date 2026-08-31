@@ -19120,8 +19120,10 @@ def _claude_exact_body(body, fields: set[str]) -> bool:
 
 
 def _claude_body_strings(body, *fields: str) -> tuple[str, ...] | None:
-    values = tuple(str(body.get(field) or "").strip() for field in fields)
-    return values if all(values) else None
+    values = tuple(body.get(field) for field in fields)
+    if not all(isinstance(value, str) and value.strip() for value in values):
+        return None
+    return tuple(value.strip() for value in values)
 
 
 def _claude_query_value(parsed, field: str) -> str | None:
@@ -19200,6 +19202,8 @@ def _mint_claude_terminal_capability(handler, term, operation: str) -> None:
     )
     queue_claude_terminal_capability_cookie(
         handler,
+        term.handle,
+        term.generation,
         operation,
         capability,
     )
@@ -19295,7 +19299,13 @@ def _handle_claude_code_terminal_token(handler, body):
         capability = issue_terminal_capability(handle, generation, operation)
     except KeyError:
         return j(handler, {"error": "not_found"}, status=404)
-    queue_claude_terminal_capability_cookie(handler, operation, capability)
+    queue_claude_terminal_capability_cookie(
+        handler,
+        handle,
+        generation,
+        operation,
+        capability,
+    )
     return j(
         handler,
         {
@@ -19307,8 +19317,18 @@ def _handle_claude_code_terminal_token(handler, body):
     )
 
 
-def _claude_terminal_authority(handler, operation: str) -> str | None:
-    return get_claude_terminal_capability_cookie(handler, operation)
+def _claude_terminal_authority(
+    handler,
+    handle: str,
+    generation: str,
+    operation: str,
+) -> str | None:
+    return get_claude_terminal_capability_cookie(
+        handler,
+        handle,
+        generation,
+        operation,
+    )
 
 
 def _handle_claude_code_terminal_input(handler, body):
@@ -19323,7 +19343,12 @@ def _handle_claude_code_terminal_input(handler, body):
     if len(data.encode("utf-8")) > 8192:
         return j(handler, {"error": "invalid_request"}, status=413)
     handle, generation = values
-    capability = _claude_terminal_authority(handler, "input")
+    capability = _claude_terminal_authority(
+        handler,
+        handle,
+        generation,
+        "input",
+    )
     from api.terminal import write_managed_terminal
 
     try:
@@ -19348,13 +19373,22 @@ def _handle_claude_code_terminal_resize(handler, body):
     values = _claude_body_strings(body, "handle", "generation")
     if values is None:
         return j(handler, {"error": "invalid_request"}, status=400)
-    try:
-        rows = int(body["rows"])
-        cols = int(body["cols"])
-    except (TypeError, ValueError):
+    rows = body["rows"]
+    cols = body["cols"]
+    if (
+        type(rows) is not int
+        or type(cols) is not int
+        or not 8 <= rows <= 80
+        or not 20 <= cols <= 240
+    ):
         return j(handler, {"error": "invalid_request"}, status=400)
     handle, generation = values
-    capability = _claude_terminal_authority(handler, "resize")
+    capability = _claude_terminal_authority(
+        handler,
+        handle,
+        generation,
+        "resize",
+    )
     from api.terminal import resize_managed_terminal
 
     try:
@@ -19379,7 +19413,12 @@ def _handle_claude_code_stop(handler, body):
     if values is None:
         return j(handler, {"error": "invalid_request"}, status=400)
     handle, generation = values
-    capability = _claude_terminal_authority(handler, "stop")
+    capability = _claude_terminal_authority(
+        handler,
+        handle,
+        generation,
+        "stop",
+    )
     from api.terminal import stop_managed_terminal
 
     try:
@@ -19414,7 +19453,12 @@ def _handle_claude_code_terminal_output(handler, parsed):
     if stream_query is None:
         return j(handler, {"error": "invalid_request"}, status=400)
     handle, generation = stream_query
-    capability = _claude_terminal_authority(handler, "stream")
+    capability = _claude_terminal_authority(
+        handler,
+        handle,
+        generation,
+        "stream",
+    )
     from api.terminal import (
         ManagedTerminalViewerLimitError,
         attach_managed_terminal,

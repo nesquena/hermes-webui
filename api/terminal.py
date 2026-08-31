@@ -1220,10 +1220,18 @@ def issue_terminal_capability(
             or not term.is_alive()
         ):
             raise KeyError("terminal not found")
+        newest_by_operation: dict[str, tuple[str, tuple[str, str, float]]] = {}
+        for digest, record in term._capabilities.items():
+            record_operation, record_generation, expires_at = record
+            if expires_at <= now or record_generation != generation:
+                continue
+            existing = newest_by_operation.get(record_operation)
+            if existing is None or existing[1][2] < expires_at:
+                newest_by_operation[record_operation] = (digest, record)
         term._capabilities = {
             digest: record
-            for digest, record in term._capabilities.items()
-            if record[2] > now
+            for record_operation, (digest, record) in newest_by_operation.items()
+            if record_operation != operation
         }
         capability = secrets.token_urlsafe(32)
         digest = hashlib.sha256(capability.encode("utf-8")).hexdigest()
