@@ -64,6 +64,7 @@ def _safe_close_fd(fd: int) -> None:
 # catch-up backlog and the per-viewer queue stay in lockstep.
 _OUTPUT_BUFFER_MAXLEN = 2000
 _MANAGED_OUTPUT_BACKLOG_BYTES = 4 * 1024 * 1024
+_MANAGED_OUTPUT_BACKLOG_MAX_RECORDS = 2000
 _MANAGED_TERMINAL_MAX = 2
 _MANAGED_TERMINAL_MAX_VIEWERS = 8
 _MANAGED_TERMINAL_IDLE_SECONDS = 6 * 60 * 60
@@ -89,11 +90,12 @@ class ManagedTerminalStartError(RuntimeError):
 
 
 class _ManagedSubscriberQueue(queue.Queue):
-    """A non-blocking, byte-bounded queue for one managed-terminal viewer."""
+    """A non-blocking, byte- and record-bounded managed viewer queue."""
 
-    def __init__(self, byte_limit: int):
+    def __init__(self, byte_limit: int, record_limit: int):
         super().__init__(maxsize=0)
         self.byte_limit = byte_limit
+        self.record_limit = record_limit
         self.buffered_bytes = 0
         self.lagged = False
 
@@ -102,7 +104,10 @@ class _ManagedSubscriberQueue(queue.Queue):
         with self.not_full:
             if self.lagged:
                 return False
-            if self.buffered_bytes + size > self.byte_limit:
+            if (
+                self.buffered_bytes + size > self.byte_limit
+                or self._qsize() >= self.record_limit
+            ):
                 dropped = len(self.queue)
                 self.queue.clear()
                 self.unfinished_tasks = max(0, self.unfinished_tasks - dropped)
@@ -212,6 +217,7 @@ class TerminalSession:
     _next_output_seq: int = 1
     closed: threading.Event = field(default_factory=threading.Event)
     reader: threading.Thread | None = None
+    reader_started: bool = False
     # Serializes fd-touching ops (os.write, resize ioctl) against os.close, so a
     # write can never land on a master_fd that was closed and whose number was
     # already recycled by a concurrent openpty — that would inject the user's
@@ -266,7 +272,10 @@ class TerminalSession:
         """
         managed = self.kind == "claude_code"
         q: queue.Queue = (
-            _ManagedSubscriberQueue(_MANAGED_OUTPUT_BACKLOG_BYTES)
+            _ManagedSubscriberQueue(
+                _MANAGED_OUTPUT_BACKLOG_BYTES,
+                _MANAGED_OUTPUT_BACKLOG_MAX_RECORDS,
+            )
             if managed
             else queue.Queue(maxsize=_OUTPUT_BUFFER_MAXLEN)
         )
@@ -326,7 +335,11 @@ class TerminalSession:
                 self.backlog_bytes += _managed_output_size(event, payload)
                 while (
                     self._backlog
-                    and self.backlog_bytes > _MANAGED_OUTPUT_BACKLOG_BYTES
+                    and (
+                        self.backlog_bytes > _MANAGED_OUTPUT_BACKLOG_BYTES
+                        or len(self._backlog)
+                        > _MANAGED_OUTPUT_BACKLOG_MAX_RECORDS
+                    )
                 ):
                     _seq, dropped_event, dropped_payload = self._backlog.popleft()
                     self.backlog_bytes -= _managed_output_size(
@@ -373,22 +386,20 @@ def _managed_output_size(event: str, payload: dict) -> int:
     )
 
 
-def _owned_group_exists(term: TerminalSession) -> bool:
-    """Check the immutable process group that was verified immediately after spawn."""
-    if (
-        not term.owned_pgid_verified
-        or term.pgid is None
-        or term.pgid <= 0
-        or term.pgid != term.proc.pid
-    ):
+def _verified_process_group_exists(proc: subprocess.Popen, pgid: int | None) -> bool:
+    """Check a PGID that was verified as the spawned leader's immediately after spawn."""
+    if pgid is None or pgid <= 0 or pgid != proc.pid:
         return False
-    if term.proc.poll() is None:
+    if proc.poll() is None:
         try:
-            return os.getpgid(term.proc.pid) == term.pgid
-        except (OSError, ProcessLookupError):
-            return False
+            return os.getpgid(proc.pid) == pgid
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            if exc.errno != errno.ESRCH:
+                return False
     try:
-        os.killpg(term.pgid, 0)
+        os.killpg(pgid, 0)
         return True
     except PermissionError:
         return True
@@ -396,21 +407,42 @@ def _owned_group_exists(term: TerminalSession) -> bool:
         return False
 
 
-def _signal_owned_group(term: TerminalSession, sig: int) -> bool:
-    """Signal only the runner-owned group verified immediately after spawn."""
-    if not _owned_group_exists(term):
+def _owned_group_exists(term: TerminalSession) -> bool:
+    """Check the immutable process group that was verified immediately after spawn."""
+    if not term.owned_pgid_verified:
+        return False
+    return _verified_process_group_exists(term.proc, term.pgid)
+
+
+def _signal_verified_process_group(
+    proc: subprocess.Popen,
+    pgid: int | None,
+    sig: int,
+) -> bool:
+    if not _verified_process_group_exists(proc, pgid):
         return False
     try:
-        os.killpg(term.pgid, sig)
+        os.killpg(pgid, sig)
         return True
     except (OSError, ProcessLookupError):
         return False
 
 
-def _wait_for_owned_group_exit(term: TerminalSession, timeout: float) -> bool:
+def _signal_owned_group(term: TerminalSession, sig: int) -> bool:
+    """Signal only the runner-owned group verified immediately after spawn."""
+    if not term.owned_pgid_verified:
+        return False
+    return _signal_verified_process_group(term.proc, term.pgid, sig)
+
+
+def _wait_for_verified_process_group_exit(
+    proc: subprocess.Popen,
+    pgid: int | None,
+    timeout: float,
+) -> bool:
     deadline = time.monotonic() + timeout
-    while _owned_group_exists(term):
-        _reap_terminal_descendants(term.pgid or term.proc.pid)
+    while _verified_process_group_exists(proc, pgid):
+        _reap_terminal_descendants(pgid or proc.pid)
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.01)
@@ -1038,6 +1070,7 @@ def start_managed_terminal(
     master_fd = slave_fd = readiness_read_fd = readiness_write_fd = -1
     proc = None
     term = None
+    actual_pgid = None
     rolled_back = False
     published = False
     try:
@@ -1101,6 +1134,7 @@ def start_managed_terminal(
         _set_size(term, rows, cols)
         term.reader = threading.Thread(target=_reader_loop, args=(term,), daemon=True)
         term.reader.start()
+        term.reader_started = True
         with _LOCK:
             if term.closed.is_set():
                 raise ManagedTerminalStartError("ownership_unknown")
@@ -1110,6 +1144,9 @@ def start_managed_terminal(
     except BaseException:
         if term is not None:
             _teardown_managed_terminal(term)
+            rolled_back = True
+        elif proc is not None and actual_pgid == proc.pid:
+            _teardown_verified_managed_spawn(proc, actual_pgid, master_fd)
             rolled_back = True
         elif proc is not None:
             try:
@@ -1427,36 +1464,81 @@ def _teardown_terminal(term: TerminalSession) -> None:
 
 def _teardown_managed_terminal(term: TerminalSession) -> None:
     """Stop only the verified runner-owned group, then drain and close its PTY."""
+    if term.owned_pgid_verified:
+        _stop_verified_managed_group(term.proc, term.pgid)
+
+    reader = term.reader
+    if (
+        reader is not None
+        and term.reader_started
+        and reader is not threading.current_thread()
+    ):
+        try:
+            reader.join(timeout=1.0)
+        except RuntimeError:
+            pass
+    elif not term.reader_started:
+        _drain_managed_pty_fd(term.master_fd)
+
+    term.closed.set()
+    with term.io_lock:
+        _safe_close_fd(term.master_fd)
+    _reap_terminal_descendants(term.pgid or term.proc.pid)
+
+
+def _stop_verified_managed_group(
+    proc: subprocess.Popen,
+    pgid: int | None,
+) -> None:
     escalation = (
         (signal.SIGHUP, 0.75),
         (signal.SIGTERM, 0.75),
         (signal.SIGKILL, 1.0),
     )
     for sig, timeout in escalation:
-        if not _signal_owned_group(term, sig):
+        if not _signal_verified_process_group(proc, pgid, sig):
             break
-        if _wait_for_owned_group_exit(term, timeout):
+        if _wait_for_verified_process_group_exit(proc, pgid, timeout):
             break
 
     try:
-        term.proc.wait(timeout=0)
-    except (subprocess.TimeoutExpired, ProcessLookupError):
+        proc.wait(timeout=0)
+    except (AttributeError, OSError, subprocess.TimeoutExpired, ProcessLookupError):
         pass
+    _reap_terminal_descendants(pgid or proc.pid)
 
-    reader = term.reader
-    if (
-        reader is not None
-        and reader is not threading.current_thread()
-        and getattr(reader, "is_alive", lambda: False)()
-    ):
-        reader.join(timeout=1.0)
-    elif reader is not None and reader is not threading.current_thread():
-        reader.join(timeout=0)
 
-    term.closed.set()
-    with term.io_lock:
-        _safe_close_fd(term.master_fd)
-    _reap_terminal_descendants(term.pgid or term.proc.pid)
+def _drain_managed_pty_fd(fd: int) -> None:
+    remaining = _MANAGED_OUTPUT_BACKLOG_BYTES
+    while fd >= 0 and remaining > 0:
+        try:
+            ready, _, _ = select.select([fd], [], [], 0)
+            if not ready:
+                return
+            data = os.read(fd, min(8192, remaining))
+        except ValueError:
+            return
+        except OSError as exc:
+            if exc.errno in (errno.EIO, errno.EBADF):
+                return
+            return
+        if not data:
+            return
+        remaining -= len(data)
+
+
+def _teardown_verified_managed_spawn(
+    proc: subprocess.Popen,
+    pgid: int,
+    master_fd: int,
+) -> None:
+    """Roll back a verified spawn before a TerminalSession can own it."""
+    try:
+        _stop_verified_managed_group(proc, pgid)
+        _drain_managed_pty_fd(master_fd)
+    finally:
+        _safe_close_fd(master_fd)
+        _reap_terminal_descendants(pgid)
 
 
 def close_all_terminals() -> None:

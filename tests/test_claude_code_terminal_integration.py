@@ -117,6 +117,14 @@ def _wait_for_path(path: Path, timeout=5):
     raise AssertionError(f"timed out waiting for {path}")
 
 
+def _process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def test_real_runner_readiness_lease_exec_and_authoritative_cwd(
     tmp_path, monkeypatch
 ):
@@ -221,6 +229,100 @@ def test_post_readiness_setup_failure_reaps_real_runner_and_releases_lease(
     )
     assert lease is not None
     lease.close()
+
+
+def test_session_constructor_failure_reaps_verified_group_and_inherited_lease(
+    tmp_path, monkeypatch
+):
+    repository = Path(__file__).parents[1]
+    config_dir = tmp_path / ".claude-constructor-failure"
+    config_dir.mkdir()
+    session_id = str(uuid4())
+    child_marker = tmp_path / "constructor-child.pid"
+    helper = tmp_path / "constructor_failure_runner.py"
+    helper.write_text(
+        "import os,signal,sys,time\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(repository)!r})\n"
+        "from api.claude_code_runner import acquire_resume_lease\n"
+        f"lease=acquire_resume_lease(Path({str(config_dir)!r}), 'local-models', {session_id!r})\n"
+        "if lease is None:\n"
+        "    raise SystemExit(4)\n"
+        "child=os.fork()\n"
+        "if child:\n"
+        "    time.sleep(30)\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"Path({str(child_marker)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    spawned = {}
+    opened_fds = []
+    real_openpty = terminal.os.openpty
+    real_pipe = terminal.os.pipe
+
+    def tracked_openpty():
+        pair = real_openpty()
+        opened_fds.extend(pair)
+        return pair
+
+    def tracked_pipe():
+        pair = real_pipe()
+        opened_fds.extend(pair)
+        return pair
+
+    def spawn(*, argv, cwd, env, slave_fd, pass_fds):
+        proc = subprocess.Popen(
+            [sys.executable, str(helper)],
+            cwd=cwd,
+            env=env,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+            pass_fds=pass_fds,
+            start_new_session=True,
+        )
+        spawned["proc"] = proc
+        _wait_for_path(child_marker)
+        spawned["lease_was_held"] = (
+            acquire_resume_lease(config_dir, "local-models", session_id) is None
+        )
+        return proc
+
+    monkeypatch.setattr(terminal.os, "openpty", tracked_openpty)
+    monkeypatch.setattr(terminal.os, "pipe", tracked_pipe)
+    monkeypatch.setattr(terminal, "_spawn_pty_process", spawn)
+    monkeypatch.setattr(
+        terminal,
+        "TerminalSession",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("session constructor")),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="session constructor"):
+            terminal.start_managed_terminal("constructor-failure", tmp_path)
+
+        proc = spawned["proc"]
+        assert spawned["lease_was_held"] is True
+        assert proc.poll() is not None
+        assert not _process_group_exists(proc.pid)
+        assert terminal._MANAGED_START_RESERVATIONS == 0
+        assert not terminal._TERMINALS
+        for fd in opened_fds:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        lease = acquire_resume_lease(config_dir, "local-models", session_id)
+        assert lease is not None
+        lease.close()
+    finally:
+        proc = spawned.get("proc")
+        if proc is not None and _process_group_exists(proc.pid):
+            os.killpg(proc.pid, signal.SIGKILL)
+        if proc is not None:
+            proc.wait(timeout=5)
 
 
 def test_orphaned_runner_lease_is_not_adopted_or_signalled(tmp_path, monkeypatch):

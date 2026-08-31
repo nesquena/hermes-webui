@@ -346,6 +346,7 @@ def test_managed_spawn_and_readiness_do_not_hold_global_registry_lock(
 def test_post_spawn_failure_rolls_back_group_fds_and_capacity(
     monkeypatch, tmp_path, stage
 ):
+    real_thread = threading.Thread
     proc = _ReadyProc()
     opened_fds = []
     real_openpty = terminal.os.openpty
@@ -402,11 +403,16 @@ def test_post_spawn_failure_rolls_back_group_fds_and_capacity(
             lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(stage)),
         )
     elif stage == "thread_start":
-        class _BrokenStart(_DummyThread):
-            def start(self):
+        def unstartable_thread(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+
+            def fail_start():
                 raise RuntimeError(stage)
 
-        monkeypatch.setattr(terminal.threading, "Thread", _BrokenStart)
+            thread.start = fail_start
+            return thread
+
+        monkeypatch.setattr(terminal.threading, "Thread", unstartable_thread)
     elif stage == "publication":
         class _RejectingRegistry(dict):
             def __setitem__(self, key, value):

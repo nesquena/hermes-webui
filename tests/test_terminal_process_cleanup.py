@@ -181,6 +181,7 @@ def test_stop_managed_terminal_escalates_owned_group_and_drains_reader(monkeypat
     term.owned_pgid_verified = True
     term.persistent_when_unwatched = True
     term.reader = reader
+    term.reader_started = True
     terminal._TERMINALS[term.handle] = term
     monkeypatch.setattr(terminal.os, "getpgid", lambda pid: term.pgid)
     kills = []
@@ -228,6 +229,45 @@ def test_managed_teardown_never_signals_unverified_process_group(monkeypatch):
     terminal._teardown_terminal(term)
 
     assert signals == []
+
+
+def test_owned_group_check_survives_leader_exit_between_poll_and_getpgid(
+    monkeypatch,
+):
+    class RacingProc:
+        pid = 717_717
+
+        def __init__(self):
+            self.exited = False
+
+        def poll(self):
+            return 0 if self.exited else None
+
+    proc = RacingProc()
+    term = terminal.TerminalSession(
+        session_id="managed-racing-leader",
+        workspace="/tmp",
+        proc=proc,
+        master_fd=-1,
+        kind="claude_code",
+        pgid=proc.pid,
+        owned_pgid_verified=True,
+    )
+
+    def leader_disappears(_pid):
+        proc.exited = True
+        raise ProcessLookupError
+
+    signals = []
+    monkeypatch.setattr(terminal.os, "getpgid", leader_disappears)
+    monkeypatch.setattr(
+        terminal.os,
+        "killpg",
+        lambda pgid, sig: signals.append((pgid, sig)),
+    )
+
+    assert terminal._signal_owned_group(term, signal.SIGTERM) is True
+    assert signals == [(proc.pid, 0), (proc.pid, signal.SIGTERM)]
 
 
 def _process_group_exists(pgid):

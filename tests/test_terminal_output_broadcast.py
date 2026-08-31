@@ -340,6 +340,36 @@ def test_stalled_managed_viewer_is_byte_bounded_and_healthy_viewer_continues(
     assert healthy_sequences == list(range(1, 1001))
 
 
+def test_one_byte_managed_output_is_record_bounded_for_backlog_and_viewer(
+    monkeypatch,
+):
+    monkeypatch.setattr(terminal, "_MANAGED_OUTPUT_BACKLOG_BYTES", 4096)
+    monkeypatch.setattr(
+        terminal,
+        "_MANAGED_OUTPUT_BACKLOG_MAX_RECORDS",
+        32,
+        raising=False,
+    )
+    term = _make_managed_term("managed-one-byte-records")
+    slow = term.subscribe(generation=term.generation)
+    healthy = term.subscribe(generation=term.generation)
+    healthy_sequences = []
+
+    for _index in range(1000):
+        term.put_output("output", {"text": "x"})
+        healthy_sequences.append(healthy.get_nowait()[0])
+
+    assert len(term._backlog) <= 32
+    assert term.backlog_bytes <= 4096
+    assert slow.qsize() <= 32
+    assert [event for _seq, event, _payload in _drain(slow)] == [
+        "terminal_reset"
+    ]
+    assert slow not in term._subscribers
+    assert healthy in term._subscribers
+    assert healthy_sequences == list(range(1, 1001))
+
+
 def test_concurrent_producers_keep_monotonic_sequences_through_backlog_rollover():
     term = _make_term()
     live = term.subscribe()
