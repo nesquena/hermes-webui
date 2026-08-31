@@ -19441,6 +19441,8 @@ def _claude_terminal_cursor(value) -> int | None:
         return None
     if not raw_cursor.isascii() or not raw_cursor.isdecimal():
         return None
+    if len(raw_cursor) > 1 and raw_cursor[0] == "0":
+        return None
     if (
         len(raw_cursor) == len(_CLAUDE_TERMINAL_CURSOR_MAX)
         and raw_cursor > _CLAUDE_TERMINAL_CURSOR_MAX

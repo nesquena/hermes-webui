@@ -926,6 +926,8 @@ def test_stream_cursor_behind_backlog_floor_emits_terminal_reset(
         "-1",
         "1.5",
         "nope",
+        "00",
+        "0001",
         "1&cursor=2",
         "9223372036854775808",
         "9" * 20,
@@ -936,6 +938,8 @@ def test_stream_cursor_behind_backlog_floor_emits_terminal_reset(
         "negative",
         "fractional",
         "non_decimal",
+        "zero_leading_zero",
+        "leading_zero",
         "duplicate",
         "int64_overflow",
         "overlength",
@@ -974,8 +978,8 @@ def test_stream_cursor_query_accepts_int64_boundaries(cursor, expected):
 
 @pytest.mark.parametrize(
     "cursor",
-    ["9" * 100_000, "9223372036854775808"],
-    ids=("huge", "int64_overflow"),
+    ["00", "0001", "9" * 100_000, "9223372036854775808"],
+    ids=("zero_leading_zero", "leading_zero", "huge", "int64_overflow"),
 )
 def test_stream_last_event_id_fails_closed_before_attach(cursor, managed_terminals):
     term, _other = managed_terminals
