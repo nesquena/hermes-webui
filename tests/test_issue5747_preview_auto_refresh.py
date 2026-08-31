@@ -168,7 +168,7 @@ def test_text_path_tokens_extracts_dotted_paths():
     )
     assert r.returncode == 0, f"node failed: {r.stderr}"
     assert "static/style.css" in json.loads(r.stdout), (
-        f"terminal text must yield the mutated path token (#5747)"
+        "terminal text must yield the mutated path token (#5747)"
     )
     # F2: a write target escaping the active workspace is rejected, not tracked.
     r2 = subprocess.run(
@@ -177,7 +177,7 @@ def test_text_path_tokens_extracts_dotted_paths():
     )
     assert r2.returncode == 0, f"node failed: {r2.stderr}"
     assert "/etc/passwd" not in json.loads(r2.stdout), (
-        f"escaping path must be rejected (#5747 re-gate F2)"
+        "escaping path must be rejected (#5747 re-gate F2)"
     )
 
 
