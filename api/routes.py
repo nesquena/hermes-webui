@@ -19892,7 +19892,22 @@ def _handle_tts(handler, parsed):
         voice = data.get("voice") or voice
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
-        engine = (data.get("engine") or "edge").strip().lower()
+        request_engine = data.get("engine")
+        if "engine" not in data or (
+            isinstance(request_engine, str) and not request_engine.strip()
+        ):
+            persisted_engine = (load_settings() or {}).get("tts_engine")
+            if isinstance(persisted_engine, str):
+                persisted_engine = persisted_engine.strip().lower()
+            else:
+                persisted_engine = ""
+            engine = (
+                persisted_engine
+                if persisted_engine in {"edge", "elevenlabs", "openai"}
+                else "edge"
+            )
+        else:
+            engine = (request_engine or "edge").strip().lower()
     except Exception:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid request body", 400)
