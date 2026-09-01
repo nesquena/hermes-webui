@@ -2425,14 +2425,19 @@ def _find_existing_assistant_for_journal_content(
 
     def _owns_turn(idx: int) -> bool:
         message = messages[idx]
-        if (
-            stream_id
-            and message.get('_recovered_stream_id') == stream_id
-        ):
+        # Stream-locked rows (recovered by an earlier pass) may only be
+        # claimed by the SAME stream — symmetric with the tool path, and it
+        # closes the cross-stream collapse asymmetry flagged in the #7388
+        # attack review.
+        if stream_id and message.get('_recovered_stream_id') == stream_id:
             return True
         if turn_start is not None:
-            # Window is defined: only rows inside it (or same-stream rows)
-            # are claimable. Earlier turns are legitimate repetition.
+            # Window is defined: window position suffices for rows that are
+            # NOT stream-tagged (they belong to this turn's core/live state);
+            # stream-tagged rows from OTHER streams were already excluded
+            # above. Earlier turns are legitimate repetition.
+            if message.get('_recovered_stream_id'):
+                return False
             return idx >= turn_start
         # No matchable pending checkpoint (quiescent session, or the pending
         # message has no surviving row): no current-turn boundary exists to
@@ -2505,21 +2510,25 @@ def _journal_tool_already_present(
         )
         if existing_preview != candidate_preview:
             continue
-        if candidate_stream is not None:
-            existing_stream = tool_call.get('_recovered_stream_id')
-            # A tool card explicitly tagged with a recovered_stream_id that
-            # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry.  Untagged tool cards (live) still
-            # match, but only with proven turn ownership (below).
-            if existing_stream and str(existing_stream) != candidate_stream:
+        # Ownership check (#7388 re-review) — branch on the EXISTING card's
+        # provenance, not on which arguments the caller supplied:
+        #   * tagged with another stream  -> another recovery's turn: skip.
+        #   * tagged with our stream      -> same-stream idempotency: match.
+        #   * untagged (a live card)      -> only a proven current-turn
+        #     window position (assistant_msg_idx >= turn_start) may match;
+        #     without a window there is nothing proving the card isn't from
+        #     an earlier turn, so it must NOT suppress the current tool.
+        existing_stream = tool_call.get('_recovered_stream_id')
+        if existing_stream:
+            if str(existing_stream) != (candidate_stream or ''):
                 continue
-        elif turn_start is not None:
-            # Untagged candidate + a known turn boundary: require the existing
-            # card to belong to the current turn. Cards attached to earlier
-            # assistant turns are legitimate repetitions, not duplicates.
+            return True
+        if turn_start is not None:
             owner_idx = tool_call.get('assistant_msg_idx')
-            if not isinstance(owner_idx, int) or owner_idx < turn_start:
-                continue
+            if isinstance(owner_idx, int) and owner_idx >= turn_start:
+                return True
+            continue
+        # Legacy degrade (no stream id and no window): pre-fix behavior.
         return True
     return False
 
@@ -2710,25 +2719,53 @@ def _pending_recovery_turn_window_start(session) -> int | None:
     dedupe (#7388 review) needs the window's opening edge: rows at/after the
     checkpoint user message belong to the turn being recovered and may
     absorb journal output; earlier rows are prior turns and must never be
-    claimed.  Returns None when there is no pending message or no row
-    matches it — callers then degrade to stream-tag-only (or, for a
+    claimed.
+
+    Matching precedence (#7388 re-review): EXACT checkpoint identity
+    (timestamp/source/attachment-aware) is scanned across the whole
+    transcript FIRST; the text-only fallback runs only when no exact
+    checkpoint exists, and then takes the LATEST applicable match — an
+    earlier turn that repeated the same prompt text must never win the
+    window.  Returns None when there is no pending message or no row
+    matches it at all — callers then degrade to stream-tag-only (or, for a
     quiescent session with no stream id, legacy session-wide) behavior.
     """
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return None
-    for idx, message in enumerate(session.messages or []):
-        if not isinstance(message, dict):
-            continue
+    messages = [
+        message for message in (session.messages or [])
+        if isinstance(message, dict)
+    ]
+    # Pass 1: exact checkpoint identity anywhere in the transcript. Which
+    # match owns the window: the LATEST match that is NOT a `_recovered`
+    # repair artifact is the current turn's real submission — recovered rows
+    # are appended by the repair path itself (before journal recovery runs)
+    # and must never act as turn boundaries (#7388 attack A: without this,
+    # the repair's own recovered row re-opens the window at the earliest
+    # identical-prompt turn). If ONLY recovered echoes match, the earliest
+    # echo is the best surviving boundary (#3929 owner-echo keeps its core
+    # row claimable).
+    exact_matches = [
+        idx for idx, message in enumerate(messages)
         if _message_matches_pending_checkpoint(
             message,
             pending_text,
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
-            return idx
-    return None
+        )
+    ]
+    if exact_matches:
+        real = [idx for idx in exact_matches
+                if not messages[idx].get('_recovered')]
+        return real[-1] if real else exact_matches[0]
+    # Pass 2: text-only fallback, LATEST applicable match.
+    fallback = None
+    for idx, message in enumerate(messages):
+        if _message_matches_pending_text(message, pending_text):
+            fallback = idx
+    return fallback
 
 
 def _materialize_unsaved_gateway_terminal_error(

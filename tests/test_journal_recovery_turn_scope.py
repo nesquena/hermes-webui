@@ -181,3 +181,57 @@ def test_same_stream_repeat_still_dedupes(tmp_path):
     assert len(s.messages) == after_first, (
         f"same-stream re-recovery grew rows: {after_first} -> {len(s.messages)}"
     )
+
+
+def test_same_second_identical_prompt_window_opens_at_current_turn(tmp_path):
+    """#7388 attack A: two turns share the same wall-clock second, so int()
+    truncation makes the EARLIER user row satisfy the checkpoint exactly.
+    The window must still open at the LATEST exact match (the pending row),
+    and both turns' answers must survive."""
+    prompt = "list the files"
+    answer = "README, main.py, setup.cfg."
+    same_ts = 1788145950  # identical int second for BOTH turns
+    _write_journal(answer)
+
+    s = Session(session_id="turnscope", title="turn-scope")
+    s.messages = [
+        {"role": "user", "content": prompt, "timestamp": same_ts},
+        {"role": "assistant", "content": answer, "timestamp": same_ts + 10},
+    ]
+    s.tool_calls = [{
+        "name": "terminal", "preview": "ls", "snippet": "ls", "tid": "live-1",
+        "assistant_msg_idx": 1, "args": {"cmd": "ls"}, "done": True,
+    }]
+    s.pending_user_message = prompt
+    s.pending_started_at = same_ts  # same second as the earlier turn
+    s.pending_user_source = "webui"
+    s.active_stream_id = STREAM_ID
+    s.messages.append({
+        "role": "user", "content": prompt, "timestamp": same_ts,
+    })
+    s.messages.append({
+        "role": "assistant", "type": "interrupted", "content": "interrupted",
+        "timestamp": same_ts + 10, "_pending_journal_recovery": True,
+        "_journal_retry_stream_id": STREAM_ID,
+        "_journal_retry_first_seen_ts": same_ts + 10,
+        "_journal_retry_attempts": 0,
+    })
+    s.save(touch_updated_at=False)
+
+    window = models._pending_recovery_turn_window_start(s)
+    assert window == 2, f"window opened at {window}, expected the pending row (2)"
+
+    core_path = models.SESSION_DIR / "turnscope.json"
+    models._apply_core_sync_or_error_marker(
+        s, core_path, STREAM_ID,
+        require_stream_dead=False, touch_updated_at=False,
+    )
+    answers = [
+        m for m in s.messages
+        if m.get("role") == "assistant" and m.get("content") == answer
+    ]
+    assert len(answers) == 2, (
+        f"same-second repeated answer collapsed: {len(answers)} rows, expected 2"
+    )
+    current_tools = [t for t in (s.tool_calls or []) if t.get("tid") != "live-1"]
+    assert current_tools, "same-second repeated tool card collapsed"
