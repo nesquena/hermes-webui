@@ -9787,10 +9787,43 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
             # _session_message_visible_key carries role, content and
             # tool_calls but neither timestamp nor store — and the later turn
             # would be dropped as though it were a cross-store twin.
-            def _cross_store_visible_key(msg, from_sidecar):
-                return _session_message_visible_key(
-                    msg, normalize_workspace_prefix=not from_sidecar
+            def _cross_store_pairing_key(msg, from_sidecar):
+                """Visible identity for cross-store twin matching.
+
+                Deliberately narrower than `_session_message_visible_key`: it
+                excludes the `api_content` provider sidecar that key appends
+                via `_session_message_key_with_sidecar`. `api_content` is
+                state.db-only by design (there is a whole
+                `_copy_api_content_sidecar` helper because the sidecar copy
+                usually lacks it), so a gateway turn's Agent copy commonly
+                carries provider bytes its sidecar twin does not have. Keying
+                pairing on that field would give the two copies of ONE turn
+                different keys and let both survive — reproducing the exact
+                duplicate-turn symptom this reconciliation exists to fix.
+                `api_content` instead gets its own directional authority in
+                `_reconcile_cross_store_twin`, once a twin is already matched
+                one-to-one on every other identity component (role, visible
+                content, tool_calls, and tool_call_id/tool_name via
+                `_cross_store_pairable`). The SHARED
+                `_session_message_visible_key` is deliberately left untouched
+                — other merge paths rely on its stricter identity there.
+                """
+                if not isinstance(msg, dict):
+                    return ("non_dict", repr(msg))
+                tool_calls = msg.get("tool_calls")
+                tool_calls_key = (
+                    json.dumps(tool_calls, sort_keys=True, default=str)
+                    if tool_calls else ""
                 )
+                role = str(msg.get("role") or "")
+                content = _normalized_session_message_content(msg)
+                if role == "user" and not from_sidecar:
+                    from api.streaming import _strip_workspace_prefix
+
+                    content = " ".join(
+                        _strip_workspace_prefix(content, include_legacy=True).split()
+                    )
+                return (role, content, tool_calls_key)
 
             # Reconciliation writes onto a COPY of the survivor, never the
             # caller's dict. `session.messages` rows are shared: they live in
@@ -9840,19 +9873,27 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                                             dropped_from_sidecar):
                 """Carry a discarded cross-store twin's payload to the survivor.
 
-                The two lanes are deliberately NOT symmetric. Display metadata
-                is sidecar-authored, so it travels either way. Semantic payload
-                travels only Agent -> sidecar: the Agent store owns the real
-                reasoning/Codex trace, whereas a sidecar-authored `reasoning`
-                is the unreliable one (it can hold a verbatim copy of the
-                reply -- NousResearch/hermes-agent#13007), so pushing it into
-                an Agent survivor would degrade the better record. That lane
+                The lanes are deliberately NOT symmetric. Display metadata is
+                sidecar-authored, so it travels either way. Semantic payload
+                and `api_content` both travel only Agent -> sidecar: the
+                Agent store owns the real reasoning/Codex trace and is the
+                only store `api_content` is ever written to, whereas a
+                sidecar-authored `reasoning` is the unreliable one (it can
+                hold a verbatim copy of the reply --
+                NousResearch/hermes-agent#13007), so pushing either into an
+                Agent survivor would degrade the better record. That lane
                 keeps the survivor's own values.
+
+                `_copy_api_content_sidecar` is fill-only-if-absent on its own
+                (it returns early if the target already carries a non-empty
+                value), so a conflicting non-empty pair fails closed: the
+                identified survivor's own `api_content` is never overwritten.
                 """
                 row = _survivor_row(position, survivor)
                 _merge_session_display_metadata(row, dropped)
                 if not dropped_from_sidecar:
                     _adopt_agent_semantic_payload(row, dropped)
+                    _copy_api_content_sidecar(row, dropped)
 
             ordered = sorted(
                 [(msg, False) for msg in cli_messages]
@@ -9910,7 +9951,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                     has_identity = bool(msg.get("id") or msg.get("message_id"))
                     if has_identity != identified_pass:
                         continue
-                    visible_key = _cross_store_visible_key(msg, from_sidecar)
+                    visible_key = _cross_store_pairing_key(msg, from_sidecar)
                     if has_identity:
                         key = _session_message_merge_key(msg)
                         if key in seen_message_keys:
@@ -10482,6 +10523,8 @@ from api.models import (
     _session_message_dedup_key,
     _session_messages_have_prefix,
     _session_message_visible_key,
+    _normalized_session_message_content,
+    _copy_api_content_sidecar,
     _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
