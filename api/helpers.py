@@ -310,13 +310,15 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 # redact_sensitive_text and even GET / timed out. Above this cap, only the
 # cheap local fallback runs (still catches ghp_/sk-/AKIA/headers/keys).
 #
-# Residual gap above the cap: the fallback is prefix/keyword-based, so the
-# *prefix-less* agent-only shapes are NOT masked in a single field larger than
-# this cap — specifically bare JWTs (eyJ…), Telegram bot tokens
-# (<digits>:<token>), and DB connection-string passwords (postgres://u:pw@host).
-# This is an accepted trade-off (a multi-MB single field is a tool dump, not a
-# credential store); pinned by test_residual_shapes_leak_above_agent_cap so a
-# future reader isn't surprised. Raising the cap trades latency for coverage.
+# The fallback now also masks the three prefix-less agent-only shapes that used
+# to leak above this cap — bare JWTs (eyJ…), DB connection-string passwords
+# (postgres://u:***@host), and Telegram bot tokens (<digits>:<token>) — via the
+# cheap _JWT_RE/_URI_USERINFO_RE/_TELEGRAM_RE passes in _fallback_redact. So a
+# huge single field degrades only in that it skips the *expensive* agent pattern
+# set (Stripe/Slack/Google/… prefixes are still covered by the fallback's own
+# prefix list); the common credential shapes stay masked. Pinned both ways by
+# test_residual_shapes_masked_above_agent_cap. Raising the cap trades latency for
+# the remaining long-tail agent-only patterns.
 _REDACT_AGENT_MAX_TEXT_LEN = 16384
 
 def _build_redact_fn():
@@ -384,6 +386,18 @@ def _build_redact_fn():
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
 
+    # Prefix-less shapes the agent redactor covers but the prefix/keyword-based
+    # fallback historically did not. Added so the >16KB agent-pass bypass
+    # (see _REDACT_AGENT_MAX_TEXT_LEN) no longer leaks these in a huge single
+    # field — the exact incident class where a multi-MB config dump can carry a
+    # DB URL or JWT. All three are cheap and structure-preserving (they keep the
+    # non-secret context — botid, scheme/user/host — and mask only the secret).
+    _JWT_RE = _re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
+    # scheme://user:PASSWORD@host — keep scheme/user/host, mask the password.
+    _URI_USERINFO_RE = _re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^/:@\s]+:)([^@/\s]+)(@)")
+    # Telegram bot token <botid>:<token> — keep the numeric botid, mask token.
+    _TELEGRAM_RE = _re.compile(r"(\b\d{5,}:)([A-Za-z0-9_-]{20,})")
+
     def _mask(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
 
@@ -446,6 +460,10 @@ def _build_redact_fn():
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        # Prefix-less agent-only shapes — closes the documented >16KB residual.
+        text = _JWT_RE.sub("[REDACTED JWT]", text)
+        text = _URI_USERINFO_RE.sub(lambda m: m.group(1) + _mask(m.group(2)) + m.group(3), text)
+        text = _TELEGRAM_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         return text
 
     try:

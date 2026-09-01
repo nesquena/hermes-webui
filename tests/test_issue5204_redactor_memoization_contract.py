@@ -57,17 +57,16 @@ def test_huge_tool_dump_skips_agent_pass_but_still_masks_secrets():
     assert out == helpers._redact_fn_uncached(blob)
 
 
-def test_residual_shapes_leak_above_agent_cap():
-    """Pin the known, accepted residual gap of the >16KB agent-pass bypass.
+def test_residual_shapes_masked_above_agent_cap():
+    """The >16KB agent-pass bypass no longer leaks the prefix-less shapes.
 
-    Above _REDACT_AGENT_MAX_TEXT_LEN a single field skips the agent redactor and
-    only the prefix/keyword-based local fallback runs. The prefix-less agent-only
-    shapes — bare JWT (eyJ...) and DB connection-string passwords — are therefore
-    NOT masked in an oversize field. This is intentional (a multi-MB single field
-    is a tool dump, not a credential store); this test documents the boundary so
-    the behavior is a deliberate, reviewed trade-off rather than a silent leak.
-    If a future change starts masking these above the cap, update the code
-    comment on _REDACT_AGENT_MAX_TEXT_LEN too.
+    Above _REDACT_AGENT_MAX_TEXT_LEN a single field skips the expensive agent
+    redactor and only the local fallback runs. The fallback now also masks the
+    three prefix-less agent-only shapes (bare JWT eyJ..., DB connection-string
+    passwords, Telegram bot tokens) via _JWT_RE/_URI_USERINFO_RE/_TELEGRAM_RE,
+    so they stay masked in an oversize field. This test pins that both below and
+    above the cap. If a future change stops masking these above the cap, update
+    the code comment on _REDACT_AGENT_MAX_TEXT_LEN too.
     """
     jwt = (
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
@@ -76,22 +75,34 @@ def test_residual_shapes_leak_above_agent_cap():
     )
     db_pw = "s3cr3tDbPassw0rd"
     connstr = f"postgres://dbuser:{db_pw}@db.internal:5432/prod"
+    tg_token = "AAHdqTcvbXsj2kd83jfhs8sJDHf83jfhsu2"
+    telegram = f"123456789:{tg_token}"
     filler = "x" * (helpers._REDACT_AGENT_MAX_TEXT_LEN + 100)
 
-    # Below the cap the agent pass runs and masks both shapes.
-    small = f"start {jwt} {connstr} end"
+    # Below the cap the agent pass runs and masks all three shapes.
+    small = f"start {jwt} {connstr} {telegram} end"
     small_out = helpers._redact_fn_uncached(small)
     assert jwt not in small_out
     assert db_pw not in small_out
+    assert tg_token not in small_out
 
-    # Above the cap the agent pass is skipped: the prefix-less shapes leak.
-    big = f"{filler} {jwt} {connstr}"
+    # Above the cap the agent pass is skipped, but the fallback now covers these.
+    big = f"{filler} {jwt} {connstr} {telegram}"
     assert len(big) > helpers._REDACT_AGENT_MAX_TEXT_LEN
     big_out = helpers._redact_fn_uncached(big)
-    assert jwt in big_out, "JWT unexpectedly masked above cap - update the comment"
-    assert db_pw in big_out, "DB-connstr pw unexpectedly masked above cap - update the comment"
+    assert jwt not in big_out, "JWT leaked above cap - fallback JWT pass missing"
+    assert db_pw not in big_out, "DB-connstr pw leaked above cap - fallback URI pass missing"
+    assert tg_token not in big_out, "Telegram token leaked above cap - fallback pass missing"
+    # Structure is preserved: only the secret is masked, not the surrounding URL.
+    assert "postgres://dbuser:" in big_out
+    assert "@db.internal:5432/prod" in big_out
+    assert "123456789:" in big_out
 
-    # But short-prefix secrets are still caught by the local fallback above the
-    # cap - the fallback is exactly what keeps the common shapes safe.
+    # A short-prefix secret in the same oversize field also stays masked (the
+    # fallback prefix list keeps the common shapes safe above the cap).
     sk = "sk-ABCDEFGHIJKLMNOP1234567890"
     assert sk not in helpers._redact_fn_uncached(f"{filler} {sk}")
+
+    # False-positive guard: benign URLs / number-colon prose are untouched.
+    benign = "See http://localhost:8080/api and ratio 12345:67 at 2026-09-01T18:11:00"
+    assert helpers._redact_fn_uncached(benign) == benign
