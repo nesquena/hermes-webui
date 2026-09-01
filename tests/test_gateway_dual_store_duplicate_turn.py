@@ -126,12 +126,24 @@ Three further defects, found by probing this branch rather than by review:
    unrelated save committed to the sidecar JSON. Payload now lands on a copy
    and this function mutates nothing it was handed.
 
-Known remaining limitation, NOT fixed here: ``_session_message_key_with_sidecar``
-appends ``api_content`` to every key shape including the visible key, so a
-gateway turn whose Agent copy carries provider bytes the sidecar copy lacks
-gets two different visible keys and still renders twice. Narrowing that is a
-change to shared identity machinery with its own stricter rules, out of scope
-for this fix.
+Fifth review round
+-------------------
+The prior round flagged that ``_session_message_key_with_sidecar`` appends
+``api_content`` to every key shape including the visible key used for
+pairing, so a gateway turn whose Agent copy carries provider bytes the
+sidecar copy lacks got two different visible keys and rendered twice. Per the
+reviewer's own guidance: do NOT widen the shared ``_session_message_visible_key``
+globally (other merge paths rely on its stricter, ``api_content``-aware
+identity there). Instead this reconciliation now builds a LOCAL candidate key,
+``_cross_store_pairing_key``, that keeps role, normalized visible content and
+``tool_calls`` but omits ``api_content`` -- tool identity (``tool_call_id``/
+``tool_name``) is still enforced separately via ``_cross_store_pairable``, as
+before. Once a twin is matched one-to-one on that narrower identity,
+``api_content`` gets its own directional authority through the existing
+``_copy_api_content_sidecar`` helper (Agent -> sidecar only, same lane as the
+semantic payload) rather than a generic dict merge. That helper is
+fill-only-if-absent on its own, so a conflicting non-empty pair on both sides
+fails closed: the identified survivor's own value is never overwritten.
 """
 
 from __future__ import annotations
@@ -206,6 +218,80 @@ def test_gateway_reconciliation_preserves_agent_semantic_payload():
     # api_content has its own stricter identity rules elsewhere; this
     # reconciliation must not fold it through the generic semantic-payload copy.
     assert "api_content" not in survivor
+
+
+def test_gateway_reconciliation_pairs_across_differing_api_content():
+    """The reported production shape: Agent copy carries provider bytes the
+    sidecar copy lacks entirely.
+
+    ``_session_message_visible_key`` appends ``api_content`` to its key via
+    ``_session_message_key_with_sidecar``, so the two copies of one turn get
+    DIFFERENT keys once one side has it and the other doesn't -- neither
+    reconciles, and the turn renders twice. This reconciliation's own
+    ``_cross_store_pairing_key`` excludes that field so the match still
+    happens; `api_content` then gets adopted through the same directional
+    (Agent -> sidecar) lane as the semantic payload.
+    """
+    session = SimpleNamespace(
+        messages=[{"id": 8, "role": "assistant", "content": "answer", "timestamp": 10.5}]
+    )
+    cli_messages = [
+        {"role": "user", "content": "q", "timestamp": 1.0},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "timestamp": 10.4,
+            "api_content": "PROVIDER BYTES",
+            "reasoning": "AGENT REASONING",
+        },
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    answers = [m for m in merged if m.get("content") == "answer"]
+    assert len(answers) == 1, "one gateway turn must not render as two answer rows"
+    survivor = answers[0]
+    assert survivor.get("id") == 8, "the identified sidecar row survives"
+    assert survivor.get("api_content") == "PROVIDER BYTES"
+    assert survivor.get("reasoning") == "AGENT REASONING"
+
+
+def test_conflicting_api_content_keeps_survivors_own_value():
+    """Two non-empty, DIFFERENT api_content values must not clobber each other.
+
+    Mirrors the existing conflicting-semantic-payload contract: when the
+    identified survivor already carries its own non-empty `api_content`, the
+    Agent copy's value must not overwrite it -- fail closed via
+    `_copy_api_content_sidecar`'s own fill-only-if-absent policy.
+    """
+    session = SimpleNamespace(
+        messages=[
+            {
+                "id": 8,
+                "role": "assistant",
+                "content": "answer",
+                "timestamp": 10.5,
+                "api_content": "SIDECAR'S OWN BYTES",
+            }
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "q", "timestamp": 1.0},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "timestamp": 10.4,
+            "api_content": "AGENT BYTES",
+            "reasoning": "AGENT REASONING",
+        },
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    survivor = next(m for m in merged if m.get("id") == 8)
+    assert survivor.get("api_content") == "SIDECAR'S OWN BYTES"
+    # Non-conflicting fields still adopt normally on the same pass.
+    assert survivor.get("reasoning") == "AGENT REASONING"
 
 
 def test_gateway_reconciliation_keeps_agent_only_rows_and_order():
