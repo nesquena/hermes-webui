@@ -205,24 +205,28 @@ _PROTECTED_ENV_KEYS = frozenset({'HERMES_WEBUI_ISOLATED_PROFILE'})
 # back into a named profile's agent runtime env. The root .env is the
 # deployment/operator layer ($HERMES_HOME/.env in the Docker two-container
 # setup); only the operator/runtime settings listed here are intended to be
-# shared across profiles (e.g. SEARXNG_URL, FIRECRAWL_*). Everything else —
-# server auth secrets, provider credentials, arbitrary *_API_KEY — stays at the
-# root and is NEVER blanket-inherited, preserving the named-profile isolation
-# invariant. A profile that defines any of these keys itself (even empty) still
-# wins over the root fallback.
+# shared across profiles (e.g. SEARXNG_URL and the non-secret FIRECRAWL_*
+# configuration: API/GATEWAY URLs and browser TTL). Everything else — server
+# auth secrets, provider credentials, and any *_API_KEY such as
+# FIRECRAWL_API_KEY (classified password=True by the agent's
+# hermes_cli/config_defaults.py) — stays at the root and is NEVER
+# blanket-inherited, preserving the named-profile isolation invariant. The
+# list is exact-match only: no prefix sweeping, so a future FIRECRAWL_* secret
+# cannot sneak in through a prefix. A profile that defines any of these keys
+# itself (even empty) still wins over the root fallback.
 _ROOT_ENV_SHARE_ALLOWLIST = frozenset({
     'SEARXNG_URL',
+    # Non-secret Firecrawl operator settings (password=False upstream); the
+    # self-hosted URL needs no key and the cloud key stays operator-scoped.
+    'FIRECRAWL_API_URL',
+    'FIRECRAWL_GATEWAY_URL',
+    'FIRECRAWL_BROWSER_TTL',
 })
-_ROOT_ENV_SHARE_ALLOWLIST_PREFIXES = (
-    'FIRECRAWL_',
-)
 
 
 def _root_env_key_allowlisted(key: str) -> bool:
     """Return True when *key* is an explicitly allowlisted root .env setting."""
-    return key in _ROOT_ENV_SHARE_ALLOWLIST or key.startswith(
-        _ROOT_ENV_SHARE_ALLOWLIST_PREFIXES
-    )
+    return key in _ROOT_ENV_SHARE_ALLOWLIST
 
 
 def _isolated_profile_opt_in() -> bool:
@@ -987,10 +991,11 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
             logger.debug("Failed to read runtime env from %s", env_path)
 
     # #7048: root/parent .env fallback — explicit allowlist only, so a named
-    # profile inherits intended operator/runtime settings (SEARXNG_URL,
-    # FIRECRAWL_*) without blanket-inheriting credentials or server auth
-    # secrets. Profile-defined keys (including empty) and existing
-    # launcher/process values always win over this fallback.
+    # profile inherits intended operator/runtime settings (SEARXNG_URL and the
+    # non-secret FIRECRAWL_* config keys) without blanket-inheriting
+    # credentials (incl. FIRECRAWL_API_KEY) or server auth secrets.
+    # Profile-defined keys (including empty) and existing launcher/process
+    # values always win over this fallback.
     root_env_path = _root_env_path_for(home)
     if root_env_path is not None and root_env_path != env_path and root_env_path.exists():
         try:

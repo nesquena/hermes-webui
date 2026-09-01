@@ -8,7 +8,8 @@ secrets and arbitrary ``*_API_KEY`` credentials into named profiles (breaking
 the named-profile isolation invariant) and misparsed the supported
 ``export KEY=value`` dotenv syntax. This suite pins the corrected contract:
 
-  - explicit origin-aware allowlist (SEARXNG_URL, FIRECRAWL_*) — never a
+  - explicit origin-aware allowlist (SEARXNG_URL + non-secret FIRECRAWL_*
+    config keys; never FIRECRAWL_API_KEY or any *_API_KEY) — never a
     blanket root→profile merge;
   - precedence: profile-defined key (INCLUDING empty) > existing
     launcher/process value > allowlisted root fallback;
@@ -24,6 +25,9 @@ from api.profiles import get_profile_runtime_env, _parse_dotenv_text
 _AMBIENT_ENV_KEYS = (
     "SEARXNG_URL",
     "FIRECRAWL_API_KEY",
+    "FIRECRAWL_API_URL",
+    "FIRECRAWL_GATEWAY_URL",
+    "FIRECRAWL_BROWSER_TTL",
     "FIRECRAWL_BASE_URL",
     "HERMES_WEBUI_PASSWORD",
     "HERMES_WEBUI_ISOLATED_PROFILE",
@@ -39,14 +43,16 @@ def _write_env(path: Path, content: str) -> None:
 
 def test_root_secret_and_credential_keys_are_never_inherited(tmp_path, monkeypatch):
     """[root-secret exclusion] Non-allowlisted root keys never cross into a
-    named profile — server auth secrets, arbitrary credentials, and plain
-    non-allowlisted vars stay at the root."""
+    named profile — server auth secrets, arbitrary credentials (including the
+    password=True FIRECRAWL_API_KEY), and plain non-allowlisted vars stay at
+    the root."""
     base, alpha = _layout(tmp_path, monkeypatch)
     _write_env(
         base / ".env",
         "SEARXNG_URL=http://root-searx:8080\n"
         "HERMES_WEBUI_PASSWORD=server-auth-secret\n"
-        "OPENAI_API_KEY=sk-root-secret\n"
+        "OPENAI_API_KEY=«redacted:sk-…»\n"
+        "FIRECRAWL_API_KEY=fc-root-secret\n"
         "MY_RANDOM_VAR=not-allowlisted\n"
         "HERMES_WEBUI_ISOLATED_PROFILE=0\n",
     )
@@ -55,28 +61,38 @@ def test_root_secret_and_credential_keys_are_never_inherited(tmp_path, monkeypat
 
     # The allowlisted operator setting IS shared…
     assert env.get("SEARXNG_URL") == "http://root-searx:8080"
-    # …but server auth secrets, arbitrary credentials and non-allowlisted
-    # keys are NOT blanket-inherited, and the isolation posture stays
-    # operator-only.
+    # …but server auth secrets, arbitrary credentials (incl. FIRECRAWL_API_KEY)
+    # and non-allowlisted keys are NOT blanket-inherited, and the isolation
+    # posture stays operator-only.
     assert "HERMES_WEBUI_PASSWORD" not in env
     assert "OPENAI_API_KEY" not in env
+    assert "FIRECRAWL_API_KEY" not in env
     assert "MY_RANDOM_VAR" not in env
     assert "HERMES_WEBUI_ISOLATED_PROFILE" not in env
 
 
-def test_allowlisted_firecrawl_prefix_is_shared(tmp_path, monkeypatch):
-    """[allowlisted shared variable] FIRECRAWL_* (the #7048 operator settings)
-    propagate from the root .env into the named profile runtime env."""
+def test_allowlisted_firecrawl_config_keys_are_shared_but_key_is_not(tmp_path, monkeypatch):
+    """[allowlisted shared variable] The non-secret FIRECRAWL_* operator
+    settings (API/GATEWAY URLs, browser TTL — password=False upstream)
+    propagate from the root .env into the named profile runtime env, while
+    FIRECRAWL_API_KEY (password=True) stays at the root."""
     base, alpha = _layout(tmp_path, monkeypatch)
     _write_env(
         base / ".env",
-        "FIRECRAWL_API_KEY=fc-123\nFIRECRAWL_BASE_URL=http://fc:3002\n",
+        "FIRECRAWL_API_URL=http://fc:3002\n"
+        "FIRECRAWL_GATEWAY_URL=http://fc-gw:3003\n"
+        "FIRECRAWL_BROWSER_TTL=600\n"
+        "FIRECRAWL_API_KEY=fc-123\n",
     )
 
     env = get_profile_runtime_env(alpha)
 
-    assert env.get("FIRECRAWL_API_KEY") == "fc-123"
-    assert env.get("FIRECRAWL_BASE_URL") == "http://fc:3002"
+    assert env.get("FIRECRAWL_API_URL") == "http://fc:3002"
+    assert env.get("FIRECRAWL_GATEWAY_URL") == "http://fc-gw:3003"
+    assert env.get("FIRECRAWL_BROWSER_TTL") == "600"
+    # The Firecrawl credential is classified password=True and must never be
+    # blanket-inherited by a named profile (#3961 isolation invariant).
+    assert "FIRECRAWL_API_KEY" not in env
 
 
 def test_launcher_process_value_wins_over_root_fallback(tmp_path, monkeypatch):
@@ -161,12 +177,14 @@ def test_isolated_profile_layout_still_respects_allowlist(tmp_path, monkeypatch)
 
 def test_export_prefixed_lines_parse_canonically(tmp_path, monkeypatch):
     """[export parsing] 'export KEY=value' root lines parse as KEY (not
-    'export KEY') — both exact-allowlist and prefix-allowlist keys."""
+    'export KEY') — for both exact-allowlist keys, while an exported
+    FIRECRAWL_API_KEY credential is still refused."""
     base, alpha = _layout(tmp_path, monkeypatch)
     _write_env(
         base / ".env",
         "export SEARXNG_URL=http://root-export:8080\n"
-        "export FIRECRAWL_API_KEY=fc-export\n",
+        "export FIRECRAWL_API_URL=http://fc-export:3002\n"
+        "export FIRECRAWL_API_KEY=fc-export-secret\n",
     )
 
     env = get_profile_runtime_env(alpha)
@@ -174,7 +192,8 @@ def test_export_prefixed_lines_parse_canonically(tmp_path, monkeypatch):
     assert env.get("SEARXNG_URL") == "http://root-export:8080", (
         "'export KEY=value' must parse as KEY, not 'export KEY'"
     )
-    assert env.get("FIRECRAWL_API_KEY") == "fc-export"
+    assert env.get("FIRECRAWL_API_URL") == "http://fc-export:3002"
+    assert "FIRECRAWL_API_KEY" not in env
 
 
 def test_export_prefix_in_profile_env_parses(tmp_path, monkeypatch):
