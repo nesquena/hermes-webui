@@ -1,7 +1,337 @@
+// ── Per-tab profile context (#6559) ─────────────────────────────────────────
+// A tab's profile identity is an opaque server-issued token, NOT the
+// browser-wide hermes_profile cookie. sessionStorage holds the token AND the
+// profile name the tab believes it is running as, so a token the server has
+// forgotten can be reissued against THIS tab's profile instead of against
+// whatever the shared cookie currently names.
+const TAB_CONTEXT_KEY='hermes-tab-profile-ctx';
+const TAB_CONTEXT_PROFILE_KEY='hermes-tab-profile-ctx-profile';
+const TAB_CONTEXT_INVALID_ERROR='tab_context_invalid';
+// The server's answer when a tab declares a profile that does not exist.
+const TAB_CONTEXT_UNKNOWN_PROFILE_ERROR='unknown_profile';
+// Client-side only: this tab lost its context and could not get a new one, so
+// it refuses to send profile-sensitive requests rather than let them resolve
+// through the browser-wide cookie.
+const TAB_CONTEXT_BLOCKED_ERROR='tab_context_blocked';
+let _tabContextBlocked=false;
+function _markTabContextBlocked(){_tabContextBlocked=true;}
+
+function _tabContextStorage(){
+  try{return typeof sessionStorage!=='undefined'?sessionStorage:null;}catch(_e){return null;}
+}
+function _tabContextToken(){
+  const store=_tabContextStorage();
+  if(!store) return null;
+  try{return store.getItem(TAB_CONTEXT_KEY)||null;}catch(_e){return null;}
+}
+function _tabContextProfile(){
+  const store=_tabContextStorage();
+  if(!store) return null;
+  try{return store.getItem(TAB_CONTEXT_PROFILE_KEY)||null;}catch(_e){return null;}
+}
+function _storeTabContext(token,profileName){
+  const store=_tabContextStorage();
+  if(!store||!token) return;
+  try{
+    store.setItem(TAB_CONTEXT_KEY,token);
+    if(profileName) store.setItem(TAB_CONTEXT_PROFILE_KEY,profileName);
+    else store.removeItem(TAB_CONTEXT_PROFILE_KEY);
+    // Holding a token again is the one thing that lifts the blocked state.
+    _tabContextBlocked=false;
+  }catch(_e){}
+}
+// Drop the token but KEEP the profile name: the name is what a reissue binds
+// to, and a reissue that has forgotten it falls back to the shared cookie.
+function _clearTabContextToken(){
+  const store=_tabContextStorage();
+  if(!store) return;
+  try{store.removeItem(TAB_CONTEXT_KEY);}catch(_e){}
+}
+function _clearTabContext(){
+  const store=_tabContextStorage();
+  if(!store) return;
+  try{
+    store.removeItem(TAB_CONTEXT_KEY);
+    store.removeItem(TAB_CONTEXT_PROFILE_KEY);
+  }catch(_e){}
+}
+// The profile this tab claims to be running as: what the context was last
+// bound to, else the profile boot resolved for this tab. Never the cookie.
+function _declaredTabProfile(){
+  const stored=_tabContextProfile();
+  if(stored) return stored;
+  try{
+    if(typeof S==='object'&&S&&typeof S.activeProfile==='string'&&S.activeProfile) return S.activeProfile;
+  }catch(_e){}
+  return null;
+}
+function _tabContextUrl(urlStr){
+  // Append ?tab_context= from sessionStorage to any URL
+  try{
+    const ctx=_tabContextToken();
+    if(!ctx) return urlStr;
+    const u=new URL(urlStr,document.baseURI||location.href);
+    if(!u.searchParams.has('tab_context')) u.searchParams.set('tab_context',ctx);
+    return u.href;
+  }catch(_e){return urlStr;}
+}
+// The ONLY place static/ constructs an EventSource. Every SSE stream must go
+// through here so a tab's profile context can never be dropped from a stream
+// URL by a call site that forgot about it.
+function _tabContextEventSource(urlStr,opts){
+  return new EventSource(_tabContextUrl(urlStr),opts);
+}
+// Ask the server for a context bound to `profileName`. Uses raw fetch, not
+// api(), so the request never carries the very token we are replacing.
+// Returns {ok, token, profile, activeProfile, reason}. The caller needs the
+// REASON, not just a null: a target profile the server does not know (a URL
+// typo) is recoverable — the tab simply runs as itself — while a server that
+// could not be reached is not, and must never be treated as permission to
+// continue under the shared cookie.
+async function _issueTabContextDetailed(profileName){
+  const url=new URL('api/profile/tab-context',document.baseURI||location.href);
+  if(profileName) url.searchParams.set('profile',profileName);
+  // Bounded: boot AWAITS this, so a hung server must not stall the whole tab.
+  let controller=null,timer=null;
+  try{
+    if(typeof AbortController!=='undefined'){
+      controller=new AbortController();
+      timer=setTimeout(()=>controller.abort(),10000);
+    }
+    const res=await fetch(url.href,controller?{credentials:'include',signal:controller.signal}:{credentials:'include'});
+    if(!res.ok){
+      // 401 is not a binding failure — the whole server is closed to this tab
+      // until it logs in again, and there is no profile to be confused with.
+      // Report it so boot lets the normal 401 → login redirect happen.
+      if(res.status===401) return {ok:false,token:null,profile:null,activeProfile:null,reason:'unauthenticated'};
+      let code=null;
+      try{const body=await res.json();code=body&&typeof body.error==='string'?body.error:null;}catch(_e){}
+      return {ok:false,token:null,profile:null,activeProfile:null,
+        reason:code===TAB_CONTEXT_UNKNOWN_PROFILE_ERROR?TAB_CONTEXT_UNKNOWN_PROFILE_ERROR:'issue_failed'};
+    }
+    const data=await res.json();
+    if(!data||!data.token) return {ok:false,token:null,profile:null,activeProfile:null,reason:'issue_failed'};
+    const bound=data.profile||profileName||null;
+    _storeTabContext(data.token,bound);
+    return {ok:true,token:data.token,profile:bound,
+      activeProfile:typeof data.active_profile==='string'?data.active_profile:null,reason:null};
+  }finally{
+    if(timer) clearTimeout(timer);
+  }
+}
+async function _issueTabContext(profileName){
+  return (await _issueTabContextDetailed(profileName)).token;
+}
+// Rebind this tab to `profileName`. Call whenever the tab's OWN active profile
+// changes: the old token still resolves to the old profile and outranks the
+// shared cookie, so leaving it in place silently pins the tab to where it was.
+async function _rebindTabContext(profileName){
+  _clearTabContext();
+  try{
+    const token=await _issueTabContext(profileName||null);
+    // A rebind that could not issue leaves the tab holding nothing. Block it
+    // rather than let the next request be resolved through the cookie.
+    if(!token) _markTabContextBlocked();
+    return token;
+  }catch(e){
+    console.warn('[tab-context] rebind failed',e);
+    _markTabContextBlocked();
+    return null;
+  }
+}
+// Boot-time binding. Runs BEFORE the first profile-sensitive request of the
+// tab, not after it: a tab opened as "?profile=<B>" that asks the server
+// anything before it holds a B-bound token gets that answer resolved through
+// the browser-wide cookie — i.e. as the OPENER's profile A.
+//
+// `profileName` is the target the URL names, or null for "whatever this
+// browser's cookie resolves to". An existing token is kept only when it is
+// already bound to the requested profile. Returns
+// {ok, reason, token, boundProfile, previousProfile}; `previousProfile` is
+// what the request resolved to BEFORE the token was issued, which is how boot
+// tells "this tab moved to another profile" from "it was already there".
+async function _ensureTabContextForBoot(profileName){
+  const target=profileName||null;
+  const existing=_tabContextToken();
+  if(existing&&(!target||_tabContextProfile()===target)){
+    return {ok:true,reason:null,token:existing,boundProfile:_tabContextProfile(),previousProfile:null};
+  }
+  _clearTabContext();
+  let issued;
+  try{
+    issued=await _issueTabContextDetailed(target);
+  }catch(e){
+    console.warn('[tab-context] boot binding failed',e);
+    issued={ok:false,token:null,profile:null,activeProfile:null,reason:'issue_failed'};
+  }
+  if(!issued.ok){
+    if(issued.reason!=='unauthenticated') _markTabContextBlocked();
+    return {ok:false,reason:issued.reason||'issue_failed',token:null,boundProfile:null,previousProfile:null};
+  }
+  return {ok:true,reason:null,token:issued.token,boundProfile:issued.profile,previousProfile:issued.activeProfile};
+}
+// The raw ?profile= value, read before anything else in the tab runs. It is
+// deliberately NOT validated here: the server checks the name against its own
+// profile list and answers `unknown_profile`, and duplicating that rule in a
+// second place is how the two drift apart.
+function _tabContextTargetFromLocation(){
+  try{
+    if(typeof location==='undefined'||!location.search) return null;
+    const params=new URLSearchParams(location.search);
+    if(!params.has('profile')) return null;
+    return String(params.get('profile')||'')||null;
+  }catch(_e){return null;}
+}
+// ── Parse-time binding ──────────────────────────────────────────────────────
+// The tab acquires its profile identity HERE, in the second script the app
+// loads, not in boot. Two reasons:
+//
+//  1. Boot is not the first thing to ask the server a profile-scoped question.
+//     panels.js starts its version-skew check at its own parse time, which is
+//     before boot's IIFE runs at all. Binding in boot would still leave that
+//     request — and any future parse-time caller — resolved by the shared
+//     cookie, i.e. as the OPENER's profile.
+//  2. A new browsing context can inherit a COPY of the opener's sessionStorage,
+//     so a tab opened as "?profile=<B>" can start out holding a token bound to
+//     the opener's profile A, which outranks the cookie. It is dropped before
+//     anything in this tab can send it.
+//
+// Every request through api()/_tabContextFetch() awaits this, so "binding
+// precedes the first profile-sensitive request" is a property of the transport
+// rather than a rule each module has to remember. Boot awaits the same promise
+// and acts on its verdict (see _showTabContextBootFailure).
+let _tabContextBootBinding=null;
+function _tabContextBootBindingResult(){return _tabContextBootBinding;}
+(function _bindTabContextAtParseTime(){
+  const target=_tabContextTargetFromLocation();
+  // An inherited token belongs to the opener, not to this tab.
+  if(target) _clearTabContext();
+  _tabContextBootBinding=(async()=>{
+    const result=await _ensureTabContextForBoot(target);
+    if(result.ok||!target||result.reason!==TAB_CONTEXT_UNKNOWN_PROFILE_ERROR){
+      return {...result,target};
+    }
+    // The URL names a profile that does not exist. There is no other profile
+    // to be mistaken for, so bind to this tab's own and let boot report it —
+    // the same outcome a malformed ?profile= value already had.
+    const fallback=await _ensureTabContextForBoot(null);
+    return {...fallback,target,targetUnknown:true};
+  })();
+})();
+let _tabContextRecovery=null;
+// Clear a dead context and reissue one bound to this tab's own profile.
+// Single-flight: a stale token typically fails several in-flight requests at
+// once, and they must all converge on ONE replacement token.
+//
+// The declared profile name deliberately SURVIVES the clear: it is the only
+// record of which profile this tab belongs to, and a reissue that has lost it
+// falls back to the shared cookie — the exact downgrade this whole mechanism
+// exists to prevent.
+function _recoverTabContext(){
+  if(_tabContextRecovery) return _tabContextRecovery;
+  const declared=_declaredTabProfile();
+  _clearTabContextToken();
+  _tabContextRecovery=(async()=>{
+    try{
+      const token=await _issueTabContext(declared);
+      if(!token) _markTabContextBlocked();
+      return token;
+    }catch(e){
+      console.warn('[tab-context] reissue failed',e);
+      _markTabContextBlocked();
+      return null;
+    }finally{
+      _tabContextRecovery=null;
+    }
+  })();
+  return _tabContextRecovery;
+}
+// Fail-closed gate, run before every request that carries a context.
+//
+// Clearing a dead token and failing to replace it used to leave the tab in the
+// most dangerous state available: no token at all. The NEXT request then looks
+// exactly like a request from a tab that never had a context, so the server
+// serves it under the browser-wide cookie — silently, under another profile.
+// A tab that has lost its context stays blocked instead: it retries the
+// reissue, and refuses to send if that fails too.
+function _isTabContextBlocked(){
+  return _tabContextBlocked&&!_tabContextToken();
+}
+function _tabContextBlockedError(){
+  const err=new Error(TAB_CONTEXT_BLOCKED_ERROR);
+  err.errorCode=TAB_CONTEXT_BLOCKED_ERROR;
+  err.tabContextBlocked=true;
+  return err;
+}
+async function _requireTabContext(){
+  // Ordering, enforced at the transport: no request may overtake the binding.
+  if(_tabContextBootBinding){try{await _tabContextBootBinding;}catch(_e){}}
+  if(_tabContextToken()) return true;
+  // A tab that never held a context (share page, pre-boot, storage denied)
+  // keeps the historical cookie behaviour; only a tab that LOST one blocks.
+  if(!_tabContextBlocked) return true;
+  return !!(await _recoverTabContext());
+}
+function _isTabContextInvalidError(e){
+  if(!e||Number(e.status)!==409) return false;
+  return e.errorCode===TAB_CONTEXT_INVALID_ERROR||e.message===TAB_CONTEXT_INVALID_ERROR;
+}
+async function _isTabContextInvalidResponse(res){
+  if(!res||Number(res.status)!==409||typeof res.clone!=='function') return false;
+  try{
+    const text=await res.clone().text();
+    if(!text) return false;
+    try{return JSON.parse(text).error===TAB_CONTEXT_INVALID_ERROR;}
+    catch(_e){return text.indexOf(TAB_CONTEXT_INVALID_ERROR)>=0;}
+  }catch(_e){return false;}
+}
+// The context-aware raw transport. api() is the client for JSON endpoints, but
+// a number of profile-sensitive call sites need the Response itself — binary
+// bodies (TTS audio, PDFs), FormData uploads, no-store text previews, bespoke
+// status handling. Before #6559 they called fetch() directly, which meant they
+// carried no tab context and were resolved through the shared cookie: one
+// profile's tab fetching another profile's models, files and voices.
+//
+// This is the single place those transports go through. It attaches the token,
+// recovers a refused context exactly as api() does, and honours the same
+// fail-closed gate, so "needs the raw Response" never again means "opts out of
+// the tab's profile identity".
+async function _tabContextFetch(urlStr,init){
+  if(!await _requireTabContext()) throw _tabContextBlockedError();
+  const res=await fetch(_tabContextUrl(urlStr),init);
+  if(!await _isTabContextInvalidResponse(res)) return res;
+  // The server refused this token and deliberately did not fall back to the
+  // cookie. Reissue and replay once; if the reissue fails, hand back the 409
+  // rather than retrying bare.
+  if(!await _recoverTabContext()) return res;
+  return fetch(_tabContextUrl(urlStr),init);
+}
+// EventSource cannot read the body of a refused handshake, so an SSE that dies
+// while this tab holds a context may be a tab_context_invalid rejection. Probe
+// with a cheap profile-scoped GET: api() below clears + reissues + retries on
+// that error, so by the time this resolves sessionStorage holds a usable token
+// and the caller's reconnect carries it.
+async function _revalidateTabContextAfterSseError(){
+  // Nothing to revalidate for a tab that holds no context: either it never had
+  // one (storage denied — its requests have always been cookie-scoped, and
+  // refusing to reconnect would just break the stream) or it is blocked, which
+  // the answer below reports.
+  if(_tabContextToken()){
+    try{
+      await api('/api/profile/active',{timeoutMs:5000,timeoutToast:false,retries:0,redirect401:false});
+    }catch(_e){}
+  }
+  // Answer with what is true NOW, not with what was true on entry. The probe's
+  // recovery may have cleared the dead token and failed to replace it; saying
+  // "revalidated" then lets the caller reopen the stream with no context at
+  // all, which the server happily serves under the shared cookie.
+  return !_isTabContextBlocked();
+}
+
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
-  const url=new URL(rel,document.baseURI||location.href);
+  const baseUrl=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
   const redirect401=opts.redirect401!==false;
@@ -12,6 +342,9 @@ async function api(path,opts={}){
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Callers may opt into retrying timeouts / transient server statuses for idempotent GETs.
   let lastErr;
+  // One extra attempt is reserved for a tab_context_invalid recovery; it does
+  // not consume a normal retry (see the catch below).
+  let tabContextRetried=false;
   for(let attempt=0;attempt<maxAttempts;attempt++){
     let controller=null;
     let timeoutId=null;
@@ -39,8 +372,16 @@ async function api(path,opts={}){
         }
         fetchOpts.signal=controller.signal;
       }
+      // Fail-closed gate: a tab that lost its context must not fall through to
+      // the shared cookie. It retries the reissue here and refuses to send if
+      // that fails, rather than sending a request the server would resolve as
+      // whatever profile the browser-wide cookie currently names.
+      if(!await _requireTabContext()) throw _tabContextBlockedError();
+      // Resolve the per-tab profile context per attempt, not once per call: a
+      // retry after a tab_context_invalid recovery must carry the NEW token.
+      const requestUrl=_tabContextUrl(baseUrl.href);
       const requestPromise=(async()=>{
-        const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        const res=await fetch(requestUrl,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
         if(!res.ok){
           // 401 means the auth session expired. Redirect to login so the user can
           // re-authenticate. This is especially important for iOS PWA (standalone mode)
@@ -68,13 +409,15 @@ async function api(path,opts={}){
           // Parse JSON error body and surface the human-readable message,
           // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
           let message=text;
-          try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
+          let errorCode=null;
+          try{const j=JSON.parse(text);errorCode=(j&&typeof j.error==='string')?j.error:null;message=j.error||j.message||text;}catch(e){}
           // Attach the raw HTTP context so callers can branch on status (404 stale-session
           // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
           const err=new Error(message);
           err.status=res.status;
           err.statusText=res.statusText;
           err.body=text;
+          err.errorCode=errorCode;
           throw err;
         }
         const ct=res.headers.get('content-type')||'';
@@ -106,6 +449,16 @@ async function api(path,opts={}){
         err.timeout=true;
         if(timeoutToast&&typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
         throw err;
+      }
+      // #6559: the server refused this request's per-tab profile context. It
+      // deliberately did NOT fall back to the shared cookie, so recover here:
+      // drop the dead token, reissue one bound to THIS tab's profile, and run
+      // the same attempt again. `attempt--` keeps the recovery from eating a
+      // normal retry; `tabContextRetried` caps it at exactly one.
+      if(_isTabContextInvalidError(e)&&!tabContextRetried){
+        tabContextRetried=true;
+        if(await _recoverTabContext()){attempt--;continue;}
+        throw e;
       }
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
       // that were already thrown above. Re-throw 401 redirects immediately.

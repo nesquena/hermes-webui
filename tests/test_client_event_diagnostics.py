@@ -138,7 +138,7 @@ def test_workspace_js_defines_sanitized_client_sse_error_reporter():
 
 def test_sessions_js_reports_gateway_sse_errors_with_browser_context():
     gateway_block_start = SESSIONS_JS.index("_gatewaySSE.onerror = () =>")
-    gateway_block = SESSIONS_JS[gateway_block_start:gateway_block_start + 400]
+    gateway_block = SESSIONS_JS[gateway_block_start:gateway_block_start + 700]
     assert "recordClientSSEError('gateway-sessions'" in gateway_block
     assert "probeGatewaySSEStatus" in gateway_block
 
