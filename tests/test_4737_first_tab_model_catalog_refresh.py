@@ -222,8 +222,10 @@ def driver_path(tmp_path_factory):
     return str(path)
 
 
-def _run(driver_path, scenario):
-    marker = "async function populateModelDropdown("
+def _extract_function(marker):
+    """Extract a single top-level function body from UI_JS, from its
+    signature marker through the closing brace (same slicing the sibling
+    drivers use)."""
     start = UI_JS.index(marker)
     paren_depth = 1
     idx = start + len(marker)
@@ -235,7 +237,7 @@ def _run(driver_path, scenario):
             paren_depth -= 1
         idx += 1
     if paren_depth != 0:
-        raise AssertionError("could not locate populateModelDropdown signature")
+        raise AssertionError(f"could not locate {marker!r} signature")
     brace_start = UI_JS.index("{", idx)
     depth = 0
     for idx in range(brace_start, len(UI_JS)):
@@ -245,10 +247,19 @@ def _run(driver_path, scenario):
         elif char == "}":
             depth -= 1
             if depth == 0:
-                fn_source = UI_JS[start : idx + 1]
-                break
-    else:
-        raise AssertionError("could not extract populateModelDropdown")
+                return UI_JS[start : idx + 1]
+    raise AssertionError(f"could not extract {marker!r}")
+
+
+def _run(driver_path, scenario):
+    # The driver evaluates the extracted functions in isolation, so any
+    # helper the code-under-test calls must be extracted alongside it.
+    fn_source = "\n".join(
+        [
+            _extract_function("function _qualifiedCatalogOptionMeta("),
+            _extract_function("async function populateModelDropdown("),
+        ]
+    )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".js", delete=False) as handle:
         handle.write(fn_source)
         fn_source_path = handle.name
