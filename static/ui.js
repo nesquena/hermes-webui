@@ -3580,6 +3580,18 @@ function _applySessionModelFallback(sel){
   return null;
 }
 
+// Server-side catalog rows for non-active providers arrive provider-qualified:
+// the dedupe pass rewrites colliding ids as @<provider_id>:<model>. Return the
+// metadata a picker option needs for such a row (bare model id + owning
+// provider) so _modelStateForSelect() can persist the CLEAN model id into a
+// new session instead of leaking the full @provider:model routing id. #7241
+function _qualifiedCatalogOptionMeta(model, providerId){
+  const raw=String(model||'');
+  const provider=String(providerId||'').trim();
+  const prefix=provider?`@${provider}:`:'';
+  if(!raw.startsWith('@')||!raw.includes(':')||!prefix||!raw.toLowerCase().startsWith(prefix.toLowerCase())) return null;
+  return {model:raw.slice(prefix.length),provider};
+}
 async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
@@ -3671,6 +3683,15 @@ async function populateModelDropdown(opts={}){
       for(const m of (Array.isArray(g.models)?g.models:[])){
         const opt=document.createElement('option');
         opt.value=m.id;
+        // Provider-qualified rows (e.g. @custom:omni:… for non-active
+        // providers) must carry the bare model + owning provider as option
+        // metadata; a fresh-session selection otherwise persists the whole
+        // routing id (extraction prefers dataset.model over option.value). #7241
+        const qualifiedMeta=_qualifiedCatalogOptionMeta(m&&m.id,g&&g.provider_id);
+        if(qualifiedMeta){
+          opt.dataset.model=qualifiedMeta.model;
+          opt.dataset.provider=qualifiedMeta.provider;
+        }
         opt.textContent=m.label;
         if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
           opt.dataset.fast='1';
@@ -4159,6 +4180,13 @@ function _appendOverflowOptionsToGroup(group, extraModels){
     }
     const opt=document.createElement('option');
     opt.value=m.id;
+    // Overflow rows of a provider-qualified group keep the same metadata
+    // contract as the catalog rows above (bare model + provider). #7241
+    const qualifiedMeta=_qualifiedCatalogOptionMeta(m.id,group&&group.dataset&&group.dataset.provider);
+    if(qualifiedMeta){
+      opt.dataset.model=qualifiedMeta.model;
+      opt.dataset.provider=qualifiedMeta.provider;
+    }
     opt.textContent=m.label||m.id;
     group.appendChild(opt);
     appended++;
