@@ -2188,7 +2188,58 @@
   .cron-btn.pause{border-color:var(--accent-bg-strong);color:var(--accent-text);}
   .cron-last{font-size:11px;color:var(--muted);border-top:1px solid var(--border);padding-top:8px;max-height:220px;overflow-y:auto;white-space:pre-wrap;line-height:1.5;word-break:break-word;}
   .cron-last-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:4px;}
+  
+  /* ---- Cron panel: scheduled-session history list ----
+     Styles the top-level "Cron" panel (sibling work in panels.js/index.html
+     adds the panel + nav entry). Reuses the app's existing .panel-view /
+     .panel-header / .empty-state / .session-* primitives so the panel matches
+     every other panel with zero duplication and no restyling of them.
+     Rows/list carry BOTH modern and legacy class names so whichever the
+     sibling ships renders identically. */
+  #panelCron.panel-view.active,
+  #panelCronSessions.panel-view.active{display:flex;}
+
+  .cron-session-list,
+  .cron-sessions-list{flex:1;min-height:0;overflow-y:auto;padding:8px;display:flex;flex-direction:column;}
+
+  .cron-session-item,
+  .cronSessionsItem{width:100%;min-width:0;box-sizing:border-box;padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;position:relative;}
+  @media (hover:hover){
+    .cron-session-item:hover,
+    .cronSessionsItem:hover{background:var(--hover-bg);color:var(--text);}
+  }
+  .cron-session-item:hover .session-title,
+  .cronSessionsItem:hover .session-title{color:var(--text);}
+  .cron-session-item:hover .session-meta,
+  .cronSessionsItem:hover .session-meta{color:var(--text);opacity:.8;}
+  .cron-session-item .session-text,
+  .cronSessionsItem .session-text{flex:1;min-width:0;}
+
+  .cron-session-list .panel-empty,
+  .cron-sessions-list .panel-empty,
+  .cron-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:40px;color:var(--muted);text-align:center;font-size:13px;}
+  .cron-session-list .panel-empty h2,
+  .cron-sessions-list .panel-empty h2,
+  .cron-empty h2,
+  .cron-session-list .panel-empty .cron-empty-title,
+  .cron-sessions-list .panel-empty .cron-empty-title,
+  .cron-empty .cron-empty-title{font-size:16px;font-weight:600;color:var(--text);letter-spacing:-.01em;}
+  .cron-session-list .panel-empty p,
+  .cron-sessions-list .panel-empty p,
+  .cron-empty p{max-width:300px;margin:0;}
+
+  /* Cron header + stat helper chips (match the app's uppercase micro-header style) */
+  .cron-panel-header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0;padding:8px 12px 4px;font-size:10px;font-weight:600;letter-spacing:.08em;color:var(--muted);}
+  .cron-stat{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:600;letter-spacing:.05em;color:var(--muted);}
+  .cron-stat .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+  .cron-stat .dot.total{background:var(--muted);}
+  .cron-stat .dot.ok{background:var(--success);}
+  .cron-stat .dot.paused{background:var(--accent-bg-strong);}
+  .cron-stat .dot.error{background:var(--error);}
+  .cron-stat .num{font-weight:700;color:var(--text);min-width:1.2em;text-align:right;}
+
   /* Skills panel */
+
   .skills-list{flex:1;overflow-y:auto;padding:0 8px 8px;}
   .skills-category{margin-bottom:4px;}
   .skills-cat-header{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 6px 4px;cursor:pointer;display:flex;align-items:center;gap:2px;user-select:none;}

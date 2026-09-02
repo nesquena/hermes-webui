@@ -957,6 +957,8 @@ const LOCALES = {
     tab_workspaces: 'Spaces',
     tab_profiles: 'Profiles',
     tab_kanban: 'Kanban',
+    tab_cron: 'Cron',
+    cron_empty: 'No cron sessions yet',
     kanban_board: 'Board',
     kanban_visible_tasks: '{0} visible tasks',
     kanban_search_tasks: 'Search tasks',

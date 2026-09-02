@@ -42,9 +42,9 @@ let _logsSeverityFilter = 'all';
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', cron: 'tab_cron', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','cron','workspaces','profiles','insights','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -451,6 +451,7 @@ async function switchPanel(name, opts = {}) {
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'cron') await loadCronSessions();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -471,6 +472,12 @@ async function switchPanel(name, opts = {}) {
   return true;
 }
 
+// Cron-session transcript loading for the Cron panel is implemented in
+// static/sessions.js (loadCronSessions, exported on window). switchPanel below
+// calls it on panel activation; it fetches GET /api/sessions?source_filter=cron
+// and opens transcripts via the existing session-open machinery. This file does
+// not redefine it (panels.js loads after sessions.js and would otherwise shadow
+// the transcript-opening loader).
 // ── Cron panel ──
 function _isRecurringCronJob(job) {
   const kind = job && job.schedule && job.schedule.kind;

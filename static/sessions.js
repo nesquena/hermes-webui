@@ -7550,6 +7550,16 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let webuiArchivedCount=0;
   let cliArchivedCount=0;
   for(const s of allMatched){
+    // CRON-FREE SIDEBAR: cron-source sessions are NEVER listed in the chat/
+    // WebUI sidebar. They have their own home in the Cron panel (see
+    // loadCronSessions below), reachable independently of the show_cron_sessions
+    // toggle. Skipping them at this single chokepoint (where every visible
+    // sidebar row universe is assembled) guarantees cron never surfaces in the
+    // chat sidebar through any render path — search, archive view, pinned rows,
+    // lineage collapse, or unread scoping — while leaving them fully intact on
+    // the server, so the Cron panel can still list, archive, restore and open
+    // them. Nothing is deleted here.
+    if(_isCronSessionForUnread(s)) continue;
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
     if(isCli) cliSessionCount++;
@@ -9518,3 +9528,120 @@ document.addEventListener('keydown',(e)=>{
   e.preventDefault();
   navigateSession(e.key==='j'?1:-1);
 });
+
+
+// ── Cron panel: fetch + render cron session transcripts ──────────────────────
+// Source-of-truth contract (see api/routes.py GET /api/sessions): passing
+// source_filter=cron is a deliberate, explicit request to reveal cron-source
+// (state.db agent/internal) sessions even though they are hidden from the
+// default sidebar. The server normalizes it (strip+lower) and treats 'cron' as
+// a valid background source filter — verified against _dedupe_cli_sidebar_sessions_for_api
+// (source_filter: 'cron' => show_cron_sessions=True).
+function _cronPanelSessionsEndpoint() {
+  const qs = new URLSearchParams();
+  qs.set('source_filter', 'cron');
+  qs.set('exclude_hidden', '0');
+  qs.set('sidebar_source', 'webui');
+  qs.set('include_archived', '1');
+  return '/api/sessions?' + qs.toString();
+}
+
+function _cronPanelTimestampMs(s) {
+  const raw = Number(s && (s.last_message_at || s.updated_at || s.created_at || 0));
+  return Number.isFinite(raw) ? raw * 1000 : 0;
+}
+
+// Render the device-independent placeholder shown before/instead of the list
+// (loading, connection/error states). Kept minimal but safe via esc().
+function _cronPanelSetState(container, stateId, messageHtml) {
+  if (!container) return;
+  const snippet = document.createElement('div');
+  snippet.className = 'cron-sessions-state cron-sessions-state-' + String(stateId || '');
+  if (messageHtml) snippet.innerHTML = messageHtml;
+  container.appendChild(snippet);
+  return snippet;
+}
+
+// Core of the Cron panel: fetch cron sessions from GET /api/sessions?source_filter=cron
+// and render a clickable list (title + relative time). Each row opens its
+// transcript via the existing session-open machinery (_openSidebarSession /
+// loadSession) so lineage resolution, profile switching and read-only cron
+// handling all just work. Callers: static/panels.js (panel activation) and
+// static/index.html (onclick). Globally exported as window.loadCronSessions.
+async function _renderCronSessions(containerId) {
+  const container = document.getElementById(containerId);
+  // Guard: sibling subagent may not have created the panel shell/DOM container
+  // yet. No-op gracefully; the panel activation will retry on next activation.
+  if (!container) return false;
+  if (container.getAttribute('data-cron-loading') === '1') return false;
+  container.setAttribute('data-cron-loading', '1');
+  container.innerHTML = '';
+  _cronPanelSetState(container, 'loading', '<span class="cron-sessions-spinner"></span> Loading cron sessions&hellip;');
+  try {
+    const resp = await api(_cronPanelSessionsEndpoint(), {timeoutToast: false, retries: 1, retryStatuses: [502, 503, 504]});
+    const list = (resp && Array.isArray(resp.sessions)) ? resp.sessions : [];
+    container.innerHTML = '';
+    if (!list.length) {
+      _cronPanelSetState(container, 'empty', 'No cron sessions yet.');
+      return true;
+    }
+    // Newest-first like the chat sidebar.
+    list.sort((a, b) => _cronPanelTimestampMs(b) - _cronPanelTimestampMs(a));
+    const ul = document.createElement('ul');
+    ul.className = 'cron-sessions-list';
+    for (const s of list) {
+      if (!s || !s.session_id) continue;
+      const li = document.createElement('li');
+      li.className = 'cron-session-item';
+      const titleSrc = s.display_title || s.title || s.session_id;
+      // Reuse the canonical sidebar title derivation when available.
+      const titleText = (typeof _sessionDisplayTitle === 'function' && titleSrc !== s.session_id)
+        ? _sessionDisplayTitle(s)
+        : titleSrc;
+      // Strip cron/system-prefix markers the same way the sidebar does; a chat
+      // page should never surface raw system-prompt text as its title.
+      let clean = String(titleText || s.session_id || '');
+      if (clean.startsWith('[SYSTEM:')) clean = 'Session';
+      const timeText = (typeof _formatRelativeSessionTime === 'function')
+        ? _formatRelativeSessionTime(_cronPanelTimestampMs(s))
+        : '';
+      const idEsc = esc(s.session_id);
+      const titleEsc = esc(clean);
+      li.innerHTML =
+        '<button type="button" class="cron-session-open" data-sid="' + idEsc + '">' +
+          '<span class="cron-session-title">' + titleEsc + '</span>' +
+          (timeText ? '<span class="cron-session-time">' + esc(timeText) + '</span>' : '') +
+        '</button>';
+      li.querySelector('.cron-session-open').addEventListener('click', async () => {
+        try {
+          const row = {session_id: s.session_id, title: clean, display_title: clean, profile: s.profile};
+          if (typeof _openSidebarSession === 'function') await _openSidebarSession(row, {skipLineageResolve: true});
+          else if (typeof loadSession === 'function') await loadSession(s.session_id);
+        } catch (err) {
+          if (typeof showToast === 'function') showToast('Could not open session: ' + (err && err.message || err), 0, 'error');
+        }
+      });
+      ul.appendChild(li);
+    }
+    container.appendChild(ul);
+    return true;
+  } catch (err) {
+    container.innerHTML = '';
+    _cronPanelSetState(container, 'error', 'Failed to load cron sessions: ' + esc(err && err.message || String(err)));
+    if (typeof showToast === 'function') showToast('Could not load cron sessions', 0, 'error');
+    return false;
+  } finally {
+    container.removeAttribute('data-cron-loading');
+  }
+}
+
+// Public entry point for the Cron panel. Re-renders every activation so the
+// list reflects newly-finished cron runs. Container id: 'cronSessionsPanel'.
+// Global (window) so static/panels.js switchPanel and static/index.html onclick
+// can call it without import ceremony — matches the rest of this global-script
+// codebase.
+async function loadCronSessions(containerId) {
+  containerId = containerId || 'cronSessionsPanel';
+  return _renderCronSessions(containerId);
+}
+if (typeof window !== 'undefined') window.loadCronSessions = loadCronSessions;
