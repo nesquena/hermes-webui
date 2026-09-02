@@ -5741,7 +5741,11 @@ def _static_models_catalog_without_live_probes() -> dict:
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
             provider_cfg = _get_provider_cfg(raw_key)
             raw_models = []
-            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+            if (
+                isinstance(provider_cfg, dict)
+                and "models" in provider_cfg
+                and provider_cfg.get("models_discovered") is not True
+            ):
                 raw_models = _configured_model_options(provider_cfg["models"])
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
@@ -8143,7 +8147,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # whichever model had local settings. Only Copilot skips the
                     # config-models allowlist branch and asks Hermes CLI for the
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
-                    _uses_models_as_settings_map = pid == "copilot"
+                    _uses_models_as_settings_map = pid == "copilot" or (
+                        isinstance(provider_cfg, dict)
+                        and provider_cfg.get("models_discovered") is True
+                    )
                     if (
                         not _uses_models_as_settings_map
                         and isinstance(provider_cfg, dict)
