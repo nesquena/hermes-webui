@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 from types import SimpleNamespace
+from urllib.parse import urljoin
 
 import pytest
 
@@ -40,6 +41,12 @@ class _Handler:
         self.status = status
 
     def send_header(self, name, value):
+        # Enforce the production header codec: the stdlib
+        # BaseHTTPRequestHandler.send_header() buffers
+        # ("%s: %s\r\n" % (keyword, value)).encode("latin-1", "strict"), so a
+        # non-Latin-1 Location raises there. A fake that only stores Python
+        # strings cannot see that boundary.
+        ("%s: %s\r\n" % (name, value)).encode("latin-1", "strict")
         self.sent_headers.append((name, value))
 
     def end_headers(self):
@@ -100,13 +107,16 @@ def test_trusted_header_request_redirects_to_safe_next(monkeypatch):
     )
 
 
-def test_trusted_header_request_without_next_redirects_to_root(monkeypatch):
+def test_trusted_header_request_without_next_redirects_to_mount_root(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
     handler = _Handler(headers={"Remote-User": "alice"})
 
     assert _get_login(handler) is True
     assert handler.status == 302
-    assert _location(handler) == ["/"]
+    # `./`, not `/`: from `<mount>/login` it resolves to the mount root, so a
+    # subpath deployment such as `/hermes/` is not sent to the site root.
+    # Mirrors the `_safeNextPath()` default in static/login.js.
+    assert _location(handler) == ["./"]
 
 
 @pytest.mark.parametrize(
@@ -117,13 +127,84 @@ def test_trusted_header_request_without_next_redirects_to_root(monkeypatch):
         "next=%2Flogin%3Fnext%3D%2Flogin",
     ],
 )
-def test_unsafe_next_falls_back_to_root(monkeypatch, query):
+def test_unsafe_next_falls_back_to_mount_root(monkeypatch, query):
     monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
     handler = _Handler(headers={"Remote-User": "alice"})
 
     assert _get_login(handler, query=query) is True
     assert handler.status == 302
-    assert _location(handler) == ["/"]
+    assert _location(handler) == ["./"]
+
+
+@pytest.mark.parametrize(
+    ("page_url", "query", "expected"),
+    [
+        # No `next`: land on the mount root, wherever the app is mounted.
+        ("https://host/login", "", "https://host/"),
+        ("https://host/hermes/login", "", "https://host/hermes/"),
+        # Unsafe `next`: same fallback.
+        ("https://host/login", "next=%2F%2Fevil.example.com%2F", "https://host/"),
+        ("https://host/hermes/login", "next=%2F%2Fevil.example.com%2F", "https://host/hermes/"),
+        # A present `next` is a browser-side root-absolute path: the app's own
+        # producers (static/ui.js, workspace.js, boot.js) build it from
+        # window.location.pathname, which already carries the mount prefix, and
+        # static/login.js navigates to it verbatim. Emit it as-is so it resolves
+        # exactly like the password flow — prefixing `./` would double the
+        # mount (`/hermes/hermes/session/...`).
+        ("https://host/login", "next=%2Fsession%2Fabc123", "https://host/session/abc123"),
+        (
+            "https://host/hermes/login",
+            "next=%2Fhermes%2Fsession%2Fabc123",
+            "https://host/hermes/session/abc123",
+        ),
+    ],
+)
+def test_location_resolves_under_root_and_subpath_mounts(
+    monkeypatch, page_url, query, expected
+):
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
+    handler = _Handler(headers={"Remote-User": "alice"})
+
+    assert _get_login(handler, query=query) is True
+    (location,) = _location(handler)
+    assert urljoin(page_url, location) == expected
+
+
+def test_non_latin1_next_is_percent_encoded_for_the_header(monkeypatch):
+    """`parse_qs()` decodes `%E4%BD%A0%E5%A5%BD` to `/你好`, and the stdlib
+    `send_header()` encodes header values as strict Latin-1, so passing the
+    decoded string through raised `UnicodeEncodeError` (a 500 instead of the
+    redirect). The `Location` must go out as an ASCII URI."""
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
+    handler = _Handler(headers={"Remote-User": "alice"})
+
+    assert _get_login(handler, query="next=%2F%E4%BD%A0%E5%A5%BD") is True
+    assert handler.status == 302
+    assert _location(handler) == ["/%E4%BD%A0%E5%A5%BD"]
+
+
+def test_latin1_encodable_non_ascii_next_is_still_percent_encoded(monkeypatch):
+    """`é` fits Latin-1, so the stdlib does not raise — but a raw non-ASCII
+    byte is not a valid header value either. It must be UTF-8 percent-encoded."""
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
+    handler = _Handler(headers={"Remote-User": "alice"})
+
+    assert _get_login(handler, query="next=%2Fsession%2Fcaf%C3%A9") is True
+    assert _location(handler) == ["/session/caf%C3%A9"]
+
+
+def test_existing_escapes_and_delimiters_survive_encoding(monkeypatch):
+    """Encoding must not double a `%xx` that survived `parse_qs()` (a
+    once-encoded `?` the target page owns) or touch URI delimiters."""
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
+    handler = _Handler(headers={"Remote-User": "alice"})
+
+    # parse_qs() decodes this to `/session/abc%3Fx?q=1&r=2`.
+    assert (
+        _get_login(handler, query="next=%2Fsession%2Fabc%253Fx%3Fq%3D1%26r%3D2")
+        is True
+    )
+    assert _location(handler) == ["/session/abc%3Fx?q=1&r=2"]
 
 
 def test_cookie_authenticated_request_redirects(monkeypatch):

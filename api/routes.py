@@ -11036,6 +11036,28 @@ def _safe_login_redirect_path(raw_path: str | None) -> str:
     return path
 
 
+def _login_redirect_location(safe_path: str) -> str:
+    """Serialize a `_safe_login_redirect_path()` result as a `Location` value.
+
+    The fallback `/` becomes `./`: from `<mount>/login` that resolves to the
+    mount root, so a subpath deployment such as `/hermes/` is not sent to the
+    site root. This mirrors the `_safeNextPath()` default in static/login.js.
+    A present `next` is emitted as-is — the app's own producers (static/ui.js,
+    workspace.js, boot.js) build it from `window.location.pathname`, which
+    already carries the mount prefix, and login.js navigates to it verbatim;
+    prefixing `./` would double the mount (`/hermes/hermes/session/...`).
+
+    `parse_qs()` has already decoded percent escapes, so a UTF-8 `next` arrives
+    as a Unicode string, and `BaseHTTPRequestHandler.send_header()` encodes
+    header values as strict Latin-1 — `/你好` would raise. Percent-encode
+    anything outside the RFC 3986 reserved/unreserved sets back to an ASCII
+    URI; `%` stays safe so a `%xx` that survived decoding is not doubled.
+    """
+    if safe_path == "/":
+        return "./"
+    return quote(safe_path, safe="/%:@!$&'()*+,;=?#[]~")
+
+
 def _request_base_url(handler) -> str:
     from api.auth import _is_secure_context
 
@@ -12943,8 +12965,10 @@ def handle_get(handler, parsed) -> bool:
             handler.send_response(302)
             handler.send_header(
                 "Location",
-                _safe_login_redirect_path(
-                    parse_qs(parsed.query or "").get("next", [""])[0]
+                _login_redirect_location(
+                    _safe_login_redirect_path(
+                        parse_qs(parsed.query or "").get("next", [""])[0]
+                    )
                 ),
             )
             handler.send_header("Cache-Control", "no-store")
