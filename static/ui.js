@@ -575,6 +575,9 @@ const _recycleResetAttrs=[
   'data-live-assistant-turn',
 ];
 let _scrollbarDragActive=false;
+// A native scroll is classified in rAF, after pointerup may have cleared the
+// live drag flag. Keep drag ownership latched only until that queued frame runs.
+let _scrollbarDragIntentQueued=false;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
@@ -6032,11 +6035,12 @@ const MESSAGE_TAIL_JITTER_MAX_DELTA_PX=16;
 // so brace/`})();`-based test harnesses that slice the listener body keep
 // extracting the whole block. The typeof guards keep it inert in harnesses that
 // inject the listener without these helpers.
-function _isMessageTailJitter(top,bottomDistance){
+function _isMessageTailJitter(top,bottomDistance,scrollbarDragIntent=false){
   if(_lastScrollTop===null) return false;
   const delta=_lastScrollTop-top;
   if(!(delta>0&&delta<=MESSAGE_TAIL_JITTER_MAX_DELTA_PX)) return false;
   if(bottomDistance>MESSAGE_TAIL_JITTER_MAX_BOTTOM_PX) return false;
+  if(scrollbarDragIntent) return false;
   if(typeof _scrollbarDragActive!=='undefined'&&_scrollbarDragActive) return false;
   if(typeof _recentMessageWheelIntent==='function'&&_recentMessageWheelIntent()) return false;
   if(typeof _recentMessageTouchScrollIntent==='function'&&_recentMessageTouchScrollIntent()) return false;
@@ -6259,6 +6263,8 @@ if(typeof document!=='undefined'){
 function _resetScrollDirectionTracker(){
   _cancelMessageJumpScroll();
   _clearNewMessageScrollCue();
+  _scrollbarDragActive=false;
+  _scrollbarDragIntentQueued=false;
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
   _messageUserUnpinned=false;
@@ -6285,6 +6291,8 @@ function _resetStreamScrollFollow(){
   // undo them and silently disable auto-follow for the new stream.
   _cancelBottomSettle();
   _clearNewMessageScrollCue();
+  _scrollbarDragActive=false;
+  _scrollbarDragIntentQueued=false;
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -6440,8 +6448,11 @@ if(typeof window!=='undefined'){
     if(_freshProgrammaticScrollActive()) return;
     _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
+    if(_scrollbarDragActive) _scrollbarDragIntentQueued=true;
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
+      const dragIntent=typeof _scrollbarDragIntentQueued!=='undefined'&&_scrollbarDragIntentQueued;
+      if(typeof _scrollbarDragIntentQueued!=='undefined') _scrollbarDragIntentQueued=false;
       const top=el.scrollTop;
       const bottomDistance=el.scrollHeight-top-el.clientHeight;
       const nearBottom=bottomDistance<250;
@@ -6459,7 +6470,7 @@ if(typeof window!=='undefined'){
       // a tiny upward nudge while the reader is still AT the bottom, with no real
       // input intent, is a layout artifact — not a decision to leave the tail.
       // Any wheel/touch/key/scrollbar intent bypasses this and unpins normally.
-      const _tailJitter=typeof _isMessageTailJitter==='function'&&_isMessageTailJitter(top,bottomDistance);
+      const _tailJitter=typeof _isMessageTailJitter==='function'&&_isMessageTailJitter(top,bottomDistance,dragIntent);
       const movedUp=!grew&&!_tailJitter&&_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
       // Suppress the post-render scroll artifact: right after renderMessages()
@@ -6483,6 +6494,7 @@ if(typeof window!=='undefined'){
         && typeof _recentNonMessageScrollIntent==='function'
         && typeof _recentMessageWheelIntent==='function'
         && typeof _recentMessageKeyScrollIntent==='function'
+        && !dragIntent
         && (typeof _scrollbarDragActive==='undefined' || !_scrollbarDragActive)
         && _recentMessageRenderArtifactWindow(1400)
         && !_recentMessageTouchScrollIntent()
