@@ -1273,5 +1273,269 @@ class TestAuxTitleConversationContext(unittest.TestCase):
         self.assertEqual(mock_aux_title.call_args.kwargs.get('conversation_id'), 'entry-sync-sid')
 
 
+class TestAuxSchemaFirstTitleGeneration(unittest.TestCase):
+    """Schema-first title generation (#7413): the aux route asks for a strict
+    ``{"title": ...}`` JSON object via ``response_format`` (mirroring the CLI's
+    agent/title_generator.py) so routes that accept-but-ignore a
+    reasoning-disable still return a short parseable title, with the
+    reasoning-disable mode kept as the fallback for routes that reject
+    ``response_format`` or answer with an empty/non-object response.
+    """
+
+    def _patch_llm(self, fake):
+        return patch('agent.auxiliary_client.call_llm', side_effect=fake, create=True)
+
+    def test_schema_first_unwraps_json_title(self):
+        """A strict json_schema response unwraps to its title text."""
+        from api.streaming import generate_title_raw_via_aux
+
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return {
+                'choices': [
+                    {
+                        'message': {'content': '{"title": "Weather Report"}'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'openrouter', 'model': 'deepseek/deepseek-chat', 'base_url': 'https://openrouter.ai/api/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='What is the weather?',
+                    assistant_text='It is sunny and warm.',
+                )
+
+        self.assertEqual(result, 'Weather Report')
+        self.assertEqual(status, 'llm_aux')
+        extra = captured.get('extra_body') or {}
+        self.assertEqual(extra['response_format']['type'], 'json_schema')
+        self.assertEqual(extra['response_format']['json_schema']['name'], 'session_title')
+        self.assertEqual(extra['response_format']['json_schema']['schema']['required'], ['title'])
+        # Route is not reject-listed: the reasoning-disable rides along, like the CLI.
+        self.assertEqual(extra['reasoning'], {'enabled': False})
+
+    def test_schema_first_unwraps_fenced_json(self):
+        """Some gateways wrap structured output in a markdown code fence."""
+        from api.streaming import generate_title_raw_via_aux
+
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return {
+                'choices': [
+                    {
+                        'message': {'content': '```json\n{"title": "Fenced Title"}\n```'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'openrouter', 'model': 'deepseek/deepseek-chat', 'base_url': 'https://openrouter.ai/api/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Fence me in',
+                    assistant_text='Done.',
+                )
+
+        self.assertEqual(result, 'Fenced Title')
+        self.assertEqual(status, 'llm_aux')
+        self.assertIn('response_format', captured.get('extra_body') or {})
+
+    def test_reject_listed_route_schema_attempt_sends_no_reasoning(self):
+        """OpenAI/Azure reject the `reasoning` param (#4161) — the schema
+        attempt must stay schema-only on reject-listed routes."""
+        from api.streaming import generate_title_raw_via_aux
+
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return {
+                'choices': [
+                    {
+                        'message': {'content': '{"title": "Gpt Title"}'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'openai', 'model': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Titrate this session',
+                    assistant_text='Titled.',
+                )
+
+        self.assertEqual(result, 'Gpt Title')
+        self.assertEqual(status, 'llm_aux')
+        extra = captured.get('extra_body') or {}
+        self.assertIn('response_format', extra)
+        self.assertNotIn('reasoning', extra)
+
+    def test_prose_response_accepted_on_schema_attempt(self):
+        """A route that ignores response_format and answers in prose still
+        titles on the first (schema) attempt — no forced fallback."""
+        from api.streaming import generate_title_raw_via_aux
+
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return {
+                'choices': [
+                    {
+                        'message': {'content': 'Prose Session Title'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'custom', 'model': 'ignore-schema-model', 'base_url': 'http://localhost:9999/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Title me plainly',
+                    assistant_text='Plainly titled.',
+                )
+
+        self.assertEqual(result, 'Prose Session Title')
+        self.assertEqual(status, 'llm_aux')
+        self.assertIn('response_format', captured.get('extra_body') or {})
+
+    def test_schema_exception_falls_back_to_reasoning_disable(self):
+        """A route that rejects response_format (HTTP 400) falls back to the
+        reasoning-disable mode for the same slot."""
+        from api.streaming import generate_title_raw_via_aux
+
+        calls = []
+
+        def fake_call_llm(**kwargs):
+            calls.append(kwargs)
+            if 'response_format' in (kwargs.get('extra_body') or {}):
+                raise RuntimeError('400: unsupported response_format json_schema')
+            return {
+                'choices': [
+                    {
+                        'message': {'content': 'Fallback Reasoning Title'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'deepseek', 'model': 'deepseek-chat', 'base_url': 'https://api.deepseek.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Schema rejected here',
+                    assistant_text='Falling back.',
+                )
+
+        self.assertEqual(result, 'Fallback Reasoning Title')
+        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].get('extra_body'), {'reasoning': {'enabled': False}})
+
+    def test_empty_schema_answer_falls_back_to_reasoning_disable(self):
+        """A fully empty answer on the schema attempt (no reasoning, stop
+        finish) means the route ignored response_format — retry the slot in
+        the reasoning-disable mode."""
+        from api.streaming import generate_title_raw_via_aux
+
+        calls = []
+
+        def fake_call_llm(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return {'choices': [{'message': {'content': ''}, 'finish_reason': 'stop'}]}
+            return {
+                'choices': [
+                    {
+                        'message': {'content': 'Empty Fallback Title'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'deepseek', 'model': 'deepseek-chat', 'base_url': 'https://api.deepseek.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Empty first try',
+                    assistant_text='Fallback second try.',
+                )
+
+        self.assertEqual(result, 'Empty Fallback Title')
+        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1].get('extra_body'), {'reasoning': {'enabled': False}})
+
+    def test_json_object_without_title_falls_back(self):
+        """A JSON object that is not {"title": ...} is not stored as a session
+        title — the reasoning-disable mode gets a chance instead."""
+        from api.streaming import generate_title_raw_via_aux
+
+        calls = []
+
+        def fake_call_llm(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return {
+                    'choices': [
+                        {
+                            'message': {'content': '{"topic": "wrong shape"}'},
+                            'finish_reason': 'stop',
+                        }
+                    ]
+                }
+            return {
+                'choices': [
+                    {
+                        'message': {'content': 'Right Shape Title'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'deepseek', 'model': 'deepseek-chat', 'base_url': 'https://api.deepseek.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Wrong shape first',
+                    assistant_text='Right shape second.',
+                )
+
+        self.assertEqual(result, 'Right Shape Title')
+        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(len(calls), 2)
+
+    def test_schema_length_truncation_retries_in_schema_mode(self):
+        """Length-truncated schema attempts keep the budget-doubling retry in
+        schema mode (recoverable — the model just needs more headroom to emit
+        the JSON object)."""
+        from api.streaming import generate_title_raw_via_aux
+
+        responses = [
+            {'choices': [{'message': {'content': ''}, 'finish_reason': 'length'}]},
+            {'choices': [{'message': {'content': '{"title": "Retried Json Title"}'}, 'finish_reason': 'stop'}]},
+        ]
+        captured_budgets = []
+
+        def fake_call_llm(**kwargs):
+            captured_budgets.append(kwargs.get('max_tokens'))
+            return responses.pop(0)
+
+        with _patch_tg_config({'provider': 'ollama', 'model': 'kimi-k2.6', 'base_url': 'https://ollama.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Hey nur ein kurzer Test',
+                    assistant_text='Alles klar, ich helfe dir dabei.',
+                )
+
+        self.assertEqual(result, 'Retried Json Title')
+        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(captured_budgets, [512, 1024])
+
+
 if __name__ == '__main__':
     unittest.main()
