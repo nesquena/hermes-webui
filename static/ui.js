@@ -4462,7 +4462,25 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  // #7400: _modelStateForSelect(sel,sel.value) resolves the SELECTED option to
+  // its canonical (bare model, owning provider) pair via dataset.model /
+  // dataset.provider. A candidate row's m.value is the raw option value, which
+  // for a provider-qualified row is the routing id (@provider:model) — NOT the
+  // bare model. Compare canonical-with-canonical: derive the row's bare model
+  // with the same _qualifiedCatalogOptionMeta() stamping the catalog paths use,
+  // then require BOTH model and provider to match so two providers offering the
+  // same bare model still disambiguate by their owning provider.
+  const _canonicalRowModelForCompare=(m)=>{
+    const _raw=String((m&&m.value)||'');
+    if(!_raw.startsWith('@')||!_raw.includes(':')) return _raw;
+    const _provider=String(_modelProviderForSelectedBadge(m)||'');
+    if(_provider&&typeof _qualifiedCatalogOptionMeta==='function'){
+      const _meta=_qualifiedCatalogOptionMeta(_raw,_provider);
+      if(_meta&&_meta.model) return _meta.model;
+    }
+    return _raw;
+  };
+  const _isSelectedModelRow=(m)=>String(_canonicalRowModelForCompare(m))===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
