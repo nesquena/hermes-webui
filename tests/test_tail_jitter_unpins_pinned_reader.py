@@ -29,6 +29,13 @@ def _function_source(name: str) -> str:
     raise AssertionError(f"function body not found: {name}")
 
 
+def _message_scroll_listener_source() -> str:
+    marker = "(function(){\n  const el=document.getElementById('messages');"
+    start = UI_JS.index(marker, UI_JS.index("function _isMessageTailJitter"))
+    end = UI_JS.index("\n})();", start) + len("\n})();")
+    return UI_JS[start:end]
+
+
 def _run_scroll_frames(samples: list[dict]) -> dict:
     constants = "\n".join(
         line
@@ -88,6 +95,101 @@ console.log(JSON.stringify({state,trace}));
     return json.loads(result.stdout)
 
 
+def _run_deferred_scrollbar_drag() -> dict:
+    constants = "\n".join(
+        line
+        for line in UI_JS.splitlines()
+        if line.startswith("const MESSAGE_TAIL_JITTER_MAX_")
+    )
+    payload = {
+        "guard": constants + "\n" + _function_source("_isMessageTailJitter"),
+        "listener": _message_scroll_listener_source(),
+    }
+    script = "const payload=" + json.dumps(payload) + ";\n" + r"""
+const elHandlers={};
+const windowHandlers={};
+const documentHandlers={};
+const el={
+  scrollTop:6500, scrollHeight:7000, clientHeight:500, clientWidth:800,
+  addEventListener(type,handler){elHandlers[type]=handler;},
+  contains(){return false;}, matches(){return false;},
+};
+const document={
+  activeElement:null, visibilityState:'visible',
+  getElementById(id){return id==='messages'?el:null;},
+  addEventListener(type,handler){documentHandlers[type]=handler;},
+};
+const window={
+  _autoScrollFollow:true,
+  addEventListener(type,handler){windowHandlers[type]=handler;},
+};
+let nextRaf=1;
+const rafs=new Map();
+function requestAnimationFrame(callback){const id=nextRaf++;rafs.set(id,callback);return id;}
+function cancelAnimationFrame(id){rafs.delete(id);}
+function flushAnimationFrames(){
+  const queued=[...rafs.values()];
+  rafs.clear();
+  for(const callback of queued) callback();
+}
+let _scrollbarDragActive=false;
+let _scrollbarDragIntentQueued=false;
+let _messageScrollInputGeneration=0;
+let _messageJumpScrollOwner=null;
+let _lastScrollTop=6500;
+let _lastMessageClientHeight=500;
+let _nearBottomCount=0;
+let _scrollPinned=true;
+let _messageUserUnpinned=false;
+let _newMessageCueVisible=false;
+let _lastMessageKeyScrollIntentMs=-Infinity;
+let _lastMessageScrollIntentMs=-Infinity;
+const performance={now(){return 1000;}};
+const noop=()=>{};
+const _scheduleMessageVirtualizedRender=noop;
+const _scheduleMessageJumpScrollReconcile=noop;
+const _freshProgrammaticScrollActive=()=>false;
+const _markMessageVirtualScrollActive=noop;
+const _cancelBottomSettle=noop;
+const _clearNewMessageScrollCue=noop;
+const _syncScrollToBottomCue=noop;
+const _updateSessionStartJumpButton=noop;
+const _isSessionEndlessScrollEnabled=()=>false;
+const _messagesTruncated=false;
+const _loadOlderMessages=noop;
+const _scheduleDeferredOlderMessagesLoad=noop;
+const _setMessageScrollToBottom=noop;
+const _recentMessageRenderArtifactWindow=()=>false;
+const _recentMessageTouchScrollIntent=()=>false;
+const _recentNonMessageScrollIntent=()=>false;
+const _recentMessageWheelIntent=()=>false;
+const _recentMessageKeyScrollIntent=()=>false;
+eval(payload.guard);
+eval(payload.listener);
+
+elHandlers.pointerdown({target:el,offsetX:el.clientWidth});
+el.scrollTop=6492;
+elHandlers.scroll();
+const queuedBeforePointerUp=rafs.size;
+windowHandlers.pointerup();
+const dragActiveBeforeFlush=_scrollbarDragActive;
+flushAnimationFrames();
+console.log(JSON.stringify({
+  queuedBeforePointerUp, dragActiveBeforeFlush,
+  _messageUserUnpinned, _scrollPinned,
+}));
+"""
+    assert NODE is not None
+    result = subprocess.run(
+        [NODE, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return json.loads(result.stdout)
+
+
 def test_stream_growth_and_no_input_tail_jitter_keep_runtime_pin_stable():
     """Streaming growth re-anchors once; an 8px browser drift never unpins."""
     growth = _run_scroll_frames(
@@ -112,6 +214,22 @@ def test_stream_growth_and_no_input_tail_jitter_keep_runtime_pin_stable():
     assert jitter["trace"][1]["cancels"] == 0
     assert jitter["state"]["_scrollPinned"] is True
     assert jitter["state"]["_messageUserUnpinned"] is False
+
+
+def test_scrollbar_drag_intent_survives_pointerup_before_scroll_frame():
+    """The queued scroll keeps drag ownership after pointerup clears the live flag."""
+    result = _run_deferred_scrollbar_drag()
+    assert result["queuedBeforePointerUp"] == 1
+    assert result["dragActiveBeforeFlush"] is False
+    assert result["_messageUserUnpinned"] is True
+    assert result["_scrollPinned"] is False
+
+
+@pytest.mark.parametrize("reset", ["_resetScrollDirectionTracker", "_resetStreamScrollFollow"])
+def test_scrollbar_drag_intent_latch_is_cleared_by_scroll_ownership_resets(reset):
+    source = _function_source(reset)
+    assert "_scrollbarDragActive=false;" in source
+    assert "_scrollbarDragIntentQueued=false;" in source
 
 
 @pytest.mark.parametrize("intent", ["wheel", "touch", "key", "scrollbar", "nonMessage"])
