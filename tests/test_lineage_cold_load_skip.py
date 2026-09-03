@@ -67,6 +67,8 @@ def deep_lineage(hermes_home, monkeypatch):
     routes._lineage_display_cache.clear()
 
     def build(hops, sentinel):
+        """``sentinel`` is either a bool applied to every ancestor, or a set of
+        depths (0 = oldest root) that carry the truncate-to-empty sentinel."""
         previous = None
         for depth in range(hops):
             sid = f"anc_{depth}"
@@ -76,7 +78,10 @@ def deep_lineage(hermes_home, monkeypatch):
                 messages=_turns(40, 1000 + depth * 1000, f"anc{depth}"),
             )
             ancestor.pre_compression_snapshot = True
-            if sentinel:
+            has_sentinel = (
+                depth in sentinel if isinstance(sentinel, set) else bool(sentinel)
+            )
+            if has_sentinel:
                 # The truncate-to-empty sentinel: falsy, so a naive `if wm:`
                 # check misses it, yet it blocks all replay in the merge.
                 ancestor.truncation_watermark = 0.0
@@ -206,4 +211,99 @@ def test_shortcut_still_dedupes_the_child_rows(deep_lineage, monkeypatch):
     assert shortcut == reference, (
         "the shortcut must reproduce the final merge exactly; returning raw "
         f"rows changes the visible output ({len(shortcut)} vs {len(reference)})"
+    )
+
+
+def test_mixed_chain_with_contributing_segments_before_the_sentinel(
+    deep_lineage, monkeypatch
+):
+    """Mixed lineage: child -> contributing parents -> neutralising snapshot.
+
+    Shape: ``continuation -> anc_3 -> anc_2 -> anc_1(sentinel) -> anc_0(sentinel)``.
+    ``anc_3`` and ``anc_2`` are genuine snapshots that replay history, so
+    ``segments`` is already non-empty when the walk meets the sentinel on
+    ``anc_1``. This pins the non-empty ``segments`` path:
+
+    - output byte-identical to the unoptimised walk (shortcut disabled, and an
+      explicit replay of the pre-fix merge loop);
+    - ``anc_3``/``anc_2`` are the ONLY full loads — the sentinel and everything
+      above it are never read;
+    - nothing is inserted in the lineage display cache.
+    """
+    import json
+
+    routes, Session, child = deep_lineage(hops=4, sentinel={0, 1})
+    sid = child.session_id
+
+    loaded: list[str] = []
+    metadata_loaded: list[str] = []
+    real_load = Session.load
+    real_load_metadata_only = Session.load_metadata_only
+
+    def counting_load(s, *args, **kwargs):
+        loaded.append(str(s))
+        return real_load(s, *args, **kwargs)
+
+    def counting_load_metadata_only(s, *args, **kwargs):
+        metadata_loaded.append(str(s))
+        return real_load_metadata_only(s, *args, **kwargs)
+
+    monkeypatch.setattr(routes.Session, "load", staticmethod(counting_load))
+    monkeypatch.setattr(
+        routes.Session, "load_metadata_only", staticmethod(counting_load_metadata_only)
+    )
+
+    fast = routes._webui_sidecar_lineage_messages_for_display(child)
+
+    # The contributing parents are loaded, in walk order; the sentinel and its
+    # own ancestry are not.
+    assert [s for s in loaded if s.startswith("anc_")] == ["anc_3", "anc_2"], loaded
+    assert "anc_0" not in metadata_loaded, metadata_loaded
+    # Ancestry was deliberately left unverified above the sentinel, so the
+    # result must not have entered the cache.
+    assert sid not in routes._lineage_display_cache
+    # Sanity: the contributing history is actually present in the output.
+    assert len(fast) > len(child.messages)
+    assert any(str(m.get("content", "")).startswith("anc2-") for m in fast)
+    assert any(str(m.get("content", "")).startswith("anc3-") for m in fast)
+
+    # Reference 1: the same walk with the shortcut disabled — every ancestor
+    # is loaded and merged, exactly as before this change.
+    routes._lineage_display_cache.clear()
+    loaded.clear()
+    monkeypatch.setattr(routes, "_snapshot_parent_replays_nothing", lambda meta: False)
+    reference = routes._webui_sidecar_lineage_messages_for_display(child)
+    assert [s for s in loaded if s.startswith("anc_")] == [
+        "anc_3",
+        "anc_2",
+        "anc_1",
+        "anc_0",
+    ], loaded
+    routes._lineage_display_cache.clear()
+
+    # Reference 2: explicit replay of the pre-fix merge loop over the full chain
+    # (oldest first, then the child), independent of the walk implementation.
+    chain = [real_load(f"anc_{depth}") for depth in (3, 2, 1, 0)]
+    replay: list = []
+    for segment in reversed(chain):
+        replay = routes.merge_session_messages_append_only(
+            replay,
+            list(segment.messages),
+            truncation_watermark=segment.truncation_watermark,
+            truncation_boundary=segment.truncation_boundary,
+        )
+    replay = routes.merge_session_messages_append_only(
+        replay, list(child.messages), truncation_watermark=None
+    )
+
+    def _bytes(rows):
+        return json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")
+
+    assert _bytes(fast) == _bytes(reference), (
+        f"shortcut output diverges from the unoptimised walk "
+        f"({len(fast)} vs {len(reference)} rows)"
+    )
+    assert _bytes(fast) == _bytes(replay), (
+        f"shortcut output diverges from the explicit pre-fix merge replay "
+        f"({len(fast)} vs {len(replay)} rows)"
     )
