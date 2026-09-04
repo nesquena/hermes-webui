@@ -4266,7 +4266,7 @@ function _setActiveSessionUrl(sid){
  * tag chips, lineage/child toggles, while renaming, or in batch select mode.
  */
 function _openSessionUrlInNewTab(sid){
-  if(!sid||typeof window==='undefined'||typeof _sessionUrlForSid!=='function') return false;
+  if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
   if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
   if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
   let url=null;
@@ -9066,6 +9066,11 @@ function renderSessionListFromCache(){
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
       if(e.ctrlKey||e.metaKey){
         // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
+        // Clear the pending tap first so the deferred single-tap opener from
+        // the FIRST click of a fast Ctrl+click-double-click can't fire after
+        // the new tab opens (same cancel path as the double-tap branch).
+        clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        el.classList.remove('loading');
         if(_consumeSessionNewTabClick(e, s.session_id)) return;
       }
       if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
