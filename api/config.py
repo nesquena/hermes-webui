@@ -3192,19 +3192,30 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     return _finalize(model_id, config_provider, config_base_url)
 
 
-def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
+def resolve_custom_provider_connection(
+    provider_id: str,
+    *,
+    return_provenance: bool = False,
+) -> tuple[str | None, str | None] | tuple[str | None, str | None, bool]:
     """Return (api_key, base_url) for a named ``custom:*`` provider.
 
     Supports ``custom_providers[].api_key`` as either a literal key or
     ``${ENV_VAR}``, and ``custom_providers[].key_env`` as an env-var hint.
     Returns ``(None, None)`` when no named custom provider matches.
+    If ``return_provenance=True``, returns ``(api_key, base_url, is_exact)``
+    indicating whether the connection was resolved from an exact matching
+    ``custom_providers[]`` entry.
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
+        if return_provenance:
+            return None, None, False
         return None, None
 
     slug = _custom_provider_slug_key(pid)
     if not slug:
+        if return_provenance:
+            return None, None, False
         return None, None
 
     # Read the live config snapshot to avoid stale module-level cache edge
@@ -3238,18 +3249,14 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if matched_entry is not None:
         base_url = str(matched_entry.get("base_url") or "").strip() or None
         api_key = _resolve_key(matched_entry.get("api_key"), matched_entry.get("key_env"), pid)
+        if return_provenance:
+            return api_key, base_url, True
         return api_key, base_url
 
-    # If exactly one custom provider is configured, use it as a pragmatic
-    # fallback for mismatched slugs (e.g. punctuation differences).
-    if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
-        entry = custom_providers[0]
-        return (
-            _resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
-            str(entry.get("base_url") or "").strip() or None,
-        )
-
     # Fallbacks for setups that don't use custom_providers names directly.
+    # Preserve keyed-only fallback when no exact list row exists, selecting URL
+    # and key as a complete bundle from the same record rather than mixing
+    # credentials and endpoints across candidate records.
     providers_cfg = cfg_data.get("providers", {})
     provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
     provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
@@ -3257,26 +3264,108 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     model_cfg = cfg_data.get("model", {})
     model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
 
-    fallback_base = None
-    for candidate in (provider_specific, provider_custom, model_cfg):
-        if isinstance(candidate, dict):
-            _base = str(candidate.get("base_url") or "").strip()
-            if _base:
-                fallback_base = _base
-                break
+    candidates = []
+    if isinstance(provider_specific, dict) and provider_specific:
+        candidates.append(provider_specific)
+    if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
+        candidates.append(custom_providers[0])
+    if isinstance(provider_custom, dict) and provider_custom:
+        candidates.append(provider_custom)
+    if isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
+        candidates.append(model_cfg)
 
-    fallback_key = None
-    if isinstance(provider_specific, dict):
-        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"), pid)
-    if not fallback_key and isinstance(provider_custom, dict):
-        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"), pid)
-    if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
-        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"), pid)
+    for cand in candidates:
+        cand_key = _resolve_key(cand.get("api_key"), cand.get("key_env"), pid)
+        cand_base = str(cand.get("base_url") or "").strip() or None
+        if cand_key or cand_base:
+            if return_provenance:
+                return cand_key, cand_base, False
+            return cand_key, cand_base
 
-    if fallback_key or fallback_base:
-        return fallback_key, fallback_base or None
-
+    if return_provenance:
+        return None, None, False
     return None, None
+
+
+# Local OpenAI-compatible servers frequently run without authentication, so a
+# missing key must not fail before the first request: hand the SDK a harmless
+# placeholder and let the endpoint accept it or return its own auth error.
+KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+
+def apply_custom_provider_connection_authority(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    *,
+    lookup_provider: str | None = None,
+    connection_resolver=None,
+) -> tuple[str | None, str | None, str | None, bool]:
+    """Apply a named ``custom:*`` provider's OWN connection bundle atomically.
+
+    Returns ``(provider, api_key, base_url, custom_owned)``.
+
+    Every consumer that builds an AIAgent for a ``custom:<slug>`` route must go
+    through here so the endpoint and the credential always come from ONE record.
+    The fill-only pattern this replaces (``if not api_key: api_key = ...``) mixed
+    authorities whenever the runtime provider had already supplied a truthy value
+    from a same-slug keyed ``providers:`` record: resolution deterministically
+    produced the ``custom_providers[]`` row's URL while keeping the keyed row's
+    API key, so the final constructor got list-URL + keyed-key.
+
+    An exact ``custom_providers[]`` row is authoritative for its slug: BOTH the
+    endpoint (including ``None`` when the row's ``base_url`` is blank) and the
+    credential are replaced, never merged. Only when no exact row matches do the
+    keyed/``model:`` fallbacks fill missing fields — and ``connection_resolver``
+    already picks those as a complete same-record bundle.
+
+    ``custom_owned`` reports whether a config-owned custom record supplied the
+    connection. Callers that also route runtime-owned side fields (credential
+    pool, api_mode, ACP command/args) must CLEAR them when it is True: those
+    belong to the ambient runtime provider, not to this custom endpoint.
+
+    ``connection_resolver`` lets a caller pass its own module-bound reference to
+    :func:`resolve_custom_provider_connection` (so monkeypatching that name in
+    the caller's namespace still takes effect) and defaults to this module's.
+    """
+    lookup = lookup_provider or resolved_provider
+    if not (isinstance(lookup, str) and lookup.startswith("custom:")):
+        return resolved_provider, resolved_api_key, resolved_base_url, False
+
+    _resolver = connection_resolver or resolve_custom_provider_connection
+    # Tolerate resolvers that predate/omit the provenance kwarg (older builds and
+    # test doubles that patch in a plain two-value resolver).
+    try:
+        _conn = _resolver(lookup, return_provenance=True)
+    except TypeError:
+        _conn = _resolver(lookup)
+    if len(_conn) == 3:
+        cp_key, cp_base, is_exact = _conn
+    else:
+        cp_key, cp_base = _conn
+        is_exact = False
+
+    if is_exact:
+        resolved_base_url = cp_base
+        resolved_api_key = cp_key
+    else:
+        if not resolved_api_key and cp_key:
+            resolved_api_key = cp_key
+        if not resolved_base_url and cp_base:
+            resolved_base_url = cp_base
+
+    if resolved_base_url:
+        # Route through the generic custom OpenAI-compatible client once the
+        # named provider has supplied the concrete endpoint. Keeping the provider
+        # as custom:<slug> would make Agent init synthesize invalid env-var hints
+        # like CUSTOM:SOMETHING-8000_API_KEY on keyless setups.
+        resolved_provider = "custom"
+        if not resolved_api_key:
+            resolved_api_key = KEYLESS_CUSTOM_API_KEY
+
+    return resolved_provider, resolved_api_key, resolved_base_url, bool(
+        is_exact or cp_key or cp_base
+    )
 
 
 # Subprocess ACP transports (Cursor/Copilot CLI). Model IDs often contain '/'

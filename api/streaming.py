@@ -44,6 +44,7 @@ from api.config import (
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
+    apply_custom_provider_connection_authority,
     model_with_provider_context,
     warm_models_catalog_provenance_if_cold,
     load_settings,
@@ -247,7 +248,6 @@ def _cancel_event_payload(
 # (api/profiles.py:715).
 _ENV_LOCK = threading.Lock()
 
-_KEYLESS_CUSTOM_API_KEY = "dummy-key"
 _STREAM_WRITEBACK_DIAG_DEFAULT_THRESHOLD_MS = 250.0
 
 _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -546,50 +546,140 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
 
-def _resolve_custom_provider_runtime_overrides(
+def _resolve_custom_provider_connection_authority(
     resolved_provider: str | None,
     resolved_api_key: str | None,
     resolved_base_url: str | None,
     profile_name: str | None = None,
-) -> tuple[str | None, str | None, str | None]:
-    """Return provider/key/base_url overrides for ``custom:*`` endpoints.
+    custom_provider_lookup: str | None = None,
+) -> tuple[str | None, str | None, str | None, bool]:
+    """Return ``(provider, api_key, base_url, custom_owned)`` for ``custom:*``.
 
-    Hermes Agent treats named custom providers as routing hints around an
-    OpenAI-compatible base URL.  Local OpenAI-compatible servers often run
-    without authentication, so a missing key should not fail before the first
-    request; pass a harmless placeholder to the SDK and let the endpoint accept
-    it or return its own auth error.
+    Thin profile-scoped wrapper around
+    :func:`api.config.apply_custom_provider_connection_authority`, which holds the
+    atomic-replacement rules (exact ``custom_providers[]`` row owns BOTH the
+    endpoint and the credential; keyed/``model:`` fallbacks only fill gaps, as one
+    same-record bundle).
 
-    ``profile_name`` binds the SESSION's own profile while
-    ``resolve_custom_provider_connection`` reads the endpoint AND the credential.
-    That helper resolves both from ONE ``get_config()``/env snapshot, so binding
-    the profile here keeps them from splitting across profiles: on a detached
-    worker thread (which doesn't inherit the request-profile TLS/env) an unbound
-    call would read the DEFAULT profile and pair a named profile's endpoint with
-    the default profile's API key (finding #3). No-op for the default/root
-    profile; when ``profile_name`` is None the ambient scope (if any) is used.
+    ``profile_name`` binds the SESSION's own profile while the connection is
+    resolved. That lookup reads the endpoint AND the credential from ONE
+    ``get_config()``/env snapshot, so binding the profile here keeps them from
+    splitting across profiles: on a detached worker thread (which doesn't inherit
+    the request-profile TLS/env) an unbound call would read the DEFAULT profile
+    and pair a named profile's endpoint with the default profile's API key
+    (finding #3). No-op for the default/root profile; when ``profile_name`` is
+    None the ambient scope (if any) is used.
+
+    ``custom_provider_lookup`` carries the session's pre-canonicalization
+    identity, so a provider already rewritten to plain ``"custom"`` by an earlier
+    resolve still selects its own named record on a retry.
+
+    ``custom_owned`` is True when a config-owned custom record supplied the
+    connection; see :func:`_resolve_runtime_connection_bundle` for why callers
+    must then clear the runtime-owned side fields.
     """
-    if not (isinstance(resolved_provider, str) and resolved_provider.startswith("custom:")):
-        return resolved_provider, resolved_api_key, resolved_base_url
+    lookup_provider = custom_provider_lookup or resolved_provider
+    if not (isinstance(lookup_provider, str) and lookup_provider.startswith("custom:")):
+        return resolved_provider, resolved_api_key, resolved_base_url, False
 
     from api import profiles as _profiles_api
     with _profiles_api.profile_scope_for_detached_worker(
         profile_name, "custom provider connection", logger_override=logger
     ):
-        _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
-    if not resolved_api_key and _cp_key:
-        resolved_api_key = _cp_key
-    if not resolved_base_url and _cp_base:
-        resolved_base_url = _cp_base
-    if resolved_base_url:
-        # Route through the generic custom OpenAI-compatible client once the
-        # named provider has supplied the concrete endpoint. Keeping the
-        # provider as custom:<slug> would make Agent init synthesize invalid
-        # env-var hints like CUSTOM:SOMETHING-8000_API_KEY on keyless setups.
-        resolved_provider = "custom"
-        if not resolved_api_key:
-            resolved_api_key = _KEYLESS_CUSTOM_API_KEY
-    return resolved_provider, resolved_api_key, resolved_base_url
+        return apply_custom_provider_connection_authority(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            lookup_provider=lookup_provider,
+            # Pass THIS module's binding so tests (and any future shim) that patch
+            # ``streaming.resolve_custom_provider_connection`` still take effect.
+            connection_resolver=resolve_custom_provider_connection,
+        )
+
+
+def _resolve_custom_provider_runtime_overrides(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    profile_name: str | None = None,
+    custom_provider_lookup: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Return provider/key/base_url overrides for ``custom:*`` endpoints.
+
+    Legacy three-value view of
+    :func:`_resolve_custom_provider_connection_authority`. Prefer
+    :func:`_resolve_runtime_connection_bundle` in agent-construction paths: the
+    three fields alone are NOT a complete constructor bundle, so a caller that
+    keeps the ambient runtime's ``credential_pool`` / ``api_mode`` / ACP
+    command+args beside them still sends a mixed-authority agent to the custom
+    endpoint.
+    """
+    return _resolve_custom_provider_connection_authority(
+        resolved_provider,
+        resolved_api_key,
+        resolved_base_url,
+        profile_name=profile_name,
+        custom_provider_lookup=custom_provider_lookup,
+    )[:3]
+
+
+# The constructor-routing fields AIAgent takes from the resolved runtime
+# provider. They travel together: a bundle that replaces the endpoint/credential
+# but leaves these behind builds an agent whose transport (ACP subprocess),
+# wire protocol (api_mode) or credential source (pool) still points at the
+# previous authority.
+_RUNTIME_BUNDLE_FIELDS = ('api_mode', 'acp_command', 'acp_args', 'credential_pool')
+
+
+def _resolve_runtime_connection_bundle(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    runtime_provider: dict | None,
+    profile_name: str | None = None,
+    custom_provider_lookup: str | None = None,
+) -> dict:
+    """Return the COMPLETE constructor-routing bundle for one send attempt.
+
+    Keys: ``provider``, ``base_url``, ``api_key`` plus every field in
+    :data:`_RUNTIME_BUNDLE_FIELDS`. Callers must apply the whole dict — that is
+    the point: the endpoint/credential and the transport/protocol/pool fields
+    are one authority, and the agent-cache signature must be derived from the
+    same dict so a bundle change always mints a new agent.
+
+    When a config-owned custom record supplies the connection, the runtime-owned
+    side fields are explicitly cleared rather than passed through. A named
+    ``custom:<slug>`` endpoint is a plain OpenAI-compatible HTTP endpoint: it
+    does not use Anthropic credential pooling, does not speak a non-default
+    ``api_mode``, and is not reached through a Claude/Cursor ACP subprocess. The
+    ambient runtime provider can legitimately report all three (that's the
+    provider the process is otherwise authenticated as), so passing them through
+    is what made a custom-provider send inherit a foreign transport/credential.
+    """
+    (
+        provider,
+        api_key,
+        base_url,
+        custom_owned,
+    ) = _resolve_custom_provider_connection_authority(
+        resolved_provider,
+        resolved_api_key,
+        resolved_base_url,
+        profile_name=profile_name,
+        custom_provider_lookup=custom_provider_lookup,
+    )
+
+    bundle = {'provider': provider, 'base_url': base_url, 'api_key': api_key}
+    if custom_owned:
+        bundle.update({_field: None for _field in _RUNTIME_BUNDLE_FIELDS})
+        return bundle
+
+    _rt = runtime_provider if isinstance(runtime_provider, dict) else {}
+    bundle['api_mode'] = _rt.get('api_mode')
+    bundle['acp_command'] = _rt.get('command')
+    bundle['acp_args'] = _rt.get('args')
+    bundle['credential_pool'] = _rt.get('credential_pool')
+    return bundle
 
 
 def _same_base_url_endpoint(url_a: str, url_b: str) -> bool:
@@ -621,6 +711,7 @@ def _runtime_preferred_base_url(
     runtime_provider: dict | None,
     resolved_provider: str | None,
     configured_base_url: str | None,
+    session_requested_provider: str | None = None,
 ) -> str | None:
     """Prefer the runtime-normalized base_url, but never override an explicit
     configured endpoint that points somewhere genuinely different.
@@ -646,7 +737,8 @@ def _runtime_preferred_base_url(
         return runtime_base_url
 
     provider_id = str(
-        resolved_provider
+        session_requested_provider
+        or resolved_provider
         or (runtime_provider or {}).get("provider")
         or ""
     ).strip().lower()
@@ -8430,6 +8522,54 @@ def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
 
 
+def _compute_agent_cache_signature(
+    resolved_model: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    resolved_provider: str | None,
+    runtime_bundle: dict | None,
+    max_iterations_cfg=None,
+    max_tokens_cfg=None,
+    fallback_resolved=None,
+    toolsets=None,
+    reasoning_config=None,
+    main_request_overrides=None,
+    _main_request_overrides=None,
+    prefill_context=None,
+    profile_home: str | None = None,
+    safe_profile_runtime_env: dict | None = None,
+) -> str:
+    """Return the SHA256 signature identifying an agent's constructor routing state."""
+    import hashlib as _hashlib
+    import json as _json
+    _bundle = runtime_bundle if isinstance(runtime_bundle, dict) else {}
+    _credential_pool = _bundle.get('credential_pool')
+    _env = safe_profile_runtime_env if isinstance(safe_profile_runtime_env, dict) else {}
+    _main_request_overrides = main_request_overrides if main_request_overrides is not None else _main_request_overrides
+    _sig_blob = _json.dumps([
+        resolved_model or '',
+        _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
+        resolved_base_url or '',
+        resolved_provider or '',
+        _bundle.get('api_mode') or '',
+        _bundle.get('acp_command') or '',
+        _bundle.get('acp_args') or [],
+        bool(_credential_pool),
+        max_iterations_cfg or '',
+        max_tokens_cfg or '',
+        fallback_resolved or {},
+        sorted(toolsets) if toolsets else [],
+        reasoning_config or {},
+        _main_request_overrides or {},
+        _public_prefill_context_status(prefill_context),
+        profile_home or '',
+        _env.get('TERMINAL_ENV', '') or '',
+        _env.get('TERMINAL_SSH_HOST', '') or '',
+        _env.get('TERMINAL_SSH_USER', '') or '',
+    ], sort_keys=True)
+    return _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
+
+
 def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False) -> bool:
     from api.session_lifecycle import commit_session_memory
 
@@ -10023,6 +10163,9 @@ def _run_agent_streaming(
                 # Resolve API key via Hermes runtime provider (matches gateway behaviour).
                 # Pass the resolved provider so non-default providers get their own credentials.
                 resolved_api_key = None
+                # Default to an empty runtime dict so the constructor-routing
+                # bundle below stays buildable when resolution raises.
+                _rt = {}
                 try:
                     from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -10046,11 +10189,23 @@ def _run_agent_streaming(
                 # Preserve the pre-canonicalization identity so image routing can
                 # still select the exact custom_providers entry after the rewrite
                 # to "custom" below.
+                #
+                # Resolve ONE complete constructor-routing bundle here and let
+                # every downstream field (including the agent-cache signature)
+                # read from it. Resolving only provider/key/base_url left the
+                # runtime-owned credential_pool / api_mode / ACP command+args
+                # beside a replaced custom endpoint, so the agent was built with
+                # a mixed authority: the list row's URL and key, but the ambient
+                # provider's transport, wire protocol and credential source.
                 _session_requested_provider = resolved_provider
-                resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                    resolved_provider, resolved_api_key, resolved_base_url,
+                _runtime_bundle = _resolve_runtime_connection_bundle(
+                    resolved_provider, resolved_api_key, resolved_base_url, _rt,
                     profile_name=_resolved_profile_name,
+                    custom_provider_lookup=_session_requested_provider,
                 )
+                resolved_provider = _runtime_bundle['provider']
+                resolved_api_key = _runtime_bundle['api_key']
+                resolved_base_url = _runtime_bundle['base_url']
 
             # Read per-profile config at call time (not module-level snapshot).
             # The streaming worker is a detached thread that does NOT inherit the
@@ -10257,15 +10412,18 @@ def _run_agent_streaming(
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
             if 'request_overrides' in _agent_params and _main_request_overrides:
                 _agent_kwargs['request_overrides'] = _main_request_overrides
-            # Params added in newer hermes-agent — skip if not supported
+            # Params added in newer hermes-agent — skip if not supported.
+            # Read from the resolved bundle, NOT from _rt: a custom-provider
+            # override clears these, and taking them straight off the runtime
+            # provider would re-introduce the authority it replaced.
             if 'api_mode' in _agent_params:
-                _agent_kwargs['api_mode'] = _rt.get('api_mode')
+                _agent_kwargs['api_mode'] = _runtime_bundle['api_mode']
             if 'acp_command' in _agent_params:
-                _agent_kwargs['acp_command'] = _rt.get('command')
+                _agent_kwargs['acp_command'] = _runtime_bundle['acp_command']
             if 'acp_args' in _agent_params:
-                _agent_kwargs['acp_args'] = _rt.get('args')
+                _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
             if 'credential_pool' in _agent_params:
-                _agent_kwargs['credential_pool'] = _rt.get('credential_pool')
+                _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
             # Pin Honcho memory sessions to the stable WebUI session ID.
             # Without this, 'per-session' Honcho strategy creates a new Honcho
             # session on every streaming request because HonchoSessionManager is
@@ -10280,41 +10438,26 @@ def _run_agent_streaming(
                 agent = _AIAgent(**_agent_kwargs)
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
-                import hashlib as _hashlib
-                import json as _json
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                _credential_pool = _rt.get('credential_pool')
-                _sig_blob = _json.dumps([
-                    resolved_model or '',
-                    _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
-                    resolved_base_url or '',
-                    resolved_provider or '',
-                    _rt.get('api_mode') or '',
-                    _rt.get('command') or '',
-                    _rt.get('args') or [],
-                    bool(_credential_pool),
-                    _max_iterations_cfg or '',
-                    _max_tokens_cfg or '',
-                    _fallback_resolved or {},
-                    sorted(_toolsets) if _toolsets else [],
-                    _reasoning_config or {},
-                    _main_request_overrides or {},
-                    _public_prefill_context_status(_prefill_context),
-                    # #1897: profile_home is part of the agent's identity because
-                    # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
-                    # at construction time, sourced from HERMES_HOME. Same-session
-                    # profile switches keep `session_id` stable, so without this
-                    # field the cached agent silently retains the previous
-                    # profile's SOUL.md (and any other profile-scoped context).
-                    _profile_home or '',
-                    # Terminal backend identity: sessions switching between
-                    # remote (SSH) and local backends must not reuse a cached
-                    # agent that carries stale terminal env vars (#5937).
-                    _safe_profile_runtime_env.get('TERMINAL_ENV', '') or '',
-                    _safe_profile_runtime_env.get('TERMINAL_SSH_HOST', '') or '',
-                    _safe_profile_runtime_env.get('TERMINAL_SSH_USER', '') or '',
-                ], sort_keys=True)
-                _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
+                # Signature fields come from the SAME bundle the constructor
+                # received, so a cleared/overridden field always mints a new
+                # agent instead of reusing one built on the prior authority.
+                _agent_sig = _compute_agent_cache_signature(
+                    resolved_model,
+                    resolved_api_key,
+                    resolved_base_url,
+                    resolved_provider,
+                    _runtime_bundle,
+                    max_iterations_cfg=_max_iterations_cfg,
+                    max_tokens_cfg=_max_tokens_cfg,
+                    fallback_resolved=_fallback_resolved,
+                    toolsets=_toolsets,
+                    reasoning_config=_reasoning_config,
+                    main_request_overrides=_main_request_overrides,
+                    prefill_context=_prefill_context,
+                    profile_home=_profile_home,
+                    safe_profile_runtime_env=_safe_profile_runtime_env,
+                )
 
                 agent = None
                 _identity_mismatch_entry = None
@@ -11168,7 +11311,8 @@ def _run_agent_streaming(
                             if not resolved_provider:
                                 resolved_provider = _heal_rt.get('provider')
                             resolved_base_url = _runtime_preferred_base_url(
-                                _heal_rt, resolved_provider, configured_base_url
+                                _heal_rt, resolved_provider, configured_base_url,
+                                session_requested_provider=_session_requested_provider,
                             )
                             # Preserve the session's original pre-canonicalization
                             # provider identity (captured at first resolve) so a
@@ -11177,21 +11321,52 @@ def _run_agent_streaming(
                             # (e.g. the provider was first discovered on this heal).
                             if not _session_requested_provider:
                                 _session_requested_provider = resolved_provider
-                            resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                                resolved_provider, resolved_api_key, resolved_base_url,
+                            # Rebuild the COMPLETE bundle, not just the three
+                            # connection fields: the self-heal re-resolve can
+                            # return a different runtime authority, and a
+                            # custom-provider override must clear its
+                            # credential_pool / api_mode / ACP fields here too.
+                            _runtime_bundle = _resolve_runtime_connection_bundle(
+                                resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
                                 profile_name=_resolved_profile_name,
+                                custom_provider_lookup=_session_requested_provider,
                             )
+                            resolved_provider = _runtime_bundle['provider']
+                            resolved_api_key = _runtime_bundle['api_key']
+                            resolved_base_url = _runtime_bundle['base_url']
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
                             _agent_kwargs['base_url'] = resolved_base_url
                             _agent_kwargs['model'] = resolved_model
                             _agent_kwargs['provider'] = resolved_provider
                             _replace_session_db_in_kwargs(_agent_kwargs, _state_db_path)
+                            if 'api_mode' in _agent_params:
+                                _agent_kwargs['api_mode'] = _runtime_bundle['api_mode']
+                            if 'acp_command' in _agent_params:
+                                _agent_kwargs['acp_command'] = _runtime_bundle['acp_command']
+                            if 'acp_args' in _agent_params:
+                                _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
                             if 'credential_pool' in _agent_params:
-                                _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
+                                _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                             agent = _AIAgent(**_agent_kwargs)
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
+                            _agent_sig = _compute_agent_cache_signature(
+                                resolved_model,
+                                resolved_api_key,
+                                resolved_base_url,
+                                resolved_provider,
+                                _runtime_bundle,
+                                max_iterations_cfg=_max_iterations_cfg,
+                                max_tokens_cfg=_max_tokens_cfg,
+                                fallback_resolved=_fallback_resolved,
+                                toolsets=_toolsets,
+                                reasoning_config=_reasoning_config,
+                                main_request_overrides=_main_request_overrides,
+                                prefill_context=_prefill_context,
+                                profile_home=_profile_home,
+                                safe_profile_runtime_env=_safe_profile_runtime_env,
+                            )
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
                             with _SAC_L:
                                 _SAC[session_id] = (agent, _agent_sig)
@@ -12467,7 +12642,8 @@ def _run_agent_streaming(
                     if not resolved_provider:
                         resolved_provider = _heal_rt.get('provider')
                     resolved_base_url = _runtime_preferred_base_url(
-                        _heal_rt, resolved_provider, configured_base_url
+                        _heal_rt, resolved_provider, configured_base_url,
+                        session_requested_provider=_session_requested_provider,
                     )
                     # Preserve the session's original pre-canonicalization provider
                     # identity (captured at first resolve) so a named custom:slug
@@ -12475,10 +12651,18 @@ def _run_agent_streaming(
                     # Only initialize when empty.
                     if not _session_requested_provider:
                         _session_requested_provider = resolved_provider
-                    resolved_provider, resolved_api_key, resolved_base_url = _resolve_custom_provider_runtime_overrides(
-                        resolved_provider, resolved_api_key, resolved_base_url,
+                    # Rebuild the COMPLETE bundle (see the returned-error retry
+                    # above): replacing only provider/key/base_url would leave
+                    # the pre-heal credential_pool / api_mode / ACP fields on a
+                    # custom endpoint that owns none of them.
+                    _runtime_bundle = _resolve_runtime_connection_bundle(
+                        resolved_provider, resolved_api_key, resolved_base_url, _heal_rt,
                         profile_name=_resolved_profile_name,
+                        custom_provider_lookup=_session_requested_provider,
                     )
+                    resolved_provider = _runtime_bundle['provider']
+                    resolved_api_key = _runtime_bundle['api_key']
+                    resolved_base_url = _runtime_bundle['base_url']
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
                     _heal_kwargs['api_key'] = resolved_api_key
@@ -12486,11 +12670,33 @@ def _run_agent_streaming(
                     _heal_kwargs['model'] = resolved_model
                     _heal_kwargs['provider'] = resolved_provider
                     _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
+                    if 'api_mode' in _agent_params:
+                        _heal_kwargs['api_mode'] = _runtime_bundle['api_mode']
+                    if 'acp_command' in _agent_params:
+                        _heal_kwargs['acp_command'] = _runtime_bundle['acp_command']
+                    if 'acp_args' in _agent_params:
+                        _heal_kwargs['acp_args'] = _runtime_bundle['acp_args']
                     if 'credential_pool' in _agent_params:
-                        _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
+                        _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
                     _heal_agent = _AIAgent(**_heal_kwargs)
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
+                    _agent_sig = _compute_agent_cache_signature(
+                        resolved_model,
+                        resolved_api_key,
+                        resolved_base_url,
+                        resolved_provider,
+                        _runtime_bundle,
+                        max_iterations_cfg=_max_iterations_cfg,
+                        max_tokens_cfg=_max_tokens_cfg,
+                        fallback_resolved=_fallback_resolved,
+                        toolsets=_toolsets,
+                        reasoning_config=_reasoning_config,
+                        main_request_overrides=_main_request_overrides,
+                        prefill_context=_prefill_context,
+                        profile_home=_profile_home,
+                        safe_profile_runtime_env=_safe_profile_runtime_env,
+                    )
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
                     with _SAC2_L:
                         _SAC2[session_id] = (_heal_agent, _agent_sig)
