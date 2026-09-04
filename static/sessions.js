@@ -9066,10 +9066,10 @@ function renderSessionListFromCache(){
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
       if(e.ctrlKey||e.metaKey){
         // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
-        // Clear the pending tap first so the deferred single-tap opener from
-        // the FIRST click of a fast Ctrl+click-double-click can't fire after
-        // the new tab opens (same cancel path as the double-tap branch).
+        // Clear the pending tap and active gesture before opening the new tab.
         clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        _clearLongPressTimer();
+        _gestureState='idle';
         el.classList.remove('loading');
         if(_consumeSessionNewTabClick(e, s.session_id)) return;
       }
