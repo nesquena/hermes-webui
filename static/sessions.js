@@ -4257,6 +4257,79 @@ function _setActiveSessionUrl(sid){
   }
 }
 
+/**
+ * Middle-click (or Ctrl/Cmd+click) on a sidebar session row opens that
+ * session's deep link (`/session/<id>`) in a new browser tab instead of
+ * switching the current tab. Boot already resolves the id from the URL
+ * (`_sessionIdFromLocation` + `loadSession(saved)`), so the new tab lands
+ * directly on the session. Never fires for the ⋮ action menu, checkboxes,
+ * tag chips, lineage/child toggles, while renaming, or in batch select mode.
+ */
+function _openSessionUrlInNewTab(sid){
+  if(!sid||typeof window==='undefined'||typeof _sessionUrlForSid!=='function') return false;
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  let url=null;
+  try{url=_sessionUrlForSid(sid);}catch(_e){return false;}
+  if(!url) return false;
+  try{
+    window.open(url,'_blank','noopener');
+    return true;
+  }catch(_e){return false;}
+}
+// Shared choke point for the pointer-tap paths below: returns true when the
+// event was consumed as an open-in-new-tab (caller must skip same-tab open).
+function _consumeSessionNewTabClick(e, sid){
+  if(!e||!sid) return false;
+  const isModifiedClick=!!(e.ctrlKey||e.metaKey);
+  const isMiddleClick=(typeof e.button==='number'&&e.button===1)||e.which===2;
+  if(!isModifiedClick&&!isMiddleClick) return false;
+  if(e.target&&e.target.closest){
+    try{
+      if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count')) return false;
+    }catch(_e){}
+  }
+  if(typeof _isSessionActionTarget==='function'&&_isSessionActionTarget(e.target)) return false;
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  if(typeof e.preventDefault==='function') e.preventDefault();
+  if(typeof e.stopPropagation==='function') e.stopPropagation();
+  return _openSessionUrlInNewTab(sid);
+}
+// `auxclick` fires for the middle button where `click` never does; `mousedown`
+// also preventDefaults button-1 so the browser doesn't start autoscroll.
+function _wireSessionNewTabListeners(node, getSid){
+  if(!node||typeof node.addEventListener!=='function'||typeof getSid!=='function') return;
+  node.addEventListener('auxclick',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count')) return;
+      }catch(_e2){}
+    }
+    if(typeof _isSessionActionTarget==='function'&&_isSessionActionTarget(e.target)) return;
+    if(typeof e.preventDefault==='function') e.preventDefault();
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    _openSessionUrlInNewTab(getSid());
+  });
+  node.addEventListener('mousedown',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count')) return;
+      }catch(_e2){}
+    }
+    // Swallow the middle-button default (autoscroll / back-nav chord) without
+    // claiming the gesture: pointerup's _finishSessionGesture still ignores
+    // button!==0, so no swipe/rename/tap side effects can fire from this.
+    if(typeof e.preventDefault==='function') e.preventDefault();
+  });
+}
+
 // ── Batch select mode ──
 function toggleSessionSelectMode(){
   _sessionSelectMode=!_sessionSelectMode;
@@ -8311,8 +8384,10 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, seg.session_id)) return;
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
+        _wireSessionNewTabListeners(row, ()=>seg.session_id);
         lineageList.appendChild(row);
       }
       sessionText.appendChild(lineageList);
@@ -8322,7 +8397,8 @@ function renderSessionListFromCache(){
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
-      const openChildSession=async(childSession)=>{
+      const openChildSession=async(childSession, openOpts={})=>{
+        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id);
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -8556,8 +8632,10 @@ function renderSessionListFromCache(){
               return;
             }
             e.stopPropagation();
+            if(_consumeSessionNewTabClick(e, child.session_id)) return;
             await openChildSession(child);
           };
+          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id);
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
             mainBtn.textContent=childLabelFor(child);
           });
@@ -8608,6 +8686,7 @@ function renderSessionListFromCache(){
             e.stopPropagation();
             _openSessionActionMenu(child, actions||row);
           };
+          _wireSessionNewTabListeners(row, ()=>child.session_id);
           childList.appendChild(row);
           continue;
         }
@@ -8618,8 +8697,10 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, child.session_id)) return;
           await openChildSession(child);
         };
+        _wireSessionNewTabListeners(row, ()=>child.session_id);
         childList.appendChild(row);
       }
       sessionText.appendChild(childList);
@@ -8983,8 +9064,13 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
+      if(e.ctrlKey||e.metaKey){
+        // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
+        if(_consumeSessionNewTabClick(e, s.session_id)) return;
+      }
       if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
     };
+    _wireSessionNewTabListeners(el, ()=>s.session_id);
     // Add ondblclick for more reliable double-click detection
     el.ondblclick=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
