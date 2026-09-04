@@ -11051,11 +11051,14 @@ def _login_redirect_location(safe_path: str) -> str:
     as a Unicode string, and `BaseHTTPRequestHandler.send_header()` encodes
     header values as strict Latin-1 — `/你好` would raise. Percent-encode
     anything outside the RFC 3986 reserved/unreserved sets back to an ASCII
-    URI; `%` stays safe so a `%xx` that survived decoding is not doubled.
+    URI. A `%` is legal only as the start of a `%HH` triplet: a valid triplet
+    that survived decoding is kept as-is (not doubled to `%25HH`), while a
+    lone or malformed `%` (`100%`, `%Z`) is escaped to `%25`.
     """
     if safe_path == "/":
         return "./"
-    return quote(safe_path, safe="/%:@!$&'()*+,;=?#[]~")
+    path = re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", safe_path)
+    return quote(path, safe="/%:@!$&'()*+,;=?#[]~")
 
 
 def _request_base_url(handler) -> str:

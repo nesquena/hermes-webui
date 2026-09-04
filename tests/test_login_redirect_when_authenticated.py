@@ -15,8 +15,9 @@ destination, and still renders the form for everyone else.
 from __future__ import annotations
 
 import io
+import re
 from types import SimpleNamespace
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin
 
 import pytest
 
@@ -88,6 +89,15 @@ def _get_login(handler, query=""):
 
 def _location(handler):
     return handler.header_values("Location")
+
+
+_PCT_ONLY_TRIPLETS = re.compile(r"^(?:[^%]|%[0-9A-Fa-f]{2})*$")
+
+
+def _assert_ascii_uri(location):
+    """RFC 3986: `%` is legal only as the start of a two-hex-digit triplet."""
+    assert location.isascii(), location
+    assert _PCT_ONLY_TRIPLETS.match(location), location
 
 
 def test_trusted_header_request_redirects_to_safe_next(monkeypatch):
@@ -181,6 +191,7 @@ def test_non_latin1_next_is_percent_encoded_for_the_header(monkeypatch):
     assert _get_login(handler, query="next=%2F%E4%BD%A0%E5%A5%BD") is True
     assert handler.status == 302
     assert _location(handler) == ["/%E4%BD%A0%E5%A5%BD"]
+    _assert_ascii_uri(_location(handler)[0])
 
 
 def test_latin1_encodable_non_ascii_next_is_still_percent_encoded(monkeypatch):
@@ -191,6 +202,7 @@ def test_latin1_encodable_non_ascii_next_is_still_percent_encoded(monkeypatch):
 
     assert _get_login(handler, query="next=%2Fsession%2Fcaf%C3%A9") is True
     assert _location(handler) == ["/session/caf%C3%A9"]
+    _assert_ascii_uri(_location(handler)[0])
 
 
 def test_existing_escapes_and_delimiters_survive_encoding(monkeypatch):
@@ -205,6 +217,36 @@ def test_existing_escapes_and_delimiters_survive_encoding(monkeypatch):
         is True
     )
     assert _location(handler) == ["/session/abc%3Fx?q=1&r=2"]
+    _assert_ascii_uri(_location(handler)[0])
+
+
+@pytest.mark.parametrize(
+    ("query", "decoded", "expected"),
+    [
+        ("next=%2Fsession%2F100%25", "/session/100%", "/session/100%25"),
+        ("next=%2Fa%25Z", "/a%Z", "/a%25Z"),
+        ("next=%2Fa%25ZZ", "/a%ZZ", "/a%25ZZ"),
+        # Mixed: the valid `%3F` survives once, the lone `%` is escaped.
+        ("next=%2Fa%253F%25", "/a%3F%", "/a%3F%25"),
+        ("next=%2Fa%25%253F", "/a%%3F", "/a%25%3F"),
+    ],
+)
+def test_malformed_percent_is_escaped_while_valid_triplets_survive(
+    monkeypatch, query, decoded, expected
+):
+    """A `%` that does not start a `%HH` triplet is not a valid URI character.
+    `parse_qs()` hands the route a decoded string in which a literal `%` may
+    appear; it must go out as `%25` while an existing valid triplet is left
+    alone (not doubled to `%253F`)."""
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_AUTH_HEADER", "Remote-User")
+    handler = _Handler(headers={"Remote-User": "alice"})
+
+    assert parse_qs(query)["next"][0] == decoded  # pin the route's actual input
+
+    assert _get_login(handler, query=query) is True
+    assert handler.status == 302
+    assert _location(handler) == [expected]
+    _assert_ascii_uri(_location(handler)[0])
 
 
 def test_cookie_authenticated_request_redirects(monkeypatch):
