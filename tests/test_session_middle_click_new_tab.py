@@ -19,10 +19,11 @@ Ctrl/Cmd+click on the tap paths, leaving right-click menu, select mode,
 rename, swipe, and single-tap behavior untouched.
 """
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
+
+import tempfile
 
 import pytest
 
@@ -132,6 +133,16 @@ def test_modified_click_cancels_pending_tap_before_new_tab():
     )
     assert "_lastTapTime=0" in window.replace(" ", "")
     assert "_tapTimer=null" in window.replace(" ", "")
+    # The row's gesture machine was armed by pointerdown before this
+    # pointerup fired: the long-press timer must be disarmed and the
+    # gesture parked back to idle BEFORE the early return, or a later
+    # pointermove promotes the stale `pressing` state to `dragging` and a
+    # pending pen long-press opens the action menu behind the new tab.
+    nose = window.replace(" ", "")
+    assert "_clearLongPressTimer()" in window
+    assert "_gestureState='idle'" in nose
+    assert window.index("_clearLongPressTimer()") < consume_idx
+    assert window.index("_gestureState='idle'") < consume_idx
 
 
 # ── Behavioral tests via Node VM ─────────────────────────────────────────────
@@ -261,12 +272,18 @@ console.log(JSON.stringify(ret));
         temp files (instead of nested ``json.dumps`` string concatenation)
         to keep quoting levels manageable.
         """
-        import tempfile
-
         branch = _pointerup_branch()
         consume = _extract_function(SESSIONS_JS, "_consumeSessionNewTabClick")
         opener = _extract_function(SESSIONS_JS, "_openSessionUrlInNewTab")
         urlfn = _extract_function(SESSIONS_JS, "_sessionUrlForSid")
+        # The branch under test runs inside the row's gesture closure, so the
+        # harness must stub every closure free-var the branch touches:
+        # _tapTimer/_lastTapTime (pending tap), _clearLongPressTimer +
+        # _longPressTimer/_longPressMenuOpened (pen long-press), _gestureState
+        # (pressing/dragging machine), el (row node), and the new-tab choke
+        # point. Missing stubs surface as ReferenceError here by design —
+        # that is exactly the CI failure the maintainer reported.
+        assert "_clearLongPressTimer()" in branch and "_gestureState='idle'" in branch.replace(" ", "")
         driver = (
             "const fs = require('fs');\n"
             "const branchSrc = fs.readFileSync("
@@ -295,12 +312,15 @@ const runnerSrc =
   'const _isSessionActionTarget = () => false;' +
   'let finisherRan = false;' +
   'const _finishSessionGesture = () => { finisherRan = true; return false; };' +
+  'let _longPressTimer = "ARMED"; let _longPressMenuOpened = false; let longPressCleared = false;' +
+  'const _clearLongPressTimer = () => { _longPressTimer = null; longPressCleared = true; };' +
+  'let _gestureState = "pressing";' +
   'let loadingRemoved = false;' +
   'const el = { classList: { remove(c) { loadingRemoved = true; } } };' +
   branchSrc.replace(/(\W)document(\W)/g, '$1doc$2')
   .replace(/if\(_consumeSessionNewTabClick\(e, s\.session_id\)\) return;/,
-    'if(_consumeSessionNewTabClick(e, s.session_id)){ globalThis.__capture = { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan }; }') +
-  '; globalThis.__capture = globalThis.__capture || { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan };';
+    'if(_consumeSessionNewTabClick(e, s.session_id)){ globalThis.__capture = { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, longPressTimer: _longPressTimer, longPressCleared: longPressCleared }; }') +
+  '; globalThis.__capture = globalThis.__capture || { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, longPressTimer: _longPressTimer, longPressCleared: longPressCleared };';
 try {
   new Function('ref', runnerSrc)(ref);
   ret.out = globalThis.__capture;
@@ -333,6 +353,10 @@ console.log(JSON.stringify(ret));
         assert out["out"]["opened"] == {"u": "/session/test-session-123", "t": "_blank", "f": "noopener"}
         assert out["out"]["loadingRemoved"] is True
         assert out["out"]["finisherRan"] is False
+        # Gesture machine parked + pen long-press disarmed before the return.
+        assert out["out"]["gestureState"] == "idle"
+        assert out["out"]["longPressTimer"] is None
+        assert out["out"]["longPressCleared"] is True
 
     def test_wirer_opens_on_auxclick_and_swallows_mousedown(self):
         """The shared wirer (single choke point for all row kinds): auxclick
