@@ -3340,38 +3340,43 @@ async function _kanbanPopulateModelSelect(currentValue, currentProvider){
   emptyOption.value = '';
   emptyOption.textContent = t('kanban_no_model_override') || 'Profile default';
   sel.appendChild(emptyOption);
+  _kanbanSyncModelChip();
   try {
     const res = await fetch(new URL('api/models', document.baseURI || location.href), {credentials: 'include'});
-    if (!res.ok) { if (seq === _kanbanModelPopulateSeq) _kanbanSyncModelChip(); return; }
-    const data = await res.json();
-    // A stale response from an earlier modal invocation must not clobber the
-    // selection a newer one just restored. Drop it without touching the select.
-    if (seq !== _kanbanModelPopulateSeq) { _kanbanSyncModelChip(); return; }
-    const groups = Array.isArray(data && data.groups) ? data.groups : [];
-    for (const g of groups) {
-      const models = Array.isArray(g.models) ? g.models : [];
-      const overflow = Array.isArray(g.extra_models) ? g.extra_models : [];
-      if (!models.length && !overflow.length) continue;
-      const og = document.createElement('optgroup');
-      og.label = g.provider || g.provider_id || 'Configured';
-      if (g.provider_id) og.dataset.provider = g.provider_id;
-      // Overflow tail — renderModelDropdown's "Show more" + search read this.
-      if (overflow.length) {
-        try { og.dataset.extraModels = JSON.stringify(overflow); } catch (_e) {}
+    if (seq !== _kanbanModelPopulateSeq) return;
+    if (res.ok) {
+      const data = await res.json();
+      if (seq !== _kanbanModelPopulateSeq) return;
+      const groups = Array.isArray(data && data.groups) ? data.groups : [];
+      for (const g of groups) {
+        const models = Array.isArray(g.models) ? g.models : [];
+        const overflow = Array.isArray(g.extra_models) ? g.extra_models : [];
+        if (!models.length && !overflow.length) continue;
+        const og = document.createElement('optgroup');
+        og.label = g.provider || g.provider_id || 'Configured';
+        if (g.provider_id) og.dataset.provider = g.provider_id;
+        // Overflow tail — renderModelDropdown's "Show more" + search read this.
+        if (overflow.length) {
+          try { og.dataset.extraModels = JSON.stringify(overflow); } catch (_e) {}
+        }
+        for (const m of models) {
+          if (!m || !m.id) continue;
+          const opt = document.createElement('option');
+          opt.value = String(m.id);
+          opt.textContent = (typeof getModelLabel === 'function' ? getModelLabel(m.id) : (m.label || m.id));
+          if (g.provider_id) opt.dataset.provider = g.provider_id;
+          og.appendChild(opt);
+        }
+        sel.appendChild(og);
       }
-      for (const m of models) {
-        if (!m || !m.id) continue;
-        const opt = document.createElement('option');
-        opt.value = String(m.id);
-        opt.textContent = (typeof getModelLabel === 'function' ? getModelLabel(m.id) : (m.label || m.id));
-        if (g.provider_id) opt.dataset.provider = g.provider_id;
-        og.appendChild(opt);
-      }
-      sel.appendChild(og);
     }
   } catch (_e) {
     // Catalog unavailable — leave just the "Profile default" option.
   }
+  // A stale response or rejection from an earlier modal invocation must not
+  // clobber the selection a newer one just restored. Drop it without touching
+  // the select or chip.
+  if (seq !== _kanbanModelPopulateSeq) return;
   // A user can select a model (e.g. via the Custom model-ID input, which works
   // without the catalog) while /api/models is still in flight — the create modal
   // is shown immediately and the populate fires un-awaited. After the load
@@ -3495,9 +3500,7 @@ function openKanbanCreate(){
   _kanbanResetTaskModalFields({status: 'ready'});
   _kanbanSetTaskModalStatusHint(null);
   _kanbanSetTaskModalLabels('create');
-  _kanbanPopulateModelSelect('').then(() => {
-    _kanbanSyncModelChip();
-  });
+  _kanbanPopulateModelSelect('');
   _kanbanMountModelChip();
   _kanbanPopulateAssigneeSelect('').then(() => {
     // After the dropdown is populated, default-select the first profile (not

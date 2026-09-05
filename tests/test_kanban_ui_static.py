@@ -1477,7 +1477,7 @@ def test_kanban_editor_modal_has_model_and_provider_fields():
     # tallest row in the modal and pushed it past the calc(100vh - 48px) cap at
     # 1920x1080 in the longer locales (#6906). The row therefore carries only the
     # label plus the chip, whose empty state reads "Profile default".
-    assert 'data-i18n="kanban_model"' in INDEX
+    assert 'for="kanbanTaskModalModel" data-i18n="kanban_model_next_dispatch"' in INDEX
     _model_row_at = INDEX.index('<label for="kanbanTaskModalModel"')
     model_row = INDEX[_model_row_at:INDEX.index('<div class="kanban-modal-row">', _model_row_at)]
     assert 'kanban-modal-hint' not in model_row, (
@@ -1734,6 +1734,10 @@ def test_kanban_model_wording_is_dispatch_scoped_everywhere():
     dropdown_src = extract_function(PANELS, "_kanbanOpenModelDropdown")
     assert "t('kanban_model_hint')" in dropdown_src
 
+    # (f) The modal form label uses the next-dispatch label, not the bare 'kanban_model'.
+    assert 'for="kanbanTaskModalModel" data-i18n="kanban_model_next_dispatch"' in INDEX
+    assert '<label for="kanbanTaskModalModel" data-i18n="kanban_model">' not in INDEX
+
 
 def test_kanban_model_dispatch_keys_present_in_every_locale():
     """Locale parity: the reworded/new kanban model keys must exist in all 15
@@ -1988,3 +1992,202 @@ def test_kanban_submit_still_does_not_repin_a_provider_the_task_never_had():
     assert create_cleared["payload"]["model_override"] == "gpt-5.6-sol", create_cleared["payload"]
     assert "provider_override" not in create_cleared["payload"], create_cleared["payload"]
     assert edit_kept["payload"]["provider_override"] == "openai", edit_kept["payload"]
+
+
+def test_kanban_populate_model_select_deferred_promise_ordering():
+    """Behavioral deferred-promise tests for _kanbanPopulateModelSelect():
+    (a) Edit A -> open Create while catalog /api/models is pending: chip must immediately
+        reflect "Profile default" rather than lingering on Task A's model until settlement.
+    (b) An older rejected request settling after a newer invocation: sequence token drops
+        the older rejection so it cannot restore/synthesize its stale model override.
+    (c) An older fulfilled request settling after a newer invocation: sequence token drops
+        the late response without clobbering newer modal state.
+    """
+    import json
+    import shutil
+    import subprocess
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+
+    fn_sync = extract_function(PANELS, "_kanbanSyncModelChip", prefix="function")
+    fn_populate = extract_function(PANELS, "_kanbanPopulateModelSelect", prefix="async function")
+
+    harness = f"""
+const assert = require("assert");
+
+class Element {{
+  constructor(tag) {{
+    this.tagName = tag ? tag.toUpperCase() : "DIV";
+    this.children = [];
+    this.dataset = {{}};
+    this.textContent = "";
+    this._value = "";
+    this.title = "";
+    this.parentElement = null;
+  }}
+  get value() {{
+    if (this.tagName === "SELECT") {{
+      const opts = this.options;
+      if (!opts.length) return "";
+      const hit = opts.find(o => String(o.value) === String(this._value));
+      return hit ? hit.value : (opts[0] ? opts[0].value : "");
+    }}
+    return this._value;
+  }}
+  set value(v) {{
+    this._value = String(v);
+  }}
+  set innerHTML(val) {{
+    if (val === "") {{
+      this.children = [];
+      this._value = "";
+    }}
+  }}
+  appendChild(child) {{
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }}
+  get options() {{
+    const list = [];
+    function collect(el) {{
+      for (const ch of el.children) {{
+        if (ch.tagName === "OPTION") list.push(ch);
+        else collect(ch);
+      }}
+    }}
+    collect(this);
+    return list;
+  }}
+  get selectedOptions() {{
+    const hit = this.options.find(o => String(o.value) === String(this.value));
+    return hit ? [hit] : [];
+  }}
+}}
+
+let elements = {{
+  kanbanTaskModalModel: new Element("select"),
+  kanbanTaskModalModelChip: new Element("button"),
+}};
+global.document = {{
+  getElementById: (id) => elements[id] || null,
+  createElement: (tag) => new Element(tag),
+  baseURI: "http://localhost/",
+}};
+function t(k) {{
+  if (k === "kanban_no_model_override") return "Profile default";
+  return k;
+}}
+let _fetchImpl = null;
+global.fetch = (...args) => _fetchImpl(...args);
+
+function deferred() {{
+  let resolve, reject;
+  const promise = new Promise((res, rej) => {{
+    resolve = res;
+    reject = rej;
+  }});
+  return {{ promise, resolve, reject }};
+}}
+
+let _kanbanModelPopulateSeq = 0;
+{fn_sync}
+{fn_populate}
+
+async function run() {{
+  const sel = elements.kanbanTaskModalModel;
+  const chip = elements.kanbanTaskModalModelChip;
+
+  // ── (a) Edit A -> open Create while catalog is pending ──
+  // Step 1: Simulate Task A edit having settled
+  sel.value = "model-a";
+  chip.textContent = "Model A";
+  chip.title = "model-a";
+
+  // Step 2: Open Create while /api/models fetch is pending
+  const createDef = deferred();
+  _fetchImpl = () => createDef.promise;
+  const createPromise = _kanbanPopulateModelSelect("");
+
+  // Assert: While pending, select is reset AND chip is immediately synchronized
+  assert.strictEqual(sel.value, "", "select must be cleared to empty string immediately");
+  assert.strictEqual(chip.textContent, "Profile default", "chip must immediately sync to Profile default while pending");
+  assert.strictEqual(chip.title, "Profile default", "chip title must immediately sync to Profile default while pending");
+
+  // Step 3: Catalog settles
+  createDef.resolve({{
+    ok: true,
+    json: async () => ({{ groups: [{{ provider_id: "prov-a", models: [{{ id: "model-a", label: "Model A" }}] }}] }})
+  }});
+  await createPromise;
+  assert.strictEqual(sel.value, "");
+  assert.strictEqual(chip.textContent, "Profile default");
+
+  // ── (b) Older rejected request settling after a newer invocation ──
+  // Invocation 1: Edit Task with stale-model (deferred)
+  const oldRejectDef = deferred();
+  _fetchImpl = () => oldRejectDef.promise;
+  const oldRejectPromise = _kanbanPopulateModelSelect("stale-model-x", "stale-prov-x");
+
+  // Invocation 2: Newer Create invocation (settles first)
+  const newerCreateDef = deferred();
+  _fetchImpl = () => newerCreateDef.promise;
+  const newerCreatePromise = _kanbanPopulateModelSelect("", "");
+  newerCreateDef.resolve({{
+    ok: true,
+    json: async () => ({{ groups: [{{ provider_id: "prov-y", models: [{{ id: "model-y", label: "Model Y" }}] }}] }})
+  }});
+  await newerCreatePromise;
+  assert.strictEqual(sel.value, "");
+  assert.strictEqual(chip.textContent, "Profile default");
+
+  // Invocation 1 rejects into catch
+  oldRejectDef.reject(new Error("Network connection lost"));
+  await oldRejectPromise;
+
+  // Assert: Older rejected request did NOT overwrite select or chip
+  assert.strictEqual(sel.value, "", "older rejected invocation overwrote select value");
+  assert.strictEqual(chip.textContent, "Profile default", "older rejected invocation overwrote chip text");
+  assert(!sel.options.some(o => o.value === "stale-model-x"), "older rejected invocation synthesized stale option");
+
+  // ── (c) Older fulfilled request settling after a newer invocation ──
+  const oldSuccessDef = deferred();
+  _fetchImpl = () => oldSuccessDef.promise;
+  const oldSuccessPromise = _kanbanPopulateModelSelect("stale-model-z", "stale-prov-z");
+
+  const newestEditDef = deferred();
+  _fetchImpl = () => newestEditDef.promise;
+  const newestEditPromise = _kanbanPopulateModelSelect("active-model", "active-prov");
+  newestEditDef.resolve({{
+    ok: true,
+    json: async () => ({{ groups: [{{ provider_id: "active-prov", models: [{{ id: "active-model", label: "Active Model" }}] }}] }})
+  }});
+  await newestEditPromise;
+  assert.strictEqual(sel.value, "active-model");
+  assert.strictEqual(chip.textContent, "Active Model");
+
+  // Now older success settles
+  oldSuccessDef.resolve({{
+    ok: true,
+    json: async () => ({{ groups: [{{ provider_id: "stale-prov-z", models: [{{ id: "stale-model-z", label: "Stale Z" }}] }}] }})
+  }});
+  await oldSuccessPromise;
+
+  assert.strictEqual(sel.value, "active-model", "older fulfilled invocation clobbered select value");
+  assert.strictEqual(chip.textContent, "Active Model", "older fulfilled invocation clobbered chip text");
+}}
+
+run().then(() => {{
+  console.log(JSON.stringify({{ success: true }}));
+}}).catch(e => {{
+  process.stderr.write(String(e && e.stack || e));
+  process.exit(1);
+}});
+"""
+    result = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, f"node deferred-promise test failed: {result.stderr}"
+    assert json.loads(result.stdout)["success"] is True
+
