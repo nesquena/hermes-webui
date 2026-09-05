@@ -218,7 +218,9 @@ URLs, and any supplied objective or context go to Parallel. This adds MCP tools;
 it does not replace the built-in web tools or change their provider settings.
 
 In the same profile, run `/reload-mcp` in chat, then check **MCP Servers** and
-**MCP Tools** in Settings. A configured server is not proof of a working
+**MCP Tools** in Settings. If `parallel` initially appears unavailable while
+reload is still running, wait for it to finish discovering tools, then refresh
+the panel. A configured server is not proof of a working
 connection: confirm that `parallel` is active and that `web_search` and
 `web_fetch` appear under it (Hermes prefixes their registered names with
 `mcp__parallel__`). Try asking Hermes to use Parallel to find a public
