@@ -134,15 +134,13 @@ def test_modified_click_cancels_pending_tap_before_new_tab():
     assert "_lastTapTime=0" in window.replace(" ", "")
     assert "_tapTimer=null" in window.replace(" ", "")
     # The row's gesture machine was armed by pointerdown before this
-    # pointerup fired: the long-press timer must be disarmed and the
-    # gesture parked back to idle BEFORE the early return, or a later
-    # pointermove promotes the stale `pressing` state to `dragging` and a
-    # pending pen long-press opens the action menu behind the new tab.
-    nose = window.replace(" ", "")
-    assert "_clearLongPressTimer()" in window
-    assert "_gestureState='idle'" in nose
-    assert window.index("_clearLongPressTimer()") < consume_idx
-    assert window.index("_gestureState='idle'") < consume_idx
+    # pointerup fired, and a pen drag may have painted swipe offsets
+    # (mouse never paints: `_isSessionSwipeTarget` excludes mouse). The
+    # branch must settle via the shared `_clearPointerDragState()` choke
+    # point BEFORE the early return — parking `_gestureState` alone would
+    # leave pen-painted offsets displaced and the `dragging` class stuck.
+    assert "_clearPointerDragState()" in window
+    assert window.index("_clearPointerDragState()") < consume_idx
 
 
 # ── Behavioral tests via Node VM ─────────────────────────────────────────────
@@ -278,12 +276,11 @@ console.log(JSON.stringify(ret));
         urlfn = _extract_function(SESSIONS_JS, "_sessionUrlForSid")
         # The branch under test runs inside the row's gesture closure, so the
         # harness must stub every closure free-var the branch touches:
-        # _tapTimer/_lastTapTime (pending tap), _clearLongPressTimer +
-        # _longPressTimer/_longPressMenuOpened (pen long-press), _gestureState
-        # (pressing/dragging machine), el (row node), and the new-tab choke
+        # _tapTimer/_lastTapTime (pending tap), _clearPointerDragState
+        # (gesture settle choke point), el (row node), and the new-tab choke
         # point. Missing stubs surface as ReferenceError here by design —
         # that is exactly the CI failure the maintainer reported.
-        assert "_clearLongPressTimer()" in branch and "_gestureState='idle'" in branch.replace(" ", "")
+        assert "_clearPointerDragState()" in branch
         driver = (
             "const fs = require('fs');\n"
             "const branchSrc = fs.readFileSync("
@@ -312,15 +309,27 @@ const runnerSrc =
   'const _isSessionActionTarget = () => false;' +
   'let finisherRan = false;' +
   'const _finishSessionGesture = () => { finisherRan = true; return false; };' +
-  'let _longPressTimer = "ARMED"; let _longPressMenuOpened = false; let longPressCleared = false;' +
-  'const _clearLongPressTimer = () => { _longPressTimer = null; longPressCleared = true; };' +
-  'let _gestureState = "pressing";' +
+  // Pen-drag-painted row state: the gesture is mid-drag with swipe tracking
+  // on (i.e. _paintSessionSwipe already ran and set the offset CSS vars).
+  // The choke-point stub below mirrors the shipped _clearPointerDragState
+  // (idle + long-press disarm + settle swipe paint when a drag was in
+  // flight) so the test observes the same settlement the row gets.
+  'let _gestureState = "dragging"; let _swipeTracking = true;' +
+  'let longPressCleared = false; let settleCalls = 0;' +
+  'const removedClasses = [];' +
+  'const _clearLongPressTimer = () => { longPressCleared = true; };' +
+  'const _settleSessionSwipePaint = () => { settleCalls++; removedClasses.push("dragging"); };' +
+  'const _clearPointerDragState = () => {' +
+  '  const wasDragging = _gestureState === "dragging" || _swipeTracking;' +
+  '  _gestureState = "idle"; _clearLongPressTimer();' +
+  '  if(wasDragging){ settleCalls++; removedClasses.push("dragging"); }' +
+  '};' +
   'let loadingRemoved = false;' +
-  'const el = { classList: { remove(c) { loadingRemoved = true; } } };' +
+  'const el = { classList: { remove(c) { if(c === "loading") loadingRemoved = true; } } };' +
   branchSrc.replace(/(\W)document(\W)/g, '$1doc$2')
   .replace(/if\(_consumeSessionNewTabClick\(e, s\.session_id\)\) return;/,
-    'if(_consumeSessionNewTabClick(e, s.session_id)){ globalThis.__capture = { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, longPressTimer: _longPressTimer, longPressCleared: longPressCleared }; }') +
-  '; globalThis.__capture = globalThis.__capture || { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, longPressTimer: _longPressTimer, longPressCleared: longPressCleared };';
+    'if(_consumeSessionNewTabClick(e, s.session_id)){ globalThis.__capture = { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, settleCalls: settleCalls, longPressCleared: longPressCleared }; }') +
+  '; globalThis.__capture = globalThis.__capture || { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, settleCalls: settleCalls, longPressCleared: longPressCleared };';
 try {
   new Function('ref', runnerSrc)(ref);
   ret.out = globalThis.__capture;
@@ -353,9 +362,12 @@ console.log(JSON.stringify(ret));
         assert out["out"]["opened"] == {"u": "/session/test-session-123", "t": "_blank", "f": "noopener"}
         assert out["out"]["loadingRemoved"] is True
         assert out["out"]["finisherRan"] is False
-        # Gesture machine parked + pen long-press disarmed before the return.
+        # Gesture settled via the shared choke point before the return: parked
+        # to idle, swipe-paint settle ran for the in-flight pen drag,
+        # long-press disarmed. (Row starts `dragging` + swipe-tracking to
+        # emulate the pen-drag-painted state the maintainer identified.)
         assert out["out"]["gestureState"] == "idle"
-        assert out["out"]["longPressTimer"] is None
+        assert out["out"]["settleCalls"] >= 1
         assert out["out"]["longPressCleared"] is True
 
     def test_wirer_opens_on_auxclick_and_swallows_mousedown(self):

@@ -9066,10 +9066,14 @@ function renderSessionListFromCache(){
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
       if(e.ctrlKey||e.metaKey){
         // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
-        // Clear the pending tap and active gesture before opening the new tab.
+        // Settle the gesture machine first via the shared choke point: a pen
+        // (or touch-emulated) drag may have painted swipe offsets, and a
+        // shaky click may have added the 'dragging' class — parking
+        // _gestureState alone would leave the row visually displaced.
+        // _clearPointerDragState() parks idle, disarms the long-press timer,
+        // and settles swipe paint when a drag was in flight.
         clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
-        _clearLongPressTimer();
-        _gestureState='idle';
+        _clearPointerDragState();
         el.classList.remove('loading');
         if(_consumeSessionNewTabClick(e, s.session_id)) return;
       }
