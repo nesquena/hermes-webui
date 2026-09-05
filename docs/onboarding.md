@@ -191,6 +191,48 @@ State normally lives outside the repository. By default:
 Override these with `HERMES_HOME` and `HERMES_WEBUI_STATE_DIR` when you need an
 isolated test install.
 
+## Optional web search with Parallel Search MCP
+
+After onboarding, you can add [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for web search and page extraction without a Parallel account or API key.
+This uses Hermes Agent's existing remote MCP client over Streamable HTTP.
+Free access is rate limited.
+
+Choose the profile you want to use, then edit that profile's `config.yaml` on
+the machine running Hermes. The default profile normally uses
+`~/.hermes/config.yaml`; named profiles use their own config files. Add this
+entry under the existing `mcp_servers` mapping, keeping other servers and
+settings intact. If you already have a server named `parallel`, choose another
+name instead of overwriting it.
+
+```yaml
+mcp_servers:
+  parallel:
+    url: https://search.parallel.ai/mcp
+```
+
+No authorization headers are needed for this anonymous endpoint. Adding the
+entry enables the server on the next MCP discovery or reload, and the agent may
+call its tools during a conversation. Search queries, requested
+URLs, and any supplied objective or context go to Parallel. This adds MCP tools;
+it does not replace the built-in web tools or change their provider settings.
+
+In the same profile, run `/reload-mcp` in chat, then check **MCP Servers** and
+**MCP Tools** in Settings. A configured server is not proof of a working
+connection: confirm that `parallel` is active and that `web_search` and
+`web_fetch` appear under it (Hermes prefixes their registered names with
+`mcp__parallel__`). Try asking Hermes to use Parallel to find a public
+documentation page and fetch its contents. Existing toolset selections still
+apply, so include the server's MCP toolset if your conversation restricts tools.
+
+To stop using it, disable the server in **MCP Servers** or remove only its entry
+from the profile config, then run `/reload-mcp` again. Reload reconnects MCP
+servers, so wait for active tool calls to finish first.
+
+If reload reports `MCP runtime unavailable`, check the Hermes Agent installation
+using [Troubleshooting](troubleshooting.md). Docker users should also check the
+Agent source mount and dependency setup in the [Docker guide](docker.md).
+
 ## When to file an issue
 
 File an issue when the diagnostics point to WebUI rather than local
