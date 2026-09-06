@@ -9179,6 +9179,7 @@ function requestNotificationPermission(){
   if(Notification.permission==='granted'){
     if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
     if(typeof showToast==='function') showToast(t('notifications_enabled_toast'),3000);
+    _ensurePushSubscription();
     return Promise.resolve('granted');
   }
   if(Notification.permission==='denied'){
@@ -9189,8 +9190,67 @@ function requestNotificationPermission(){
   return Notification.requestPermission().then(p=>{
     if(typeof showToast==='function') showToast(p==='granted'?t('notifications_enabled_toast'):t('notifications_denied'),3000,p==='granted'?undefined:'error');
     if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
+    if(p==='granted') _ensurePushSubscription();
     return p;
   });
+}
+
+// Web Push registration: local Notification()/showNotification() (above)
+// only fire while this page or its service worker is actively alive, which
+// a backgrounded/locked PWA (notably on iOS) never is. Web Push is the only
+// path that can wake a fully closed install -- delivery goes through the
+// OS's own push service, driven server-side (api/push_notifications.py)
+// instead of by this page's JS. Best-effort and silent: a device that can't
+// or won't subscribe just keeps the existing foreground-only behavior.
+function _urlBase64ToUint8Array(base64String){
+  const padding='='.repeat((4-base64String.length%4)%4);
+  const base64=(base64String+padding).replace(/-/g,'+').replace(/_/g,'/');
+  const rawData=atob(base64);
+  const outputArray=new Uint8Array(rawData.length);
+  for(let i=0;i<rawData.length;++i) outputArray[i]=rawData.charCodeAt(i);
+  return outputArray;
+}
+async function _ensurePushSubscription(){
+  try{
+    if(!('serviceWorker' in navigator)||!('PushManager' in window)) return;
+    if(!('Notification' in window)||Notification.permission!=='granted') return;
+    const reg=await navigator.serviceWorker.ready;
+    const {key}=await api('api/push/vapid-public-key',{timeoutToast:false});
+    if(!key) return;
+    const desiredKey=_urlBase64ToUint8Array(key);
+    let sub=await reg.pushManager.getSubscription();
+    // A PushSubscription is bound to the VAPID public key it was created
+    // with -- if the server's key ever changes (key file regenerated, or
+    // -- the actual bug this guards against -- an earlier bad build served
+    // a profile-scoped key instead of the one true server-wide key) an
+    // existing subscription silently stops being deliverable-to without
+    // ever erroring here. Re-subscribing against a mismatched key is the
+    // only fix; detect it and self-heal instead of staying silently stale.
+    if(sub){
+      const existingKey=new Uint8Array(sub.options.applicationServerKey);
+      const sameKey=existingKey.length===desiredKey.length&&existingKey.every((b,i)=>b===desiredKey[i]);
+      if(!sameKey){
+        await sub.unsubscribe().catch(()=>{});
+        sub=null;
+      }
+    }
+    if(!sub){
+      sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:desiredKey});
+    }
+    await api('api/push/subscribe',{method:'POST',body:JSON.stringify(sub.toJSON()),timeoutToast:false});
+  }catch(e){console.warn('Push subscription failed:',e);}
+}
+async function _unsubscribeFromPush(){
+  try{
+    if(!('serviceWorker' in navigator)) return;
+    const reg=await navigator.serviceWorker.getRegistration();
+    if(!reg) return;
+    const sub=await reg.pushManager.getSubscription();
+    if(!sub) return;
+    const endpoint=sub.endpoint;
+    await sub.unsubscribe();
+    await api('api/push/unsubscribe',{method:'POST',body:JSON.stringify({endpoint}),timeoutToast:false});
+  }catch(e){console.warn('Push unsubscribe failed:',e);}
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);

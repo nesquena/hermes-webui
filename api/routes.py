@@ -14422,6 +14422,19 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/approval/stream":
         return _handle_approval_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/push/vapid-public-key":
+        return _handle_push_vapid_public_key(handler, parsed)
+
+    if parsed.path == "/api/push/debug-ack":
+        # Temporary delivery-diagnostic beacon (see static/sw.js's push
+        # handler) -- fired first thing, before showNotification(), so a hit
+        # in the access log proves the push event actually reached the
+        # device's service worker, isolating that from whether iOS then
+        # chose to display it. Safe to remove once push delivery is a known
+        # quantity; every hit is already visible in the normal request log
+        # via its ?tag= query string, so no bespoke logging needed here.
+        return j(handler, {"ok": True})
+
     if parsed.path == "/api/approval/inject_test":
         # Loopback-only: used by automated tests; blocked from any remote client
         if handler.client_address[0] != "127.0.0.1":
@@ -16531,6 +16544,13 @@ def handle_post(handler, parsed) -> bool:
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
         return _handle_approval_respond(handler, body)
+
+    # ── Web Push subscriptions (POST) ──
+    if parsed.path == "/api/push/subscribe":
+        return _handle_push_subscribe(handler, body)
+
+    if parsed.path == "/api/push/unsubscribe":
+        return _handle_push_unsubscribe(handler, body)
 
     # ── Clarify (POST) ──
     if parsed.path == "/api/clarify/respond":
@@ -26625,6 +26645,38 @@ def _handle_approval_respond(handler, body):
             else {}
         ),
     })
+
+
+def _handle_push_vapid_public_key(handler, parsed):
+    """Return the VAPID public key so the frontend can call pushManager.subscribe().
+
+    Generates the keypair on first call (see api/push_notifications.py).
+    Works even without pywebpush installed -- keygen only needs `cryptography`,
+    already a hard requirement; only the send path needs pywebpush.
+    """
+    from api.push_notifications import ensure_vapid_keys
+    keys = ensure_vapid_keys()
+    if not keys:
+        return j(handler, {"error": "push notifications unavailable"}, status=503)
+    return j(handler, {"key": keys["public_key"]})
+
+
+def _handle_push_subscribe(handler, body):
+    endpoint = str((body or {}).get("endpoint") or "").strip()
+    if not endpoint:
+        return bad(handler, "endpoint is required")
+    from api.push_notifications import add_subscription
+    add_subscription(body)
+    return j(handler, {"ok": True})
+
+
+def _handle_push_unsubscribe(handler, body):
+    endpoint = str((body or {}).get("endpoint") or "").strip()
+    if not endpoint:
+        return bad(handler, "endpoint is required")
+    from api.push_notifications import remove_subscription
+    remove_subscription(endpoint)
+    return j(handler, {"ok": True})
 
 
 def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:

@@ -3,12 +3,15 @@
 State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
 """
+import logging
 import queue
 import threading
 import uuid
 from contextlib import contextmanager
 
 from api.session_events import publish_session_list_changed
+
+logger = logging.getLogger(__name__)
 
 # Approval system (optional -- graceful fallback if agent not available)
 try:
@@ -945,6 +948,26 @@ def submit_pending(session_key: str, approval: dict) -> None:
         # notify arriving before T1's earlier notify with a stale count).
         _approval_sse_notify_locked(session_key, head, total)
     publish_session_list_changed("attention_pending")
+    # Web Push, in addition to the SSE notify above: SSE only reaches an
+    # already-open, already-connected tab. On iOS specifically a
+    # backgrounded/locked PWA has no live SSE connection and the existing
+    # local Notification()/showNotification() path (messages.js
+    # sendBrowserNotification) can't fire either -- both require the page or
+    # its service worker to be actively alive. Web Push is delivered by the
+    # OS's own push service instead, so it's the only path that can wake a
+    # fully closed install. No-ops entirely if pywebpush isn't installed or
+    # no device has subscribed -- see api/push_notifications.py.
+    try:
+        from api.push_notifications import send_push_to_all
+        from urllib.parse import quote
+        send_push_to_all(
+            "Approval required",
+            entry.get("description") or "Tool approval needed",
+            url=f"session/{quote(session_key, safe='')}",
+            tag=f"hermes-{session_key}",
+        )
+    except Exception:
+        logger.warning("Web Push notify failed", exc_info=True)
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism

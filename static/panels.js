@@ -13464,6 +13464,11 @@ function updateNotificationPermissionStatus(){
   const perm=Notification.permission||'default';
   const label=t('notifications_permission_status', perm);
   el.textContent=label;
+  // Opportunistic re-check for a returning session where permission was
+  // already granted earlier: requestNotificationPermission() only runs on
+  // an explicit click, so this is what catches a device whose push
+  // subscription needs (re)registering without one.
+  if(perm==='granted'&&typeof _ensurePushSubscription==='function') _ensurePushSubscription();
   if(btn){
     const granted=perm==='granted';
     btn.disabled=granted;
