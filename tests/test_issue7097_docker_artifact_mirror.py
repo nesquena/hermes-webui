@@ -165,6 +165,38 @@ def test_workspace_path_keeps_precedence_over_docker_mirror(tmp_path, monkeypatc
     assert [entry["name"] for entry in payload["entries"]] == ["primary.txt"]
 
 
+def test_file_read_does_not_fall_back_after_workspace_validation_error(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    profile_home = tmp_path / "hermes"
+    mirror_root = profile_home / "sandboxes" / "docker" / "default" / "home"
+    mirror_root.mkdir(parents=True)
+    (mirror_root / "oversized.txt").write_text("mirror", encoding="utf-8")
+    session = SimpleNamespace(workspace=str(workspace), profile="default")
+
+    _capture_json(monkeypatch)
+    _configure_docker_mirror(monkeypatch, profile_home)
+    monkeypatch.setattr(routes, "get_session_for_file_ops", lambda _sid: session)
+
+    def _read_file_content(root, rel):
+        if str(root) == str(workspace):
+            raise ValueError("File too large")
+        return {"path": rel, "content": "mirror"}
+
+    monkeypatch.setattr(routes, "read_file_content", _read_file_content)
+
+    payload, status = routes._handle_file_read(
+        object(),
+        _parsed("/api/file", session_id="session-validation", path="root/oversized.txt"),
+    )
+
+    assert status == 404
+    assert payload["error"] == "File too large"
+
+
 @pytest.mark.parametrize(
     ("backend", "persistent"),
     [("local", True), ("docker", False)],

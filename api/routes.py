@@ -18035,12 +18035,12 @@ def _handle_list_dir(handler, parsed):
         rel_path = qs.get("path", ["."])[0]
         listing_root = Path(workspace)
         listing_rel = rel_path
-        try:
-            entries = list_dir(listing_root, listing_rel)
-        except (FileNotFoundError, ValueError):
-            mirror = _docker_sandbox_mirror_target(rel_path)
-            if mirror is None:
-                raise
+        mirror = (
+            _docker_sandbox_mirror_target(rel_path)
+            if str(rel_path).lstrip().startswith("/")
+            else None
+        )
+        if mirror is not None:
             listing_root, mirror_target, container_root = mirror
             listing_rel = mirror_target.relative_to(listing_root).as_posix() or "."
             entries = list_dir(listing_root, listing_rel)
@@ -18049,6 +18049,21 @@ def _handle_list_dir(handler, parsed):
                 listing_root,
                 container_root,
             )
+        else:
+            try:
+                entries = list_dir(listing_root, listing_rel)
+            except FileNotFoundError:
+                mirror = _docker_sandbox_mirror_target(rel_path)
+                if mirror is None:
+                    raise
+                listing_root, mirror_target, container_root = mirror
+                listing_rel = mirror_target.relative_to(listing_root).as_posix() or "."
+                entries = list_dir(listing_root, listing_rel)
+                entries = _virtualize_docker_mirror_entries(
+                    entries,
+                    listing_root,
+                    container_root,
+                )
         return j(
             handler,
             {
@@ -21014,15 +21029,25 @@ def _handle_file_read(handler, parsed):
     if not rel:
         return bad(handler, "path is required")
     try:
-        try:
-            payload = read_file_content(Path(s.workspace), rel)
-        except (FileNotFoundError, ValueError):
-            mirror = _docker_sandbox_mirror_target(rel)
-            if mirror is None:
-                raise
+        mirror = (
+            _docker_sandbox_mirror_target(rel)
+            if str(rel).lstrip().startswith("/")
+            else None
+        )
+        if mirror is not None:
             mirror_root, mirror_target, _container_root = mirror
             mirror_rel = mirror_target.relative_to(mirror_root).as_posix() or "."
             payload = read_file_content(mirror_root, mirror_rel)
+        else:
+            try:
+                payload = read_file_content(Path(s.workspace), rel)
+            except FileNotFoundError:
+                mirror = _docker_sandbox_mirror_target(rel)
+                if mirror is None:
+                    raise
+                mirror_root, mirror_target, _container_root = mirror
+                mirror_rel = mirror_target.relative_to(mirror_root).as_posix() or "."
+                payload = read_file_content(mirror_root, mirror_rel)
         return j(handler, payload)
     except ImportError as e:
         return bad(handler, str(e), 503)
