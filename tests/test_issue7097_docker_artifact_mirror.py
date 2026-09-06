@@ -1,5 +1,6 @@
 """Regression coverage for Docker-sandbox artifact browsing (#7097)."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode, urlparse
 
@@ -30,6 +31,11 @@ def _configure_docker_mirror(
 ):
     monkeypatch.delenv("TERMINAL_SANDBOX_DIR", raising=False)
     monkeypatch.setattr(routes, "get_active_hermes_home", lambda: profile_home)
+    monkeypatch.setattr(
+        routes,
+        "resolve_implicit_workspace_with_recovery",
+        lambda stored_workspace, _get_last_workspace: (Path(stored_workspace), False),
+    )
     monkeypatch.setattr(
         routes,
         "get_config",
