@@ -34,6 +34,15 @@ def gateway_chat():
     return module
 
 
+def _compressor_bundle():
+    """sys.modules entries that make `import agent.context_compressor` resolve.
+
+    The submodule alone is not enough: the import statement also binds the
+    parent package, which is absent from checkouts without the agent bundle.
+    """
+    return {"agent": MagicMock(), "agent.context_compressor": MagicMock()}
+
+
 class _StubSession:
     """The subset of Session the usage fold touches."""
 
@@ -159,7 +168,9 @@ def test_turn_usage_is_persisted_so_a_reload_still_has_a_meter(gateway_chat):
     # …and the same numbers ride the done event for the live indicator.
     assert out["last_prompt_tokens"] == 160_000
     assert out["context_length"] == 200_000
-    assert out["threshold_tokens"] == 180_000
+    # The threshold states the ceiling this path enforces (75% of the window),
+    # replacing whatever an earlier in-process run left on the session.
+    assert out["threshold_tokens"] == 150_000
 
 
 def test_session_totals_accumulate_while_last_prompt_tracks_the_latest_turn(gateway_chat):
@@ -204,6 +215,125 @@ def test_unknown_window_leaves_the_session_value_alone(gateway_chat):
     assert out["context_length"] == 200_000
 
 
+# ── The 75% ceiling ──────────────────────────────────────────────────────────
+
+@pytest.fixture()
+def compress_calls(gateway_chat):
+    """Patch the compression job starter and record what it was asked to do.
+
+    Also stands in for the local agent bundle, which the trigger requires and
+    which is not installed in every checkout.
+    """
+    import json as _json
+
+    import api.routes as routes
+
+    calls = []
+
+    def fake_start(handler, body, status="running"):
+        calls.append(dict(body))
+        handler.wfile.write(_json.dumps({"status": status, "session_id": body["session_id"]}).encode())
+
+    gateway_chat._GATEWAY_AUTO_COMPRESS_LAST_TRIGGER.clear()
+    with patch.dict(sys.modules, _compressor_bundle()), \
+         patch.object(routes, "_handle_session_compress_start", fake_start):
+        yield calls
+    gateway_chat._GATEWAY_AUTO_COMPRESS_LAST_TRIGGER.clear()
+
+
+def test_no_local_compressor_means_no_compression_attempt(gateway_chat):
+    """A WebUI without the agent bundle can still use a gateway."""
+    import api.routes as routes
+
+    gateway_chat._GATEWAY_AUTO_COMPRESS_LAST_TRIGGER.clear()
+    started = []
+
+    def fake_start(handler, body):
+        started.append(body)
+        handler.wfile.write(b'{"status": "running"}')
+
+    with patch.dict(sys.modules, {"agent.context_compressor": None}), \
+         patch.object(routes, "_handle_session_compress_start", fake_start):
+        assert gateway_chat.maybe_autocompress_gateway_session(
+            "s-nobundle", {"context_length": 100_000, "last_prompt_tokens": 99_000}, {}) is False
+
+    assert started == []
+
+
+def test_ceiling_fires_at_the_step_where_the_ring_turns_red(gateway_chat, compress_calls):
+    at_ceiling = {"context_length": 100_000, "last_prompt_tokens": 75_000}
+
+    assert gateway_chat.maybe_autocompress_gateway_session("s-ceiling", at_ceiling, {}) is True
+    assert compress_calls == [{"session_id": "s-ceiling"}]
+
+
+def test_below_the_ceiling_nothing_is_compressed(gateway_chat, compress_calls):
+    below = {"context_length": 100_000, "last_prompt_tokens": 74_999}
+
+    assert gateway_chat.maybe_autocompress_gateway_session("s-below", below, {}) is False
+    assert compress_calls == []
+
+
+def test_a_repeat_at_the_same_size_does_not_summarize_again(gateway_chat, compress_calls):
+    """Compression may report 'unchanged'; retrying every turn would be a loop."""
+    usage = {"context_length": 100_000, "last_prompt_tokens": 90_000}
+
+    assert gateway_chat.maybe_autocompress_gateway_session("s-loop", usage, {}) is True
+    assert gateway_chat.maybe_autocompress_gateway_session("s-loop", usage, {}) is False
+    # …but a context that kept growing is tried again.
+    grown = {"context_length": 100_000, "last_prompt_tokens": 92_000}
+    assert gateway_chat.maybe_autocompress_gateway_session("s-loop", grown, {}) is True
+    assert len(compress_calls) == 2
+
+
+def test_the_ceiling_is_configurable_and_can_be_turned_off(gateway_chat, compress_calls):
+    usage = {"context_length": 100_000, "last_prompt_tokens": 60_000}
+
+    assert gateway_chat.gateway_auto_compress_pct({}) == 75
+    assert gateway_chat.gateway_auto_compress_pct({"webui_auto_compress_pct": 50}) == 50
+    assert gateway_chat.gateway_auto_compress_pct({"webui_auto_compress_pct": "nonsense"}) == 75
+
+    assert gateway_chat.maybe_autocompress_gateway_session("s-cfg", usage, {}) is False
+    assert gateway_chat.maybe_autocompress_gateway_session(
+        "s-cfg", usage, {"webui_auto_compress_pct": 50}) is True
+    assert gateway_chat.maybe_autocompress_gateway_session(
+        "s-off", {"context_length": 100_000, "last_prompt_tokens": 99_000},
+        {"webui_auto_compress_pct": 0}) is False
+
+
+def test_an_unknown_window_never_triggers(gateway_chat, compress_calls):
+    assert gateway_chat.maybe_autocompress_gateway_session(
+        "s-nowindow", {"context_length": 0, "last_prompt_tokens": 500_000}, {}) is False
+    assert compress_calls == []
+
+
+def test_a_failing_starter_is_swallowed(gateway_chat):
+    import api.routes as routes
+
+    gateway_chat._GATEWAY_AUTO_COMPRESS_LAST_TRIGGER.clear()
+
+    def boom(handler, body):
+        raise RuntimeError("agent runtime is stale")
+
+    with patch.dict(sys.modules, _compressor_bundle()), \
+         patch.object(routes, "_handle_session_compress_start", boom):
+        assert gateway_chat.maybe_autocompress_gateway_session(
+            "s-boom", {"context_length": 100_000, "last_prompt_tokens": 90_000}, {}) is False
+
+
+def test_tooltip_threshold_matches_the_enforced_ceiling(gateway_chat):
+    session = _StubSession()
+    usage = gateway_chat._gateway_stream_usage({"usage": {"prompt_tokens": 10_000}})
+
+    out = _fold(gateway_chat, session, usage, context_length=96_000)
+
+    assert gateway_chat.gateway_auto_compress_threshold_tokens({}, 96_000) == 72_000
+    assert session.threshold_tokens == 72_000
+    assert out["threshold_tokens"] == 72_000, (
+        "the tooltip's auto-compress line must state the number this path acts on"
+    )
+
+
 # ── Wiring ───────────────────────────────────────────────────────────────────
 
 def test_success_writeback_folds_usage_before_saving():
@@ -219,3 +349,19 @@ def test_success_writeback_folds_usage_before_saving():
     assert fold_at < done_at, (
         "the done event carries the enriched usage the indicator reads"
     )
+
+
+def test_compression_is_announced_only_after_the_job_exists():
+    src = GATEWAY_CHAT.read_text(encoding="utf-8")
+    trigger_at = src.index("if maybe_autocompress_gateway_session(session_id, usage, cfg):")
+    announce_at = src.index('put_gateway_event("compress_started"')
+    stream_end_at = src.index('put_gateway_event("stream_end"')
+
+    assert trigger_at < announce_at < stream_end_at, (
+        "announcing before the job is admitted would have the frontend poll a "
+        "job that does not exist yet"
+    )
+
+    messages_js = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    assert "source.addEventListener('compress_started'" in messages_js
+    assert "resumeManualCompressionForSession(sid)" in messages_js

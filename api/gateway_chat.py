@@ -548,6 +548,92 @@ def _gateway_context_length(cfg, model: str, model_provider: str) -> int:
         return 0
 
 
+# Share of the context window at which a finished gateway turn compresses
+# itself. The in-process path leaves this to the agent's own compressor, which
+# a gateway deployment does not expose, so a gateway session had no ceiling at
+# all: the indicator could read 169% and nothing acted on it. 75 is the step
+# where the ring turns red and offers the manual button, so the automatic
+# ceiling and the visible warning are the same number.
+_GATEWAY_AUTO_COMPRESS_PCT_DEFAULT = 75
+
+# session_id -> the request size that last triggered an attempt. Compression is
+# allowed to report "unchanged"; without this guard a context that cannot
+# shrink would be summarized again after every single turn.
+_GATEWAY_AUTO_COMPRESS_LAST_TRIGGER: dict[str, int] = {}
+
+
+def gateway_auto_compress_pct(cfg) -> int:
+    """Percent of the window that triggers auto-compression, 0 to disable.
+
+    Overridable with ``webui_auto_compress_pct`` in config.yaml.
+    """
+    raw = cfg.get("webui_auto_compress_pct") if isinstance(cfg, dict) else None
+    if raw is None:
+        return _GATEWAY_AUTO_COMPRESS_PCT_DEFAULT
+    try:
+        pct = int(float(raw))
+    except (TypeError, ValueError):
+        return _GATEWAY_AUTO_COMPRESS_PCT_DEFAULT
+    return max(0, min(100, pct))
+
+
+def gateway_auto_compress_threshold_tokens(cfg, context_length) -> int:
+    """The token count the auto-compress ceiling lands on for this window."""
+    window = _gateway_usage_int(context_length)
+    pct = gateway_auto_compress_pct(cfg)
+    if not window or not pct:
+        return 0
+    return int(round(window * pct / 100))
+
+
+def maybe_autocompress_gateway_session(session_id: str, usage: dict, cfg=None) -> bool:
+    """Start a compression job when the finished turn sat above the ceiling.
+
+    Runs the same job the composer's "compress now" button starts, so the
+    guards, the status endpoint and the transcript marker are all the existing
+    ones. Returns whether a job was admitted.
+    """
+    pct = gateway_auto_compress_pct(cfg)
+    if not pct or not session_id:
+        return False
+    window = _gateway_usage_int((usage or {}).get("context_length"))
+    prompt_tokens = _gateway_usage_int((usage or {}).get("last_prompt_tokens"))
+    if not window or not prompt_tokens:
+        return False
+    if prompt_tokens * 100 < window * pct:
+        return False
+    if prompt_tokens <= _GATEWAY_AUTO_COMPRESS_LAST_TRIGGER.get(session_id, 0):
+        # Already attempted at this size and the context did not come down.
+        # Wait until it actually grows again.
+        return False
+    try:
+        # Compression runs in this process against the local agent bundle. A
+        # WebUI deployed without it can still talk to a gateway, and there the
+        # honest answer is to leave the context alone rather than fail a job on
+        # every turn above the ceiling.
+        import agent.context_compressor  # noqa: F401
+    except Exception:
+        logger.debug("Gateway auto-compression unavailable: no local compressor")
+        return False
+    try:
+        from api.routes import _ManualCompressionMemoryHandler, _handle_session_compress_start
+
+        handler = _ManualCompressionMemoryHandler()
+        _handle_session_compress_start(handler, {"session_id": session_id})
+        payload = handler.payload()
+    except Exception:
+        logger.debug("Gateway auto-compression could not start for %s", session_id, exc_info=True)
+        return False
+    started = isinstance(payload, dict) and payload.get("status") == "running"
+    if started:
+        _GATEWAY_AUTO_COMPRESS_LAST_TRIGGER[session_id] = prompt_tokens
+        logger.info(
+            "Gateway auto-compression started for session %s (%s of %s tokens, ceiling %s%%)",
+            session_id, prompt_tokens, window, pct,
+        )
+    return started
+
+
 def _apply_gateway_usage_to_session(session, usage: dict, *, cfg=None, model: str = "",
                                     model_provider: str = "") -> dict:
     """Fold one gateway turn's usage into the session and complete the payload.
@@ -584,8 +670,13 @@ def _apply_gateway_usage_to_session(session, usage: dict, *, cfg=None, model: st
         resolved_context_length = _gateway_context_length(cfg, model, model_provider)
         if resolved_context_length:
             session.context_length = resolved_context_length
-        # A turn that spends more than the auto-compress threshold is what the
-        # tooltip warns about, so carry whatever the session already knows.
+        # The ceiling this path enforces itself, so the tooltip's "auto-compress
+        # at …" line states a number that something actually acts on.
+        auto_threshold = gateway_auto_compress_threshold_tokens(
+            cfg, getattr(session, "context_length", 0)
+        )
+        if auto_threshold:
+            session.threshold_tokens = auto_threshold
         usage["threshold_tokens"] = _gateway_usage_int(getattr(session, "threshold_tokens", 0))
         usage["context_length"] = _gateway_usage_int(getattr(session, "context_length", 0))
         # The indicator reads input/output as session totals (the in-process
@@ -1592,6 +1683,10 @@ def _run_gateway_chat_streaming(
         from api.streaming import _session_payload_with_full_messages
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
+        # Announce the compression only once the job exists, so the frontend
+        # polls a job that is already registered rather than racing it.
+        if maybe_autocompress_gateway_session(session_id, usage, cfg):
+            put_gateway_event("compress_started", {"session_id": session_id, "automatic": True})
         put_gateway_event("stream_end", {"session_id": session_id})
     except urllib.error.HTTPError as exc:
         try:

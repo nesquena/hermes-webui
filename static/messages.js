@@ -6499,6 +6499,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       snapshotLiveTurn();
     });
 
+    source.addEventListener('compress_started',e=>{
+      // The gateway path enforces the context ceiling itself: when a turn ends
+      // above it, the server admits the same job the composer's compress
+      // button starts. Pick it up through the normal resume path so the
+      // running card, the polling and the applied result are the usual ones.
+      try{
+        const d=JSON.parse(e.data||'{}');
+        const sid=d.session_id||activeSid;
+        if(sid!==activeSid) return;
+        if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
+      }catch(_){}
+    });
+
     source.addEventListener('compressed',e=>{
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
