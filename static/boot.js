@@ -403,13 +403,43 @@ function toggleMobileSidebar(){
   else{
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    // a11y: announce the expanded state and move focus into the drawer.
+    // Opening it used to leave focus on <body>, so a screen reader user had no
+    // idea the navigation had appeared (WCAG 2.4.3 / 4.1.2).
+    _syncMobileSidebarToggleState(true);
+    setTimeout(()=>{
+      const first=sidebar.querySelector('.mobile-sidebar-close')
+        ||sidebar.querySelector('button,a[href],input,select,[tabindex]:not([tabindex="-1"])');
+      if(first&&typeof first.focus==='function') first.focus();
+    },0);
   }
+}
+/* a11y: keep aria-expanded / aria-controls on the hamburger in sync. */
+function _syncMobileSidebarToggleState(open){
+  const btn=$('btnHamburger');
+  if(!btn) return;
+  const sidebar=document.querySelector('.sidebar');
+  if(sidebar){
+    if(!sidebar.id) sidebar.id='sidebar';
+    btn.setAttribute('aria-controls',sidebar.id);
+  }
+  btn.setAttribute('aria-expanded',open?'true':'false');
 }
 function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
+  // a11y: if focus is still inside the drawer we are closing, hand it back to
+  // the hamburger button rather than dropping it on <body>.
+  const focusInside=!!(sidebar&&document.activeElement&&sidebar.contains(document.activeElement));
   if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
+  _syncMobileSidebarToggleState(false);
+  if(focusInside){
+    const btn=$('btnHamburger');
+    if(btn&&typeof btn.focus==='function'&&getComputedStyle(btn).display!=='none'){
+      try{ btn.focus(); }catch(_e){ /* button hidden on desktop */ }
+    }
+  }
 }
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;
@@ -2501,10 +2531,16 @@ document.addEventListener('keydown',async e=>{
     return;
   }
   if(e.key==='Escape'){
-    // Close onboarding overlay if open (skip/dismiss the wizard)
+    // First-run wizard: Escape must NOT silently abandon setup (WCAG 3.3.4).
+    // Skipping is irreversible — it persists onboarding_completed and the
+    // wizard never reappears — so an accidental Escape used to cost the user
+    // their provider, model, workspace and password configuration with no
+    // warning and no way back.  Escape now only announces how to skip on
+    // purpose; the visible "Skip setup" button remains the deliberate path.
     const onboardingOverlay=$('onboardingOverlay');
     if(onboardingOverlay&&onboardingOverlay.style.display!=='none'){
-      if(typeof skipOnboarding==='function') skipOnboarding();
+      e.preventDefault();
+      if(typeof announceOnboardingEscape==='function') announceOnboardingEscape();
       return;
     }
     // Close settings panel if active
@@ -2858,7 +2894,12 @@ function _pickSkin(name){
 
 function _syncThemePicker(active){
   document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.themeVal===active);
+    const on=btn.dataset.themeVal===active;
+    btn.classList.toggle('active',on);
+    // a11y: the CSS class alone is invisible to a screen reader — without
+    // aria-pressed the user cannot tell which option is currently in use
+    // (WCAG 1.3.1 / 4.1.2).
+    btn.setAttribute('aria-pressed',on?'true':'false');
     btn.style.borderColor='';
     btn.style.boxShadow='';
   });
@@ -2866,7 +2907,9 @@ function _syncThemePicker(active){
 
 function _syncSkinPicker(active){
   document.querySelectorAll('#skinPickerGrid .skin-pick-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.skinVal===active);
+    const on=btn.dataset.skinVal===active;
+    btn.classList.toggle('active',on);
+    btn.setAttribute('aria-pressed',on?'true':'false');
     btn.style.borderColor='';
     btn.style.boxShadow='';
   });
@@ -2891,7 +2934,9 @@ function _pickFontSize(size){
 
 function _syncFontSizePicker(active){
   document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.fontSizeVal===(active||'default'));
+    const on=btn.dataset.fontSizeVal===(active||'default');
+    btn.classList.toggle('active',on);
+    btn.setAttribute('aria-pressed',on?'true':'false');
     btn.style.borderColor='';
     btn.style.boxShadow='';
   });

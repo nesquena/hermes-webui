@@ -1656,6 +1656,26 @@
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}
+  /* The session title is an <a href> link so the screen reader announces it as
+     navigation to a conversation and opening in a new tab works. Its appearance
+     should remain unchanged relative to the former <span>: no underline, color
+     inherited from the row. The focus indicator MUST be visible — without it a
+     keyboard user does not know where they are (WCAG 2.4.7), and its contrast
+     against the background must be at least 3:1 (WCAG 1.4.11). Therefore
+     var(--accent), NOT var(--focus-ring): --focus-ring is semi-transparent
+     (alpha .35), so it blends into the panel background — measured from pixels
+     it yielded 1.15:1 where 3:1 is required.
+     NOTE on `color`: NOT `inherit`. The browser gives <a> its own color, so it
+     must be overridden — but `inherit` takes the PARENT color (.session-item has
+     var(--muted), gray), while the former <span> had its own rule with
+     var(--text). Measured: titles became gray rgb(192,192,192) instead of
+     rgb(255,248,220), so the accessibility fix dimmed the whole list.
+     Therefore use var(--text) explicitly — just like the rule above for
+     .session-title. */
+  a.session-title{text-decoration:none;color:var(--text);cursor:pointer;}
+  a.session-title:hover{text-decoration:none;}
+  a.session-title:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px;}
+  .session-date-header:focus-visible,.session-select-toggle:focus-visible,.project-chip:focus-visible,.session-archive-more:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -1830,7 +1850,7 @@
   .session-date-header.pinned{color:var(--accent);}
 
   /* ── Batch select mode ── */
-  .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.6;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}
+  .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.85;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}
   .session-select-toggle:hover{opacity:1;background:var(--hover-bg);}
   .session-select-bar{display:flex;align-items:center;gap:6px;padding:6px 10px;margin-bottom:4px;flex-shrink:0;}
   .batch-exit-btn{width:22px;height:22px;border:none;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;padding:0;flex-shrink:0;}
@@ -5849,7 +5869,10 @@ main.main > #mainPlugin{display:none;}
   text-transform: uppercase;
   letter-spacing: .04em;
   color: var(--accent-text);
-  opacity: .65;
+  /* a11y: was .65 — measured 1.9:1 against the sidebar background, far below
+     the 4.5:1 required for this text size (WCAG 1.4.3).  Full opacity keeps the
+     chip visually secondary through its small size and muted background. */
+  opacity: 1;
   padding: 1px 5px;
   border-radius: 3px;
   background: rgba(128, 128, 128, 0.12);
@@ -5867,15 +5890,35 @@ main.main > #mainPlugin{display:none;}
 .session-item.menu-open .session-source-chip {
   display: none;
 }
-/* Source-specific colors for gateway sessions */
-.session-item.cli-session[data-source-key="telegram"] { border-left-color: rgba(0, 136, 204, 0.55); }
-.session-source-chip[data-source-key="telegram"] { color: rgba(0, 136, 204, 0.85); background: rgba(0, 136, 204, 0.12); }
-.session-item.cli-session[data-source-key="discord"] { border-left-color: #5865F2; }
-.session-source-chip[data-source-key="discord"] { color: #5865F2; background: rgba(88, 101, 242, 0.12); }
-.session-item.cli-session[data-source-key="slack"] { border-left-color: #4A154B; }
-.session-source-chip[data-source-key="slack"] { color: #4A154B; background: rgba(74, 21, 75, 0.12); }
-.session-item.cli-session[data-source-key="claude_code"] { border-left-color: rgba(217, 119, 6, 0.65); }
-.session-source-chip[data-source-key="claude_code"] { color: rgba(217, 119, 6, 0.85); background: rgba(217, 119, 6, 0.12); }
+/* Source-specific colors for gateway sessions.
+   ONE mechanism, per-source DATA — not four copies of the same declaration.
+
+   a11y (WCAG 1.4.3): the chip text is 9px, so it needs 4.5:1. Measured against
+   the real sidebar row, every brand hue failed at full saturation:
+     telegram 2.92:1   discord 2.99:1   slack 1.10:1   claude_code 3.40:1
+   Slack's #4A154B was effectively invisible — 1.1:1 is barely distinguishable
+   from the background at all.
+
+   The fix keeps each brand recognisable instead of flattening them to grey: the
+   shared rule below lightens the brand hue toward white by exactly as much as
+   that hue needs, so the chip still reads "Telegram blue" / "Slack aubergine".
+   --source-tint-keep is how much of the brand hue survives; the default is the
+   value the DARKEST hue needs, so a newly added source is legible before anyone
+   measures it (fail safe, not fail pretty). Add a source by declaring its hue;
+   only override the keep value if a measurement shows it can carry more.
+   Note the hues are OPAQUE here on purpose — alpha on text multiplies against
+   the background and silently eats contrast, which is how these got so low. */
+.session-source-chip[data-source-key] {
+  color: color-mix(in srgb, var(--source-hue) var(--source-tint-keep, 50%), white);
+  background: color-mix(in srgb, var(--source-hue) 12%, transparent);
+}
+.session-item.cli-session[data-source-key] {
+  border-left-color: color-mix(in srgb, var(--source-hue) 55%, transparent);
+}
+[data-source-key="telegram"]    { --source-hue: #0088CC; --source-tint-keep: 78%; }
+[data-source-key="discord"]     { --source-hue: #5865F2; --source-tint-keep: 74%; }
+[data-source-key="slack"]       { --source-hue: #4A154B; --source-tint-keep: 50%; }
+[data-source-key="claude_code"] { --source-hue: #D97706; --source-tint-keep: 88%; }
 
 /* ═══════════════════════════════════════════════════════════════════
    Messages redesign — additive overrides for the transcript area.
@@ -7322,3 +7365,43 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+
+/* ── a11y helpers ──────────────────────────────────────────────────────────
+   Added while fixing accessibility audit findings (WCAG 2.2 / EN 301 549). */
+
+/* Content available to screen readers but not shown visually.  Used for the
+   document's single <h1>: the title bar carries the visible branding, but a
+   heading-navigation user needs a real level-1 heading (WCAG 1.3.1). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Bypass block (WCAG 2.4.1).  Off-screen until focused, then anchored top-left
+   so a keyboard user can see where the first Tab landed. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 10000;
+  padding: 10px 16px;
+  background: var(--accent-bg, #2563eb);
+  color: var(--accent-text, #fff);
+  border: 2px solid var(--focus-ring, #fff);
+  border-radius: 0 0 8px 0;
+  font: 600 13px/1.3 var(--font-ui, system-ui, sans-serif);
+  text-decoration: none;
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  left: 0;
+  outline: 3px solid var(--focus-ring, #fff);
+  outline-offset: 2px;
+}

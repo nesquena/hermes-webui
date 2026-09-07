@@ -8802,6 +8802,28 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     return window, start_idx
 
 
+def _renderable_count_before(messages, offset) -> int:
+    """How many VISIBLE rows precede a window offset.
+
+    The offset returned by ``_message_window_for_display`` counts raw storage
+    rows, but the transcript numbers visible turns: a 194-row window holds 100
+    of them, and tool rows are folded into cards. Deriving "how far into the
+    conversation am I" from the raw offset would therefore drift badly.
+
+    Counting with the same ``_message_counts_as_renderable_for_window`` predicate
+    that carved the window keeps both sides in one coordinate space, so a heading
+    numbered N really is the Nth thing the user can reach.
+    """
+    try:
+        idx = int(offset or 0)
+    except (TypeError, ValueError):
+        return 0
+    if idx <= 0:
+        return 0
+    rows = list(messages or [])[:idx]
+    return sum(1 for row in rows if _message_counts_as_renderable_for_window(row))
+
+
 _LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
 # Server-side ceiling on the ?msg_limit= tail-window size. A client could
 # otherwise request msg_limit=1000000 and force the server to assemble and
@@ -10167,6 +10189,10 @@ def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
         "parent_session_id",
         "end_reason",
         "actual_message_count",
+        # Live work state from the agent itself: without it the browser cannot
+        # tell that a CLI/TUI turn is in flight (see _agent_row_live_work_state).
+        "last_activity_at",
+        "last_activity_description",
         "_lineage_root_id",
         "_lineage_tip_id",
         "_compression_segment_count",
@@ -13692,6 +13718,18 @@ def handle_get(handler, parsed) -> bool:
             else:
                 _truncated_msgs = []
                 _messages_offset = 0
+            # How many VISIBLE turns precede the window. The transcript numbers
+            # turns for heading navigation, and counting from the first row in
+            # the DOM restarted at 1 in every long session: a session with
+            # hundreds of turns announced "1." for a message far into the
+            # conversation, so the number said nothing about where the user was.
+            # ``_messages_offset`` cannot be used directly — it counts raw
+            # storage rows (measured: offset 978 for a window holding 100 visible
+            # turns out of 194 rows).
+            _visible_before = (
+                _renderable_count_before(_all_msgs, _messages_offset)
+                if load_messages else 0
+            )
             # Index of the first returned message in the full message array.
             # Frontend uses this as cursor for scroll-to-top paging.
             _windowed_messages = (
@@ -13856,13 +13894,63 @@ def handle_get(handler, parsed) -> bool:
                 # keep the raw count available as ``actual_message_count`` but
                 # do not let it make the frontend expect phantom messages.
                 raw["message_count"] = _merged_message_count
+            # The agent's own live work state, for EVERY source — deliberately
+            # outside the branches above. The WebUI's is_streaming /
+            # active_stream_id only describe streams this server owns, so a turn
+            # running in the CLI/TUI reads as "finished" in the browser while the
+            # agent is still working (reported with a terminal and a browser open
+            # on the same session; measured: is_streaming=False while the agent
+            # was mid-turn). The webui branch reconciles source flags and the
+            # messaging branch merges sidebar metadata, so a CLI session fell
+            # through both and never received this.
+            if cli_meta:
+                for _live_key in ("last_activity_at", "last_activity_description"):
+                    _live_value = cli_meta.get(_live_key)
+                    if _live_value not in (None, ""):
+                        raw[_live_key] = _live_value
             # Signal to the frontend that older messages were omitted. The
             # message window cursor already reflects visible-row pagination and
             # avoids false positives when raw hidden tool rows exceed msg_limit.
             _truncated = load_messages and msg_limit is not None and _messages_offset > 0
             raw["_messages_truncated"] = _truncated
             raw["_messages_offset"] = _messages_offset
+            # Visible-turn coordinates for heading numbering. Two numbers, both in
+            # the same space as the rows the user can actually reach:
+            #   _visible_turns_before — how many turns are hidden above the window
+            #   _visible_turns_total  — how many the whole conversation has
+            # so a heading can say "turn 43 of 61" instead of restarting at 1 on
+            # every reload of a long session.
+            raw["_visible_turns_before"] = _visible_before
+            raw["_visible_turns_total"] = (
+                _visible_before
+                + sum(
+                    1 for _row in (_truncated_msgs or [])
+                    if _message_counts_as_renderable_for_window(_row)
+                )
+            ) if load_messages else 0
             raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+            # Change marker that does NOT depend on ?messages=.
+            #
+            # Measured defect: /api/session returns two different
+            # ``message_count`` values for the same session in the same instant —
+            # 1346 with messages=1 (rows after merge/dedup, what the transcript
+            # shows) and 2397 with messages=0 (raw state.db rows). The refresh
+            # probe fetches metadata-only while loading a session fetches
+            # messages, so ``remoteCount !== localCount`` compares two different
+            # coordinate spaces: always true, never informative. A transcript
+            # driven from the CLI could therefore not be told apart from an
+            # unchanged one, which is why new terminal output did not appear in
+            # the browser.
+            #
+            # ``last_message_at`` is identical across both shapes (verified), so
+            # it is the honest "something arrived" signal. Expose it under an
+            # explicit name rather than overloading message_count, whose two
+            # meanings other call sites already depend on.
+            try:
+                _marker = float(raw.get("last_message_at") or raw.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                _marker = 0.0
+            raw["_transcript_marker"] = _marker
             _t4 = _time.monotonic()
             if _diag: _diag.stage("t4_after_compact_and_merge")
             if effective_model:

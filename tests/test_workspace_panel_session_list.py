@@ -7,10 +7,12 @@
    flex-shrink ratios or container queries.
 
 2. Project color dot truncation — the dot used to be appended INSIDE the
-   `.session-title` span (which is `overflow:hidden;text-overflow:ellipsis`),
-   so the dot got clipped along with long titles. Fix moves the dot to a
-   flex sibling in `.session-title-row` between title and timestamp, and
-   moves `.session-time` from `position:absolute` to flex flow so the
+   `.session-title` element (which is `overflow:hidden;text-overflow:ellipsis`;
+   an accessibility fix later turned that element from a `span` into an
+   `<a href>` link, but the truncation behaviour and this contract are
+   unchanged), so the dot got clipped along with long titles. Fix moves the
+   dot to a flex sibling in `.session-title-row` between title and timestamp,
+   and moves `.session-time` from `position:absolute` to flex flow so the
    title's `flex:1` bound stops at the timestamp's left edge.
 """
 

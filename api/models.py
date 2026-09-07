@@ -7596,6 +7596,30 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     return dict(metadata)
 
 
+def _agent_row_live_work_state(row: dict) -> dict:
+    """Project the agent's own live work state onto a session row.
+
+    ``is_streaming``/``active_stream_id`` only describe streams this server owns,
+    so a turn running in the CLI/TUI is invisible here: the browser shows a
+    session that looks finished while the agent is still working (reported with a
+    terminal and a browser open on the same session).
+
+    Hermes writes its current step into ``sessions.last_activity_at`` /
+    ``last_activity_description`` for every source, so pass both through and let
+    the caller decide how to present them. Measured descriptions look like
+    "receiving stream response", "executing tool: terminal",
+    "terminal command running (60s elapsed)".
+
+    One helper, because this projection is built in four sibling passes (the
+    interactive window plus the cron/webhook/kanban rescue passes); a fifth copy
+    would silently miss the state again.
+    """
+    return {
+        'last_activity_at': row.get('last_activity_at'),
+        'last_activity_description': row.get('last_activity_description'),
+    }
+
+
 def _load_cli_sessions_uncached(
     hermes_home: Path,
     db_path: Path,
@@ -7777,6 +7801,7 @@ def _load_cli_sessions_uncached(
             'relationship_type': row.get('relationship_type'),
             '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
             'end_reason': row.get('end_reason'),
+            **_agent_row_live_work_state(row),
             'actual_message_count': row.get('actual_message_count'),
             'user_message_count': row.get('actual_user_message_count'),
             '_lineage_root_id': row.get('_lineage_root_id'),
@@ -7849,6 +7874,7 @@ def _load_cli_sessions_uncached(
                     'relationship_type': row.get('relationship_type'),
                     '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
                     'end_reason': row.get('end_reason'),
+                    **_agent_row_live_work_state(row),
                     'actual_message_count': row.get('actual_message_count'),
                     'user_message_count': row.get('actual_user_message_count'),
                     '_lineage_root_id': row.get('_lineage_root_id'),
@@ -7915,6 +7941,7 @@ def _load_cli_sessions_uncached(
                     'relationship_type': row.get('relationship_type'),
                     '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
                     'end_reason': row.get('end_reason'),
+                    **_agent_row_live_work_state(row),
                     'actual_message_count': row.get('actual_message_count'),
                     'user_message_count': row.get('actual_user_message_count'),
                     '_lineage_root_id': row.get('_lineage_root_id'),
@@ -7979,6 +8006,7 @@ def _load_cli_sessions_uncached(
                     'relationship_type': row.get('relationship_type'),
                     '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
                     'end_reason': row.get('end_reason'),
+                    **_agent_row_live_work_state(row),
                     'actual_message_count': row.get('actual_message_count'),
                     'user_message_count': row.get('actual_user_message_count'),
                     '_lineage_root_id': row.get('_lineage_root_id'),
@@ -9717,6 +9745,25 @@ def _session_message_visible_key(
     ), msg)
 
 
+# Word-index tuning for _matching_visible_duplicate. The thresholds come from
+# reasoning about when the index CAN help, not from micro-benchmarks: repeated
+# timings of the untouched merge on small transcripts vary by up to 4.3x, so any
+# small difference measured there would be noise, not signal.
+#
+# _WORD_INDEX_MIN_CANDIDATES: below this many same-role keys the saved iterations
+#   cannot outweigh building dicts and calling min(), so the original full scan
+#   runs. Real transcripts that hurt have 1.1k-9k same-role keys, far above it.
+# _WORD_INDEX_MIN_CHARS: word tokens do not model raw substring containment for
+#   short strings ("abc" sits inside "xabcy" with disjoint word sets), so short
+#   texts are always scanned instead of indexed.
+# _WORD_INDEX_MAX_CHARS: tokenizing megabyte tool dumps would cost more than the
+#   scan it saves; such keys stay on the always-check list.
+_WORD_INDEX_MIN_CANDIDATES = 250
+_WORD_INDEX_MIN_CHARS = 64
+_WORD_INDEX_MAX_CHARS = 20_000
+_WORD_INDEX_TOKEN = re.compile(r"\w+")
+
+
 def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     by_role = {}
     for key in visible_keys:
@@ -9737,6 +9784,82 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
 _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
 
 
+def _visible_duplicate_word_index(candidates: list) -> dict:
+    """Build a word index that narrows duplicate candidates without changing results.
+
+    ``_matching_visible_duplicate`` scans every same-role key to decide whether an
+    incoming row is a replay. That scan is quadratic in the number of same-role
+    rows, and profiling a real 14.8k-message transcript showed 97.5% of the cost
+    goes into proving a row has NO duplicate: 1327 probes walked 905k candidates
+    to return None. The 200k-char guard below never engaged, because the largest
+    message in these transcripts is 96k chars.
+
+    The index exploits a necessary condition of substring containment: if X is
+    contained in Y, every word of X also occurs in Y. Two directions must be
+    covered, because the matcher tests containment BOTH ways:
+
+    * incoming shorter: candidates must contain the incoming text's rarest word;
+    * candidate shorter: the candidate's own rarest word must appear in the
+      incoming text.
+
+    Anything that cannot satisfy the condition safely stays on ``always`` and is
+    checked every time (fail open, never fail lossy):
+
+    * texts shorter than _WORD_INDEX_MIN_CHARS, where word tokens do not model
+      raw containment ("abc" is inside "xabcy" but the word sets are disjoint);
+    * texts above _WORD_INDEX_MAX_CHARS, which are rare and not worth tokenizing;
+    * texts with no word characters at all.
+
+    Truncating the word set (an earlier attempt capped it at 400 words) breaks the
+    necessary condition in both directions and silently drops matches, so the
+    tokenization is complete for everything that enters the index.
+    """
+    always: list = []
+    indexed: list = []
+    words_by_id: dict[int, set] = {}
+    for key in candidates:
+        text = str((key[1] if len(key) > 1 else "") or "")
+        if len(text) < _WORD_INDEX_MIN_CHARS or len(text) > _WORD_INDEX_MAX_CHARS:
+            always.append(key)
+            continue
+        words = set(_WORD_INDEX_TOKEN.findall(text.casefold()))
+        if not words:
+            always.append(key)
+            continue
+        words_by_id[id(key)] = words
+        indexed.append(key)
+    frequency: collections.Counter = collections.Counter()
+    for key in indexed:
+        frequency.update(words_by_id[id(key)])
+    by_word: dict = {}
+    by_rarest: dict = {}
+    for key in indexed:
+        words = words_by_id[id(key)]
+        for word in words:
+            by_word.setdefault(word, []).append(key)
+        by_rarest.setdefault(min(words, key=lambda w: frequency[w]), []).append(key)
+    return {"by_word": by_word, "by_rarest": by_rarest, "always": always}
+
+
+def _narrowed_visible_duplicate_candidates(index: dict, content: str) -> list:
+    """Candidates that could match ``content`` — a superset of the real matches."""
+    narrowed = list(index["always"])
+    words = set(_WORD_INDEX_TOKEN.findall(str(content or "").casefold()))
+    if not words:
+        # Nothing to narrow by: fall back to every indexed key so a wordless
+        # probe can never miss a match the full scan would have found.
+        for bucket in index["by_word"].values():
+            narrowed.extend(bucket)
+        return narrowed
+    by_word = index["by_word"]
+    rarest = min(words, key=lambda w: len(by_word.get(w, ())))
+    narrowed.extend(by_word.get(rarest, ()))
+    by_rarest = index["by_rarest"]
+    for word in words:
+        narrowed.extend(by_rarest.get(word, ()))
+    return narrowed
+
+
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
     if visible_key in visible_keys:
         return visible_key
@@ -9755,7 +9878,20 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         lookup = _build_visible_duplicate_lookup(visible_keys)
     loose_content = None
     loose_by_key = lookup.setdefault("loose_by_key", {})
-    for existing_key in lookup.get("by_role", {}).get(role, []):
+    candidates = lookup.get("by_role", {}).get(role, [])
+    # Narrow the scan for roles large enough that the index pays for itself. Below
+    # the threshold Python's dict/min() overhead dominates the few iterations
+    # saved, so small transcripts keep the original path untouched. The index is
+    # only a filter: every candidate it yields still goes through the exact
+    # comparisons below, so the outcome is identical either way.
+    if len(candidates) >= _WORD_INDEX_MIN_CANDIDATES:
+        word_indexes = lookup.setdefault("word_indexes", {})
+        index = word_indexes.get(role)
+        if index is None:
+            index = _visible_duplicate_word_index(candidates)
+            word_indexes[role] = index
+        candidates = _narrowed_visible_duplicate_candidates(index, content)
+    for existing_key in candidates:
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         existing_sidecar = existing_key[3] if len(existing_key) > 3 else None

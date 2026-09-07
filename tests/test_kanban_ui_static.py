@@ -333,14 +333,50 @@ def test_kanban_edit_mode_preserves_status_when_dropdown_untouched():
 
 
 def test_kanban_modal_focus_trap_helper_exists():
-    """Shared focus-trap helper should exist and attach/remove Tab key handling."""
+    """Focus trap must still trap Tab and tear the handler down.
+
+    Updated for the a11y fix that moved the shared behaviour into
+    `static/a11y-helpers.js` (`a11yTrapFocus`). `_trapModalFocus` is now a thin
+    delegator, so asserting that THIS function body registers the keydown
+    listener pinned the old structure rather than the behaviour: the twin Kanban
+    dialogs used to trap Tab but never restore focus to the opener, dropping
+    keyboard and screen reader users onto <body> (WCAG 2.4.3).
+
+    The contract that actually matters is checked on both live paths: the shared
+    helper (used when it is loaded) and the in-file fallback (used when it is
+    not). Either way Tab is trapped and the handler is removed on cleanup.
+    """
     assert "function _trapModalFocus" in PANELS
     fn = re.search(r"function _trapModalFocus\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
     assert fn, "_trapModalFocus() not found"
     fn_body = fn.group(1)
-    assert "addEventListener('keydown'" in fn_body
-    assert "removeEventListener('keydown'" in fn_body
-    assert "ev.key !== 'Tab'" in fn_body or "ev.key === 'Tab'" in fn_body
+
+    # Path 1: delegation to the shared helper, with focus restored to the opener.
+    assert "a11yTrapFocus(" in fn_body, (
+        "_trapModalFocus must delegate to the shared a11yTrapFocus helper so "
+        "every modal behaves identically — duplicated copies of this pattern "
+        "were the original defect."
+    )
+    assert "restoreFocus: true" in fn_body, (
+        "Closing a modal must return focus to the element that opened it."
+    )
+
+    # Path 2: in-file fallback keeps the original Tab handling.
+    fb = re.search(r"function _trapModalFocusFallback\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert fb, "_trapModalFocusFallback() not found"
+    fb_body = fb.group(1)
+    assert "addEventListener('keydown'" in fb_body
+    assert "removeEventListener('keydown'" in fb_body
+    assert "ev.key !== 'Tab'" in fb_body or "ev.key === 'Tab'" in fb_body
+
+    # The shared helper itself must do the same, or the delegation is a downgrade.
+    helpers = (Path(__file__).resolve().parent.parent / "static" / "a11y-helpers.js").read_text(
+        encoding="utf-8"
+    )
+    assert "function a11yTrapFocus" in helpers
+    assert "addEventListener('keydown'" in helpers
+    assert "removeEventListener('keydown'" in helpers
+    assert "ev.key !== 'Tab'" in helpers or "ev.key === 'Tab'" in helpers
 
 
 def test_kanban_task_modal_focus_trap_is_installed_and_removed():

@@ -4165,16 +4165,22 @@ function _mountSearchableModelSelect(opts={}){
   const listedSelection=listedChoiceIds.has(selectedValue) ? selectedValue : '';
   const customSelection=listedSelection ? '' : selectedValue;
   let lastListedValue=listedSelection||(choices[0]?choices[0].id:'');
+  // a11y: every control here needs an accessible name.  Placeholders are not
+  // names — a screen reader user tabbing into these fields used to hear only
+  // "edit, blank" (WCAG 1.3.1 / 3.3.2 / 4.1.2).
+  const searchLabel=esc(t('model_search_label')||t('model_search_placeholder')||'Search models');
+  const listLabel=esc(t('model_list_label')||'Model');
+  const customLabel=esc(t('model_custom_label')||'Custom model ID');
   root.innerHTML=
     `<div class="model-search-row">`+
-      `<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off">`+
-      `<button class="model-search-clear" title="Clear search">${li('x',10)}</button>`+
+      `<input class="model-search-input" type="text" aria-label="${searchLabel}" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off">`+
+      `<button class="model-search-clear" type="button" aria-label="${esc(t('model_search_clear')||'Clear search')}" title="Clear search">${li('x',10)}</button>`+
     `</div>`+
-    `<select ${selectId?`id="${esc(selectId)}"`:''}></select>`+
-    `<div class="model-group model-custom-sep">${esc(t('model_custom_label')||'Custom model ID')}</div>`+
+    `<select ${selectId?`id="${esc(selectId)}"`:''} aria-label="${listLabel}"></select>`+
+    `<div class="model-group model-custom-sep">${customLabel}</div>`+
     `<div class="model-custom-row">`+
-      `<input ${customInputId?`id="${esc(customInputId)}"`:''} class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off">`+
-      `<button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`+
+      `<input ${customInputId?`id="${esc(customInputId)}"`:''} class="model-custom-input" type="text" aria-label="${customLabel}" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off">`+
+      `<button class="model-custom-btn" type="button" aria-label="${esc(t('model_custom_use')||'Use this model')}" title="Use this model">${li('plus',12)}</button>`+
     `</div>`;
   const searchInput=root.querySelector('.model-search-input');
   const clearButton=root.querySelector('.model-search-clear');
@@ -4816,6 +4822,19 @@ function renderModelDropdown(){
     if(idx<0||idx>=rows.length) return;
     const row=rows[idx];
     row.classList.add('is-highlighted');
+    // a11y: the highlight is a CSS class, which no screen reader can perceive.
+    // Expose the highlighted row through aria-activedescendant so arrowing
+    // through the list actually announces the model (WCAG 4.1.2).
+    if(!row.id) row.id='model-opt-'+idx+'-'+Math.random().toString(36).slice(2,7);
+    row.setAttribute('role','option');
+    for(const r of rows){ if(r!==row) r.setAttribute('aria-selected','false'); }
+    row.setAttribute('aria-selected','true');
+    if(_si){
+      _si.setAttribute('role','combobox');
+      _si.setAttribute('aria-expanded','true');
+      _si.setAttribute('aria-autocomplete','list');
+      _si.setAttribute('aria-activedescendant',row.id);
+    }
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
   };
   _si.addEventListener('keydown',e=>{
@@ -4834,6 +4853,19 @@ function renderModelDropdown(){
     }
   });
   _si.addEventListener('click',e=>e.stopPropagation());
+  // a11y: Escape must close the list from anywhere inside it, not only from the
+  // search field.  Keyboard users who reach the option rows or the custom-model
+  // input otherwise had no way out (WCAG 2.1.2).
+  // Guarded: the node test harnesses stub `document` with only the handful of
+  // methods they need, so getElementById may be absent here (#3691 driver).
+  const _ddRoot=(typeof document!=='undefined'&&typeof document.getElementById==='function')
+    ? document.getElementById('composerModelDropdown') : null;
+  if(_ddRoot&&_ddRoot.dataset&&!_ddRoot.dataset.escBound&&typeof _ddRoot.addEventListener==='function'){
+    _ddRoot.dataset.escBound='1';
+    _ddRoot.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){ e.preventDefault(); e.stopPropagation(); closeModelDropdown(); }
+    });
+  }
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
@@ -4894,15 +4926,45 @@ async function toggleModelDropdown(){
   chip.classList.add('active');
   const mobileAction=$('composerMobileModelAction');
   if(mobileAction) mobileAction.classList.add('active');
+  // a11y: move focus into the panel and expose the expanded state.
+  // Arrow-key navigation and Escape are bound to the search input (see the
+  // keydown handler above), so leaving focus on the chip made both dead for
+  // keyboard users: arrows did nothing and Escape would not close the list
+  // (WCAG 2.1.1 / 2.4.3).  Capability-guarded for the node harnesses.
+  if(typeof chip.setAttribute==='function') chip.setAttribute('aria-expanded','true');
+  if(mobileAction&&typeof mobileAction.setAttribute==='function') mobileAction.setAttribute('aria-expanded','true');
+  if(typeof dd.querySelector==='function'){
+    setTimeout(()=>{
+      const si=dd.querySelector('.model-search-input');
+      if(si&&typeof si.focus==='function') si.focus();
+    },0);
+  }
 }
 
 function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
+  // a11y: hand focus back to the chip that opened the list, but only if focus
+  // is still inside the panel we are closing — otherwise we would yank it away
+  // from wherever the user has since moved (WCAG 2.4.3).
+  // Every DOM call here is capability-guarded: the node DOM-parentage harnesses
+  // stub chip/dd with plain objects carrying only classList and style (#6080).
+  const focusWasInside=!!(dd&&typeof dd.contains==='function'
+    &&typeof document!=='undefined'&&document.activeElement
+    &&dd.contains(document.activeElement));
   if(dd) dd.classList.remove('open');
-  if(chip) chip.classList.remove('active');
-  if(mobileAction) mobileAction.classList.remove('active');
+  if(chip){
+    chip.classList.remove('active');
+    if(typeof chip.setAttribute==='function') chip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    if(typeof mobileAction.setAttribute==='function') mobileAction.setAttribute('aria-expanded','false');
+  }
+  if(focusWasInside&&chip&&typeof chip.focus==='function'){
+    try{ chip.focus(); }catch(_e){ /* chip removed mid-close */ }
+  }
   // If the phone path reparented the menu onto <body>, put it back in the
   // footer and clear the fixed-position inline styles so the DOM returns to its
   // baseline shape and the next desktop open anchors correctly (#6080).
@@ -10027,6 +10089,10 @@ async function refreshSession() {
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
+    // Heading numbering is GLOBAL - recompute it when the window changes.
+    if (typeof a11ySetTurnNumbering === 'function') {
+      a11ySetTurnNumbering(data.session._visible_turns_before, data.session._visible_turns_total);
+    }
     if (typeof _mergePendingSessionMessage !== 'function') {
       throw new Error('Pending-session merge helper unavailable');
     }
@@ -11224,7 +11290,13 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
+  // aria-hidden on the role icon: it is a CIRCLE WITH THE FIRST LETTER of the
+  // name ("H"), so it is pure visual decoration duplicating the adjacent label.
+  // Without this a screen reader reads the letter as separate text and the label
+  // becomes "H Hermes" — measured in the accessibility tree on the live app and
+  // reported by the user as "HHermes". The name remains in .msg-role-name, so
+  // nothing is lost and one piece of information stops being read twice.
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant" aria-hidden="true">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
 }
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
@@ -11888,6 +11960,37 @@ function _attachCopyButton(header){
 function _transparentEventCountLabel(toolCount){
   return toolCount?`Trace: ${toolCount} ${toolCount===1?'tool':'tools'}`:'Trace';
 }
+/* a11y (WCAG 4.1.2): the Full/Output bar has role="tab", but the active state
+   existed only as a CSS `.active` class — a screen reader said "Output tab"
+   and did not say which one was selected. We already fixed the same defect in
+   Settings > Extensions; this is its third copy (the bar is created in 3 places:
+   twice via createElement and once in the card's HTML template).
+
+   We declare the state through ONE function called from the switcher below,
+   instead of adding attributes in three HTML-building places — otherwise a
+   fourth copy would be born mute again. The panel is single and shared by both
+   tabs ("output" mode only hides arguments in the same container), so the
+   helper attaches its name to the ACTIVE tab. */
+function _syncTransparentDetailTabsA11y(detail, mode){
+  if(!detail||typeof detail.querySelector!=='function') return;
+  const modes=detail.querySelector('.transparent-detail-modes');
+  if(!modes) return;
+  if(typeof a11yTablist!=='function'){
+    // Fallback: even without the helper we still declare the selected state,
+    // because that is the actual defect. Arrow-key navigation requires the
+    // helper, and then its absence is expected.
+    modes.querySelectorAll('[role="tab"]').forEach(el=>{
+      el.setAttribute('aria-selected', el.getAttribute('data-mode')===mode?'true':'false');
+    });
+    return;
+  }
+  a11yTablist(modes,{
+    label:(typeof t==='function'?t('tool_detail_tabs_aria'):null)||'Tool detail view',
+    activeKey:mode,
+    keyOf:(el)=>el.getAttribute('data-mode'),
+    panelFor:()=>detail
+  });
+}
 function _setTransparentDetailMode(tab, mode){
   const row=tab&&tab.closest?tab.closest('.transparent-event-row'):null;
   const detail=row&&row.querySelector('.tool-card-detail');
@@ -11897,6 +12000,7 @@ function _setTransparentDetailMode(tab, mode){
   detail.querySelectorAll('.transparent-detail-mode').forEach(el=>{
     el.classList.toggle('active', el===tab || el.getAttribute('data-mode')===next);
   });
+  _syncTransparentDetailTabsA11y(detail,next);
 }
 function _setTransparentCardOpen(card, open){
   if(!card) return;
@@ -11973,6 +12077,14 @@ function _materializeTransparentToolDetail(row){
       if(firstChild&&firstChild.parentNode===detail) detail.insertBefore(modes, firstChild);
       else detail.appendChild(modes);
       detail.setAttribute('data-transparent-detail-mode','full');
+    }
+    // OUTSIDE the condition above: when detail comes from a ready-made template
+    // that ALREADY contains the tab bar, that block does not run - and the
+    // template bar is exactly the one that has no declared state. So we sync
+    // every construction path, not only the one that appends the bar.
+    if(detail){
+      _syncTransparentDetailTabsA11y(
+        detail, detail.getAttribute('data-transparent-detail-mode')||'full');
     }
     // Match the eager path's post-processing so highlight/copy/KaTeX/Mermaid land.
     if(typeof _postProcessWithAnchorSuppression==='function'){
@@ -12288,6 +12400,12 @@ function _decorateTransparentEventRow(row, opts){
         if(firstChild&&firstChild.parentNode===detail) detail.insertBefore(modes, firstChild);
         else detail.appendChild(modes);
         detail.setAttribute('data-transparent-detail-mode','full');
+      }
+      // Outside the condition: the bar may come from the card template (then the
+      // block above does not run), and that exact bar has no declared state.
+      if(detail){
+        _syncTransparentDetailTabsA11y(
+          detail, detail.getAttribute('data-transparent-detail-mode')||'full');
       }
       if(typeof _syncTransparentEventTimestamp==='function') _syncTransparentEventTimestamp(row, header, {toolCall:tc, ts:opts.ts, live:opts.live===true});
       _wireTransparentHeaderToggle(header);
@@ -14632,6 +14750,11 @@ function placeLiveRunStatusHost(){
   return _moveLiveRunStatusToTurnEnd(el);
 }
 function showLiveRunStatus(sid,opts){
+  // a11y: announce that work has started (WCAG 4.1.3).  Must run BEFORE the
+  // compact-worklog early return below — in that mode the visual status host is
+  // hidden outright, which is exactly the case where a screen reader user was
+  // left with silence indistinguishable from a crash.
+  if(typeof a11yRunStarted==='function') a11yRunStarted();
   if(typeof isCompactWorklogMode==='function'&&isCompactWorklogMode()){
     _liveRunStatusSessionId=sid;
     _liveRunStatusTokens=opts&&opts.tokens||null;
@@ -14686,6 +14809,17 @@ function _syncLiveRunStatusAfterRender(){
   showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});
 }
 function hideLiveRunStatus(sid){
+  // a11y: always close the run state, BEFORE the session-id gate. Measured
+  // symptom reported by the user: "the model finishes writing, but I still hear
+  // 5. Hermes, working / Hermes is working / Idle, and only after refresh do I
+  // get the reply". Cause: on a mismatched sid this function returned on the
+  // first line and a11yRunFinished() was NOT called, so _a11yRunActive stayed
+  // true. And while the run "continues", _a11yTurnIsLive() treats the LAST
+  // assistant turn as live — so the heading reads "working" and
+  // _a11yReorderTurn never reorders the blocks, meaning the reply content stays
+  // AFTER the logs. The run state is global to the window, not per session, so
+  // there is no reason to keep it conditional.
+  if(typeof a11yRunFinished==='function') a11yRunFinished();
   if(sid&&_liveRunStatusSessionId&&sid!==_liveRunStatusSessionId) return;
   const el=$('liveRunStatus');
   if(el){el.hidden=true;el.innerHTML='';}
@@ -20809,6 +20943,13 @@ function renderFileTree(){
   // BELOW the clicked disclosure, so the clicked row keeps its offset from the top (no
   // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
   const prevScrollTop=box?box.scrollTop:0;
+  // Same class of loss as the scroll position above, one layer up: innerHTML=''
+  // detaches every row, so the roving tab stop is rebuilt onto the FIRST row and
+  // the keyboard user is thrown back to the top of the tree by the very act of
+  // expanding a directory. Remembered by entry path (the index shifts when rows
+  // appear), restored after the render tail. Raised in review of #7258.
+  const prevTreeFocus=(typeof a11yTreeRememberFocus==='function')
+    ? a11yTreeRememberFocus(box) : null;
   box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
@@ -20830,8 +20971,23 @@ function renderFileTree(){
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  // The container must be a TREE, not a set of loose divs: without role=tree a
+  // screen reader will not announce "tree, N items" or provide its own
+  // navigation, and without a name the user does not know what they entered.
+  // Called after EVERY rerender, because innerHTML='' above destroys the rows;
+  // the helper itself is idempotent and does not install keyboard listeners twice.
+  if(typeof a11yTree==='function'){
+    a11yTree(box, {
+      label: (typeof t==='function' && t('workspace_tree_aria'))
+        || 'Workspace files',
+    });
+  }
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
+  // Restore the keyboard position last, after a11yTree() has wired the container
+  // and every row carries its contract. Falls back to the first row when the
+  // remembered entry is gone, so the tree always keeps exactly one tab stop.
+  if(typeof a11yTreeRestoreFocus==='function') a11yTreeRestoreFocus(box, prevTreeFocus);
 }
 
 let _wsActiveDragPath=null;
@@ -21022,6 +21178,11 @@ function _renderTreeItems(container, entries, depth){
       arrow.className='file-tree-toggle';
       const isExpanded=S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
+      // The ▸/▾ glyph alone says nothing to a screen reader, and the expanded
+      // state is already carried by aria-expanded on the ROW (treeitem role).
+      // So the arrow is pure decoration - hide it so it does not read "▸" before
+      // every name.
+      arrow.setAttribute('aria-hidden','true');
       el.appendChild(arrow);
     }else{
       // Keep file icons aligned with sibling directories that occupy this
@@ -21035,6 +21196,10 @@ function _renderTreeItems(container, entries, depth){
     // Icon
     const iconEl=document.createElement('span');
     iconEl.className='file-icon';
+    // The entry type is already in the row's accessible name ("folder .cache"),
+    // so the icon itself is decoration - otherwise the screen reader reads the
+    // SVG or an empty spot.
+    iconEl.setAttribute('aria-hidden','true');
     iconEl.innerHTML = isExternalLink
       ? li('external-link', 14)
       : isDirLike
@@ -21143,16 +21308,28 @@ function _renderTreeItems(container, entries, depth){
     }
 
     // Delete button -- for file-like rows and directory-like rows
+    // The name MUST say WHAT will disappear: just "×" (or "delete") across
+    // twenty rows does not let you tell which button is which. We hide the
+    // visible glyph from the screen reader and provide an accessible name with
+    // the entry name.
+    const _delLabel=(name)=>{
+      const pattern=(typeof t==='function' && t('delete_entry_aria'))||'';
+      return pattern ? pattern.replace('{name}', name) : `${(typeof t==='function' && t('delete_title'))||'Delete'} ${name}`;
+    };
     if(isFileLike){
       if(!isReadOnlyEscape){
         const del=document.createElement('button');
         del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+        del.setAttribute('aria-label', _delLabel(item.name));
+        del.setAttribute('type','button');
         del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
         el.appendChild(del);
       }
     }else if(isDirLike&& !isReadOnlyEscape){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+      del.setAttribute('aria-label', _delLabel(item.name));
+      del.setAttribute('type','button');
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceDir(item.path,item.name);};
       el.appendChild(del);
     }
@@ -21206,6 +21383,31 @@ function _renderTreeItems(container, entries, depth){
       };
     }else{
       el.onclick=async()=>openFile(item.path);
+    }
+
+    // Tree contract (WCAG 4.1.2): only HERE do we know everything about the row -
+    // whether it is a directory, whether it is expanded, and which level it is on.
+    // Without this the row was an ordinary <div>: the screen reader did not see a
+    // control, it was unreachable by keyboard, and the whole row sounded like
+    // "▸ .cache ×" (report 2026-08-18).
+    if(typeof a11yTreeRow==='function'){
+      const _kind=isExternalLink
+        ? ((typeof t==='function' && t('tree_external_link_aria'))||'external link')
+        : isDirLike
+          ? ((typeof t==='function' && t('tree_folder_aria'))||'folder')
+          : ((typeof t==='function' && t('tree_file_aria'))||'file');
+      // The first top-level row holds focus for the whole tree (roving tabindex)
+      // - otherwise a tree with a hundred files becomes a hundred Tabs.
+      const _isFirst=depth===0 && container.querySelectorAll
+        && container.querySelectorAll('[role="treeitem"]').length===0;
+      a11yTreeRow(el, {
+        level: depth+1,
+        expandable: isDirLike,
+        expanded: isDirLike && S._expandedDirs.has(item.path),
+        label: `${_kind} ${item.name}`,
+        focusable: _isFirst,
+        path: item.path,
+      });
     }
 
     container.appendChild(el);

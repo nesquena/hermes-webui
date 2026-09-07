@@ -3481,6 +3481,27 @@ function _kanbanPopulateParentsDatalist(){
 }
 
 function _trapModalFocus(modalEl){
+  // a11y: delegate to the shared helper so all modals behave identically.
+  // The previous local implementation trapped Tab but never restored focus to
+  // the element that opened the modal — closing a Kanban dialog with Escape
+  // dropped focus onto <body>, leaving keyboard and screen reader users with no
+  // position in the page (WCAG 2.4.3).  appDialog already restored focus; these
+  // twin dialogs did not, which is exactly the "fix the pattern, not the
+  // instance" case.
+  if (!modalEl) return () => {};
+  if (typeof a11yTrapFocus === 'function') {
+    return a11yTrapFocus(modalEl, {
+      // Background isolation is handled by the overlay itself for these
+      // dialogs; keep the previous behaviour and only manage focus.
+      isolateBackground: false,
+      restoreFocus: true,
+      autofocus: false,
+    });
+  }
+  return _trapModalFocusFallback(modalEl);
+}
+
+function _trapModalFocusFallback(modalEl){
   if (!modalEl) return () => {};
   const selector = 'a[href], button, textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
   const collect = () => {
@@ -5597,6 +5618,10 @@ function closeWorkspacePathSuggestions(){
     box.style.display='none';
   }
   _wsSuggestIndex=-1;
+  // List collapsed: the field must not keep pointing at a removed option.
+  if(typeof a11yActiveDescendantList==='function'){
+    a11yActiveDescendantList($('workspaceFormPath'), box, [], -1, {idPrefix:'wsSuggest'});
+  }
 }
 
 function _applyWorkspaceSuggestion(path){
@@ -5619,6 +5644,18 @@ function _highlightWorkspaceSuggestion(idx){
     el.classList.toggle('active', active);
     if(active) el.scrollIntoView({block:'nearest'});
   });
+  /* a11y (WCAG 4.1.2): the highlight used to live only in a CSS class. The
+     arrow keys worked, but focus stays in the path field, so the screen reader
+     did not announce which suggestion is selected. The same contract as the
+     model list and command suggestions — one shared helper, not another copy. */
+  if(typeof a11yActiveDescendantList==='function'){
+    const widoczna=items.length>0&&box.style.display!=='none';
+    a11yActiveDescendantList($('workspaceFormPath'), box, widoczna?items:[], idx, {
+      idPrefix:'wsSuggest',
+      label:(typeof t==='function'?t('workspace_path_suggestions_aria'):null)
+            ||'Path suggestions'
+    });
+  }
 }
 
 function _renderWorkspacePathSuggestions(paths){
@@ -8006,6 +8043,10 @@ function switchSettingsSection(name,opts){
     if(section==='plugins') loadPluginsPanel();
     if(section==='extensions') loadExtensionsPanel();
   }
+  // a11y: the tab bar becomes visible HERE, so its ARIA contract is declared
+  // here — outside the skipLazyLoad branch, because arriving from settings
+  // search shows the same bar without running the loader.
+  if(section==='extensions') _extensionsSyncTabsA11y();
   if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
 }
 
@@ -10369,6 +10410,29 @@ function handleExtensionStorageClear(btn){
   showToast('Extension storage cleared in this browser.');
 }
 
+/* a11y (WCAG 4.1.2): the active extensions tab was expressed ONLY as a CSS class,
+   so a screen reader said "tab Gallery" without saying which tab is current.
+   One entry point for BOTH paths — first paint of the panel and every later
+   switch — because a contract applied on only one path drifts on the other:
+   entering Settings without clicking would have left the tabs undeclared.
+
+   Callers must invoke this BEFORE any early return: the first version of this
+   fix sat after `if(!target) return;` in loadExtensionsPanel, where target is the
+   DIAGNOSTICS pane, so opening the Gallery tab bailed out before the attributes
+   were set and the tabs still announced no selection. Tab-bar accessibility does
+   not depend on whether one of its panes happens to have rendered. */
+function _extensionsSyncTabsA11y(){
+  if(typeof a11yTablist!=='function') return;
+  const bar=document.querySelector('.extensions-tab-bar');
+  if(!bar) return;
+  a11yTablist(bar,{
+    label:(typeof t==='function'&&t('settings_extensions_tabs_aria'))||'Extension views',
+    activeKey:_extensionsActiveTab,
+    keyOf:btn=>btn.dataset.extensionsTab,
+    panelFor:btn=>document.querySelector(`[data-extensions-pane="${btn.dataset.extensionsTab}"]`),
+  });
+}
+
 async function loadExtensionsPanel(opts){
   const target=$('extensionsDiagnostics');
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
@@ -10405,6 +10469,10 @@ function switchExtensionsTab(tab){
   document.querySelectorAll('[data-extensions-pane]').forEach(pane=>{
     pane.hidden=pane.dataset.extensionsPane!==tab;
   });
+  // a11y: same single entry point as the panel's first paint (see
+  // _extensionsSyncTabsA11y) — the ARIA state is derived from _extensionsActiveTab,
+  // so it cannot drift from the CSS class that drives the visuals.
+  _extensionsSyncTabsA11y();
   if(tab==='diagnostics') loadExtensionsPanel({preserveExisting:true});
   if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
 }
@@ -12614,9 +12682,18 @@ async function _loadAuxiliaryModels(){
    label.innerHTML=esc(task.label||task.task)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(task.description||'')+'</div>';
    row.appendChild(label);
 
+   // a11y: the task name lives in a sibling <div>, not a <label>, so neither
+   // select inherits it.  Without an explicit name a screen reader announces
+   // only the current value ("Palantir Claude, combo box") and the user cannot
+   // tell which task it configures, nor provider from model (WCAG 1.3.1/4.1.2).
+   const auxTaskName=task.label||task.task;
+   const provAria=(t('settings_aux_provider_aria')||'{task} — provider').replace('{task}',auxTaskName);
+   const modelAria=(t('settings_aux_model_aria')||'{task} — model').replace('{task}',auxTaskName);
+
    // Provider select
    const provSel=document.createElement('select');
    provSel.id='aux-prov-'+task.task;
+   provSel.setAttribute('aria-label',provAria);
    provSel.style.cssText=_auxSelectStyle();
    _buildAuxProviderOptions(provSel,_auxProviders,cfg.provider);
    provSel.addEventListener('change',()=>_onAuxProviderChange(task.task,_auxProviders));
@@ -12625,6 +12702,7 @@ async function _loadAuxiliaryModels(){
    // Model select
    const modelSel=document.createElement('select');
    modelSel.id='aux-model-'+task.task;
+   modelSel.setAttribute('aria-label',modelAria);
    modelSel.style.cssText=_auxSelectStyle();
    _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
    modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));

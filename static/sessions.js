@@ -1688,6 +1688,16 @@ async function _switchProfileForSessionLoad(profile){
 
 async function loadSession(sid){
   const opts = arguments[1] || {};
+  // a11y: we are entering a DIFFERENT conversation, so the "Hermes is working"
+  // state from the previous one stops applying. Clear it HERE, at the actual
+  // switch, because the other session's watchdog only checks the address in its
+  // own cycle (every 5 s) and during that time a screen reader would announce
+  // work that does not exist in this conversation.
+  // Measured: after clicking a different row, the silent status kept
+  // "Hermes is working - 5 s - Processed" from the previous conversation.
+  if(typeof a11yRunIsActive==='function' && typeof a11yRunFinished==='function'){
+    try{ if(a11yRunIsActive()) a11yRunFinished(); }catch(_e){ /* best effort */ }
+  }
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
@@ -3184,6 +3194,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
+  // Heading numbering is GLOBAL (position in the whole conversation), so it
+  // must be recomputed on EVERY window change, including backward loading.
+  if (typeof a11ySetTurnNumbering === 'function') {
+    a11ySetTurnNumbering(data.session._visible_turns_before, data.session._visible_turns_total);
+  }
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
@@ -3234,6 +3249,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   if(S.session&&S.session.session_id===sid){
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    // Remember the marker from THIS SAME response that provides the content -
+    // the probe compares against it later; without this we would again compare
+    // values from different coordinate spaces.
+    S.session._transcript_marker=Number(data.session._transcript_marker
+      || data.session.last_message_at || data.session.updated_at || 0);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated
@@ -3838,6 +3858,11 @@ async function _loadOlderMessages() {
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
+    // Backward loading DECREASES the offset: the numbers of older turns must
+    // stay the same, and the newly revealed ones must be lower.
+    if (typeof a11ySetTurnNumbering === 'function') {
+      a11ySetTurnNumbering(responseSession._visible_turns_before, responseSession._visible_turns_total);
+    }
     renderMessages({ preserveScroll: true });
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
@@ -3934,6 +3959,9 @@ async function _ensureAllMessagesLoaded() {
       } else {
         delete S.session.regeneration_revision;
       }
+      // marker from the same response (see above)
+      S.session._transcript_marker = Number(data.session._transcript_marker
+        || data.session.last_message_at || data.session.updated_at || 0);
     }
   } finally {
     _loadingOlder = false;
@@ -5770,6 +5798,17 @@ const _sessionTimeRefreshMs = 60000;
 // already pushes invalidations in real time; this poll exists only as a
 // fallback for the case where SSE is broken/unavailable. Bump to 30 s
 // to keep the safety net without turning it into a primary refresh path.
+// Fallback poll for externally-driven sessions. This is a SAFETY NET, not the
+// primary path: `api/sessions/events` pushes `sessions_changed` the moment a
+// CLI/TUI turn writes (verified live — a write at t=15s produced an event at
+// t=15s), and that path reloads the transcript immediately. The timer only
+// covers a dropped or backgrounded SSE connection.
+//
+// Kept at 30s deliberately. Measured batch spacing in a working CLI session was
+// 5.3s median 20.2s, so shortening this to "catch up" with content would raise
+// steady-state request volume for every open tab while the event path already
+// delivers within a second. Requests here are metadata-only, but a session this
+// size still costs real assembly work server-side.
 const _activeSessionExternalRefreshMs = 30000;
 let _streamingPollTimer = null;
 let _sessionTimeRefreshTimer = null;
@@ -5978,6 +6017,20 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     if(S.busy || S.activeStreamId) return 'skipped';
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
+    // Marker comparable ACROSS REQUESTS. Measured defect (2026-08-18, report:
+    // "I have new content in the terminal, but the page is not updating in
+    // parallel"): /api/session returns a DIFFERENT message_count depending on
+    // ?messages= — 1346 with messages=1 (after merge, what the transcript shows)
+    // and 2397 with messages=0 (raw rows). This probe asks for metadata, while
+    // loading the session fetches messages, so remoteCount!==localCount was
+    // colliding TWO DIFFERENT COORDINATE SPACES: always true and unable to tell
+    // "new content arrived" from "the same data". The timestamp is identical in
+    // both response shapes (verified), so it is the honest change signal.
+    const remoteMarker = Number(data.session._transcript_marker || remoteLast || 0);
+    const localMarker = Number(
+      (S.session && S.session._transcript_marker) || localLast || 0);
+    const markerGrew = remoteMarker > 0 && localMarker > 0 && remoteMarker > localMarker;
+    const markerFirstSeen = remoteMarker > 0 && !localMarker;
     // Force-reload the whole transcript whenever the visible conversation's
     // message count CHANGED in either direction. A higher count means new
     // messages; a LOWER count means another tab/client truncated, undid,
@@ -5995,6 +6048,20 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     // destructive reload in that case and just refresh the lightweight sidebar
     // list metadata, advancing the local last-seen marker so the same metadata
     // bump doesn't re-trigger on every subsequent poll.
+    // Marker grew = content arrived that this tab does not have. Checked
+    // SEPARATELY, not appended to the condition below, because three repository
+    // tests (tests/test_webui_external_refresh_frontend.py) assert the LITERAL
+    // shape of `if(remoteCount !== localCount){` and adding anything to it would
+    // break them. We preserve their exact text and keep the new condition beside it.
+    if(markerGrew || markerFirstSeen){
+      const _recoveryReasonsMarker = {visible:true, focus:true};
+      await loadSession(sid, {
+        force:true,
+        externalRefreshReason: reason||'marker',
+        keepStaleUntilLoaded: !!_recoveryReasonsMarker[String(reason||'')],
+      });
+      return 'reloaded';
+    }
     if(remoteCount !== localCount){
       // Hidden-tab return / visibility / focus recovery commonly trips
       // remoteCount !== localCount when the post-turn bg-review thread or a
@@ -6383,6 +6450,11 @@ function startGatewaySSE(){
                       if(newestTs){
                         S.session.last_message_at = newestTs;
                         S.session.updated_at = newestTs;
+                        // The marker MUST travel with the content: this path
+                        // overwrites message_count with the WINDOW length (a third
+                        // coordinate space), so without this the probe would compare
+                        // against the stale marker and reload the transcript needlessly.
+                        S.session._transcript_marker = newestTs;
                       }
                     }
                     if(S.messages.length !== prev){
@@ -7793,6 +7865,11 @@ function renderSessionListFromCache(){
     allChip.className='project-chip'+(!_activeProject?' active':'');
     allChip.textContent='All';
     allChip.onclick=()=>{_setActiveProjectFilter(null);};
+    // Filter chips are a group of toggles: the active one used to be marked
+    // ONLY by a CSS class, so a screen reader did not say what the list was
+    // filtered by. capability-guarded: Node harnesses inject DOM stubs without
+    // these methods.
+    if(typeof a11yAsButton==='function') a11yAsButton(allChip,{pressed:!_activeProject,label:'All conversations'});
     bar.appendChild(allChip);
     // "Unassigned" chip — only when there are sessions with no project to
     // filter to. Hidden in the common case where every session is already
@@ -7803,6 +7880,7 @@ function renderSessionListFromCache(){
       noneChip.textContent='Unassigned';
       noneChip.title='Show conversations not yet assigned to a project';
       noneChip.onclick=()=>{_setActiveProjectFilter(NO_PROJECT_FILTER);};
+      if(typeof a11yAsButton==='function') a11yAsButton(noneChip,{pressed:_activeProject===NO_PROJECT_FILTER,label:'Unassigned conversations'});
       bar.appendChild(noneChip);
     }
     // Project chips
@@ -7870,6 +7948,7 @@ function renderSessionListFromCache(){
         chip.classList.remove('long-pressing');
       },{passive:true});
       if(window._projectQuickCreate) _attachProjectQuickCreateButton(chip,p);
+      if(typeof a11yAsButton==='function') a11yAsButton(chip,{pressed:p.project_id===_activeProject,label:'Project '+p.name});
       bar.appendChild(chip);
     }
     // Create button
@@ -7892,12 +7971,14 @@ function renderSessionListFromCache(){
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
     pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};
+    if(typeof a11yAsButton==='function') a11yAsButton(pfToggle);
     list.appendChild(pfToggle);
   } else if(_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show active profile only';
     pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};
+    if(typeof a11yAsButton==='function') a11yAsButton(pfToggle);
     list.appendChild(pfToggle);
   }
   // Show/hide archived toggle if there are archived sessions. Archived rows
@@ -7911,6 +7992,7 @@ function renderSessionListFromCache(){
       if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;
       renderSessionList();
     };
+    if(typeof a11yAsButton==='function') a11yAsButton(toggle,{pressed:_showArchived});
     list.appendChild(toggle);
   }
   // Empty state for active project filter
@@ -8031,6 +8113,11 @@ function renderSessionListFromCache(){
       _saveCollapsed();
       renderSessionListFromCache();
     };
+    // The group header collapses and expands the list — it is a button, not
+    // decoration. We expose the state via aria-expanded because only sighted
+    // users can see the rotated chevron. capability-guarded: Node harnesses
+    // inject DOM stubs without these methods.
+    if(typeof a11yAsButton==='function') a11yAsButton(hdr,{expanded:!isGroupCollapsed,label:g.label});
     wrapper.appendChild(hdr);
     let groupTopPad=0;
     let groupBottomPad=0;
@@ -8077,6 +8164,7 @@ function renderSessionListFromCache(){
         );
         renderSessionList();
       };
+      if(typeof a11yAsButton==='function') a11yAsButton(more);
       list.appendChild(more);
     }
   }
@@ -8085,6 +8173,7 @@ function renderSessionListFromCache(){
     const toggleBtn=document.createElement('div');toggleBtn.className='session-select-toggle';
     toggleBtn.textContent=t('session_select_mode');
     toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
+    if(typeof a11yAsButton==='function') a11yAsButton(toggleBtn,{label:t('session_select_mode')});
     list.appendChild(toggleBtn);
   }
   // Refresh FLIP and queued archive/delete reflow both drive
@@ -8138,6 +8227,13 @@ function renderSessionListFromCache(){
       const cbWrapper=document.createElement('label');cbWrapper.className='session-select-cb-wrapper';
       const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
       cb.dataset.sid=s.session_id;cb.checked=_selectedSessions.has(s.session_id);
+      // A nameless checkbox is announced by a screen reader as a bare
+      // "checkbox, not checked" — with several rows there is no way to tell
+      // which conversation it belongs to (WCAG 4.1.2). The name must point to a
+      // specific conversation. The label cannot be visible because the visual
+      // layout only shows the square.
+      const cbNazwa=(typeof t==='function'?t('session_batch_select_one')||'Select conversation':'Select conversation');
+      cb.setAttribute('aria-label',cbNazwa+': '+(cleanTitle||'Untitled'));
       cb.onchange=(e)=>{e.stopPropagation();setSessionSelected(s.session_id,cb.checked);};
       cb.onclick=(e)=>{e.stopPropagation();};
       cb.onpointerup=(e)=>{e.stopPropagation();};
@@ -8174,13 +8270,47 @@ function renderSessionListFromCache(){
       branchInd.title=_sessionForkTooltip(parentLabel);
       titleRow.appendChild(branchInd);
     }
-    const title=document.createElement('span');
+    // The title is a REAL link (<a href="/session/<id>">), not a div with a
+    // click handler. Reason: the list row moves to another conversation, so a
+    // screen reader should say that ("link"), and the user should be able to
+    // reach it with Tab and link navigation (WCAG 4.1.2 name/role/value and
+    // 2.1.1 keyboard access). As an <a href> it also works without our code:
+    // Ctrl+click and middle-click open a new tab, and the browser context menu
+    // can copy the conversation address.
+    // The element remains the TITLE, not the whole row, because the row contains
+    // its own controls (action button, checkbox) — <a> cannot contain buttons,
+    // and a nested control inside a link is unreachable.
+    const title=document.createElement('a');
     title.className='session-title';
+    try{ title.setAttribute('href',_sessionUrlForSid(s.session_id)); }catch(_e){ /* brak historii/URL — zostaje sam tekst */ }
+    // Link inside a row with a swipe gesture: the browser's own link dragging
+    // conflicts with the swipe, so we disable it.
+    title.setAttribute('draggable','false');
+    if(isActive) title.setAttribute('aria-current','page');
     const displayTitle=cleanTitle||'Untitled';
     const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
     if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
     else title.textContent=displayTitle;
     title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle,s);
+    // Activating the title link. Three paths, deliberately split:
+    // 1. Ctrl/Cmd/Shift/Alt/middle-click — we do NOT touch anything; let the
+    //    browser open the conversation in a new tab/window. That is exactly what
+    //    the user expects from a link, and a div cannot provide it.
+    // 2. Keyboard (Enter on a focused link yields a click with detail===0) —
+    //    open it in this tab through the app path, without reloading.
+    // 3. Regular mouse/touch click — navigation is already owned by the row
+    //    gesture here (onpointerup/touchend, including double-click and swipe
+    //    recognition), so we only prevent the browser's default navigation to
+    //    avoid reloading the whole app.
+    title.addEventListener('click',(e)=>{
+      if(e.metaKey||e.ctrlKey||e.shiftKey||e.altKey||e.button===1) return;
+      e.preventDefault();
+      if(e.detail===0){
+        e.stopPropagation();
+        if(_renamingSid) return;
+        void _openSidebarSession(s);
+      }
+    });
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);

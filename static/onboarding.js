@@ -131,11 +131,28 @@ function _renderOnboardingSteps(){
   const wrap=$('onboardingSteps');
   if(!wrap)return;
   wrap.innerHTML='';
+  // a11y: expose the progress list and the current step to assistive tech.
+  // The visual state used to live only in the CSS class "active", which a
+  // screen reader cannot perceive — the user heard five steps but never which
+  // one they were on (WCAG 1.3.1 / 4.1.2).
+  const total=ONBOARDING.steps.length;
+  wrap.setAttribute('role','list');
+  wrap.setAttribute('aria-label',
+    (t('onboarding_progress_label')||'Setup progress')
+    +`, ${t('onboarding_progress_step')||'step'} ${ONBOARDING.step+1}/${total}`);
   ONBOARDING.steps.forEach((key,idx)=>{
     const meta=_onboardingStepMeta(key);
     const item=document.createElement('div');
     item.className='onboarding-step'+(idx===ONBOARDING.step?' active':idx<ONBOARDING.step?' done':'');
-    item.innerHTML=`<div class="onboarding-step-index">${idx+1}</div><div><div class="onboarding-step-title">${meta.title}</div><div class="onboarding-step-desc">${meta.desc}</div></div>`;
+    item.setAttribute('role','listitem');
+    if(idx===ONBOARDING.step) item.setAttribute('aria-current','step');
+    // Announce completion for the steps already behind us.
+    const stateWord=idx<ONBOARDING.step
+      ? (t('onboarding_step_state_done')||'completed')
+      : (idx===ONBOARDING.step ? (t('onboarding_step_state_current')||'current step') : '');
+    item.setAttribute('aria-label',
+      `${idx+1}/${total}: ${meta.title}${stateWord?', '+stateWord:''}. ${meta.desc}`);
+    item.innerHTML=`<div class="onboarding-step-index" aria-hidden="true">${idx+1}</div><div><div class="onboarding-step-title">${meta.title}</div><div class="onboarding-step-desc">${meta.desc}</div></div>`;
     wrap.appendChild(item);
   });
 }
@@ -435,6 +452,37 @@ function syncOnboardingWorkspaceSelect(value){
   if(input) input.value=value;
 }
 
+let _onboardingFocusCleanup=null;
+
+/* a11y: modal focus trap + inert background for the first-run wizard. */
+function _installOnboardingFocusTrap(){
+  if(_onboardingFocusCleanup) return;
+  const overlay=$('onboardingOverlay');
+  if(!overlay||typeof a11yTrapFocus!=='function') return;
+  _onboardingFocusCleanup=a11yTrapFocus(overlay,{
+    // Land on the primary action rather than the "Skip setup" button so the
+    // first thing a screen reader user hears is how to proceed, not how to bail.
+    initialFocus:'#onboardingNextBtn',
+    isolateBackground:true,
+    restoreFocus:false,
+  });
+}
+
+function _releaseOnboardingFocusTrap(){
+  if(!_onboardingFocusCleanup) return;
+  try{ _onboardingFocusCleanup(); }catch(_e){ /* overlay already gone */ }
+  _onboardingFocusCleanup=null;
+}
+
+/* a11y: Escape inside the wizard is a no-op by design (see boot.js).  Tell the
+ * user how to skip deliberately instead of silently discarding their setup. */
+function announceOnboardingEscape(){
+  const msg=t('onboarding_escape_hint')
+    ||'Setup stays open. To skip it, use the Skip setup button.';
+  if(typeof a11yAnnounce==='function') a11yAnnounce(msg);
+  if(typeof showToast==='function') showToast(msg);
+}
+
 function syncOnboardingProvider(value){
   const provider=_getOnboardingSetupProvider(value);
   ONBOARDING.form.provider=value;
@@ -467,6 +515,11 @@ async function loadOnboardingWizard(){
     $('onboardingOverlay').style.display='flex';
     _renderOnboardingSteps();
     _renderOnboardingBody();
+    // a11y: the wizard declares role="dialog" aria-modal="true", so it must
+    // actually behave modally — trap Tab inside it and mark the background
+    // inert.  Without this the very first screen a new user meets leaked focus
+    // onto the app rails behind the overlay (WCAG 2.4.3).
+    _installOnboardingFocusTrap();
     return true;
   }catch(e){
     console.warn('onboarding status failed',e);
@@ -530,6 +583,7 @@ async function _finishOnboarding(){
   const done=await api('/api/onboarding/complete',{method:'POST',body:'{}'});
   ONBOARDING.status=done;
   ONBOARDING.active=false;
+  _releaseOnboardingFocusTrap();
   $('onboardingOverlay').style.display='none';
   showToast(t('onboarding_complete'));
   await loadWorkspaceList();
@@ -547,6 +601,7 @@ async function skipOnboarding(){
     // Mark onboarding completed server-side without changing any config
     await api('/api/onboarding/complete',{method:'POST',body:'{}'});
     ONBOARDING.active=false;
+    _releaseOnboardingFocusTrap();
     $('onboardingOverlay').style.display='none';
     showToast(t('onboarding_skipped')||'Setup skipped');
   }catch(e){

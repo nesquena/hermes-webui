@@ -574,6 +574,17 @@ def read_importable_agent_session_rows(
         session_source_expr = _optional_col('session_source', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
+        # Live work state written by the agent itself while a turn is running
+        # (e.g. "receiving stream response", "executing tool: terminal"). The
+        # WebUI has no other way to tell that a CLI/TUI turn is in flight: its
+        # own ``is_streaming``/``active_stream_id`` only track streams this
+        # server owns, so a session driven from a terminal looks finished in the
+        # browser while it is still working. Optional columns, so older state.db
+        # schemas keep working.
+        last_activity_at_expr = _optional_col('last_activity_at', session_cols)
+        last_activity_description_expr = _optional_col(
+            'last_activity_description', session_cols
+        )
         user_id_expr = _optional_col('user_id', session_cols)
         chat_id_expr = _optional_col('chat_id', session_cols)
         chat_type_expr = _optional_col('chat_type', session_cols)
@@ -704,6 +715,8 @@ def read_importable_agent_session_rows(
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},
+                   {last_activity_at_expr},
+                   {last_activity_description_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
                    {last_activity_expr} AS last_activity

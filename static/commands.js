@@ -2244,12 +2244,39 @@ function showCmdDropdown(matches){
     dd.appendChild(el);
   }
   dd.classList.add('open');
+  // Initial state: the first item is already selected (_cmdSelectedIdx=0),
+  // so the contract must exist IMMEDIATELY, not after the first arrow key.
+  _syncCmdDropdownA11y();
 }
 
 function hideCmdDropdown(){
   const dd=$('cmdDropdown');
   if(dd)dd.classList.remove('open');
   _cmdSelectedIdx=-1;
+  // After collapsing the list, the field must not keep aria-activedescendant
+  // pointing at an element the user can no longer see.
+  _syncCmdDropdownA11y();
+}
+
+/* a11y (WCAG 4.1.2): the selected suggestion used to be marked ONLY by the CSS
+   class 'selected'. The arrow keys worked, but focus stays in the text field,
+   so the screen reader announced NOTHING — the user did not know what Enter
+   would confirm. The repo already solved the same problem for the model list
+   (ui.js, _highlightRow), so we use the shared helper instead of a fourth copy.
+   Called from EVERY place that changes the selection: showing the list, arrow-key
+   navigation, and hiding it. */
+function _syncCmdDropdownA11y(){
+  if(typeof a11yActiveDescendantList!=='function') return;
+  const dd=$('cmdDropdown');
+  const pole=$('msg');
+  const items=dd?Array.from(dd.querySelectorAll('.cmd-item')):[];
+  // Visibility is controlled by the 'open' CLASS (not style.display) -
+  // verified in showCmdDropdown/hideCmdDropdown below.
+  const widoczna=!!dd&&items.length>0&&dd.classList.contains('open');
+  a11yActiveDescendantList(pole, dd, widoczna?items:[], _cmdSelectedIdx, {
+    idPrefix:'cmdOpt',
+    label:(typeof t==='function'?t('slash_commands_list_aria'):null)||'Slash commands'
+  });
 }
 
 function navigateCmdDropdown(dir){
@@ -2265,6 +2292,7 @@ function navigateCmdDropdown(dir){
   // Scroll the newly highlighted item into view so it stays visible when the
   // dropdown overflows and the user navigates with keyboard (#838).
   items[_cmdSelectedIdx].scrollIntoView({block:'nearest'});
+  _syncCmdDropdownA11y();
 }
 
 function selectCmdDropdownItem(){
