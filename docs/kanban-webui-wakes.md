@@ -16,7 +16,7 @@ Sidecar + HTTP enablement (`GET`/`POST /api/kanban/webui-wake` writing `kanban_w
    `POST /api/kanban/webui-wake` with `{"action":"enable"}` and the existing `X-Hermes-CSRF-Token` header.
 6. Check the response and normal WebUI/server logs. Enable snapshots one event boundary per owned Kanban DB before writing the enabled marker, and advances only `platform=webui` rows this process hosts (blank `notifier_profile` counts as `default` only when this process hosts root). Isolated processes must not wake or baseline foreign profiles. Events accumulated before that boundary do not wake existing subscriptions.
 
-A successful enable is idempotent. A failed baseline remains disabled and returns an activation error; retry after checking the DB and logs. New subscriptions use the normal current-event cursor initialization.
+A successful enable is idempotent. The activation boundary is published only after the enabled sidecar write succeeds; a failed baseline or sidecar write leaves the prior activation's in-flight rewind eligibility intact. New subscriptions use the normal current-event cursor initialization.
 
 ## Disable and topology changes
 

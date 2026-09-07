@@ -41,6 +41,9 @@ def test_webui_wake_http_routes_and_sidecar_use_session_server_only():
 
     bad_status, _ = _request("POST", "/api/kanban/webui-wake", {"action": "bogus"})
     assert bad_status == 400
+    for action in (None, True, 1, [], {}):
+        bad_status, _ = _request("POST", "/api/kanban/webui-wake", {"action": action})
+        assert bad_status == 400
 
     post_status, enabled = _request("POST", "/api/kanban/webui-wake", {"action": "enable"})
     assert post_status == 200

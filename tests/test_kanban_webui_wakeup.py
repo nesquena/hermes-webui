@@ -979,3 +979,136 @@ def test_wakeup_error_body_without_status_does_not_ack(monkeypatch):
 
     assert result["status"] != 200
     assert result["resp"]["error"] == "adapter"
+
+
+def test_poll_isolates_bad_board_and_subscription_from_later_wake(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
+    from api import background_process as bp
+
+    bad_sub = {
+        "task_id": "bad-task",
+        "platform": "webui",
+        "chat_id": "bad-chat",
+        "thread_id": "",
+        "notifier_profile": "research",
+        "delivery_mode": "notify+wake",
+    }
+    healthy_sub = {**bad_sub, "task_id": "healthy-task", "chat_id": "healthy-chat"}
+    event = SimpleNamespace(id=7, task_id="task", kind="completed", payload={})
+    starts = []
+    rewinds = []
+    closed = []
+
+    class KB:
+        def list_boards(self, **_kwargs):
+            return [{"slug": "bad"}, {"slug": "healthy"}]
+
+        def connect(self, *, board):
+            if board == "bad":
+                raise OSError("bad board")
+            return SimpleNamespace(close=lambda: closed.append(board))
+
+        def list_notify_subs(self, _conn, **_kwargs):
+            return [object(), bad_sub, healthy_sub]
+
+        def claim_unseen_events_for_sub(self, _conn, **kwargs):
+            return 3, 7, [SimpleNamespace(**{**event.__dict__, "task_id": kwargs["task_id"]})]
+
+        def get_task(self, _conn, task_id):
+            if task_id == "bad-task":
+                raise OSError("bad subscription")
+            return SimpleNamespace(id=task_id, status="completed", result="done")
+
+    monkeypatch.setattr(
+        bp,
+        "_load_kanban_webui_wake_state",
+        lambda: (
+            {
+                "schema_version": 1,
+                "enabled": True,
+                "baseline_complete": True,
+                "activation_id": 1,
+                "baseline_completed_at": 0,
+                "db_boundaries": {"board:bad": 0, "board:healthy": 0},
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr("api.kanban_bridge._kb", lambda: KB())
+    monkeypatch.setattr("api.models.get_session", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *_args: nullcontext())
+    monkeypatch.setattr(bp, "_rewind_webui_kanban_claim", lambda *args: rewinds.append(args) or True)
+    monkeypatch.setattr(
+        bp,
+        "_start_server_side_wakeup_turn",
+        lambda session_id, _prompt, **kwargs: (
+            starts.append(session_id),
+            kwargs["on_result"](200, {"_status": 200}, None),
+        ),
+    )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
+    monkeypatch.setattr(bp, "_KANBAN_INFLIGHT_CLAIMS", {})
+
+    bp._poll_webui_kanban_wakeups()
+
+    assert starts == ["healthy-chat"]
+    assert len(rewinds) == 1
+    assert rewinds[0][1]["task_id"] == "bad-task"
+    assert closed == ["healthy"]
+
+
+def test_failed_rewind_stays_pending_until_a_later_poll_rewinds_it(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
+    from api import background_process as bp
+
+    sub = {
+        "task_id": "task-1",
+        "platform": "webui",
+        "chat_id": "chat-1",
+        "thread_id": "",
+        "notifier_profile": "research",
+        "delivery_mode": "notify+wake",
+    }
+    event = SimpleNamespace(id=7, task_id="task-1", kind="completed", payload={})
+    claim_calls = []
+    rewind_results = iter([False, True])
+
+    class KB:
+        def list_boards(self, **_kwargs):
+            return [{"slug": "default"}]
+
+        def connect(self, **_kwargs):
+            return SimpleNamespace(close=lambda: None)
+
+        def list_notify_subs(self, _conn, **_kwargs):
+            return [sub]
+
+        def claim_unseen_events_for_sub(self, _conn, **_kwargs):
+            claim_calls.append(True)
+            return 3, 7, [event]
+
+        def get_task(self, _conn, _task_id):
+            return SimpleNamespace(id="task-1", status="completed", result="done")
+
+    monkeypatch.setattr("api.kanban_bridge._kb", lambda: KB())
+    monkeypatch.setattr("api.models.get_session", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("api.profiles.get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *_args: nullcontext())
+    monkeypatch.setattr(bp, "_rewind_webui_kanban_claim", lambda *_args: next(rewind_results))
+    monkeypatch.setattr(
+        bp,
+        "_start_server_side_wakeup_turn",
+        lambda *_args, **kwargs: kwargs["on_result"](500, {"_status": 500}, None),
+    )
+    monkeypatch.setattr(bp, "_DRAIN_STOP", threading.Event())
+    monkeypatch.setattr(bp, "_KANBAN_INFLIGHT_CLAIMS", {})
+
+    bp._poll_webui_kanban_wakeups()
+    assert len(bp._KANBAN_INFLIGHT_CLAIMS) == 1
+    bp._poll_webui_kanban_wakeups()
+
+    assert claim_calls == [True]
+    assert bp._KANBAN_INFLIGHT_CLAIMS == {}

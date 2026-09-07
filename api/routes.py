@@ -15000,16 +15000,18 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/kanban/webui-wake":
+        action = body.get("action") if isinstance(body, dict) else None
         if (
             not isinstance(body, dict)
             or set(body) != {"action"}
-            or body.get("action") not in {"enable", "disable"}
+            or not isinstance(action, str)
+            or action not in {"enable", "disable"}
         ):
             return bad(handler, "action must be enable or disable", status=400)
         from api.background_process import set_kanban_webui_wake_enabled
 
         try:
-            status = set_kanban_webui_wake_enabled(body["action"] == "enable")
+            status = set_kanban_webui_wake_enabled(action == "enable")
         except Exception:
             logger.exception("Kanban WebUI wake activation failed")
             return bad(handler, "Kanban WebUI wake activation failed", status=503)

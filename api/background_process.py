@@ -249,18 +249,23 @@ def set_kanban_webui_wake_enabled(enabled: bool) -> dict:
             try:
                 from api.kanban_bridge import _kb
 
-                boundaries = _baseline_kanban_webui_wake(_kb())
-                new_state = _default_kanban_webui_wake_state()
-                new_state.update(
-                    {
-                        "enabled": True,
-                        "baseline_complete": True,
-                        "activation_id": int(state.get("activation_id") or 0) + 1,
-                        "baseline_completed_at": int(time.time()),
-                        "db_boundaries": boundaries,
-                    }
-                )
-                _write_kanban_webui_wake_state(new_state)
+                with _KANBAN_INFLIGHT_LOCK:
+                    boundaries = _baseline_kanban_webui_wake(_kb())
+                    activation_id = int(state.get("activation_id") or 0) + 1
+                    new_state = _default_kanban_webui_wake_state()
+                    new_state.update(
+                        {
+                            "enabled": True,
+                            "baseline_complete": True,
+                            "activation_id": activation_id,
+                            "baseline_completed_at": int(time.time()),
+                            "db_boundaries": boundaries,
+                        }
+                    )
+                    _write_kanban_webui_wake_state(new_state)
+                    for key, claim in list(_KANBAN_INFLIGHT_CLAIMS.items()):
+                        if claim["activation_id"] < activation_id:
+                            _KANBAN_INFLIGHT_CLAIMS.pop(key, None)
                 return get_kanban_webui_wake_status()
             except Exception:
                 logger.warning("Kanban WebUI wake activation failed", exc_info=True)
@@ -831,9 +836,28 @@ def _webui_kanban_claim_key(board: str, sub: dict) -> tuple[str, str, str, str, 
     )
 
 
-def _claim_webui_kanban_events(conn, board: str, sub: dict, kb):
+def _claim_webui_kanban_events(
+    conn, board: str, sub: dict, kb, activation_id: int
+):
     with _THREAD_LIFECYCLE_LOCK:
         if _DRAIN_STOP.is_set():
+            return None
+        key = _webui_kanban_claim_key(board, sub)
+        retry_claim = None
+        with _KANBAN_INFLIGHT_LOCK:
+            existing = _KANBAN_INFLIGHT_CLAIMS.get(key)
+            if existing:
+                retry_claim = existing if existing["retry_pending"] else None
+        if existing:
+            if retry_claim and _rewind_webui_kanban_claim(
+                retry_claim["board"],
+                retry_claim["sub"],
+                retry_claim["old_cursor"],
+                retry_claim["new_cursor"],
+            ) is not False:
+                with _KANBAN_INFLIGHT_LOCK:
+                    if _KANBAN_INFLIGHT_CLAIMS.get(key) is retry_claim:
+                        _KANBAN_INFLIGHT_CLAIMS.pop(key, None)
             return None
         old_cursor, new_cursor, events = kb.claim_unseen_events_for_sub(
             conn,
@@ -844,43 +868,48 @@ def _claim_webui_kanban_events(conn, board: str, sub: dict, kb):
             kinds=_KANBAN_EVENT_KINDS,
         )
         if events:
-            key = _webui_kanban_claim_key(board, sub)
             with _KANBAN_INFLIGHT_LOCK:
-                _KANBAN_INFLIGHT_CLAIMS[key] = (
-                    board,
-                    dict(sub),
-                    old_cursor,
-                    new_cursor,
-                )
+                _KANBAN_INFLIGHT_CLAIMS[key] = {
+                    "board": board,
+                    "sub": dict(sub),
+                    "old_cursor": old_cursor,
+                    "new_cursor": new_cursor,
+                    "activation_id": activation_id,
+                    "retry_pending": False,
+                }
         return old_cursor, new_cursor, events
 
 
-def _forget_webui_kanban_claim(board: str, sub: dict) -> None:
+def _webui_kanban_inflight_claim(board: str, sub: dict) -> dict | None:
     with _KANBAN_INFLIGHT_LOCK:
-        _KANBAN_INFLIGHT_CLAIMS.pop(_webui_kanban_claim_key(board, sub), None)
+        return _KANBAN_INFLIGHT_CLAIMS.get(_webui_kanban_claim_key(board, sub))
 
 
 def _finish_webui_kanban_claim(
-    board: str, sub: dict, old_cursor: int, new_cursor: int, status: int
+    claim: dict, status: int
 ) -> None:
-    key = _webui_kanban_claim_key(board, sub)
+    key = _webui_kanban_claim_key(claim["board"], claim["sub"])
     with _KANBAN_INFLIGHT_LOCK:
-        claim = _KANBAN_INFLIGHT_CLAIMS.get(key)
-        expected = (board, sub, old_cursor, new_cursor)
-        if claim != expected:
+        if _KANBAN_INFLIGHT_CLAIMS.get(key) is not claim:
             return
-        _KANBAN_INFLIGHT_CLAIMS.pop(key, None)
+        if status == 200:
+            _KANBAN_INFLIGHT_CLAIMS.pop(key, None)
+            return
+        claim["retry_pending"] = True
     # The Kanban cursor is acknowledged only by an exactly-200 turn response.
-    if status != 200:
-        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
+    if _rewind_webui_kanban_claim(
+        claim["board"], claim["sub"], claim["old_cursor"], claim["new_cursor"]
+    ) is not False:
+        with _KANBAN_INFLIGHT_LOCK:
+            if _KANBAN_INFLIGHT_CLAIMS.get(key) is claim:
+                _KANBAN_INFLIGHT_CLAIMS.pop(key, None)
 
 
 def _rewind_inflight_webui_kanban_claims() -> None:
     with _KANBAN_INFLIGHT_LOCK:
         claims = list(_KANBAN_INFLIGHT_CLAIMS.values())
-        _KANBAN_INFLIGHT_CLAIMS.clear()
-    for board, sub, old_cursor, new_cursor in claims:
-        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
+    for claim in claims:
+        _finish_webui_kanban_claim(claim, 500)
 
 
 def _poll_webui_kanban_wakeups() -> None:
@@ -912,38 +941,53 @@ def _poll_webui_kanban_wakeups() -> None:
             if _DRAIN_STOP.is_set():
                 return
             board = str((metadata or {}).get("slug") or "default")
-            conn = kb.connect(board=board)
+            conn = None
             try:
-                subs = [
-                    sub for sub in kb.list_notify_subs(
-                        conn,
-                        notifier_profiles=hosted_names,
-                        include_unowned=hosts_root,
-                    )
-                    if _webui_wake_subscription(sub)
-                    and _webui_notifier_row_owned(sub, hosted, hosts_root)
-                ]
+                conn = kb.connect(board=board)
+                subs = []
+                for sub in kb.list_notify_subs(
+                    conn,
+                    notifier_profiles=hosted_names,
+                    include_unowned=hosts_root,
+                ):
+                    try:
+                        if _webui_wake_subscription(sub) and _webui_notifier_row_owned(
+                            sub, hosted, hosts_root
+                        ):
+                            subs.append(sub)
+                    except Exception:
+                        logger.warning(
+                            "Kanban WebUI wake poll skipped malformed subscription board=%s",
+                            board,
+                            exc_info=True,
+                        )
                 for sub in subs:
                     if _DRAIN_STOP.is_set():
                         return
-                    task_id = str(sub.get("task_id") or "")
-                    chat_id = str(sub.get("chat_id") or "")
-                    profile = str(sub.get("notifier_profile") or "").strip()
-                    if not task_id or not chat_id:
-                        continue
-                    if not profile:
-                        profile = "default"
-                    if _DRAIN_STOP.is_set():
-                        return
-                    claimed = _claim_webui_kanban_events(conn, board, sub, kb)
-                    if not claimed:
+                    claim = None
+                    try:
+                        task_id = str(sub.get("task_id") or "")
+                        chat_id = str(sub.get("chat_id") or "")
+                        profile = str(sub.get("notifier_profile") or "").strip()
+                        if not task_id or not chat_id:
+                            continue
+                        if not profile:
+                            profile = "default"
                         if _DRAIN_STOP.is_set():
                             return
-                        continue
-                    old_cursor, new_cursor, events = claimed
-                    if not events:
-                        continue
-                    try:
+                        claimed = _claim_webui_kanban_events(
+                            conn, board, sub, kb, int(state["activation_id"])
+                        )
+                        if not claimed:
+                            if _DRAIN_STOP.is_set():
+                                return
+                            continue
+                        _old_cursor, _new_cursor, events = claimed
+                        if not events:
+                            continue
+                        claim = _webui_kanban_inflight_claim(board, sub)
+                        if claim is None:
+                            continue
                         task = kb.get_task(conn, task_id)
                         profile_home = get_hermes_home_for_profile(profile)
                         with profile_env_for_background_worker(
@@ -963,27 +1007,40 @@ def _poll_webui_kanban_wakeups() -> None:
                         ):
                             raise ValueError("Kanban WebUI wake target is unavailable")
                         prompt = _format_kanban_batch_prompt(task, events)
-                    except Exception:
-                        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
-                        _forget_webui_kanban_claim(board, sub)
-                        continue
-                    if _DRAIN_STOP.is_set():
-                        return
-                    try:
+                        if _DRAIN_STOP.is_set():
+                            return
                         _start_server_side_wakeup_turn(
                             chat_id,
                             prompt,
                             profile=profile,
-                            on_result=lambda status, _resp, _error, board=board,
-                            sub=dict(sub), old_cursor=old_cursor, new_cursor=new_cursor: _finish_webui_kanban_claim(
-                                board, sub, old_cursor, new_cursor, status
+                            on_result=lambda status, _resp, _error, claim=claim: _finish_webui_kanban_claim(
+                                claim, status
                             ),
                         )
                     except Exception:
-                        _rewind_webui_kanban_claim(board, sub, old_cursor, new_cursor)
-                        _forget_webui_kanban_claim(board, sub)
+                        if claim is not None:
+                            _finish_webui_kanban_claim(claim, 500)
+                        logger.warning(
+                            "Kanban WebUI wake poll failed board=%s task=%s",
+                            board,
+                            sub.get("task_id"),
+                            exc_info=True,
+                        )
+                        continue
+            except Exception:
+                logger.warning(
+                    "Kanban WebUI wake poll failed board=%s", board, exc_info=True
+                )
             finally:
-                conn.close()
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        logger.warning(
+                            "Kanban WebUI wake poll close failed board=%s",
+                            board,
+                            exc_info=True,
+                        )
     except Exception:
         logger.debug("Kanban WebUI wake poll failed", exc_info=True)
     finally:
