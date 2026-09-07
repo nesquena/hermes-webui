@@ -212,6 +212,7 @@ def test_restore_settled_session_projects_through_production_path(browser):
               window.renderMessages = () => {};
               window.renderSessionList = () => {};
               window._setActivePaneIdleIfOwner = () => {};
+              window._commitTerminalReplacement = commit => { commit(); return true; };
               window._setActiveSessionUrl = () => {};
               window.localStorage = {setItem: () => {}};
             }

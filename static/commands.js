@@ -1962,12 +1962,11 @@ async function cmdBtw(args){
   const activeSid=S.session.session_id;
   try{
     const r=await api('/api/btw',{method:'POST',body:JSON.stringify({session_id:activeSid,question})});
-    if(!_commandOwnerIsCurrent(activeSid))return;
-    if(r&&r.error){showToast(r.error);return;}
+    if(r&&r.error){if(_commandOwnerIsCurrent(activeSid))showToast(r.error);return;}
     // Connect to the ephemeral SSE stream
     const streamId=r.stream_id;
     const parentSid=r.parent_session_id;
-    if(typeof attachBtwStream==='function') attachBtwStream(parentSid,streamId,question);
+    if(typeof attachBtwStream==='function') attachBtwStream(parentSid||activeSid,streamId,question);
   }catch(e){if(_commandOwnerIsCurrent(activeSid))showToast(t('btw_failed')+e.message);}
 }
 async function cmdBackground(args){
@@ -1978,8 +1977,7 @@ async function cmdBackground(args){
   const activeSid=S.session.session_id;
   try{
     const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:activeSid,prompt})});
-    if(!_commandOwnerIsCurrent(activeSid))return;
-    if(r&&r.error){showToast(r.error);return;}
+    if(r&&r.error){if(_commandOwnerIsCurrent(activeSid))showToast(r.error);return;}
     // Show background badge and start polling
     if(typeof showBackgroundBadge==='function') showBackgroundBadge(r.task_id);
     if(typeof startBackgroundPolling==='function') startBackgroundPolling(activeSid,r.task_id,prompt);

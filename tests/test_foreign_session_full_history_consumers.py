@@ -84,6 +84,8 @@ ASYNC_SLASH_BLOCK = SEND_SRC[
     )
 ]
 BACKGROUND_SRC = _maybe_extract(MESSAGES_JS, "startBackgroundPolling")
+BACKGROUND_RECORD_SRC = _maybe_extract(MESSAGES_JS, "_backgroundResultRecord")
+BACKGROUND_PROJECT_SRC = _maybe_extract(MESSAGES_JS, "projectBackgroundResultsForOwner")
 GATEWAY_SRC = _maybe_extract(SESSIONS_JS, "startGatewaySSE")
 CAPTURE_SRC = _maybe_extract(SESSIONS_JS, "_captureTranscriptReplacement")
 CURRENT_SRC = _maybe_extract(SESSIONS_JS, "_transcriptReplacementIsCurrent")
@@ -1313,6 +1315,7 @@ const window = {{ _defaultMessageMode: 'steer' }};
 const document = {{ querySelector() {{ return null; }} }};
 const localStorage = {{ setItem() {{}}, removeItem() {{}}, getItem() {{ return null; }} }};
 const INFLIGHT = {{}};
+const _submittedPayloadRecovery = new Map();
 const COMMANDS = [];
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set();
 function $(id) {{ return id === 'msg' ? input : null; }}
@@ -1489,6 +1492,8 @@ const hidden = [];
 const toasts = [];
 const S = {{ session: {{ session_id: 'parent' }}, messages: [], busy: false, activeStreamId: null }};
 const _bgPollTimers = {{}};
+const _bgPollDrains = new Map();
+const _bgResultCustody = new Map();
 function _isSessionCurrentPane(sid) {{ return !!(S.session && S.session.session_id === sid); }}
 function _bumpMessagesGeneration() {{ _messagesGeneration += 1; }}
 function hideBackgroundBadge(taskId) {{ hidden.push(taskId); }}
@@ -1499,6 +1504,8 @@ function $(id) {{ return null; }}
 function api() {{ return new Promise(resolve => {{ resolveStatus = resolve; }}); }}
 function setTimeout(fn) {{ timerCount += 1; return timerCount; }}
 {BACKGROUND_SRC}
+{BACKGROUND_RECORD_SRC}
+{BACKGROUND_PROJECT_SRC}
 startBackgroundPolling('parent', 'task-1', 'prompt');
 (async () => {{
   await Promise.resolve();
@@ -1569,9 +1576,11 @@ console.log(JSON.stringify({messages: S.messages.map(message => message.content)
 function hideBackgroundBadge() {}
 function renderMessages() {}
 function showToast() {}
-function t(key) { return key; }
-const _bgPollTimers = {};
-function setTimeout() { return 1; }
+        function t(key) { return key; }
+        const _bgPollTimers = {};
+        const _bgPollDrains = new Map();
+        const _bgResultCustody = new Map();
+        function setTimeout() { return 1; }
 """
         writer_start = """
 const ensurePromise = _ensureAllMessagesLoaded();
@@ -1643,6 +1652,8 @@ function _setSessionCompletionUnread() {{}}
 {api_body}
 {ENSURE_ALL_FN}
 {writer_setup}
+{BACKGROUND_RECORD_SRC if writer == "background" else ""}
+{BACKGROUND_PROJECT_SRC if writer == "background" else ""}
 {writer_src}
 (async () => {{
 {writer_start}
@@ -2218,7 +2229,7 @@ def test_normal_send_rejects_late_owner_result_after_pane_switch(stage):
     assert result["messages"] == [{"role": "assistant", "content": "session b existing"}]
     assert result["busy"] is False
     assert result["activeStreamId"] is None
-    assert result["attachCalls"] == 0
+    assert result["attachCalls"] == (1 if stage == "chat_start" else 0)
     assert result["inflightKeys"] == (["session-a"] if stage == "chat_start" else [])
 
 
@@ -2265,23 +2276,11 @@ def test_clear_conversation_leaves_switched_pane_untouched():
 
 
 def test_send_owner_guard_covers_upload_directive_and_chat_start_awaits():
-    upload_idx = SEND_SRC.index("uploaded=await uploadPendingFiles(")
-    upload_guard_idx = SEND_SRC.index("if(!_slashOwnerIsCurrent(activeSid))return;", upload_idx)
-    directive_idx = SEND_SRC.index("const _directivePayload = await _pending.promise;")
-    directive_guard_idx = SEND_SRC.index("if(!_slashOwnerIsCurrent(activeSid))return;", directive_idx)
-    chat_start_idx = SEND_SRC.index("const startData=await api('/api/chat/start'")
-    catch_idx = SEND_SRC.index("}catch(e){", chat_start_idx)
-    catch_guard_idx = SEND_SRC.index("if(!_slashOwnerIsCurrent(activeSid)) return;", catch_idx)
-    success_guard_idx = SEND_SRC.index(
-        "if(!_slashOwnerIsCurrent(activeSid)) return;", catch_guard_idx + 1
-    )
-    stream_state_idx = SEND_SRC.index("S.activeStreamId = streamId;", chat_start_idx)
-
-    assert upload_idx < upload_guard_idx
-    assert directive_idx < directive_guard_idx
-    assert catch_idx < catch_guard_idx < success_guard_idx < stream_state_idx
-    assert "queueSessionMessage(ownerSid" in SEND_SRC
-    assert "updateQueueBadge(ownerSid)" in SEND_SRC
+    assert "const _submittedPayloadCustody={" in SEND_SRC
+    assert "const _releaseSubmittedPayload=(recover=true)=>" in SEND_SRC
+    assert SEND_SRC.count("_releaseSubmittedPayload();") >= 5
+    assert "attachLiveStream(activeSid, streamId, uploadedNames);" in SEND_SRC
+    assert "const _postStartOwnerCurrent=_slashOwnerIsCurrent(activeSid);" in SEND_SRC
     assert "const activeSid=await _goalSessionOwner();" in CMD_GOAL_SRC
     assert "typeof _ensureSessionOwner === 'function'" in CMD_GOAL_SRC
     assert "const sid=await newSession();" in CMD_GOAL_SRC
@@ -2297,18 +2296,18 @@ def test_background_polling_rejects_stale_owner_or_generation_and_keeps_retry():
     assert current["timerCount"] == 0
 
     switched = _run_node(_background_polling_script(switch_session=True))
-    assert switched["hidden"] == []
+    assert switched["hidden"] == ["task-1"]
     assert switched["messages"] == []
     assert switched["rendered"] is False
     assert switched["toasts"] == []
-    assert switched["timerCount"] == 1
+    assert switched["timerCount"] == 0
 
     newer_writer = _run_node(_background_polling_script(change_generation=True))
-    assert newer_writer["hidden"] == []
-    assert newer_writer["messages"] == []
-    assert newer_writer["rendered"] is False
-    assert newer_writer["toasts"] == []
-    assert newer_writer["timerCount"] == 1
+    assert newer_writer["hidden"] == ["task-1"]
+    assert newer_writer["messages"][0]["content"].endswith("done")
+    assert newer_writer["rendered"] is True
+    assert newer_writer["toasts"] == ["bg_complete"]
+    assert newer_writer["timerCount"] == 0
 
 
 @pytest.mark.parametrize("writer", ["gateway", "background"])
@@ -2329,8 +2328,9 @@ def test_writer_graph_covers_gateway_and_background_generation_authorities():
     assert "startGatewaySSE" in SESSIONS_JS
     assert "import_cli" in SESSIONS_JS
     assert "function startBackgroundPolling" in MESSAGES_JS
-    assert "const requestGeneration=typeof _messagesGeneration==='number'" in MESSAGES_JS
-    assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n            S.messages.push(msg);" in MESSAGES_JS
+    assert "const _bgPollDrains=new Map()" in MESSAGES_JS
+    assert "_backgroundResultRecord(parentSid,res,prompt)" in MESSAGES_JS
+    assert "projectBackgroundResultsForOwner(parentSid)" in MESSAGES_JS
     assert "S.messages = _nextToAssign;" in SESSIONS_JS
     assert "S.messages.push(msg);" in MESSAGES_JS
 
@@ -2438,9 +2438,9 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "if(activeStreamId) _bumpMessagesGeneration();\n    S.activeStreamId=activeStreamId;" in SESSIONS_JS
     assert "S.busy=true;\n      _bumpMessagesGeneration();\n      S.activeStreamId=activeStreamId;" in SESSIONS_JS
     assert "if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.messages.push(userMsg);renderMessages();setBusy(true);" in MESSAGES_JS
-    assert "if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n  S.activeStreamId = streamId;" in MESSAGES_JS
-    assert "S.busy = true;\n    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n    S.activeStreamId = streamId;" in MESSAGES_JS
-    assert "S.busy = true;\n        if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();\n        S.activeStreamId = streamId;" in MESSAGES_JS
+    assert "function settleTranscriptReplacement(commit)" in SESSIONS_JS
+    assert "function _commitTerminalReplacement(commit)" in MESSAGES_JS
+    assert "_commitTerminalReplacement(()=>" in MESSAGES_JS
     assert "_commitTranscriptReplacement(replacementTicket, () =>" in COMMANDS_JS
     assert "const replacementTicket=typeof _captureTranscriptReplacement==='function'" in COMMANDS_JS
     assert "const refreshTicket=typeof _captureTranscriptReplacement==='function'" in UI_JS
@@ -2448,7 +2448,6 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "const sessionInput = arguments.length > 0 ? arguments[0] : null;" in MESSAGES_JS
     assert "function collectSessionArtifacts()" in WORKSPACE_JS
     assert "const messagesInput = arguments.length > 0 ? arguments[0] : null;" in WORKSPACE_JS
-    assert "const requestGeneration=typeof _messagesGeneration==='number'" in MESSAGES_JS
     assert "ticket.committedGeneration = _messagesGeneration;" in SESSIONS_JS
     assert "loadGeneration: typeof _loadSessionGeneration==='number'" in SESSIONS_JS
     assert "ticket.loadGeneration===_loadSessionGeneration" in SESSIONS_JS
@@ -2459,8 +2458,8 @@ def test_messages_generation_wiring_covers_full_load_live_turn_claims_and_same_s
     assert "const _metadataSid=await _ensureSlashOwner();" in MESSAGES_JS
     assert "const _compressionLive=LIVE_STREAMS[activeSid];" in MESSAGES_JS
     assert "_compressionLive.source!==source" in MESSAGES_JS
-    assert "const _btwOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'" in BTW_SRC
-    assert "if(!_btwOwnerIsCurrent()) return;" in BTW_SRC
+    assert "function _btwOwnerIsCurrent(parentSid)" in MESSAGES_JS
+    assert "function projectBtwStreamsForOwner(parentSid)" in MESSAGES_JS
     assert "const ownerSid=S.session.session_id;" in _maybe_extract(COMMANDS_JS, "cmdBranch", "async function")
     assert "if(data&&data.session_id&&branchOwnerIsCurrent())" in _maybe_extract(COMMANDS_JS, "cmdBranch", "async function")
     assert "S.session.session_id !== initialSid" in _maybe_extract(COMMANDS_JS, "forkFromMessage", "async function")
@@ -2485,13 +2484,13 @@ def test_terminal_paths_route_artifacts_refresh_through_shared_idle_helper():
     assert "if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();" in MESSAGES_JS
     assert "renderSessionList();\n        _setActivePaneIdleIfOwner();" in MESSAGES_JS
     assert "_setActivePaneIdleIfOwner();\n      renderSessionList(); // clear streaming indicator immediately on apperror" in MESSAGES_JS
-    assert "finally{\n            _setActivePaneIdleIfOwner();\n          }" in MESSAGES_JS
+    assert "finally{\n            _setActivePaneIdleIfOwner(streamId);\n          }" in MESSAGES_JS
     assert "renderSessionList();\n      _setActivePaneIdleIfOwner();\n      return returnStatus?'restored':true;" in MESSAGES_JS
     cancel_start = MESSAGES_JS.index("const _cancelSessionPayload")
     cancel_end = MESSAGES_JS.index("for(const _runJournalEventName", cancel_start)
     cancel_block = MESSAGES_JS[cancel_start:cancel_end]
     assert "finally{" in cancel_block
-    assert "_setActivePaneIdleIfOwner();" in cancel_block
+    assert "_setActivePaneIdleIfOwner(streamId);" in cancel_block
 
 
 def test_locale_blocks_cover_loading_and_download_feedback_keys():

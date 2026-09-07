@@ -55,7 +55,7 @@ def test_helper_has_new_three_arg_signature_and_guards():
     assert "const visibleSid=(S.session&&S.session.session_id)||null;" in body
     assert "const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);" in body
     # Never clobber a message the user began typing during the async window.
-    assert "if(inp && !String(inp.value||'').trim()){" in body
+    assert "if(inp && !pendingNavigation && !newerFiles && !String(inp.value||'').trim()){" in body
     # Restores text and re-stages files.
     assert "inp.value=restore;" in body
     assert "S.pendingFiles=files;" in body
@@ -86,10 +86,9 @@ def test_error_branch_restores_original_snapshot_not_mutated_payload():
     start = MESSAGES_JS.find("S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});")
     assert start != -1, "the /api/chat/start error branch must still push an Error turn"
     window = MESSAGES_JS[start:start + 1100]
-    assert (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
-        in window
-    ), "the send-error path must restore the ORIGINAL captured snapshot (not `text`)"
+    assert "_releaseSubmittedPayload();" in window, (
+        "the send-error path must restore the ORIGINAL captured snapshot through custody"
+    )
 
 
 def test_send_still_clears_composer_on_the_happy_path():
@@ -150,11 +149,9 @@ def test_restore_persist_chains_after_the_clear_promise():
     )
     # And send() must pass the captured clear promise into the restore call.
     assert "let _composerDraftClearPromise=null;" in MESSAGES_JS
-    call = (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, "
-        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
-    )
-    assert call in MESSAGES_JS, "send() must pass the clear promise into the restore helper"
+    assert "files:[..._submittedFiles]" in MESSAGES_JS
+    assert "clearPromise:_composerDraftClearPromise" in MESSAGES_JS
+    assert "_restoreComposerDraftAfterFailedSend(\n      _submittedPayloadCustody.draftText" in MESSAGES_JS
 
 
 # ---------------------------------------------------------------------------

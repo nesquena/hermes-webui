@@ -1287,6 +1287,37 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
+const _submittedPayloadRecovery=new Map();
+function projectSubmittedPayloadForOwner(sid){
+  const custody=_submittedPayloadRecovery.get(sid);
+  if(!custody) return false;
+  const visibleSid=(S.session&&S.session.session_id)||null;
+  const inp=$('msg');
+  if(visibleSid===sid&&inp){
+    const liveText=String(inp.value||'').trim();
+    const expectedText=String(custody.draftText||'').trim();
+    const liveFiles=Array.isArray(S.pendingFiles)?S.pendingFiles.filter(Boolean):[];
+    const expectedFiles=Array.isArray(custody.files)?custody.files.filter(Boolean):[];
+    const filesConflict=liveFiles.length>0&&(
+      liveFiles.length!==expectedFiles.length||
+      liveFiles.some((file,index)=>expectedFiles[index]!==file)
+    );
+    if((liveText&&liveText!==expectedText)||filesConflict){
+      _submittedPayloadRecovery.delete(sid);
+      return false;
+    }
+    if(liveText===expectedText&&liveFiles.length===expectedFiles.length
+       &&(liveFiles.length===0||liveFiles.every((file,index)=>expectedFiles[index]===file))){
+      _submittedPayloadRecovery.delete(sid);
+      return true;
+    }
+  }
+  const restored=_restoreComposerDraftAfterFailedSend(
+    custody.draftText,custody.files,custody.sid,custody.clearPromise
+  );
+  if(restored) _submittedPayloadRecovery.delete(sid);
+  return restored;
+}
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
@@ -1300,8 +1331,11 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   let restoredVisible=false;
   if(belongsToVisible){
     const inp=$('msg');
+    const pendingNavigation=typeof _loadingSessionId!=='undefined'
+      && _loadingSessionId!==null && _loadingSessionId!==visibleSid;
+    const newerFiles=Array.isArray(S.pendingFiles)&&S.pendingFiles.length>0;
     // Do not clobber a new message the user began typing during the async window.
-    if(inp && !String(inp.value||'').trim()){
+    if(inp && !pendingNavigation && !newerFiles && !String(inp.value||'').trim()){
       inp.value=restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
@@ -1334,7 +1368,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, []);
+          _saveComposerDraftNow(sid, restore, typeof _composerDraftFilesForPersist==='function'
+            ? _composerDraftFilesForPersist(files)
+            : files);
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
@@ -1693,11 +1729,36 @@ async function send(){
   let _composerDraftClearPromise=null;
   if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
 
+  const _submittedPayloadCustody={
+    sid:activeSid,
+    draftText:_failedSendDraftText,
+    files:[..._submittedFiles],
+    clearPromise:_composerDraftClearPromise,
+    released:false,
+  };
+  const _releaseSubmittedPayload=(recover=true)=>{
+    if(_submittedPayloadCustody.released) return false;
+    _submittedPayloadCustody.released=true;
+    if(!recover){
+      _submittedPayloadRecovery.delete(_submittedPayloadCustody.sid);
+      return true;
+    }
+    const restored=_restoreComposerDraftAfterFailedSend(
+      _submittedPayloadCustody.draftText,
+      _submittedPayloadCustody.files,
+      _submittedPayloadCustody.sid,
+      _submittedPayloadCustody.clearPromise
+    );
+    if(restored) _submittedPayloadRecovery.delete(_submittedPayloadCustody.sid);
+    else _submittedPayloadRecovery.set(_submittedPayloadCustody.sid,_submittedPayloadCustody);
+    return true;
+  };
+
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){if(_slashOwnerIsCurrent(activeSid))setComposerStatus(`Upload error: ${e.message}`);return;}}
-  if(!_slashOwnerIsCurrent(activeSid))return;
+  catch(e){if(!text){if(_slashOwnerIsCurrent(activeSid))setComposerStatus(`Upload error: ${e.message}`);_releaseSubmittedPayload();return;}}
+  if(!_slashOwnerIsCurrent(activeSid)){_releaseSubmittedPayload();return;}
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1711,9 +1772,19 @@ async function send(){
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
     if(!_pending.sessionId||_pending.sessionId===activeSid){
-      const _directivePayload = await _pending.promise;
-      if(!_slashOwnerIsCurrent(activeSid))return;
+      let _directivePayloadResult;
+      try{
+        const _directivePayload = await _pending.promise;
+        _directivePayloadResult=_directivePayload;
+      }
+      catch(e){
+        if(_slashOwnerIsCurrent(activeSid)) setComposerStatus(`Directive error: ${e&&e.message||e}`);
+        _releaseSubmittedPayload();
+        return;
+      }
+      if(!_slashOwnerIsCurrent(activeSid)){_releaseSubmittedPayload();return;}
       if(_forcedSkillDirectivePending===_pending)_forcedSkillDirectivePending = null;
+      const _directivePayload=_directivePayloadResult;
       if(_directivePayload){
         const _directive = typeof _directivePayload==='string'
           ? _directivePayload
@@ -1731,8 +1802,9 @@ async function send(){
       }
     }
   }
+  if(!msgText)_releaseSubmittedPayload();
   if(!msgText){setComposerStatus('Nothing to send');return;}
-  if(!_slashOwnerIsCurrent(activeSid))return;
+  if(!_slashOwnerIsCurrent(activeSid)){_releaseSubmittedPayload();return;}
   // Composer textarea + persisted draft were already captured and cleared
   // immediately after capture (above, salvage of #4750 + #5912 gate fix) to close
   // the re-entrant double-send race AND avoid clobbering a draft typed during the
@@ -1868,7 +1940,7 @@ async function send(){
     if(!_slashOwnerIsCurrent(activeSid)){
       delete INFLIGHT[activeSid];
       if(typeof clearInflightState==='function') clearInflightState(activeSid);
-      _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise);
+      _releaseSubmittedPayload();
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       return;
     }
@@ -1895,6 +1967,7 @@ async function send(){
       setBusy(false);setComposerStatus('');
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       if(typeof renderMessages==='function') renderMessages();
+      _releaseSubmittedPayload(false);
       if($('emptyState')) $('emptyState').style.display='';
       if($('msgInner')) $('msgInner').innerHTML='';
       if(typeof renderSessionList==='function') void renderSessionList();
@@ -1909,6 +1982,7 @@ async function send(){
       // Keep the user's attempted turn by queueing it for after the current run.
       const _retryModelState=_chatPayloadModelState();
       queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
+      _releaseSubmittedPayload(false);
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
@@ -1921,7 +1995,7 @@ async function send(){
       }
     }
 
-    if(!_slashOwnerIsCurrent(activeSid)) return;
+    if(!_slashOwnerIsCurrent(activeSid)){_releaseSubmittedPayload();return;}
 
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
@@ -1935,23 +2009,27 @@ async function send(){
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
     // payload) and re-stage files so the user can re-send without retyping.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
+    _releaseSubmittedPayload();
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();
     return;
   }
 
-  if(!_slashOwnerIsCurrent(activeSid)) return;
+  const _postStartOwnerCurrent=_slashOwnerIsCurrent(activeSid);
+  _releaseSubmittedPayload(false);
   const startData = postStartData || {};
   streamId = postStartData ? postStartData.stream_id : null;
-  if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
-  S.activeStreamId = streamId;
+  if(_postStartOwnerCurrent){
+    if(streamId&&typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
+    S.activeStreamId = streamId;
+  }
   // setBusy(true) already ran with activeStreamId=null; refresh now that we
   // have a stream id so the primary button can switch to Stop (see
   // getComposerPrimaryAction).
-  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(_postStartOwnerCurrent&&typeof updateSendBtn==='function') updateSendBtn();
   _runOptionalPostStartUiStep('post-start ui/bookkeeping', ()=>{
+    if(!_postStartOwnerCurrent) return;
     const _modelState=modelStateForPostStart || _chatPayloadModelState();
     const _explicitPick=explicitPickForPostStart;
     if(startData&&startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
@@ -1998,20 +2076,13 @@ async function send(){
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
-    if(!INFLIGHT[activeSid]){
-      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
-    }
-    const currentInflight=INFLIGHT[activeSid];
-    markInflight(activeSid, streamId);
-    if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
-    }
-    // Refresh session list so background streaming indicators appear immediately for the
-    // session that was just started and any others that may already be running.
-    if(typeof renderSessionList === 'function') {
-      void renderSessionList();
-    }
   });
+
+  if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+  const currentInflight=INFLIGHT[activeSid];
+  markInflight(activeSid, streamId);
+  if(typeof saveInflightState==='function') saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+  if(typeof renderSessionList === 'function') void renderSessionList();
 
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
@@ -2424,6 +2495,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
   }
   function _setActivePaneIdleIfOwner(){
+    const settlingStreamId=arguments.length?arguments[0]:streamId;
+    if(settlingStreamId&&S.activeStreamId&&S.activeStreamId!==settlingStreamId) return false;
+    if(S.busy&&!S.activeStreamId&&settlingStreamId&&settlingStreamId!==streamId) return false;
+    if(S.busy&&!S.activeStreamId&&settlingStreamId===streamId
+       &&typeof _sendInProgressSid!=='undefined'&&_sendInProgressSid===activeSid
+       &&INFLIGHT[activeSid]&&INFLIGHT[activeSid].streamId!==streamId) return false;
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
       setBusy(false);
       setComposerStatus('');
@@ -2432,7 +2509,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
         else if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(activeSid);
       }
+      return true;
     }
+    return false;
+  }
+  function _commitTerminalReplacement(commit){
+    if(typeof settleTranscriptReplacement==='function') return settleTranscriptReplacement(commit);
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
+    commit();
+    return true;
   }
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
@@ -6262,16 +6347,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          const _terminalCommitted=_commitTerminalReplacement(()=>{
+            S.session=d.session;
+            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);
+          });
+          if(!_terminalCommitted) return;
+          if(S.session&&S.session.session_id){
+            try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){ }
+            if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+          }
+          if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
-          if(S.session&&S.session.session_id){
-            try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-            if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-          }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(
             window._compressionUi&&window._compressionUi.automatic&&
@@ -6442,6 +6532,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
           }
           if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
+          if(typeof projectBackgroundResultsForOwner==='function') projectBackgroundResultsForOwner(activeSid);
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
@@ -6705,11 +6796,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
-            S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
+            const _terminalCommitted=_commitTerminalReplacement(()=>{
+              S.session=d.session;
+              _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
+              S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+            });
+            if(!_terminalCommitted) return;
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
-            _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
-            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             if(S.session&&S.session.session_id){
               try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
               if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -6748,10 +6842,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               renderMessages({preserveScroll:true});
             }
           })();
-        } else {
-          _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
-          renderMessages({preserveScroll:true});
-        }
+         } else {
+           _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
+           renderMessages({preserveScroll:true});
+           if(typeof projectBackgroundResultsForOwner==='function') projectBackgroundResultsForOwner(activeSid);
+         }
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
@@ -6917,6 +7012,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearStreamNotificationBackground(activeSid, streamId);
       _clearApprovalForOwner();
       _clearClarifyForOwner('cancelled');
+      // _setActivePaneIdleIfOwner() remains stream-owned through its argument.
       let _cancelData={};
       try{ _cancelData=JSON.parse(e.data||'{}')||{}; }catch(_){ _cancelData={}; }
       _flushReasoningToAnchor();
@@ -6929,8 +7025,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
+      const _cancelSettlementGeneration=typeof _messagesGeneration==='number'?_messagesGeneration:null;
+      const _cancelSettlementInflight=INFLIGHT[activeSid]||null;
+      const _cancelContinuationIsCurrent=()=>{
+        if(!S.session||S.session.session_id!==activeSid) return false;
+        if(S.activeStreamId&&S.activeStreamId!==streamId) return false;
+        if(S.busy&&!S.activeStreamId&&typeof _sendInProgressSid!=='undefined'
+           &&_sendInProgressSid===activeSid&&INFLIGHT[activeSid]!==_cancelSettlementInflight) return false;
+        return _cancelSettlementGeneration===null||_messagesGeneration===_cancelSettlementGeneration;
+      };
       const _applyCancelSessionPayload=(sessionPayload)=>{
-        if(!sessionPayload||typeof sessionPayload!=='object'||!S.session||S.session.session_id!==activeSid) return false;
+        if(!_cancelContinuationIsCurrent()||!sessionPayload||typeof sessionPayload!=='object') return false;
         // Belt-and-suspenders: the embedded cancel snapshot must be for THIS session.
         // The GET path guarantees it via the URL; the embedded path via the stream→session
         // binding — but reject a mismatched id so a stray payload can't overwrite the view.
@@ -6946,16 +7051,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
-        S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        const _terminalCommitted=_commitTerminalReplacement(()=>{
+          S.session=sessionPayload;
+          _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
+          S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        });
+        if(!_terminalCommitted) return false;
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
-        _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
-        S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         clearLiveToolCards();if(!assistantText)removeThinking();
-        _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
-        renderMessages({preserveScroll:true});
-        if(_wasFollowingAtCancel && typeof scrollToBottom==='function') scrollToBottom();
+         _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
+         renderMessages({preserveScroll:true});
+         if(typeof projectBackgroundResultsForOwner==='function') projectBackgroundResultsForOwner(activeSid);
+         if(_wasFollowingAtCancel && typeof scrollToBottom==='function') scrollToBottom();
         return true;
       };
       // Prefer the canonical session snapshot embedded in the terminal cancel event.
@@ -6964,7 +7073,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // the fallback "Task cancelled" marker (#4076).
       const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
       renderSessionList();
-      _setActivePaneIdleIfOwner();
+      _setActivePaneIdleIfOwner(streamId);
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
@@ -6975,7 +7084,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
-          if(S.session&&S.session.session_id===activeSid){
+          if(_cancelContinuationIsCurrent()){
             const _wasFollowingAtCancelFb=((typeof _isMessagePaneNearBottom==='function')
                 ? _isMessagePaneNearBottom(1200)
                 : true)
@@ -6997,7 +7106,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               endedAt:Date.now()/1000,
             });
           }finally{
-            _setActivePaneIdleIfOwner();
+            _setActivePaneIdleIfOwner(streamId);
           }
         }
       })();
@@ -7096,9 +7205,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
-        S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
-        const _currentMessages=Array.isArray(S.messages)?S.messages:[];
+        const _visibleMessagesBeforeSettlement=Array.isArray(S.messages)?S.messages:[];
+        const _commitSettled=typeof _commitTerminalReplacement==='function'
+          ? _commitTerminalReplacement
+          : (commit)=>{commit();return true;};
+        const _terminalCommitted=_commitSettled(()=>{
+S.session=session;
+        const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
+          _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
+          S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        });
+        if(!_terminalCommitted) return returnStatus?'stale':false;
+        if(S.session&&S.session.session_id){
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){ }
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+        }
+        const _currentMessages=_visibleMessagesBeforeSettlement;
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);
         const _currentVisibleEndsWithTerminalMarker=(
@@ -7122,10 +7245,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-        if(S.session&&S.session.session_id){
-          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-        }
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
@@ -7153,6 +7272,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
+        if(typeof projectBackgroundResultsForOwner==='function') projectBackgroundResultsForOwner(activeSid);
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
@@ -9313,87 +9433,87 @@ function sendBrowserNotification(title,body,options={}){
 // Connects to the ephemeral SSE stream from /api/btw and renders the answer
 // in a visually distinct bubble that is NOT persisted to session history.
 
-function attachBtwStream(parentSid, streamId, question){
-  if(!parentSid||!streamId) return;
-  const src=new EventSource(new URL('api/chat/stream?stream_id='+encodeURIComponent(streamId), document.baseURI||location.href).href);
-  let answer='';
-  let btwRow=null;
-  let _streamDone=false;
-  const _btwOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+const _btwCustody=new Map();
+function _btwOwnerIsCurrent(parentSid){
+  return typeof _isSessionCurrentPane==='function'
     ? _isSessionCurrentPane(parentSid)
     : !!(S.session&&S.session.session_id===parentSid);
-  const _closeStaleBtwStream=()=>{
-    if(_streamDone) return false;
-    if(_btwOwnerIsCurrent()) return true;
-    _streamDone=true;
-    src.close();
-    return false;
-  };
-  function _ensureBtwRow(){
-    if(!_closeStaleBtwStream()) return false;
-    if(btwRow&&btwRow.isConnected) return true;
+}
+function _projectBtwRecord(record){
+  if(!record||record.error||!_btwOwnerIsCurrent(record.parentSid)) return false;
+  let row=record.row;
+  if(!row||!row.isConnected){
     const inner=$('msgInner');
     if(!inner) return false;
-    btwRow=document.createElement('div');
-    btwRow.className='msg-row msg-row-btw';
-    btwRow.dataset.role='assistant';
-    btwRow.dataset.btw='1';
+    row=document.createElement('div');
+    row.className='msg-row msg-row-btw';
+    row.dataset.role='assistant';
+    row.dataset.btw='1';
     const labelEl=document.createElement('div');
     labelEl.className='msg-btw-label';
     labelEl.textContent=t('btw_label');
     const qEl=document.createElement('div');
     qEl.className='msg-body';
-    qEl.textContent=question;
+    qEl.textContent=record.question;
     const ansEl=document.createElement('div');
     ansEl.className='msg-body msg-btw-answer';
     ansEl.textContent='...';
-    btwRow.appendChild(labelEl);
-    btwRow.appendChild(qEl);
-    btwRow.appendChild(ansEl);
-    inner.appendChild(btwRow);
-    btwRow.scrollIntoView({behavior:'smooth',block:'end'});
-    return true;
+    row.appendChild(labelEl);row.appendChild(qEl);row.appendChild(ansEl);inner.appendChild(row);
+    record.row=row;
   }
+  const ansEl=row.querySelector('.msg-btw-answer');
+  if(ansEl) ansEl.innerHTML=renderMd(record.answer||t('btw_no_answer'));
+  if(record.done&&!record.projected){
+    record.projected=true;
+    showToast(t('btw_done'));
+  }
+  return true;
+}
+function projectBtwStreamsForOwner(parentSid){
+  let projected=false;
+  for(const record of _btwCustody.values()){
+    if(record.parentSid===parentSid) projected=_projectBtwRecord(record)||projected;
+  }
+  return projected;
+}
+function attachBtwStream(parentSid, streamId, question){
+  if(!parentSid||!streamId) return;
+  const key=String(parentSid)+'\x1f'+String(streamId);
+  if(_btwCustody.has(key)) return _btwCustody.get(key);
+  const src=new EventSource(new URL('api/chat/stream?stream_id='+encodeURIComponent(streamId), document.baseURI||location.href).href);
+  const record={key,parentSid,streamId,question:String(question||''),answer:'',done:false,error:false,projected:false,row:null,src};
+  let _streamDone=false;
+  _btwCustody.set(key,record);
+  const close=()=>{try{src.close();}catch(_){} };
+  const _ensureBtwRow=()=>_projectBtwRecord(record);
   src.addEventListener('token',e=>{
-    if(!_closeStaleBtwStream()) return;
-    try{answer+=JSON.parse(e.data).text||'';}catch(_){}
-    if(!_ensureBtwRow()) return;
-    const ansEl=btwRow&&btwRow.querySelector('.msg-btw-answer');
-    if(ansEl) ansEl.innerHTML=renderMd(answer);
+    try{record.answer+=JSON.parse(e.data).text||'';}catch(_){}
+    _projectBtwRecord(record);
   });
   src.addEventListener('done',e=>{
-    _streamDone=true;
-    src.close();
-    try{
-      const d=JSON.parse(e.data);
-      if(d.answer&&!answer) answer=d.answer;
-    }catch(_){}
-    if(!S.session||S.session.session_id!==parentSid||!_btwOwnerIsCurrent()) return;
+    _streamDone=true;record.done=true;src.close();
+    try{const d=JSON.parse(e.data);if(d.answer&&!record.answer)record.answer=d.answer;}catch(_){}
+    if(!S.session||S.session.session_id!==parentSid) return;
+    if(!_btwOwnerIsCurrent(parentSid)) return;
     _ensureBtwRow();
-    if(btwRow&&btwRow.isConnected){
-      const ansEl=btwRow.querySelector('.msg-btw-answer');
-      if(ansEl) ansEl.innerHTML=renderMd(answer||t('btw_no_answer'));
-    }
-    if(_btwOwnerIsCurrent()) showToast(t('btw_done'));
   });
   src.addEventListener('apperror',e=>{
-    _streamDone=true;
-    src.close();
-    if(!_btwOwnerIsCurrent()) return;
-    try{
-      const d=JSON.parse(e.data);
-      showToast(t('btw_failed')+(d.message||''));
-    }catch(_){showToast(t('btw_failed'));}
-    if(btwRow&&btwRow.isConnected) btwRow.remove();
+    _streamDone=true;record.error=true;record.done=true;src.close();
+    if(!_btwOwnerIsCurrent(parentSid)) return;
+    try{const d=JSON.parse(e.data);showToast(t('btw_failed')+(d.message||''));}catch(_){showToast(t('btw_failed'));}
+    if(record.row&&record.row.isConnected) record.row.remove();
   });
-  src.addEventListener('stream_end',()=>{_streamDone=true;src.close();});
-  src.onerror=()=>{src.close();if(!_streamDone&&_btwOwnerIsCurrent()&&btwRow&&btwRow.isConnected) btwRow.remove();};
+  src.addEventListener('stream_end',()=>{_streamDone=true;record.done=true;src.close();_projectBtwRecord(record);});
+  src.onerror=()=>{close();if(!_streamDone&&!record.done){record.error=true;if(_btwOwnerIsCurrent(parentSid)&&record.row&&record.row.isConnected)record.row.remove();}};
+  return record;
 }
 
 // ── /background task tracking ────────────────────────────────────────────────
 
 let _bgPollTimers={};
 let _bgActiveTasks=new Set();
+const _bgPollDrains=new Map();
+const _bgResultCustody=new Map();
 
 function showBackgroundBadge(taskId){
   _bgActiveTasks.add(taskId);
@@ -9411,39 +9531,89 @@ function hideBackgroundBadge(taskId){
     badge.style.display=_bgActiveTasks.size?'':'none';
   }
 }
+function _backgroundResultRecord(parentSid,res,prompt){
+  const taskId=String(res&&res.task_id||'');
+  if(!taskId) return null;
+  let record=_bgResultCustody.get(taskId);
+  if(!record){
+    record={taskId,parentSid,prompt:String(res.prompt||prompt||''),answer:res.answer||'',completedAt:res.completed_at||null,projected:false,badgeHidden:false};
+    _bgResultCustody.set(taskId,record);
+  }
+  return record;
+}
+function projectBackgroundResultsForOwner(parentSid){
+  if(!parentSid||!S.session||S.session.session_id!==parentSid) return false;
+  if(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(parentSid)) return false;
+  let projected=false;
+  for(const record of _bgResultCustody.values()){
+    if(record.parentSid!==parentSid) continue;
+    if(record.projected&&Array.isArray(S.messages)
+       &&S.messages.some(message=>message&&message._backgroundTaskId===record.taskId)) continue;
+    const msg={role:'assistant',content:`**${t('bg_label')}** ${record.prompt.slice(0,80)}\n\n${record.answer||t('bg_no_answer')}`,'_background':true,_backgroundTaskId:record.taskId,_ts:Date.now()/1000};
+    if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
+    S.messages.push(msg);
+    record.projected=true;
+    if(!record.badgeHidden){hideBackgroundBadge(record.taskId);record.badgeHidden=true;}
+    projected=true;
+  }
+  if(projected){
+    renderMessages({preserveScroll:true});
+    showToast(t('bg_complete'));
+  }
+  return projected;
+}
 function startBackgroundPolling(parentSid, taskId, prompt){
+  if(!parentSid||!taskId) return;
+  let drain=_bgPollDrains.get(parentSid);
+  if(drain){
+    drain.taskIds.add(String(taskId));
+    drain.prompts.set(String(taskId),String(prompt||''));
+    return;
+  }
   if(_bgPollTimers[taskId]) return;
+  drain={
+    parentSid,
+    taskId:String(taskId),
+    prompt:String(prompt||''),
+    taskIds:new Set([String(taskId)]),
+    prompts:new Map([[String(taskId),String(prompt||'')]]),
+  };
+  _bgPollDrains.set(parentSid,drain);
+  const _scheduleDrain=()=>{
+    if(_bgPollTimers[drain.taskId]) return;
+    _bgPollTimers[drain.taskId]=setTimeout(()=>{
+      delete _bgPollTimers[drain.taskId];
+      _poll();
+    },3000);
+  };
   async function _poll(){
-    const requestSid=parentSid;
-    const requestGeneration=typeof _messagesGeneration==='number' ? _messagesGeneration : null;
     try{
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
-      if(r&&r.results){
-        for(const res of r.results){
-          if(res.task_id===taskId){
-            const ownerCurrent=typeof _isSessionCurrentPane==='function'
-              ? _isSessionCurrentPane(requestSid)
-              : !!(S.session&&S.session.session_id===requestSid);
-            const generationCurrent=requestGeneration===null
-              || typeof _messagesGeneration!=='number'
-              || _messagesGeneration===requestGeneration;
-            if(!ownerCurrent||!generationCurrent){
-              _bgPollTimers[taskId]=setTimeout(_poll,3000);
-              return;
-            }
-            hideBackgroundBadge(taskId);
-            delete _bgPollTimers[taskId];
-            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
-            if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
-            S.messages.push(msg);
-            renderMessages({preserveScroll:true});
-            showToast(t('bg_complete'));
-            return;
-          }
+      const results=Array.isArray(r&&r.results)?r.results:[];
+      for(const res of results){
+        const resultTaskId=String(res&&res.task_id||'');
+        const record=_backgroundResultRecord(parentSid,res,drain.prompts.get(resultTaskId)||prompt);
+        if(record&&!record.badgeHidden){
+          hideBackgroundBadge(record.taskId);
+          record.badgeHidden=true;
         }
       }
+      if(results.length){
+        for(const res of results){
+          const resultTaskId=String(res&&res.task_id||'');
+          if(resultTaskId) drain.taskIds.delete(resultTaskId);
+        }
+        projectBackgroundResultsForOwner(parentSid);
+        if(!drain.taskIds.size){
+          _bgPollDrains.delete(parentSid);
+          delete _bgPollTimers[drain.taskId];
+          return;
+        }
+        _scheduleDrain();
+        return;
+      }
     }catch(_){}
-    _bgPollTimers[taskId]=setTimeout(_poll,3000);
+    _scheduleDrain();
   }
   _poll();
 }

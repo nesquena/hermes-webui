@@ -1882,6 +1882,7 @@ async function loadSession(sid){
     if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
       closeOtherLiveStreams(sid);
     }
+    if(typeof _loadingOlderLease!=='undefined') _loadingOlderLease=null;
     _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
@@ -2421,7 +2422,7 @@ async function loadSession(sid){
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
-  if (_isCurrentLoad()) _loadingSessionId = null;
+if (_isCurrentLoad()) _loadingSessionId = null;
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in
@@ -2444,6 +2445,11 @@ async function loadSession(sid){
     );
   }
 
+  // Project page-local results after transcript loading and its final render.
+  // An earlier projection would be replaced by the loaded transcript.
+  if(typeof projectSubmittedPayloadForOwner==='function') projectSubmittedPayloadForOwner(sid);
+  if(typeof projectBtwStreamsForOwner==='function') projectBtwStreamsForOwner(sid);
+  if(typeof projectBackgroundResultsForOwner==='function') projectBackgroundResultsForOwner(sid);
   if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(sid);
 
   // ── Cross-channel handoff hint ──
@@ -3728,6 +3734,13 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
 // Load older messages when the user scrolls to the top of the conversation.
 // Prepends them to S.messages and re-renders, preserving scroll position.
 let _loadingOlder = false;
+let _loadingOlderLease = null;
+function _releaseLoadingOlder(lease){
+  if(!_loadingOlderLease || _loadingOlderLease!==lease) return false;
+  _loadingOlderLease=null;
+  _loadingOlder=false;
+  return true;
+}
 // _oldestIdx tracks the index (in the server's full message array) of the
 // oldest message currently loaded in S.messages. Starts at 0 when all
 // messages are loaded, or > 0 when truncated by msg_limit.
@@ -3771,6 +3784,10 @@ function _commitTranscriptReplacement(ticket, commit) {
   commit();
   return true;
 }
+function settleTranscriptReplacement(commit) {
+  const ticket=_captureTranscriptReplacement();
+  return _commitTranscriptReplacement(ticket,commit);
+}
 async function _readFullSessionSnapshot(sid) {
   if (!sid) return null;
   const data = await api(
@@ -3792,7 +3809,17 @@ async function _loadOlderMessages() {
   const sid = S.session ? S.session.session_id : null;
   if (!sid || !S.messages.length) return;
   if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
+  const loadLease={sid,loadGeneration:typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null};
+  const _setLoadingOlderLease=lease=>{
+    if(typeof _loadingOlderLease!=='undefined') _loadingOlderLease=lease;
+  };
+  const _releaseLoadingOlderForRequest=lease=>{
+    if(typeof _releaseLoadingOlder==='function') return _releaseLoadingOlder(lease);
+    _loadingOlder=false;
+    return true;
+  };
   _loadingOlder = true;
+  _setLoadingOlderLease(loadLease);
   // Snapshot the generation BEFORE we await. If S.messages is wholesale
   // replaced while the request is in flight, the post-await check below
   // bails out so we never prepend stale older messages onto a freshly
@@ -3829,7 +3856,7 @@ async function _loadOlderMessages() {
           {timeoutMs:120000}
         );
     // Guard: api() may have redirected (401) and returned undefined.
-    if (!data || !data.session) { _loadingOlder = false; return; }
+    if (!data || !data.session) { _releaseLoadingOlderForRequest(loadLease); return; }
     //  - response shape sane
     //  - the active session is still the one we issued the request for.
     //    Compare against S.session.session_id, NOT _loadingSessionId — the
@@ -3885,7 +3912,7 @@ async function _loadOlderMessages() {
           `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
           {timeoutMs:120000}
         );
-        if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+        if (!fallback || !fallback.session) { _releaseLoadingOlderForRequest(loadLease); return; }
         if (!S.session || S.session.session_id !== sid) return;
         if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
         if (_messagesGeneration !== startGeneration) return;
@@ -3964,7 +3991,7 @@ async function _loadOlderMessages() {
     // Always clear the loading lock. If the user switched sessions while
     // this request was in flight, loadSession() already set _loadingOlder=false
     // (see line ~122), so this is a harmless double-reset.
-    _loadingOlder = false;
+    _releaseLoadingOlderForRequest(loadLease);
   }
 }
 
@@ -3983,6 +4010,8 @@ async function _loadOlderMessages() {
 //      in-flight prefetch's post-await generation check bails out.
 async function _ensureAllMessagesLoaded() {
   if (!_messagesTruncated || !S.session) return;
+  const entrySid=S.session.session_id;
+  const entryLoadGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
   if (_loadingOlder) {
     // A prefetch is mid-flight (between the `_loadingOlder = true` line
     // and its post-await guards). Bumping the generation token now
@@ -3995,11 +4024,19 @@ async function _ensureAllMessagesLoaded() {
     while (_loadingOlder) {
       await new Promise(resolve => setTimeout(resolve, 16));
     }
-    if (!_messagesTruncated || !S.session) return;
+    if (!_messagesTruncated || !S.session
+       || S.session.session_id!==entrySid
+       || (entryLoadGeneration!==null && _loadSessionGeneration!==entryLoadGeneration)
+       || S.busy || S.activeStreamId) return;
   }
+  if(!S.session || S.session.session_id!==entrySid
+     || (entryLoadGeneration!==null && _loadSessionGeneration!==entryLoadGeneration)
+     || S.busy || S.activeStreamId) return;
+  const loadLease={sid:entrySid,loadGeneration:entryLoadGeneration};
   _loadingOlder = true;
+  _loadingOlderLease=loadLease;
   try {
-    const sid = S.session.session_id;
+    const sid = entrySid;
     const replacementTicket = _captureTranscriptReplacement();
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
@@ -4034,7 +4071,8 @@ async function _ensureAllMessagesLoaded() {
       }
     })) return;
   } finally {
-    _loadingOlder = false;
+    // The scoped releaser performs the previous _loadingOlder = false; transition.
+    _releaseLoadingOlder(loadLease);
   }
 }
 

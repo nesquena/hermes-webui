@@ -345,11 +345,13 @@ function _artifactsFullHistoryRequestFor(sid, generation, loadGeneration){
     if(_artifactsFullHistoryRequest !== record) return null;
     record.settled = true;
     record.snapshot = snapshot;
+    if(!snapshot) _artifactsFullHistoryRequest = null;
     return snapshot;
   }).catch(error => {
     if(_artifactsFullHistoryRequest !== record) return null;
     record.settled = true;
     record.snapshot = null;
+    _artifactsFullHistoryRequest = null;
     throw error;
   });
   _artifactsFullHistoryRequest = record;
@@ -684,7 +686,7 @@ function renderSessionArtifacts(){
       if(!snapshot || (startGeneration !== null && _messagesGeneration !== startGeneration)) return;
       _renderNow(snapshot.messages, snapshot.toolCalls);
     }).catch(e => {
-      if(_artifactsFullHistoryRequest !== record) return;
+      if(_artifactsFullHistoryRequest !== record && _artifactsFullHistoryRequest !== null) return;
       console.warn('renderSessionArtifacts full-load failed:',e);
       if(root.isConnected === false) return;
       if(typeof _workspaceArtifactsTabIsActive==='function'&&_workspaceArtifactsTabIsActive()) _renderNow();
