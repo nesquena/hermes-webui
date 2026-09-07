@@ -102,6 +102,7 @@ let _lastScrollTop = 0;
 let _lastMessageClientHeight = 0;
 let _nearBottomCount = 0;
 let _scrollPinned = false;
+let _messageFollowIntentCache = true;   // genuine tail-follower: follow-intent armed
 const performance = { now: () => 0 };
 """
         + body
@@ -114,10 +115,11 @@ HELPER = _function_body(UI_JS, "_reanchorPinnedTailAfterRender")
 
 
 def test_pinned_tailfollower_clamped_short_is_reanchored_to_settled_max():
-    """The exact jitter event: a pre-wipe tail-follower whose scrollTop the browser
-    left clamped SHORT of the settled max (8527 vs settled max 9235-626=8609). The
-    fixed helper must snap scrollTop to the settled max (8609) synchronously, so the
-    short intermediate is never painted. On the buggy version scrollTop stays 8527.
+    """The exact jitter event: a pre-wipe tail-follower (follow-intent cache
+    ARMED) whose scrollTop the browser left clamped SHORT of the settled max
+    (8527 vs settled max 9235-626=8609). The fixed helper must snap scrollTop to
+    the settled max (8609) synchronously, so the short intermediate is never
+    painted. On the buggy version scrollTop stays 8527.
     """
     scenario = r"""
 el.scrollTop = 8527;   // browser clamped a bit high during the transient-layout write
@@ -135,6 +137,31 @@ console.log(JSON.stringify({ top: el.scrollTop, prog: _programmaticScroll, pinne
         "not misread it as a manual unpin"
     )
     assert m["pinned"] is True, "re-anchoring a tail-follower must keep it pinned"
+
+
+def test_false_follow_intent_cache_skips_reanchor_and_stays_sticky():
+    """#6653 re-gate: the re-anchor is an AUTOMATIC writer and must honor a
+    false follow-intent cache. A reader who scrolled up (cache synchronously
+    invalidated on authoritative upward input) must NOT be re-anchored to the
+    settled max, and the false cache must stay STICKY — the re-arm path must
+    never flip it back to true (maintainer round-2 requirement).
+    """
+    scenario = r"""
+el.scrollTop = 8527;   // clamped short, but this reader scrolled away
+_messageFollowIntentCache = false;   // reader's scroll-away, synchronously invalidated
+_reanchorPinnedTailAfterRender(true);
+console.log(JSON.stringify({ top: el.scrollTop, prog: _programmaticScroll, cache: _messageFollowIntentCache }));
+"""
+    m = json.loads(_run_node(_harness(HELPER, scenario)))
+    assert m["top"] == 8527, (
+        "a reader who scrolled away (cache false) must NOT be re-anchored to the "
+        f"settled max; got {m['top']}"
+    )
+    assert m["prog"] is False, "no scroll write must happen for a scrolled-away reader"
+    assert m["cache"] is False, (
+        "the re-arm path must keep a false cache sticky — an automatic writer must "
+        "never flip _messageFollowIntentCache back to true (#6653 re-gate)"
+    )
 
 
 def test_unpinned_reader_not_near_tail_is_never_moved():

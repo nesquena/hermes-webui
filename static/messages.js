@@ -6857,8 +6857,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // the bottom (where the cancellation notice renders), not be stranded at a
         // stale mid-stream scrollTop by preserveScroll's restore path. Same
         // jump-on-recovery class as the Connection-interrupted path below.
-        const _wasFollowingAtCancel=((typeof _isMessagePaneNearBottom==='function')
-            ? _isMessagePaneNearBottom(1200)
+        // #6653: read the layout-free _messageFollowIntentCache (synchronously
+        // invalidated on scroll-away in ui.js) rather than a near-bottom geometry
+        // check (forced scrollHeight layout, WKWebView freeze) or the raw pin flag
+        // (rAF-deferred, stale at cancel time).
+        const _wasFollowingAtCancel=((typeof _messageFollowIntentCache!=='undefined')
+            ? _messageFollowIntentCache
             : true)
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
@@ -6893,8 +6897,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
-            const _wasFollowingAtCancelFb=((typeof _isMessagePaneNearBottom==='function')
-                ? _isMessagePaneNearBottom(1200)
+            const _wasFollowingAtCancelFb=((typeof _messageFollowIntentCache!=='undefined')
+                ? _messageFollowIntentCache
                 : true)
               && !((typeof _isMessageReaderUnpinned==='function')
                 ? _isMessageReaderUnpinned()

@@ -124,7 +124,7 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     assert "function _recentMessageRenderArtifactWindow" in UI_JS
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
     assert listener_idx != -1, "messages scroll listener not found"
-    listener = UI_JS[listener_idx: listener_idx + 4000]
+    listener = UI_JS[listener_idx: listener_idx + 6000]
     assert "_recentMessageRenderArtifactWindow(1400)" in listener
     assert "!_recentMessageTouchScrollIntent()" in listener
     assert "!_recentNonMessageScrollIntent()" in listener
@@ -417,7 +417,7 @@ def test_suppression_gates_on_scrollbar_drag():
     assert "let _scrollbarDragActive=false" in UI_JS
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
     assert listener_idx != -1, "messages scroll listener not found"
-    listener = UI_JS[listener_idx: listener_idx + 4000]
+    listener = UI_JS[listener_idx: listener_idx + 6000]
     assert "!_scrollbarDragActive" in listener, (
         "#4970 review: the suppression branch must reference !_scrollbarDragActive "
         "so a scrollbar-drag upward scroll inside the window is not swallowed."
@@ -441,7 +441,7 @@ def test_keyboard_scroll_intent_tracked_and_gated():
     assert "'PageUp'" in UI_JS and "'PageDown'" in UI_JS
     # The suppression branch must consult it.
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
-    listener = UI_JS[listener_idx: listener_idx + 4000]
+    listener = UI_JS[listener_idx: listener_idx + 6000]
     assert "!_recentMessageKeyScrollIntent()" in listener, (
         "#4970 review: the suppression branch must reference "
         "!_recentMessageKeyScrollIntent() so a keyboard scroll-up unpins."
