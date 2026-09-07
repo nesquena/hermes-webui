@@ -3918,6 +3918,27 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
   const rawId=String(modelId||'');
+  // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
+  // key must not become a second picker row. configured_model_badges holds every
+  // spelling of a configured model and renderModelDropdown() synthesises a row
+  // for each key this predicate does not recognise. The provider-qualified
+  // spelling was missed because _normalizeConfiguredModelKey() strips only one
+  // leading slash segment (#3360 keeps `vendor_a/x` and `vendor_b/y/x` distinct),
+  // so `acme/example-model` and `custom/acme/example-model` normalise to
+  // different keys and the picker lists one model twice.
+  // Match it the way the `@provider:` rule below does: the badge declares a
+  // provider, the key starts with that provider's `<provider>/` prefix, and an
+  // existing row from the same provider normalises equal to the remainder. Two
+  // different models never satisfy the last clause, so this can only drop a
+  // duplicate of a row the catalog already produced.
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const slashRoutedId=rawId.slice(slashPrefix.length);
+    if(slashRoutedId&&(entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
+    )) return true;
+  }
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
@@ -11384,6 +11405,15 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
+  // The caller only consults this predicate once the turn has settled (it gates
+  // on `!S.busy`), so an `_live` marker seen here is a leftover of the
+  // live-snapshot projection, not an ongoing stream. Folding on it hid the turn's
+  // final answer inline and echoed it into the Worklog, leaving the turn with no
+  // visible content until the #3875 blank-turn fail-safe revealed both copies. A
+  // turn-final assistant message with visible text is the answer, so keep it out
+  // of the fold; every other `_live` message folds as before. Kept as a separate
+  // guard so the live rule below keeps its position.
+  if(m._live&&hasVisibleText&&isTurnFinalAssistant) return false;
   if(m._live) return true;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
@@ -17872,12 +17902,15 @@ function renderMessages(options){
         if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
         const anchorTurn=anchorRow.closest('.assistant-turn');
         if(!anchorTurn) continue;
+        // Hoisted out of the `if(!state)` block below (same expression, same
+        // value) so the append path can use the ownership fact the group
+        // construction already uses.
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
         let state=activityByTurn.get(anchorTurn);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
-          const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
           const group=ensureActivityGroup(anchorParent,{
             collapsed:true,
             anchor:anchorRow,
@@ -17897,7 +17930,14 @@ function renderMessages(options){
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
           live:false,
-          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+          // Echo an anchor's prose as a `.wl-reason` row only when that anchor was
+          // folded into this Worklog. `assistant-segment-worklog-source` is the
+          // proof, and its `display:none` is the only reason the echo is not a
+          // second visible copy. The group construction above already reasons
+          // that way (`syncAnchorReason`); the append path did not, so an anchor
+          // that escapes the fold (the turn-final answer, an `_error` message)
+          // had its text rendered both inline and inside the Worklog.
+          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml&&!!anchorIsWorklogSource,
           thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,
@@ -18186,6 +18226,15 @@ function renderMessages(options){
       const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
       let revealed=false;
       for(const group of groups){
+        // A settled Worklog whose rows are still deferred (#5839) has an empty
+        // textContent but is not empty in substance. Judging it empty here drops
+        // through to the last-resort un-hide below, and the deferred rows then
+        // materialize the same prose beside the segments it just un-hid.
+        // Materialize first, then judge.
+        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
+           &&typeof _materializeDeferredWorklogRows==='function'){
+          _materializeDeferredWorklogRows(group);
+        }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
