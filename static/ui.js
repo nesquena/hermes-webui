@@ -4555,6 +4555,12 @@ function renderModelDropdown(){
     row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
     return row;
   };
+  // Fold separator runs so picker search matches across id/name punctuation
+  // (#7228): "ox alpha" ≡ "ox-alpha" ≡ "ox.alpha" ≡ "ox_alpha". Kept as a pure
+  // self-contained function so the behavior tests can execute it in isolation.
+  function _foldModelSearchText(v){
+    return String(v==null?'':v).toLowerCase().replace(/[\s._-]+/g,'');
+  }
   const _filterModels=(term)=>{
     // Preserve focus across the re-render if the search input already had it — so a
     // touch user typing a query (where autoFocusSearch is suppressed to avoid the
@@ -4562,6 +4568,7 @@ function renderModelDropdown(){
     const _hadFocus=(typeof document!=='undefined')&&document.activeElement===_si;
     term=term.trim().toLowerCase();
     const hasSearch=!!term;
+    const foldedTerm=_foldModelSearchText(term);
     // On a fresh search, expand all groups so every match is visible (#collapse).
     if(hasSearch) for(const k in _groupOpenState) _groupOpenState[k]=true;
     // When a search is CLEARED (search -> empty), reset the per-group open state
@@ -4573,9 +4580,11 @@ function renderModelDropdown(){
     _prevHasSearch=hasSearch;
     const found=new Set();
     for(const m of _modelData){
-      const name=m.name.toLowerCase();
-      const id=m.id.toLowerCase();
-      if(name.includes(term)||id.includes(term)){
+      // Separator-only queries fold to '' and keep matching everything, which
+      // mirrors the old behavior where such queries matched nearly every row.
+      const name=_foldModelSearchText(m.name);
+      const id=_foldModelSearchText(m.id);
+      if(!foldedTerm||name.includes(foldedTerm)||id.includes(foldedTerm)){
         found.add(m.value);
       }
     }
