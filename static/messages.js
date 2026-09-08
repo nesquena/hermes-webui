@@ -1311,6 +1311,14 @@ function projectSubmittedPayloadForOwner(sid){
       _submittedPayloadRecovery.delete(sid);
       return true;
     }
+    if(liveText===expectedText&&liveFiles.length===0&&expectedFiles.length>0){
+      const restored=_restoreComposerDraftAfterFailedSend(
+        custody.draftText,custody.files,custody.sid,custody.clearPromise,
+        {allowMatchingText:true}
+      );
+      if(restored) _submittedPayloadRecovery.delete(sid);
+      return restored;
+    }
   }
   const restored=_restoreComposerDraftAfterFailedSend(
     custody.draftText,custody.files,custody.sid,custody.clearPromise
@@ -1318,9 +1326,10 @@ function projectSubmittedPayloadForOwner(sid){
   if(restored) _submittedPayloadRecovery.delete(sid);
   return restored;
 }
-function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise){
+function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, options){
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
+  const allowMatchingText=!!(options&&options.allowMatchingText);
   if(!restore&&!files.length) return false;
 
   // Only mutate the VISIBLE composer / staged tray when the failed send belongs
@@ -1334,8 +1343,10 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     const pendingNavigation=typeof _loadingSessionId!=='undefined'
       && _loadingSessionId!==null && _loadingSessionId!==visibleSid;
     const newerFiles=Array.isArray(S.pendingFiles)&&S.pendingFiles.length>0;
+    const currentText=String(inp&&inp.value||'').trim();
+    const matchingHydratedText=allowMatchingText&&currentText===String(restore||'').trim();
     // Do not clobber a new message the user began typing during the async window.
-    if(inp && !pendingNavigation && !newerFiles && !String(inp.value||'').trim()){
+    if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText)){
       inp.value=restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();

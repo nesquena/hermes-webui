@@ -25,13 +25,27 @@ This module verifies BOTH:
 import json
 import shutil
 import subprocess
+import tempfile
 import textwrap
 from pathlib import Path
 
 import pytest
+from tests.js_source_extract import extract_function
 
 ROOT = Path(__file__).parents[1]
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
+SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
+SEND_SRC = extract_function(MESSAGES_JS, "send", "async function")
+RECOVERY_START = MESSAGES_JS.index("const _submittedPayloadRecovery")
+RECOVERY_SRC = MESSAGES_JS[RECOVERY_START : MESSAGES_JS.index("async function send(", RECOVERY_START)]
+DRAFT_FILES_START = SESSIONS_JS.index("function _composerDraftFilesForPersist")
+DRAFT_FILES_SRC = SESSIONS_JS[
+    DRAFT_FILES_START : SESSIONS_JS.index("function _composerDraftPayloadSignature", DRAFT_FILES_START)
+]
+RESTORE_DRAFT_START = SESSIONS_JS.index("function _restoreComposerDraft(")
+RESTORE_DRAFT_SRC = SESSIONS_JS[
+    RESTORE_DRAFT_START : SESSIONS_JS.index("// Clear the saved draft", RESTORE_DRAFT_START)
+]
 
 
 # ---------------------------------------------------------------------------
@@ -46,19 +60,21 @@ def _helper_body() -> str:
     return MESSAGES_JS[start:end]
 
 
-def test_helper_has_new_three_arg_signature_and_guards():
+def test_helper_has_recovery_signature_and_guards():
     body = _helper_body()
-    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise)" in body
+    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, options)" in body
     # No-op when there is nothing to restore (no text AND no staged files).
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
     assert "const visibleSid=(S.session&&S.session.session_id)||null;" in body
     assert "const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);" in body
     # Never clobber a message the user began typing during the async window.
-    assert "if(inp && !pendingNavigation && !newerFiles && !String(inp.value||'').trim()){" in body
+    assert "if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText)){" in body
     # Restores text and re-stages files.
     assert "inp.value=restore;" in body
     assert "S.pendingFiles=files;" in body
+    assert "const allowMatchingText=!!(options&&options.allowMatchingText);" in body
+    assert "{allowMatchingText:true}" in MESSAGES_JS
     # The deferred persist is stale-aware: re-reads the LIVE composer when the
     # failed session is still visible (Codex #5488 catch), rather than the
     # captured snapshot.
@@ -425,4 +441,219 @@ def test_background_failure_persists_snapshot_since_no_live_composer():
     assert out["visibleUntouched"] == "visible session draft", "the visible composer must be untouched"
     assert out["saveCalls"] == [{"sid": "sid-1", "text": "bg failed msg"}], (
         f"background failure must persist the snapshot for its own sid; got {out['saveCalls']}"
+    )
+
+
+def _run_reload_projection_in_node(stage: str, conflict: bool = False):
+    """Compose the real send, draft hydration, and owner projection order."""
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+
+    recovery_setup = textwrap.dedent(
+        f"""
+        const fileA1 = {{id: 'a1', name: 'a.pdf', size: 1, lastModified: 11}};
+        const fileA2 = {{id: 'a2', name: 'b.png', size: 2, lastModified: 22}};
+        const fileB = {{id: 'b1', name: 'new.txt', size: 3, lastModified: 33}};
+        let savedDrafts = [];
+        let trayRenders = 0;
+        {DRAFT_FILES_SRC}
+        {RECOVERY_SRC}
+        {RESTORE_DRAFT_SRC}
+        """
+    )
+    conflict_setup = """
+        const conflictDraft = {text: 'newer text', files: _composerDraftFilesForPersist([fileB])};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _restoreComposerDraft(conflictDraft, 'session-a');
+        input.value = 'newer text';
+        S.pendingFiles = [fileB];
+        const projected = projectSubmittedPayloadForOwner('session-a');
+        await Promise.resolve();
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          trayRenders,
+          savedDrafts,
+        }));
+    """
+    normal_setup = """
+        const draft = {text: 'hello', files: _composerDraftFilesForPersist([fileA1, fileA2])};
+        S.session = {session_id: 'session-a', composer_draft: draft};
+        input.value = '';
+        S.pendingFiles = [];
+        _restoreComposerDraft(draft, 'session-a');
+        const projected = projectSubmittedPayloadForOwner('session-a');
+        await Promise.resolve();
+        await Promise.resolve();
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          trayRenders,
+          savedDrafts,
+        }));
+    """
+    post_setup = conflict_setup if conflict else normal_setup
+    harness = textwrap.dedent(
+        f"""
+        let _sendInProgress = false;
+        let _sendInProgressSid = null;
+        let _pendingPickMatch = null;
+        let _pendingSelections = [];
+        let _forcedSkillDirectivePending = null;
+        let _queueDrainSid = null;
+        let _approvalSessionId = null;
+        let _clarifySessionId = null;
+        let _loadingSessionId = null;
+        let resolveStart = null;
+        let resolveUpload = null;
+        let resolveDirective = null;
+        let startCalls = 0;
+        const input = {{value: 'hello', style: {{}}}};
+        const S = {{
+          session: {{session_id: 'session-a', workspace: '/ws', model: 'model', profile: 'default'}},
+          messages: [], pendingFiles: [], pendingSelections: [], toolCalls: [],
+          busy: false, activeStreamId: null, activeProfile: 'default',
+        }};
+        const window = {{_defaultMessageMode: 'steer'}};
+        const document = {{querySelector() {{return null;}}}};
+        const localStorage = {{setItem() {{}}, removeItem() {{}}, getItem() {{return null;}}}};
+        const INFLIGHT = {{}};
+        function $(id) {{return id === 'msg' ? input : null;}}
+        function _isSessionCurrentPane(sid) {{return !!S.session && S.session.session_id === sid;}}
+        async function _ensureSessionOwner() {{return S.session && S.session.session_id;}}
+        function _composerTextWithPendingSelections() {{return input.value;}}
+        function _flushSelectionBlocksToComposer() {{}}
+        function _clearStaleBusyStateBeforeSend() {{return false;}}
+        function _clearComposerAfterQueuedSelectionSend() {{}}
+        function _chatPayloadModelState() {{return {{model: 'model', model_provider: null}};}}
+        function _dismissHandoffHint() {{}}
+        function _bumpMessagesGeneration() {{return 1;}}
+        function _runOptionalPreStartUiStep(_label, fn) {{if (typeof fn === 'function') fn();}}
+        function _runOptionalPostStartUiStep(_label, fn) {{if (typeof fn === 'function') fn();}}
+        function _clearPendingSessionModel() {{}}
+        function _clearComposerDraft() {{return Promise.resolve();}}
+        function _clearOptimisticSessionStreaming() {{}}
+        function clearOptimisticSessionStreaming() {{}}
+        function _fetchYoloState() {{}}
+        function updateSendBtn() {{}}
+        function setComposerStatus() {{}}
+        function setStatus() {{}}
+        function setBusy(value) {{S.busy = !!value;}}
+        function renderMessages() {{}}
+        function renderTray() {{trayRenders += 1;}}
+        function autoResize() {{}}
+        function hideCmdDropdown() {{}}
+        function clearLiveToolCards() {{}}
+        function ensureLiveWorklogShell() {{}}
+        function appendThinking() {{}}
+        function upsertActiveSessionForLocalTurn() {{}}
+        function markInflight() {{}}
+        function saveInflightState() {{}}
+        function startApprovalPolling() {{}}
+        function startClarifyPolling() {{}}
+        function stopApprovalPolling() {{}}
+        function stopClarifyPolling() {{}}
+        function hideApprovalCard() {{}}
+        function hideClarifyCard() {{}}
+        function removeThinking() {{}}
+        function showToast() {{}}
+        function syncTopbar() {{}}
+        function updateQueueBadge() {{}}
+        function queueSessionMessage() {{}}
+        function t(key) {{return key;}}
+        function _composerDraftHasPayload(text, files) {{return !!String(text || '').trim() || (Array.isArray(files) && files.length > 0);}}
+        function _isComposerDraftRestoreSuppressed() {{return false;}}
+        function _clearComposerDraftRestoreSuppression() {{}}
+        function _saveComposerDraftNow(sid, text, files) {{
+          savedDrafts.push({{sid, text, fileIds: (files || []).map(file => file && file.id || file && file.name || file)}});
+        }}
+        async function uploadPendingFiles() {{
+          if ({json.dumps(stage)} === 'upload') return new Promise(resolve => {{resolveUpload = resolve;}});
+          return [];
+        }}
+        function attachLiveStream() {{}}
+        function api(url) {{
+          if (String(url) !== '/api/chat/start') throw new Error('unexpected API request: ' + String(url));
+          startCalls += 1;
+          return new Promise((resolve, reject) => {{
+            resolveStart = () => {{
+              if ({json.dumps(stage)} === 'chat_start_error') reject(new Error('start failed'));
+              else resolve({{stream_id: 'stream-a'}});
+            }};
+          }});
+        }}
+        {recovery_setup}
+        {SEND_SRC}
+        (async () => {{
+          if ({json.dumps(stage)} === 'directive') {{
+            _forcedSkillDirectivePending = {{sessionId: 'session-a', promise: new Promise(resolve => {{resolveDirective = resolve;}})}};
+          }}
+          S.pendingFiles = [fileA1, fileA2];
+          const sendPromise = send();
+          if ({json.dumps(stage)} === 'upload') {{
+            for (let i = 0; i < 200 && !resolveUpload; i++) await new Promise(resolve => setTimeout(resolve, 0));
+          }} else if ({json.dumps(stage)} === 'directive') {{
+            for (let i = 0; i < 20; i++) await new Promise(resolve => setTimeout(resolve, 0));
+          }} else {{
+            for (let i = 0; i < 200 && !resolveStart; i++) await new Promise(resolve => setTimeout(resolve, 0));
+          }}
+          S.session = {{session_id: 'session-b', workspace: '/ws', model: 'model', profile: 'default'}};
+          input.value = 'B draft';
+          S.pendingFiles = [fileB];
+          S.busy = false;
+          S.activeStreamId = null;
+          if ({json.dumps(stage)} === 'upload') resolveUpload([]);
+          else if ({json.dumps(stage)} === 'directive') resolveDirective({{directive: 'forced'}});
+          else resolveStart();
+          await sendPromise;
+          const bSnapshot = {{sessionId: S.session.session_id, inputValue: input.value, pendingFileIds: S.pendingFiles.map(file => file.id)}};
+          {post_setup}
+        }})().catch(err => {{console.error(err.stack || String(err)); process.exit(1);}});
+        """
+    )
+    with tempfile.TemporaryDirectory(prefix="webui-5472-reload-") as temp_dir:
+        script_path = Path(temp_dir) / "case.js"
+        script_path.write_text(harness, encoding="utf-8")
+        proc = subprocess.run(
+            [node, str(script_path)], capture_output=True, text=True, timeout=30
+        )
+    assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+@pytest.mark.parametrize("stage", ["upload", "directive", "chat_start_error"])
+def test_failed_send_reload_restages_exact_files_after_server_draft_hydration(stage):
+    out = _run_reload_projection_in_node(stage)
+    assert out["projected"] is True
+    assert out["inputValue"] == "hello"
+    assert out["pendingFileIds"] == ["a1", "a2"]
+    assert out["pendingFileRefs"] == [True, True]
+    assert out["recoveryOutstanding"] is False
+    assert out["trayRenders"] >= 2
+    assert out["savedDrafts"][-1] == {"sid": "session-a", "text": "hello", "fileIds": ["a1", "a2"]}
+    assert out["bSnapshot"] == {"sessionId": "session-b", "inputValue": "B draft", "pendingFileIds": ["b1"]}
+
+
+def test_failed_send_reload_preserves_newer_text_and_files():
+    out = _run_reload_projection_in_node("upload", conflict=True)
+    assert out["projected"] is False
+    assert out["inputValue"] == "newer text"
+    assert out["pendingFileIds"] == ["b1"]
+    assert out["recoveryOutstanding"] is False
+
+
+def test_load_session_hydrates_server_text_before_owner_projection():
+    load_body = SESSIONS_JS[SESSIONS_JS.index("async function loadSession") :]
+    assert load_body.index("_restoreComposerDraft(_draft") < load_body.index(
+        "projectSubmittedPayloadForOwner(sid)"
     )
