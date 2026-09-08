@@ -75,10 +75,11 @@ def test_helper_has_recovery_signature_and_guards():
     # Never clobber a message the user began typing during the async window.
     assert "if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText)){" in body
     # Restores text and re-stages files.
-    assert "inp.value=restore;" in body
+    assert "inp.value=preserveVisibleText?currentRawText:restore;" in body
     assert "S.pendingFiles=files;" in body
     assert "const allowMatchingText=!!(options&&options.allowMatchingText);" in body
-    assert "{allowMatchingText:true}" in MESSAGES_JS
+    assert "const preserveVisibleText=!!(options&&options.preserveVisibleText);" in body
+    assert "{allowMatchingText:true,preserveVisibleText:true}" in MESSAGES_JS
     # The deferred persist is stale-aware: re-reads the LIVE composer when the
     # failed session is still visible (Codex #5488 catch), rather than the
     # captured snapshot.
@@ -502,6 +503,25 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
           savedDrafts,
         }));
     """
+    whitespace_setup = """
+        const conflictDraft = {text: '  hello\\n\\n', files: []};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: true,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
     normal_setup = """
         const draft = {text: 'hello', files: _composerDraftFilesForPersist([fileA1, fileA2])};
         S.session = {session_id: 'session-a', composer_draft: draft};
@@ -524,6 +544,7 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
     post_setup = {
         "text": conflict_text_setup,
         "files": conflict_files_setup,
+        "whitespace": whitespace_setup,
     }.get(conflict, normal_setup)
     harness = textwrap.dedent(
         f"""
@@ -701,6 +722,16 @@ def test_failed_send_reload_preserves_newer_text_or_files(conflict):
     assert out["inputValue"] == ("newer text" if conflict == "text" else "hello")
     assert out["pendingFileIds"] == ([] if conflict == "text" else ["b1"])
     assert out["recoveryOutstanding"] is False
+
+
+def test_failed_send_reload_preserves_hydrated_whitespace_when_restaging_files():
+    out = _run_reload_projection_in_node("upload", conflict="whitespace")
+    assert out["projected"] is True
+    assert out["inputValue"] == "  hello\n\n"
+    assert out["pendingFileIds"] == ["a1", "a2"]
+    assert out["pendingFileRefs"] == [True, True]
+    assert out["recoveryOutstanding"] is False
+    assert out["savedDrafts"][-1]["text"] == "  hello\n\n"
 
 
 def test_load_session_hydrates_server_text_before_owner_projection():

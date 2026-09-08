@@ -1314,7 +1314,7 @@ function projectSubmittedPayloadForOwner(sid){
     if(liveText===expectedText&&liveFiles.length===0&&expectedFiles.length>0){
       const restored=_restoreComposerDraftAfterFailedSend(
         custody.draftText,custody.files,custody.sid,custody.clearPromise,
-        {allowMatchingText:true}
+        {allowMatchingText:true,preserveVisibleText:true}
       );
       if(restored) _submittedPayloadRecovery.delete(sid);
       return restored;
@@ -1330,6 +1330,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   const allowMatchingText=!!(options&&options.allowMatchingText);
+  const preserveVisibleText=!!(options&&options.preserveVisibleText);
   if(!restore&&!files.length) return false;
 
   // Only mutate the VISIBLE composer / staged tray when the failed send belongs
@@ -1343,11 +1344,12 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     const pendingNavigation=typeof _loadingSessionId!=='undefined'
       && _loadingSessionId!==null && _loadingSessionId!==visibleSid;
     const newerFiles=Array.isArray(S.pendingFiles)&&S.pendingFiles.length>0;
-    const currentText=String(inp&&inp.value||'').trim();
+    const currentRawText=String(inp&&inp.value||'');
+    const currentText=currentRawText.trim();
     const matchingHydratedText=allowMatchingText&&currentText===String(restore||'').trim();
     // Do not clobber a new message the user began typing during the async window.
     if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText)){
-      inp.value=restore;
+      inp.value=preserveVisibleText?currentRawText:restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
       // Re-stage the originally attached files so a one-key resend keeps them.
