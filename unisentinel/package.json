@@ -1,0 +1,24 @@
+{
+  "name": "unisentinel",
+  "version": "0.1.0",
+  "description": "Lightweight Uniswap monitoring dashboard prototype",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "echo \"no tests\" && exit 0",
+    "lint": "eslint . || true"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.8.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22",
+    "eslint": "^8.50.0"
+  }
+}
