@@ -7674,7 +7674,8 @@ function showApprovalCard(pending, pendingCount) {
   if (!_approvalCurrentId || !_approvalDisplayedOwner) {
     // No actionable identity (legacy idless producer): render the card as an
     // explicit unresolved state — action buttons disabled so they cannot
-    // silently no-op, X still durably dismisses. (#7242)
+    // silently no-op; X hides locally but never emits a response (an
+    // identityless deny would consume an unidentified FIFO head). (#7242)
     _setApprovalControlsDisabled(null, true);
   }
   _setPromptFlyoutHidden(card, false);
@@ -7692,30 +7693,82 @@ function showApprovalCard(pending, pendingCount) {
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
   const approvalId = _approvalCurrentId;
-  const owner = _approvalDisplayedOwner;
-  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
-  hideApprovalCard(true);
-  if (sid) _clearApprovalPendingForSession(sid);
+  // Guard: an approval with an in-flight Allow/Deny response owner is already
+  // being settled — the X must never race it into a concurrent deny. (#7242)
+  if (approvalId && _approvalResponseMatches(sid, approvalId)) return;
+  const owner = _captureApprovalResponseOwner();
+  if (!owner) {
+    // Idless/legacy card (no actionable approval_id) or no longer owned by
+    // the active session: hide locally but NEVER emit a response — an
+    // identityless deny would consume whatever head the legacy FIFO path pops
+    // next, denying an approval the user never saw. (#7242)
+    hideApprovalCard(true);
+    if (sid) _clearApprovalPendingForSession(sid);
+    return;
+  }
+  const {sid: ownerSid, approvalId: ownerApprovalId} = owner;
+  // Snapshot the local projection so a failed request can restore the card.
+  const entry = _approvalPendingBySession.get(ownerSid);
+  const snapshot = entry ? {pending: entry.pending, pendingCount: entry.pendingCount} : null;
   // Durable dismissal: resolve the matching server-side pending entry (deny)
   // so the same stale head is not re-rendered by the next poll and gateway-
   // backed producers are unblocked instead of waiting out their 60s BLOCKED
-  // timeout. Best-effort — a failed or stale request must never block the
-  // local dismissal, which stays authoritative for the UI. (#7242)
-  if (sid && typeof api === "function") {
-    const body = {session_id: sid, choice: "deny"};
-    if (approvalId) body.approval_id = approvalId;
-    if (owner && owner.runId) body.run_id = owner.runId;
-    if (owner && owner.mirrorToken) body.mirror_token = owner.mirrorToken;
-    api("/api/approval/respond", {
-      method: "POST",
-      body: JSON.stringify(body),
-      timeoutToast: false,
+  // timeout. The hide is optimistic, but the local dismissal is settled ONLY
+  // from the authoritative response — a silent failure must never leave the
+  // server approval pending while the dismissal marker suppresses re-render.
+  // (#7242)
+  _markApprovalDismissed(ownerSid, ownerApprovalId);
+  _approvalClearedOwner = null;
+  // Claim the response owner BEFORE hiding so hideApprovalCard preserves the
+  // displayed owner (needed to restore the card if the deny fails).
+  _approvalResponding = {...owner, choice: "deny"};
+  _approvalResponding.controlChoice = "deny";
+  hideApprovalCard(true);
+  if (ownerSid) _clearApprovalPendingForSession(ownerSid);
+  const restoreAfterFailure = (errMsg) => {
+    _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+    if (snapshot && !_approvalPendingBySession.has(ownerSid)) {
+      _approvalPendingBySession.set(ownerSid, snapshot);
+    }
+    _restoreFailedApprovalResponse(owner, errMsg);
+  };
+  const body = {session_id: ownerSid, choice: "deny", approval_id: ownerApprovalId};
+  if (owner.runId) body.run_id = owner.runId;
+  if (owner.mirrorToken) body.mirror_token = owner.mirrorToken;
+  api("/api/approval/respond", {
+    method: "POST",
+    body: JSON.stringify(body),
+    timeoutToast: false,
+  })
+    .then(result => {
+      if (result && result.ok) {
+        // Authoritative success — the marker, hidden card and cleared
+        // projection stand; a queued successor will re-render on its own.
+        _releaseApprovalResponseOwner(owner);
+        return;
+      }
+      const errMsg = (result && result.error) ||
+        "Approval dismissal not accepted — the approval is still pending. Try again.";
+      restoreAfterFailure(errMsg);
     })
-      .then(result => {
-        if (result && result.ok && sid) _clearApprovalPendingForSession(sid);
-      })
-      .catch(() => { /* local dismissal is authoritative for the UI */ });
-  }
+    .catch(err => {
+      if (err && (err.status === 404 || err.status === 409)) {
+        // Authoritative: another actor already settled the entry (or it
+        // expired server-side). It can never re-render — keep it hidden.
+        _releaseApprovalResponseOwner(owner);
+        return;
+      }
+      let errMsg = (err && err.message) || "Dismissal failed — try again.";
+      if (err && typeof err.body === "string") {
+        try {
+          const payload = JSON.parse(err.body);
+          if (payload && (payload.error || payload.message)) {
+            errMsg = payload.error || payload.message;
+          }
+        } catch (_) { /* non-JSON HTTP error body */ }
+      }
+      restoreAfterFailure(errMsg + " Try again.");
+    });
 }
 
 function _syncApprovalCollapseButton(card) {

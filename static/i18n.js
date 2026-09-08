@@ -169,6 +169,7 @@ const LOCALES = {
     approval_gateway_unsupported: 'Approvals require a newer gateway. Upgrade the connected Hermes gateway to enable this.',
     approval_gateway_unsupported_label: 'Approvals not supported',
     approval_pending_count: (n) => `1 of ${n} pending`,
+    approval_dismiss_deny: 'Dismiss and deny',
     clarify_heading: 'Clarification needed',
     clarify_hint: 'Pick a choice, or type your own answer below.',
     clarify_other: 'Other',

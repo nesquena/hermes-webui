@@ -5,23 +5,42 @@ Covers the four-point contract from the issue:
 1. Every rendered approval carries a stable actionable approval_id (idless
    legacy entries are normalized server-side and the card degrades to an
    explicit unresolved state when identity is still missing).
-2. X durably dismisses the card (best-effort server deny + local dismissal
-   that the pending poll honors).
+2. X durably dismisses the card (server deny + local dismissal that the
+   pending poll honors).
 3. Dismissal resolves the matching server-side pending entry.
 4. Terminal runs (completed / failed / cancelled / 60s BLOCKED timeout) settle
    the approval/control-boundary state so no stale pending head re-opens the
    flyout.
 
+Plus the gate-recertification fixes for the dismiss path:
+
+5. The durable denial is sent ONLY with an approval_id (an identityless deny
+   would consume whatever head the legacy FIFO path pops next) and the local
+   dismissal is settled from the authoritative response — success or an
+   authoritative 404/409 keep the card hidden; network/5xx failures restore
+   the card with an error + retry instead of leaving the server approval
+   silently pending.
+6. The X never races an in-flight Allow/Deny (and vice-versa) on the same
+   approval, and the dismiss X is labelled "Dismiss and deny" via i18n.
+
 Backend assertions exercise the real api.route_approvals functions directly
 (no server boot required); frontend assertions use the node-driver static
-source extraction pattern used across the suite.
+source extraction pattern used across the suite plus behavioral node
+scenarios that execute the real approval-frontend block from static/messages.js
+against a stubbed DOM.
 """
+import json
+import shutil
+import subprocess
+import tempfile
 import uuid
 
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 ROUTE_APPROVALS_SRC = (ROOT / "api" / "route_approvals.py").read_text(encoding="utf-8")
 
 # Import api.config FIRST: its module-level code appends the agent dir to
@@ -175,21 +194,99 @@ def test_retire_teardown_preserves_plain_entries_retires_no_run_mirrors():
         _cleanup_sid(sid)
 
 
-# ── Frontend: durable dismiss (contracts 2 + 3) ───────────────────────────
+# ── Frontend: durable dismiss (contracts 2 + 3 + gate fixes) ──────────────
 
 def test_dismiss_approval_card_sends_deny_to_server():
     """X must resolve the server-side pending entry, not just hide locally."""
     body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
     assert '"/api/approval/respond"' in body, "dismiss must POST to /api/approval/respond"
-    assert "choice:\"deny\"" in body, "dismiss must send choice deny"
+    assert 'choice:"deny"' in body, "dismiss must send choice deny"
 
 
 def test_dismiss_approval_card_keeps_local_dismissal_behavior():
-    """The pre-existing local dismissal behavior must be preserved."""
+    """The optimistic local dismissal behavior must be preserved: the card is
+    hidden and the local projection cleared immediately, then settled."""
     body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
-    assert "_markApprovalDismissed(sid,_approvalCurrentId)" in body
+    assert "_markApprovalDismissed(ownerSid,ownerApprovalId)" in body
     assert "hideApprovalCard(true)" in body
-    assert "_clearApprovalPendingForSession(sid)" in body
+    assert "_clearApprovalPendingForSession(ownerSid)" in body
+
+
+def test_dismiss_deny_always_carries_approval_id():
+    """The durable deny must include approval_id unconditionally (a body
+    without it would hit the legacy no-id FIFO head path)."""
+    body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
+    assert "approval_id:ownerApprovalId" in body, (
+        "deny body must embed the captured approval_id unconditionally"
+    )
+    assert "body:JSON.stringify(body)" in body
+    # The response must never be emitted without an identity: the only api()
+    # call in the whole function is the identified deny POST.
+    assert body.count("api(") == 1, "idless dismiss must never reach api()"
+
+
+def test_dismiss_idless_card_hides_without_response():
+    """An idless/legacy card hides locally but must never emit a response —
+    an identityless deny would consume whatever head the legacy FIFO path
+    pops next (the user never saw that approval)."""
+    body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
+    guard_start = body.find("_captureApprovalResponseOwner()")
+    assert guard_start != -1, "dismiss must capture the response owner"
+    local_start = body.find("if(!owner){")
+    local_end = body.find("_approvalPendingBySession.get(ownerSid)")
+    assert local_start != -1 and local_end != -1
+    local_only = body[local_start:local_end]
+    assert "hideApprovalCard(true)" in local_only
+    assert "_clearApprovalPendingForSession(sid)" in local_only
+    assert "api(" not in local_only, "idless path must not POST"
+
+
+def test_dismiss_guard_blocks_x_during_inflight_response():
+    """The X must never race an in-flight Allow/Deny response owner into a
+    concurrent deny on the same approval."""
+    body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
+    guard = "if(approvalId&&_approvalResponseMatches(sid,approvalId))return;"
+    assert guard in body, "dismiss must bail out when a response owner is in flight"
+    assert body.find(guard) < body.find("_markApprovalDismissed("), (
+        "the in-flight guard must run before any state is changed"
+    )
+
+
+def test_dismiss_rollback_restores_card_after_failure():
+    """Network/5xx failures must restore the card: remove the local dismissal
+    marker, restore the pending projection snapshot, re-enable controls and
+    surface an error (the card is the retry affordance)."""
+    body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
+    assert "_unmarkApprovalDismissed(ownerSid,ownerApprovalId)" in body
+    assert "_approvalPendingBySession.set(ownerSid,snapshot)" in body, (
+        "rollback must restore the pending projection snapshot"
+    )
+    assert "_restoreFailedApprovalResponse(owner,errMsg)" in body
+    assert "Tryagain." in body, (
+        "the failure path must surface an explicit retry affordance"
+    )
+
+
+def test_dismiss_404_409_is_authoritative_terminal():
+    """An authoritative 404/409 (another actor already settled it, or the
+    entry expired server-side) keeps the dismissal — never re-renders."""
+    body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
+    assert "err.status===404||err.status===409" in body or (
+        "err.status===409||err.status===404" in body
+    ), "catch must treat 404/409 as authoritative terminal states"
+
+
+def test_dismiss_label_says_dismiss_and_deny_via_i18n():
+    """The X now really denies — its accessible name and title must say
+    'Dismiss and deny' through the normal i18n path (en bundle key +
+    data-i18n attributes, with a literal English fallback in the markup)."""
+    assert 'aria-label="Dismiss and deny"' in INDEX_HTML
+    assert 'title="Dismiss and deny"' in INDEX_HTML
+    assert 'data-i18n-aria-label="approval_dismiss_deny"' in INDEX_HTML
+    assert 'data-i18n-title="approval_dismiss_deny"' in INDEX_HTML
+    assert "approval_dismiss_deny: 'Dismiss and deny'" in I18N_JS, (
+        "the en i18n bundle must carry the approval_dismiss_deny key"
+    )
 
 
 def test_poll_skips_dismissed_pending_head():
@@ -229,3 +326,325 @@ def test_show_approval_card_disables_controls_without_identity():
     assert responding_block < guard_idx, (
         "the idless guard must run after the normal responding-controls update"
     )
+
+
+# ── Behavioral scenarios: real approval-frontend block under a stubbed DOM ─
+
+NODE = shutil.which("node")
+
+_JS_PRELUDE = r'''
+// ── harness prelude: stubs for the approval flyout block of messages.js ──
+const els = {};
+function makeEl(id) {
+  const cls = new Set();
+  const el = {
+    id, hidden: false, disabled: false, textContent: "", title: "", inert: false,
+    style: { display: "", setProperty() {}, removeProperty() {}, getPropertyValue() { return ""; } },
+    classList: {
+      add(c) { cls.add(c); },
+      remove(c) { cls.delete(c); },
+      contains(c) { return cls.has(c); },
+      toggle(c, on) {
+        if (on === undefined) { if (cls.has(c)) { cls.delete(c); } else { cls.add(c); } }
+        else if (on) { cls.add(c); } else { cls.delete(c); }
+      },
+    },
+    attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null;
+    },
+    removeAttribute(k) { delete this.attrs[k]; },
+    hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    focus() {},
+    addEventListener() {},
+    removeEventListener() {},
+    getBoundingClientRect() { return { height: 140, width: 480 }; },
+    offsetHeight: 140, scrollHeight: 140, clientHeight: 140, offsetWidth: 480,
+  };
+  return el;
+}
+["approvalCard", "approvalDesc", "approvalCmd", "approvalCounter", "approvalCollapse",
+ "approvalBtnOnce", "approvalBtnSession", "approvalBtnAlways", "approvalBtnDeny",
+ "approvalSkipAll", "messages", "msg"].forEach((id) => { els[id] = makeEl(id); });
+function $(id) { return els[id] || null; }
+
+let S = { session: null };
+let _loadSessionGeneration = 0;
+let _yoloEnabled = false;
+const toasts = [];
+const statuses = [];
+function showToast(m) { toasts.push(m); }
+function setStatus(m) { statuses.push(m); }
+function syncTopbar() {}
+function _updateYoloPill() {}
+function t(key) { return key; }
+globalThis.document = { activeElement: null };
+const _lsStore = new Map();
+globalThis.localStorage = {
+  getItem: (k) => (_lsStore.has(k) ? _lsStore.get(k) : null),
+  setItem: (k, v) => { _lsStore.set(k, String(v)); },
+  removeItem: (k) => { _lsStore.delete(k); },
+};
+globalThis.setTimeout = (fn) => { if (typeof fn === "function") { fn(); } return 1; };
+globalThis.clearTimeout = () => {};
+
+let apiCalls = [];
+let apiImpl = async () => { throw new Error("no apiImpl configured"); };
+async function api(path, opts) {
+  let body = null;
+  if (opts && typeof opts.body === "string") {
+    try { body = JSON.parse(opts.body); } catch (_) { body = null; }
+  }
+  apiCalls.push({ path, method: opts ? opts.method : "GET", body });
+  return apiImpl(path, opts, body);
+}
+const flush = () => new Promise((r) => setImmediate(r));
+function assertTrue(v, msg) { if (!v) { throw new Error(msg); } }
+function assertEq(a, b, msg) { if (a !== b) { throw new Error(msg + " | expected=" + JSON.stringify(b) + " got=" + JSON.stringify(a)); } }
+function cardVisible() { return els.approvalCard.classList.contains("visible"); }
+function showApproval(pending, sid) {
+  S.session = { session_id: sid };
+  showApprovalCard(pending, 1);
+}
+'''
+
+_JS_MAIN_RUNNER = r'''
+(async () => {
+  try {
+    const out = await main() || {};
+    process.stdout.write(JSON.stringify(out));
+  } catch (e) {
+    console.error("SCENARIO FAILED: " + (e && e.stack ? e.stack : String(e)));
+    process.exit(1);
+  }
+})();
+'''
+
+
+def _approval_frontend_block(src: str) -> str:
+    """Extract the full approval frontend state + helpers: from the state vars
+    that open the block up to the end of respondApproval()."""
+    start = src.index("let _approvalHideTimer = null;")
+    anchor = "async function respondApproval("
+    aidx = src.index(anchor)
+    # The opening brace of the body is the LAST brace on the header line
+    # (default params like `options = {}` open earlier).
+    header_end = src.index("\n", aidx)
+    brace = src.rfind("{", aidx, header_end)
+    if brace == -1:
+        brace = src.index("{", aidx)
+    depth = 0
+    for i in range(brace, len(src)):
+        ch = src[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:i + 1]
+    raise AssertionError("unbalanced braces in approval frontend block")
+
+
+def _run_node_scenario(scene_body: str) -> dict:
+    assert NODE, "node is required for the behavioral scenarios"
+    block = _approval_frontend_block(MESSAGES_JS)
+    script = _JS_PRELUDE + "\n" + block + "\n" + scene_body + "\n" + _JS_MAIN_RUNNER
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as tf:
+        tf.write(script)
+        path = tf.name
+    try:
+        proc = subprocess.run([NODE, path], capture_output=True, text=True, timeout=60)
+    finally:
+        Path(path).unlink(missing_ok=True)
+    assert proc.returncode == 0, f"node scenario failed:\n{proc.stderr}\n---\n{proc.stdout}"
+    return json.loads(proc.stdout)
+
+
+def test_node_idless_dismiss_never_posts_and_hides():
+    """An idless stale card must hide locally without emitting any response —
+    it can never consume the next FIFO head's denial."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ description: "legacy no-identity cmd", command: "ls" }, "sidA");
+  assertTrue(cardVisible(), "idless card renders");
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls.length, 0, "idless dismiss must never POST");
+  assertTrue(!cardVisible(), "idless card hides locally");
+  assertTrue(!_approvalPendingBySession.has("sidA"), "local projection cleared");
+  return { apiCalls: apiCalls.length };
+}
+''')
+    assert out["apiCalls"] == 0
+
+
+def test_node_dismiss_with_id_denies_matching_approval():
+    """X with a real approval_id must deny exactly that approval and settle
+    the local state (hidden card, cleared projection, durable marker)."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "", description: "rm -rf" }, "sidA");
+  assertTrue(cardVisible(), "card visible");
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls.length, 1, "exactly one POST");
+  assertEq(apiCalls[0].path, "/api/approval/respond", "endpoint");
+  assertEq(apiCalls[0].body.choice, "deny", "choice deny");
+  assertEq(apiCalls[0].body.approval_id, "a1", "approval_id sent unconditionally");
+  assertEq(apiCalls[0].body.session_id, "sidA", "session id");
+  assertTrue(!cardVisible(), "card hidden after success");
+  assertTrue(!_approvalPendingBySession.has("sidA"), "projection cleared");
+  assertTrue(_isApprovalDismissed("sidA", "a1"), "durable marker set");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 1
+
+
+def test_node_dismiss_network_failure_restores_card():
+    """A network failure must restore the card + controls and drop the local
+    dismissal marker — the server approval is still pending and must remain
+    visible/re-renderable (no silent blocked-agent state)."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  apiImpl = async () => { throw new Error("network down"); };
+  dismissApprovalCard();
+  assertTrue(!cardVisible(), "optimistic hide");
+  assertTrue(_isApprovalDismissed("sidA", "a1"), "optimistic marker");
+  await flush();
+  assertTrue(cardVisible(), "card restored after network failure");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "dismissal marker removed on failure");
+  assertEq(apiCalls.length, 1, "single POST attempted");
+  assertTrue(toasts.length >= 1, "error toast shown");
+  assertEq(els.approvalBtnDeny.disabled, false, "controls re-enabled");
+  return { visible: cardVisible(), toasts: toasts.length };
+}
+''')
+    assert out["visible"] is True
+    assert out["toasts"] >= 1
+
+
+def test_node_dismiss_5xx_failure_restores_card():
+    """A 5xx gateway failure is not authoritative — the card must come back
+    with an error + retry affordance."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  const err = new Error("boom");
+  err.status = 500;
+  err.body = JSON.stringify({ error: "server exploded" });
+  apiImpl = async () => { throw err; };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "5xx restores the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "marker removed on 5xx");
+  assertTrue(toasts.length >= 1, "error toast with retry shown");
+  assertTrue(cardVisible(), "card is the retry affordance");
+  return { visible: cardVisible(), toasts: toasts.length };
+}
+''')
+    assert out["visible"] is True
+
+
+def test_node_dismiss_409_keeps_hidden():
+    """An authoritative 409 (another actor already settled the approval) must
+    keep the dismissal — never restore a card whose server entry is gone."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  const err = new Error("stale approval");
+  err.status = 409;
+  apiImpl = async () => { throw err; };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(!cardVisible(), "409 keeps the card hidden");
+  assertTrue(_isApprovalDismissed("sidA", "a1"), "dismissal stands after 409");
+  assertEq(apiCalls.length, 1, "single POST");
+  assertEq(toasts.length, 0, "no restore toast for authoritative 409");
+  assertEq(_approvalResponding, null, "response owner released");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is False
+
+
+def test_node_allow_inflight_blocks_x():
+    """Permutation 1: with an Allow in flight, the X must not emit a
+    concurrent deny — it is a no-op while the response owner is active."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  let resolveApi;
+  apiImpl = () => new Promise((r) => { resolveApi = r; });
+  const pAllow = respondApproval("always");
+  await flush();
+  assertEq(apiCalls.length, 1, "allow in flight");
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls.length, 1, "X must not race an in-flight Allow/Deny");
+  assertTrue(cardVisible(), "card stays visible while allow is in flight");
+  resolveApi({ ok: true });
+  await pAllow;
+  await flush();
+  assertTrue(!cardVisible(), "allow settles and hides the card");
+  assertEq(_approvalResponding, null, "response owner released");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 1
+
+
+def test_node_dismiss_inflight_blocks_allow():
+    """Permutation 2: with the X deny in flight, an Allow click must be
+    rejected (no concurrent POST) and the deny settles the card hidden."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  let resolveApi;
+  apiImpl = () => new Promise((r) => { resolveApi = r; });
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls.length, 1, "deny in flight");
+  assertEq(apiCalls[0].body.choice, "deny", "in-flight choice is deny");
+  const allowResult = await respondApproval("always");
+  assertEq(allowResult, false, "Allow rejected while the X deny is in flight");
+  assertEq(apiCalls.length, 1, "no concurrent allow POST");
+  resolveApi({ ok: true });
+  await flush();
+  assertTrue(!cardVisible(), "deny settles and keeps the card hidden");
+  assertEq(_approvalResponding, null, "response owner released");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 1
+
+
+def test_node_successor_head_is_interactive_after_dismiss():
+    """A later successor head (B) arriving after A was dismissed must render
+    fully interactive — the released owner must not leak into B — and B's X
+    denies B by its own id."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd A" }, "sidA");
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertTrue(!cardVisible(), "A dismissed");
+  assertEq(_approvalResponding, null, "response owner released");
+  showApproval({ approval_id: "b2", description: "cmd B" }, "sidA");
+  assertTrue(cardVisible(), "successor B renders");
+  assertEq(els.approvalBtnAlways.disabled, false, "B controls enabled");
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls.length, 2, "second deny for B");
+  assertEq(apiCalls[1].body.approval_id, "b2", "successor denied by its own id");
+  assertTrue(!cardVisible(), "B dismissed");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 2
