@@ -668,6 +668,9 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 
 ## Docs
 
+- [Experimental Bot groups](docs/bot-groups.md) — opt-in installation-owner UI
+  for Hermes Agent group chat, with setup, boundaries and verification.
+
 **Start here**
 - [`docs/why-hermes.md`](docs/why-hermes.md) — why Hermes, the mental model, and a detailed comparison to Claude Code / Codex / OpenCode / Cursor
 - [`docs/onboarding.md`](docs/onboarding.md) — first-run wizard, provider setup, local model server Base URLs, and safe re-runs

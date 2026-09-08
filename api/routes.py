@@ -13127,6 +13127,11 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     # ── Insights / knowledge status ──
+    if parsed.path.startswith("/api/bot-groups/"):
+        from api.bot_groups import handle_bot_groups
+
+        return handle_bot_groups(handler, parsed)
+
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
     if parsed.path == "/api/project-os/dashboard":
@@ -15112,6 +15117,11 @@ def handle_post(handler, parsed) -> bool:
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
+
+    if parsed.path.startswith("/api/bot-groups/"):
+        from api.bot_groups import handle_bot_groups
+
+        return handle_bot_groups(handler, parsed, body)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post

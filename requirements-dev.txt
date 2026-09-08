@@ -7,6 +7,7 @@ pytest
 pytest-timeout
 pytest-asyncio
 pytest-shard
+websockets>=15
 ruff
 mcp>=1.28,<2
 # Optional Office parsers — runtime-optional (commented in requirements.txt), but
