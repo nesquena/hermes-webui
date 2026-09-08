@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UniSentinel</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">U</div>
+          <div>
+            <h1>UniSentinel</h1>
+            <span>Protocol Monitor</span>
+          </div>
+        </div>
+
+        <nav>
+          <button class="nav active">Overview</button>
+          <button class="nav">Governance</button>
+          <button class="nav">Slippage</button>
+          <button class="nav">Contracts</button>
+          <button class="nav">Alerts</button>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Uniswap ecosystem</p>
+            <h2>Realtime monitoring overview</h2>
+          </div>
+          <button class="primary">Export report</button>
+        </header>
+
+        <section class="stats-grid">
+          <article class="stat-card accent-blue">
+            <span>Monitored pairs</span>
+            <strong id="stat-pairs">0</strong>
+          </article>
+          <article class="stat-card accent-green">
+            <span>Active proposals</span>
+            <strong id="stat-proposals">0</strong>
+          </article>
+          <article class="stat-card accent-orange">
+            <span>Alerts today</span>
+            <strong id="stat-alerts">0</strong>
+          </article>
+          <article class="stat-card accent-purple">
+            <span>RPC</span>
+            <strong id="stat-rpc">offline</strong>
+          </article>
+        </section>
+
+        <section class="content-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>Recent alerts</h3>
+              <span class="badge">Live</span>
+            </div>
+            <ul id="alert-list" class="alert-list"></ul>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <h3>Operations</h3>
+            </div>
+            <ul class="ops-list">
+              <li><span>Governance watcher</span><strong>Running</strong></li>
+              <li><span>Slippage monitor</span><strong>Healthy</strong></li>
+              <li><span>Contract checks</span><strong>Watching</strong></li>
+              <li><span>Alert webhooks</span><strong>Enabled</strong></li>
+            </ul>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

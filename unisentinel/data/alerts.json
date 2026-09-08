@@ -1,0 +1,38 @@
+{
+  "alerts": [
+    {
+      "level": "medium",
+      "type": "slippage",
+      "message": "UNI-WETH exceeded slippage threshold (8.995% > 6%)",
+      "meta": {
+        "pair": "UNI-WETH",
+        "slippage": 8.995,
+        "threshold": 6
+      },
+      "id": "1788872922437-lizbct",
+      "timestamp": "2026-09-08T13:08:42.437Z"
+    },
+    {
+      "level": "medium",
+      "type": "slippage",
+      "message": "WETH/USDC pool moved 8.4% above threshold",
+      "meta": {
+        "pair": "WETH/USDC",
+        "slippage": 8.4
+      },
+      "id": "1788872374376-7pmlgg",
+      "timestamp": "2026-09-08T12:59:34.376Z"
+    },
+    {
+      "level": "info",
+      "type": "governance",
+      "message": "GovernorBravo proposal queue refreshed",
+      "meta": {
+        "proposal": "UNI-42",
+        "status": "active"
+      },
+      "id": "1788872374372-ruwn2v",
+      "timestamp": "2026-09-08T12:59:34.372Z"
+    }
+  ]
+}
