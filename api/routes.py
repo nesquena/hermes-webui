@@ -20607,7 +20607,7 @@ def _handle_live_models(handler, parsed):
                                         _base_url = str(getattr(_lm_entry, "base_url", "") or "").strip()
                     except ImportError:
                         pass
-                if _base_url and _api_key:
+                if _base_url:
                     try:
                         import urllib.request
                         import json
@@ -20621,10 +20621,10 @@ def _handle_live_models(handler, parsed):
                         else:
                             _models_url = f"{_ep}/v1/models"
                         
-                        _req = urllib.request.Request(
-                            _models_url,
-                            headers={"Authorization": f"Bearer {_api_key}"},
-                        )
+                        _headers = {}
+                        if _api_key:
+                            _headers["Authorization"] = f"Bearer {_api_key}"
+                        _req = urllib.request.Request(_models_url, headers=_headers)
                         
                         with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
                             _body = json.loads(_resp.read())
@@ -20704,7 +20704,8 @@ def _handle_live_models(handler, parsed):
         if not ids:
             if refresh_required:
                 with _LIVE_MODELS_CACHE_LOCK:
-                    _LIVE_MODELS_REFRESH_REQUIRED.discard(cache_key)
+                    if _LIVE_MODELS_CACHE_GENERATION.get(cache_key, 0) == expected_generation:
+                        _LIVE_MODELS_REFRESH_REQUIRED.discard(cache_key)
                 return _finish({"error": "live_models_unavailable", "models": []})
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]

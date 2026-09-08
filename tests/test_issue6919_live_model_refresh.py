@@ -7,6 +7,8 @@ import sys
 import types
 from urllib.parse import urlparse
 
+import pytest
+
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -209,6 +211,167 @@ def test_failed_refresh_does_not_poison_ordinary_lookup(monkeypatch):
         {"id": "provider/static-after-failure", "label": "Static After Failure"}
     ]
     assert force_flags == [True, False]
+
+
+def test_stale_failed_refresh_keeps_newer_generation_required(monkeypatch):
+    import api.routes as routes
+
+    force_flags = []
+
+    def provider_model_ids(provider, *, force_refresh=False):
+        force_flags.append(force_refresh)
+        if len(force_flags) == 1:
+            routes._invalidate_live_models_for_provider("provider")
+            return []
+        return ["provider/fresh-after-interleaving"] if force_refresh else ["provider/stale"]
+
+    _install_provider_model_ids(monkeypatch, provider_model_ids)
+    _prepare(monkeypatch, routes)
+    routes._invalidate_live_models_for_provider("provider")
+    parsed = urlparse("/api/models/live?provider=provider")
+
+    failed = routes._handle_live_models(object(), parsed)
+    key = routes._live_models_cache_key("provider")
+
+    assert failed == {"error": "live_models_unavailable", "models": []}
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+
+    recovered = routes._handle_live_models(object(), parsed)
+
+    assert recovered["models"] == [
+        {"id": "provider/fresh-after-interleaving", "label": "Fresh After Interleaving"}
+    ]
+    assert force_flags == [True, True]
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+
+
+@pytest.mark.parametrize(
+    ("provider", "config", "agent_result", "expected_url", "expected_auth", "expected_ids"),
+    [
+        (
+            "custom",
+            {"model": {"provider": "custom", "base_url": "https://plain.example"}},
+            "empty",
+            "https://plain.example/v1/models",
+            None,
+            ["upstream-model"],
+        ),
+        (
+            "custom",
+            {"model": {"provider": "custom", "base_url": "https://plain.example", "api_key": ""}},
+            "exception",
+            "https://plain.example/v1/models",
+            None,
+            ["upstream-model"],
+        ),
+        (
+            "custom:relay",
+            {
+                "model": {"provider": "openai"},
+                "custom_providers": [
+                    {
+                        "name": "custom:relay",
+                        "base_url": "https://relay.example/v1",
+                        "model": "configured-only",
+                    }
+                ],
+            },
+            "empty",
+            "https://relay.example/v1/models",
+            None,
+            ["upstream-model", "configured-only"],
+        ),
+        (
+            "custom:relay",
+            {
+                "model": {"provider": "openai"},
+                "custom_providers": [
+                    {
+                        "name": "custom:relay",
+                        "api_key": "",
+                        "base_url": "https://relay.example/v1",
+                        "model": "configured-only",
+                    }
+                ],
+            },
+            "exception",
+            "https://relay.example/v1/models",
+            None,
+            ["upstream-model", "configured-only"],
+        ),
+        (
+            "custom:relay",
+            {
+                "model": {"provider": "openai"},
+                "custom_providers": [
+                    {
+                        "name": "custom:relay",
+                        "api_key": "relay-key",
+                        "base_url": "https://relay.example/v1",
+                        "model": "configured-only",
+                    }
+                ],
+            },
+            "exception",
+            "https://relay.example/v1/models",
+            "Bearer relay-key",
+            ["upstream-model", "configured-only"],
+        ),
+    ],
+)
+def test_custom_live_fallback_uses_optional_authorization(
+    monkeypatch,
+    provider,
+    config,
+    agent_result,
+    expected_url,
+    expected_auth,
+    expected_ids,
+):
+    import urllib.request
+
+    import api.config as config_module
+    import api.routes as routes
+
+    def provider_model_ids(_provider, *, force_refresh=False):
+        if agent_result == "exception":
+            raise RuntimeError("provider unavailable")
+        return []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "upstream-model"}]}).encode()
+
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append((request.full_url, dict(request.header_items())))
+        return FakeResponse()
+
+    _install_provider_model_ids(monkeypatch, provider_model_ids)
+    _prepare(monkeypatch, routes)
+    monkeypatch.setattr(config_module, "get_config", lambda: config)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    routes._invalidate_live_models_for_provider(provider)
+
+    result = routes._handle_live_models(
+        object(), urlparse(f"/api/models/live?provider={provider.replace(':', '%3A')}")
+    )
+
+    assert len(requests) == 1
+    assert requests[0][0] == expected_url
+    assert requests[0][1].get("Authorization") == expected_auth
+    assert result["models"] == [
+        {"id": model_id, "label": model_id.replace("-", " ").title()}
+        for model_id in expected_ids
+    ]
+    assert "error" not in result
 
 
 def test_forced_lookup_exception_uses_custom_live_fallback(monkeypatch):
