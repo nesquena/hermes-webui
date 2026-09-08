@@ -3066,15 +3066,28 @@ def _normalize_journal_recovery_text(value) -> str:
 def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
-    try:
-        message_timestamp = int(message.get('timestamp'))
-        expected_timestamp = int(timestamp)
-    except (TypeError, ValueError):
-        return False
+    raw_message_timestamp = message.get('timestamp')
+    raw_expected_timestamp = timestamp
+    if raw_message_timestamp is None or raw_expected_timestamp is None:
+        # Legacy rows and replay paths may omit a timestamp. The remaining
+        # contract — content + source + attachments — is sufficient; the
+        # timestamp gate kicks back in only when both sides actually carry one.
+        timestamp_match = True
+    else:
+        try:
+            message_timestamp = float(str(raw_message_timestamp))
+            expected_timestamp = float(str(raw_expected_timestamp))
+        except (TypeError, ValueError):
+            return False
+        timestamp_match = message_timestamp == expected_timestamp or (
+            message_timestamp.is_integer()
+            and not expected_timestamp.is_integer()
+            and int(message_timestamp) == int(expected_timestamp)
+        )
     return (
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
-        and message_timestamp == expected_timestamp
+        and timestamp_match
         and (message.get('_source') or 'webui') == (source or 'webui')
         and list(message.get('attachments') or []) == list(attachments or [])
     )
@@ -3150,6 +3163,12 @@ def _pending_user_row_already_materialized(session, candidate, timestamp) -> boo
     """
     if not isinstance(candidate, dict):
         return False
+    current_token = _current_turn_token(session)
+    candidate_token = candidate.get('_active_turn_token')
+    if current_token is not None and candidate_token is not None:
+        # An explicit token conflict is authoritative negative evidence; do not
+        # let a coincidentally equal checkpoint override it.
+        return candidate_token == current_token
     if _message_matches_pending_checkpoint(
         candidate,
         session.pending_user_message,
@@ -3158,8 +3177,7 @@ def _pending_user_row_already_materialized(session, candidate, timestamp) -> boo
         session.pending_attachments,
     ):
         return True
-    current_token = _current_turn_token(session)
-    if current_token is not None and candidate.get('_active_turn_token') == current_token:
+    if current_token is not None and candidate_token == current_token:
         return _message_matches_pending_text(candidate, session.pending_user_message)
     return False
 
@@ -3503,20 +3521,34 @@ def _journal_tool_already_present(
                 if str(existing_stream) != candidate_stream:
                     continue
                 return True
-        if min_assistant_idx is not None or max_assistant_idx is not None:
-            # #7167: an untagged card (a live-recorded tool, or one carried
-            # over from a core transcript that pre-dates stream-id tagging)
-            # has no stream tag to prove ownership with, so prove it from its
-            # anchor instead. A bool guard first: assistant_msg_idx is an
-            # int-or-absent field and isinstance(True, int) is True in
-            # Python, so a stray bool would read as index 0 / 1.
-            owner_idx = tool_call.get('assistant_msg_idx')
-            if isinstance(owner_idx, bool) or not isinstance(owner_idx, int):
+            continue
+        if current_turn_min_idx is None:
+            return True
+        anchor = tool_call.get('assistant_msg_idx')
+        if isinstance(anchor, bool) or not isinstance(anchor, int):
+            continue
+        if not (current_turn_min_idx <= anchor < len(session.messages or [])):
+            continue
+        anchor_message = (session.messages or [])[anchor]
+        if not isinstance(anchor_message, dict) or anchor_message.get('role') != 'assistant':
+            continue
+        anchor_token = anchor_message.get('_active_turn_token')
+        current_token = _current_turn_token(session)
+        if current_token is not None and anchor_token is not None:
+            if anchor_token != current_token:
                 continue
-            if min_assistant_idx is not None and owner_idx < min_assistant_idx:
-                continue
-            if max_assistant_idx is not None and owner_idx >= max_assistant_idx:
-                continue
+        elif not _message_owns_current_turn(
+            next(
+                (
+                    message
+                    for message in reversed((session.messages or [])[:anchor])
+                    if isinstance(message, dict) and message.get('role') == 'user'
+                ),
+                {},
+            ),
+            session,
+        ):
+            continue
         return True
     return False
 
@@ -3734,15 +3766,23 @@ def _pending_recovery_turn_start(session) -> int | None:
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return None
+    current_token = _current_turn_token(session)
     for idx in range(len(session.messages or []) - 1, -1, -1):
         message = session.messages[idx]
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        message_token = message.get('_active_turn_token')
+        if current_token is not None and message_token is not None:
+            if message_token == current_token:
+                return idx
+            continue
         if _message_matches_pending_checkpoint(
             message,
             pending_text,
             session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
+        ):
             return idx
     return None
 
@@ -5242,21 +5282,26 @@ def _apply_core_sync_or_error_marker(
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
-            session.messages[-1],
-            session.pending_user_message,
+        _recovered_ts = int(time.time())
+        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+            _recovered_ts = int(session.pending_started_at)
+        _latest_user = next(
+            (
+                message
+                for message in reversed(session.messages or [])
+                if isinstance(message, dict) and message.get('role') == 'user'
+            ),
+            None,
+        )
+        _already_checkpointed = _pending_user_row_already_materialized(
+            session,
+            _latest_user,
             _recovered_ts,
-            session.pending_user_source,
-            session.pending_attachments,
         )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
-            session.pending_user_message,
-        )
+        _tail_user_already_checkpointed = _already_checkpointed
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
+            if not _already_checkpointed:
                 _append_recovered_pending_turn(session, timestamp=_recovered_ts)
             _append_journaled_partial_output(
                 session,

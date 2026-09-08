@@ -360,3 +360,134 @@ def test_older_untagged_tool_card_does_not_suppress_current_recovery(hermes_home
         tc.get("assistant_msg_idx") == 1 and not tc.get("_recovered_from_run_journal")
         for tc in (reloaded.tool_calls or [])
     ), "the older untagged tool card must be preserved, not replaced"
+
+
+@pytest.mark.parametrize("message_timestamp, pending_timestamp", [(500.1, 500.9), (500.9, 500.1)])
+def test_subsecond_checkpoint_mismatch_is_not_truncated(hermes_home, message_timestamp, pending_timestamp):
+    """Two distinct sub-second checkpoints must not collapse via int() truncation."""
+    from api.models import _message_matches_pending_checkpoint
+
+    session = Session(
+        session_id="subsecond-checkpoint",
+        title="test",
+        messages=[],
+        pending_user_message="run the check",
+        pending_started_at=pending_timestamp,
+        pending_attachments=[],
+        pending_user_source=None,
+        active_stream_id="current-stream",
+    )
+    candidate = {
+        "role": "user",
+        "content": "run the check",
+        "timestamp": message_timestamp,
+    }
+    assert not _message_matches_pending_checkpoint(
+        candidate,
+        session.pending_user_message,
+        session.pending_started_at,
+        session.pending_user_source,
+        session.pending_attachments,
+    )
+
+
+def test_conflicting_active_turn_token_overrides_checkpoint_fallback(hermes_home):
+    """An old token must never be accepted by the checkpoint fallback."""
+    from api.models import _message_owns_current_turn
+
+    session = Session(
+        session_id="conflicting-token",
+        title="test",
+        messages=[],
+        pending_user_message="run the check",
+        pending_started_at=500.9,
+        pending_attachments=[],
+        pending_user_source=None,
+        active_stream_id="current-stream",
+    )
+    candidate = {
+        "role": "user",
+        "content": "run the check",
+        "timestamp": 500.9,
+        "_active_turn_token": "old-stream:500.9",
+    }
+    assert not _message_owns_current_turn(candidate, session)
+
+
+def test_completed_stream_preserves_repeated_pending_prompt(hermes_home):
+    """Completed-stream repair must not use an older same-text user row."""
+    sid = "completed-repeated-prompt"
+    stream_id = "completed-repeated-stream"
+    append_run_event(sid, stream_id, "token", {"text": "current answer"})
+    append_run_event(sid, stream_id, "done", {"terminal_state": "completed"})
+    session = Session(
+        session_id=sid,
+        title="test",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 111},
+            {"role": "assistant", "content": "old answer", "timestamp": 112},
+        ],
+        pending_user_message="run the check",
+        pending_started_at=222,
+        pending_attachments=[],
+        pending_user_source=None,
+        active_stream_id=stream_id,
+    )
+    result = _apply_core_sync_or_error_marker(
+        session,
+        hermes_home / "sessions" / f"session_{sid}.json",
+        stream_id_for_recheck=stream_id,
+        require_stream_dead=False,
+    )
+    assert result is True
+    user_rows = [m for m in session.messages if m.get("role") == "user"]
+    assert [m.get("timestamp") for m in user_rows] == [111, 222]
+    assert session.pending_user_message is None
+    assert any(m.get("content") == "current answer" for m in session.messages)
+
+
+@pytest.mark.parametrize("anchor", [999, 0, "3"])
+def test_untagged_tool_requires_valid_current_turn_assistant_anchor(hermes_home, anchor):
+    """Unknown, out-of-range, and non-assistant anchors must append recovery.
+
+    On the pre-fix ``_journal_tool_already_present`` implementation, a large
+    out-of-range ``assistant_msg_idx`` (e.g. 999) still matches via the
+    unconditional ``return True`` tail and the current turn's tool is dropped.
+    After the fix, an unprovable anchor falls through to ``return False`` so
+    the journal tool gets appended.
+    """
+    from api.models import _journal_tool_already_present
+
+    session = Session(
+        session_id="invalid-anchor-isolated",
+        title="test",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 111},
+            {"role": "assistant", "content": "old answer", "timestamp": 112},
+            {"role": "user", "content": "run the check", "timestamp": 222},
+        ],
+        pending_user_message="run the check",
+        pending_started_at=222,
+        pending_attachments=[],
+        pending_user_source=None,
+        active_stream_id="current-stream",
+        tool_calls=[
+            {
+                "name": "terminal",
+                "preview": "ls -la",
+                "snippet": "ls -la",
+                "assistant_msg_idx": anchor,
+                "done": True,
+            }
+        ],
+    )
+    assert not _journal_tool_already_present(
+        session,
+        "terminal",
+        "ls -la",
+        stream_id="current-stream",
+        current_turn_min_idx=2,
+    ), (
+        f"anchor={anchor!r} must not match: an unprovable anchor must "
+        "let the current turn's tool card append instead of swallowing it"
+    )
