@@ -145,26 +145,6 @@ app.get('/api/pairs/:id', (req, res) => {
   res.json({ pair });
 });
 
-const providerUrl = process.env.ETHEREUM_RPC_URL;
-const web3 = new Web3Service(providerUrl);
-web3.start();
-web3.on('block', async (bn) => {
-  console.log(`New block ${bn}`);
-  const level = bn % 2 === 0 ? 'info' : 'medium';
-  await alerts.createAlert({
-    level,
-    type: 'block',
-    message: `New Ethereum block ${bn} observed`,
-    meta: { block: bn },
-  });
-});
-
-setInterval(() => {
-  const result = slippage.scan();
-  if (result.detections.length > 0) {
-    console.log('Slippage detection:', result.detections);
-  }
-}, 20000);
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
