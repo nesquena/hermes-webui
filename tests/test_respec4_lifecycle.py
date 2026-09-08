@@ -182,7 +182,7 @@ function api() {{ return new Promise(resolve => {{ resolveStart = resolve; }}); 
 
 def test_respec4_owner_projection_runs_after_transcript_load():
     load_marker = "if (_isCurrentLoad()) _loadingSessionId = null;"
-    projection_marker = "if(typeof projectSubmittedPayloadForOwner==='function') projectSubmittedPayloadForOwner(sid);"
+    projection_marker = "if(typeof projectSubmittedPayloadForOwner==='function') projectSubmittedPayloadForOwner(sid, _acceptedDraft);"
     assert SESSIONS_JS.index(load_marker) < SESSIONS_JS.index(projection_marker)
     assert SESSIONS_JS.index("renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);") < SESSIONS_JS.index(projection_marker)
 

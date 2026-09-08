@@ -38,9 +38,9 @@ SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
 SEND_SRC = extract_function(MESSAGES_JS, "send", "async function")
 RECOVERY_START = MESSAGES_JS.index("const _submittedPayloadRecovery")
 RECOVERY_SRC = MESSAGES_JS[RECOVERY_START : MESSAGES_JS.index("async function send(", RECOVERY_START)]
-DRAFT_FILES_START = SESSIONS_JS.index("function _composerDraftFilesForPersist")
-DRAFT_FILES_SRC = SESSIONS_JS[
-    DRAFT_FILES_START : SESSIONS_JS.index("function _composerDraftPayloadSignature", DRAFT_FILES_START)
+DRAFT_HELPERS_START = SESSIONS_JS.index("function _composerDraftFileSignature")
+DRAFT_HELPERS_SRC = SESSIONS_JS[
+    DRAFT_HELPERS_START : SESSIONS_JS.index("function _composerDraftPayloadSignatureForSid", DRAFT_HELPERS_START)
 ]
 RESTORE_DRAFT_START = SESSIONS_JS.index("function _restoreComposerDraft(")
 RESTORE_DRAFT_SRC = SESSIONS_JS[
@@ -73,11 +73,12 @@ def test_helper_has_recovery_signature_and_guards():
     assert "const visibleSid=(S.session&&S.session.session_id)||null;" in body
     assert "const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);" in body
     # Never clobber a message the user began typing during the async window.
-    assert "if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText)){" in body
+    assert "if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText||allowFileProjection)){" in body
     # Restores text and re-stages files.
     assert "inp.value=preserveVisibleText?currentRawText:restore;" in body
     assert "S.pendingFiles=files;" in body
     assert "const allowMatchingText=!!(options&&options.allowMatchingText);" in body
+    assert "const allowFileProjection=!!(options&&options.allowFileProjection);" in body
     assert "const preserveVisibleText=!!(options&&options.preserveVisibleText);" in body
     assert "{allowMatchingText:true,preserveVisibleText:true}" in MESSAGES_JS
     # The deferred persist is stale-aware: re-reads the LIVE composer when the
@@ -460,11 +461,27 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
         const fileA1 = {{id: 'a1', name: 'a.pdf', size: 1, lastModified: 11}};
         const fileA2 = {{id: 'a2', name: 'b.png', size: 2, lastModified: 22}};
         const fileB = {{id: 'b1', name: 'new.txt', size: 3, lastModified: 33}};
+        const fileCollision = {{id: 'b2', name: 'a.pdf', size: 1, lastModified: 99}};
         let savedDrafts = [];
         let trayRenders = 0;
-        {DRAFT_FILES_SRC}
+        {DRAFT_HELPERS_SRC}
         {RECOVERY_SRC}
         {RESTORE_DRAFT_SRC}
+        let observedRestoreReport = 'unset';
+        const _realRestoreComposerDraft = _restoreComposerDraft;
+        _restoreComposerDraft = (...args) => {{
+          observedRestoreReport = _realRestoreComposerDraft(...args);
+          return observedRestoreReport;
+        }};
+        const _realProjectSubmittedPayloadForOwner = projectSubmittedPayloadForOwner;
+        projectSubmittedPayloadForOwner = (sid, acceptedDraft) => {{
+          if ({json.dumps(conflict)} === 'off_pane') {{
+            S.session = {{session_id: 'session-b', workspace: '/ws', model: 'model', profile: 'default'}};
+            input.value = 'B draft';
+            S.pendingFiles = [fileB];
+          }}
+          return _realProjectSubmittedPayloadForOwner(sid, acceptedDraft);
+        }};
         """
     )
     conflict_text_setup = """
@@ -504,7 +521,67 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
         }));
     """
     whitespace_setup = """
-        const conflictDraft = {text: '  hello\\n\\n', files: []};
+        const conflictDraft = {text: '   ', files: []};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+           projected: false,
+          inputValue: input.value,
+           pendingFileIds: S.pendingFiles.map(file => file.id),
+           pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+           recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+           trayRenders,
+           sendBtnUpdates,
+           savedDrafts,
+           acceptedReport: observedRestoreReport,
+         }));
+    """
+    hydrated_b_setup = """
+        const conflictDraft = {text: 'hello', files: _composerDraftFilesForPersist([fileB])};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: false,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+          acceptedDraftFiles: S.session.composer_draft.files,
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    empty_setup = """
+        const conflictDraft = {text: '', files: []};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: false,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    newer_text_setup = """
+        const conflictDraft = {text: 'newer text', files: _composerDraftFilesForPersist([fileA1, fileA2])};
         S.session = {session_id: 'session-a', composer_draft: conflictDraft};
         input.value = '';
         S.pendingFiles = [];
@@ -517,8 +594,143 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
           pendingFileIds: S.pendingFiles.map(file => file.id),
           pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
           recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
           trayRenders,
           sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    file_only_setup = """
+        const conflictDraft = {text: '', files: _composerDraftFilesForPersist([fileA1, fileA2])};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: true,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    echo_setup = """
+        const conflictDraft = {text: 'hello', files: []};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: true,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    rejected_setup = """
+        const conflictDraft = {text: 'server draft', files: _composerDraftFilesForPersist([fileB])};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = 'hello';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: true,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    no_draft_setup = """
+        S.session = {session_id: 'session-a'};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: true,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    off_pane_setup = """
+        const conflictDraft = {text: 'hello', files: _composerDraftFilesForPersist([fileA1, fileA2])};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          projected: false,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1, S.pendingFiles[1] === fileA2],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+          trayRenders,
+          sendBtnUpdates,
+          savedDrafts,
+        }));
+    """
+    collision_setup = """
+        const conflictDraft = {text: 'hello', files: _composerDraftFilesForPersist([fileCollision])};
+        S.session = {session_id: 'session-a', composer_draft: conflictDraft};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        console.log(JSON.stringify({
+          bSnapshot,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          pendingFileRefs: [S.pendingFiles[0] === fileA1],
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
+          acceptedReport: observedRestoreReport,
+        }));
+    """
+    late_acceptance_setup = """
+        S.session = {session_id: 'session-a', composer_draft: {text: '', files: []}};
+        input.value = '';
+        S.pendingFiles = [];
+        _loadingSessionId = 'session-a';
+        await loadSession('session-a');
+        S.session = {session_id: 'session-b', workspace: '/ws', model: 'model', profile: 'default'};
+        input.value = 'B draft';
+        S.pendingFiles = [fileB];
+    """
+    late_post_setup = """
+        console.log(JSON.stringify({
+          bSnapshot,
+          inputValue: input.value,
+          pendingFileIds: S.pendingFiles.map(file => file.id),
+          recoveryOutstanding: _submittedPayloadRecovery.has('session-a'),
           savedDrafts,
         }));
     """
@@ -545,7 +757,19 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
         "text": conflict_text_setup,
         "files": conflict_files_setup,
         "whitespace": whitespace_setup,
+        "hydrated_b": hydrated_b_setup,
+        "empty": empty_setup,
+        "newer_text": newer_text_setup,
+        "file_only": file_only_setup,
+        "echo": echo_setup,
+        "suppressed": rejected_setup,
+        "preserve_active": rejected_setup,
+        "no_draft": no_draft_setup,
+        "off_pane": off_pane_setup,
+        "collision": collision_setup,
+        "late_empty": late_post_setup,
     }.get(conflict, normal_setup)
+    pre_release_setup = late_acceptance_setup if conflict == "late_empty" else ""
     harness = textwrap.dedent(
         f"""
         let _sendInProgress = false;
@@ -620,7 +844,7 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
         function _acknowledgeSessionVisit() {{}}
         function t(key) {{return key;}}
         function _composerDraftHasPayload(text, files) {{return !!String(text || '').trim() || (Array.isArray(files) && files.length > 0);}}
-        function _isComposerDraftRestoreSuppressed() {{return false;}}
+         function _isComposerDraftRestoreSuppressed() {{return {json.dumps(conflict)} === 'suppressed';}}
         function _clearComposerDraftRestoreSuppression() {{}}
         function _saveComposerDraftNow(sid, text, files) {{
           savedDrafts.push({{
@@ -647,7 +871,7 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
         }}
         {recovery_setup}
         async function loadSession(sid) {{
-          const opts = {{}};
+           const opts = {{preserveActiveInput: {json.dumps(conflict)} === 'preserve_active'}};
           const currentSid = 'session-b';
           const force = true;
           const sameSessionForceReload = false;
@@ -669,11 +893,12 @@ def _run_reload_projection_in_node(stage: str, conflict: str | None = None):
           }} else {{
             for (let i = 0; i < 200 && !resolveStart; i++) await new Promise(resolve => setTimeout(resolve, 0));
           }}
-          S.session = {{session_id: 'session-b', workspace: '/ws', model: 'model', profile: 'default'}};
+           S.session = {{session_id: 'session-b', workspace: '/ws', model: 'model', profile: 'default'}};
           input.value = 'B draft';
           S.pendingFiles = [fileB];
           S.busy = false;
           S.activeStreamId = null;
+          {pre_release_setup}
           if ({json.dumps(stage)} === 'upload') resolveUpload([]);
           else if ({json.dumps(stage)} === 'directive') resolveDirective({{directive: 'forced'}});
           else resolveStart();
@@ -726,16 +951,106 @@ def test_failed_send_reload_preserves_newer_text_or_files(conflict):
 
 def test_failed_send_reload_preserves_hydrated_whitespace_when_restaging_files():
     out = _run_reload_projection_in_node("upload", conflict="whitespace")
-    assert out["projected"] is True
-    assert out["inputValue"] == "  hello\n\n"
+    assert out["projected"] is False
+    assert out["inputValue"] == "   "
+    assert out["pendingFileIds"] == []
+    assert out["recoveryOutstanding"] is False
+    assert out["acceptedReport"] == {"text": "   ", "files": []}
+
+
+@pytest.mark.parametrize("conflict", ["hydrated_b", "empty", "whitespace", "newer_text"])
+def test_failed_send_reload_accepted_draft_owns_projection(conflict):
+    out = _run_reload_projection_in_node("upload", conflict=conflict)
+    assert out["recoveryOutstanding"] is False
+    assert out["acceptedReport"]["text"] == {
+        "hydrated_b": "hello",
+        "empty": "",
+        "whitespace": "   ",
+        "newer_text": "newer text",
+    }[conflict]
+    if conflict == "hydrated_b":
+        assert out["inputValue"] == "hello"
+        assert out["pendingFileIds"] == []
+        assert out["acceptedDraftFiles"][0]["name"] == "new.txt"
+    elif conflict == "empty":
+        assert out["inputValue"] == ""
+        assert out["pendingFileIds"] == []
+    elif conflict == "whitespace":
+        assert out["inputValue"] == "   "
+        assert out["pendingFileIds"] == []
+    else:
+        assert out["inputValue"] == "newer text"
+        assert out["pendingFileIds"] == ["a1", "a2"]
+        assert out["pendingFileRefs"] == [True, True]
+
+
+def test_failed_send_reload_retires_custody_for_same_name_with_newer_file_metadata():
+    out = _run_reload_projection_in_node("upload", conflict="collision")
+    assert out["inputValue"] == "hello"
+    assert out["pendingFileIds"] == []
+    assert out["pendingFileRefs"] == [False]
+    assert out["recoveryOutstanding"] is False
+    assert out["acceptedReport"]["files"][0]["lastModified"] == 99
+
+
+def test_failed_send_reload_file_only_draft_restages_matching_files_without_text():
+    out = _run_reload_projection_in_node("upload", conflict="file_only")
+    assert out["inputValue"] == ""
+    assert out["pendingFileIds"] == ["a1", "a2"]
+    assert out["pendingFileRefs"] == [True, True]
+    assert out["acceptedReport"] == {
+        "text": "",
+        "files": [
+            {"name": "a.pdf", "path": "", "size": 1, "type": "", "lastModified": 11},
+            {"name": "b.png", "path": "", "size": 2, "type": "", "lastModified": 22},
+        ],
+    }
+
+
+def test_failed_send_reload_metadata_less_echo_restages_matching_files():
+    out = _run_reload_projection_in_node("upload", conflict="echo")
+    assert out["inputValue"] == "hello"
     assert out["pendingFileIds"] == ["a1", "a2"]
     assert out["pendingFileRefs"] == [True, True]
     assert out["recoveryOutstanding"] is False
-    assert out["savedDrafts"][-1]["text"] == "  hello\n\n"
+
+
+@pytest.mark.parametrize("conflict", ["suppressed", "preserve_active"])
+def test_failed_send_reload_rejected_hydration_keeps_legacy_recovery(conflict):
+    out = _run_reload_projection_in_node("upload", conflict=conflict)
+    assert out["acceptedReport"] is None
+    assert out["inputValue"] == "hello"
+    assert out["pendingFileIds"] == ["a1", "a2"]
+    assert out["pendingFileRefs"] == [True, True]
+    assert out["recoveryOutstanding"] is False
+
+
+def test_failed_send_reload_no_draft_keeps_legacy_recovery():
+    out = _run_reload_projection_in_node("upload", conflict="no_draft")
+    assert out["acceptedReport"] == "unset"
+    assert out["inputValue"] == "hello"
+    assert out["pendingFileIds"] == ["a1", "a2"]
+    assert out["pendingFileRefs"] == [True, True]
+
+
+def test_failed_send_reload_off_pane_keeps_owner_custody_and_visible_pane():
+    out = _run_reload_projection_in_node("upload", conflict="off_pane")
+    assert out["acceptedReport"]["text"] == "hello"
+    assert out["inputValue"] == "B draft"
+    assert out["pendingFileIds"] == ["b1"]
+    assert out["recoveryOutstanding"] is True
+
+
+def test_failed_send_late_rejection_does_not_restore_accepted_empty_draft():
+    out = _run_reload_projection_in_node("chat_start_error", conflict="late_empty")
+    assert out["inputValue"] == "B draft"
+    assert out["pendingFileIds"] == ["b1"]
+    assert out["recoveryOutstanding"] is False
+    assert out["savedDrafts"] == []
 
 
 def test_load_session_hydrates_server_text_before_owner_projection():
     load_body = SESSIONS_JS[SESSIONS_JS.index("async function loadSession") :]
     assert load_body.index("_restoreComposerDraft(_draft") < load_body.index(
-        "projectSubmittedPayloadForOwner(sid)"
+        "projectSubmittedPayloadForOwner(sid, _acceptedDraft)"
     )

@@ -50,6 +50,7 @@ function _composerDraftFileSignature(file) {
     path: String(file.path || ''),
     size: Number.isFinite(Number(file.size)) ? Number(file.size) : null,
     type: String(file.type || file.mime || ''),
+    lastModified: Number.isFinite(Number(file.lastModified)) ? Number(file.lastModified) : null,
   };
 }
 
@@ -285,15 +286,15 @@ function _saveComposerDraftNow(sid, text, files) {
   }).catch(() => {});
 }
 
-// Restore composer draft from server onto #msg textarea.
-// Only restores if there's actual text (skip empty/None drafts).
+// Restore composer draft from server onto #msg.
+// Empty, whitespace-only, and file-only drafts remain valid accepted states, and the function returns their transient payload report.
 // Guards against double-restore when rapidly switching sessions.
 function _restoreComposerDraft(draft, targetSid, opts={}) {
   const ta = $('msg');
-  if (!ta) return;
+  if (!ta) return null;
   // targetSid is the session that was requested — if it no longer matches
   // _loadingSessionId, a newer session switch has already begun, so skip.
-  if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
+  if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return null;
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
@@ -301,7 +302,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   const restoreSid = targetSid || (S.session && S.session.session_id);
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
 
-  if (restoreSid && hasServerDraftPayload && _isComposerDraftRestoreSuppressed(restoreSid, text, files)) return;
+  if (restoreSid && hasServerDraftPayload && _isComposerDraftRestoreSuppressed(restoreSid, text, files)) return null;
   if (restoreSid && !hasServerDraftPayload) _clearComposerDraftRestoreSuppression(restoreSid);
 
   // Same-session force refreshes are driven by external state changes and may
@@ -309,7 +310,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // composer is the authoritative in-progress draft; never replace non-empty
   // local input with an older server draft. Cross-session switches still restore
   // normally so the previous session's composer contents do not leak forward.
-  if (preserveActiveInput && current && current !== text) return;
+  if (preserveActiveInput && current && current !== text) return null;
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
@@ -319,7 +320,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
       if (typeof autoResize === 'function') autoResize();
       if (typeof updateSendBtn === 'function') updateSendBtn();
     }
-    return;
+    return {text, files};
   }
   // Only update if different to avoid cursor jumps on unrelated session switches.
   if (current !== text) {
@@ -328,6 +329,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
   // Files restoration is skipped for now (requires S.pendingFiles plumbing).
+  return {text, files};
 }
 
 // Clear the saved draft for a session (called when message is sent).
@@ -2417,8 +2419,9 @@ async function loadSession(sid){
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
+  let _acceptedDraft=null;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
-    _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+    _acceptedDraft=_restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
@@ -2447,7 +2450,7 @@ if (_isCurrentLoad()) _loadingSessionId = null;
 
   // Project page-local results after transcript loading and its final render.
   // An earlier projection would be replaced by the loaded transcript.
-  if(typeof projectSubmittedPayloadForOwner==='function') projectSubmittedPayloadForOwner(sid);
+  if(typeof projectSubmittedPayloadForOwner==='function') projectSubmittedPayloadForOwner(sid, _acceptedDraft);
   if(typeof projectBtwStreamsForOwner==='function') projectBtwStreamsForOwner(sid);
   if(typeof projectBackgroundResultsForOwner==='function') projectBackgroundResultsForOwner(sid);
   if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(sid);

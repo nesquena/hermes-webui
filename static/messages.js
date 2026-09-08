@@ -1288,9 +1288,10 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
 const _submittedPayloadRecovery=new Map();
-function projectSubmittedPayloadForOwner(sid){
+function projectSubmittedPayloadForOwner(sid,acceptedDraft){
   const custody=_submittedPayloadRecovery.get(sid);
   if(!custody) return false;
+  if(custody.released===false&&!(acceptedDraft&&typeof acceptedDraft==='object')) return false;
   const visibleSid=(S.session&&S.session.session_id)||null;
   const inp=$('msg');
   if(visibleSid===sid&&inp){
@@ -1298,6 +1299,46 @@ function projectSubmittedPayloadForOwner(sid){
     const expectedText=String(custody.draftText||'').trim();
     const liveFiles=Array.isArray(S.pendingFiles)?S.pendingFiles.filter(Boolean):[];
     const expectedFiles=Array.isArray(custody.files)?custody.files.filter(Boolean):[];
+
+    if(acceptedDraft&&typeof acceptedDraft==='object'
+       &&typeof _composerDraftFilesForPersist==='function'
+       &&typeof _composerDraftPayloadSignature==='function'){
+      const acceptedText=String(acceptedDraft.text||'');
+      const acceptedFiles=Array.isArray(acceptedDraft.files)?acceptedDraft.files.filter(Boolean):[];
+      const acceptedFilesSignature=_composerDraftPayloadSignature('',acceptedFiles);
+      const expectedFilesSignature=_composerDraftPayloadSignature('',expectedFiles);
+      if(!acceptedText.trim()&&!acceptedFiles.length){
+        _submittedPayloadRecovery.delete(sid);
+        return false;
+      }
+      if(liveFiles.length>0){
+        _submittedPayloadRecovery.delete(sid);
+        return false;
+      }
+      if(acceptedFiles.length>0){
+        if(acceptedFilesSignature!==expectedFilesSignature){
+          _submittedPayloadRecovery.delete(sid);
+          return false;
+        }
+        const restored=_restoreComposerDraftAfterFailedSend(
+          custody.draftText,custody.files,custody.sid,custody.clearPromise,
+          {allowFileProjection:true,preserveVisibleText:true}
+        );
+        if(restored) _submittedPayloadRecovery.delete(sid);
+        return restored;
+      }
+      if(acceptedText.trim()&&acceptedText.trim()===expectedText&&expectedFiles.length>0){
+        const restored=_restoreComposerDraftAfterFailedSend(
+          custody.draftText,custody.files,custody.sid,custody.clearPromise,
+          {allowMatchingText:true,preserveVisibleText:true}
+        );
+        if(restored) _submittedPayloadRecovery.delete(sid);
+        return restored;
+      }
+      _submittedPayloadRecovery.delete(sid);
+      return false;
+    }
+
     const filesConflict=liveFiles.length>0&&(
       liveFiles.length!==expectedFiles.length||
       liveFiles.some((file,index)=>expectedFiles[index]!==file)
@@ -1330,6 +1371,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   const allowMatchingText=!!(options&&options.allowMatchingText);
+  const allowFileProjection=!!(options&&options.allowFileProjection);
   const preserveVisibleText=!!(options&&options.preserveVisibleText);
   if(!restore&&!files.length) return false;
 
@@ -1348,7 +1390,7 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     const currentText=currentRawText.trim();
     const matchingHydratedText=allowMatchingText&&currentText===String(restore||'').trim();
     // Do not clobber a new message the user began typing during the async window.
-    if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText)){
+    if(inp && !pendingNavigation && !newerFiles && (!currentText||matchingHydratedText||allowFileProjection)){
       inp.value=preserveVisibleText?currentRawText:restore;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
@@ -1749,13 +1791,17 @@ async function send(){
     clearPromise:_composerDraftClearPromise,
     released:false,
   };
+  _submittedPayloadRecovery.set(activeSid,_submittedPayloadCustody);
   const _releaseSubmittedPayload=(recover=true)=>{
     if(_submittedPayloadCustody.released) return false;
     _submittedPayloadCustody.released=true;
     if(!recover){
-      _submittedPayloadRecovery.delete(_submittedPayloadCustody.sid);
+      if(_submittedPayloadRecovery.get(_submittedPayloadCustody.sid)===_submittedPayloadCustody){
+        _submittedPayloadRecovery.delete(_submittedPayloadCustody.sid);
+      }
       return true;
     }
+    if(_submittedPayloadRecovery.get(_submittedPayloadCustody.sid)!==_submittedPayloadCustody) return true;
     const restored=_restoreComposerDraftAfterFailedSend(
       _submittedPayloadCustody.draftText,
       _submittedPayloadCustody.files,
