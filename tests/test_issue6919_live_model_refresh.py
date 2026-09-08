@@ -357,6 +357,13 @@ def test_custom_live_fallback_uses_optional_authorization(
     _install_provider_model_ids(monkeypatch, provider_model_ids)
     _prepare(monkeypatch, routes)
     monkeypatch.setattr(config_module, "get_config", lambda: config)
+    for env_name in {
+        config_module._api_key_env_name(provider),
+        config_module._legacy_custom_api_key_env_name(provider),
+    }:
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_module, "_lookup_custom_api_key_env", lambda _provider: "", raising=False)
+    monkeypatch.setattr(config_module, "_has_explicit_pool_credentials", lambda _provider: False, raising=False)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     routes._invalidate_live_models_for_provider(provider)
 
