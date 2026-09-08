@@ -145,6 +145,28 @@ app.get('/api/pairs/:id', (req, res) => {
   res.json({ pair });
 });
 
+// Add a new monitored pair
+app.post('/api/pairs', express.json(), (req, res) => {
+  const { id, pairAddress, tokenA, tokenB, threshold } = req.body || {};
+  if (!id) return res.status(400).json({ error: 'id is required' });
+  try {
+    const entry = slippage.addPair({ id, pairAddress, tokenA, tokenB, threshold });
+    res.status(201).json({ pair: entry });
+  } catch (e) {
+    res.status(500).json({ error: e && e.message });
+  }
+});
+
+// Update pair thresholds
+app.put('/api/pairs/:id/thresholds', express.json(), (req, res) => {
+  const { threshold } = req.body || {};
+  const id = req.params.id;
+  if (typeof threshold !== 'number') return res.status(400).json({ error: 'threshold (number) is required' });
+  const updated = slippage.updateThreshold(id, threshold);
+  if (!updated) return res.status(404).json({ error: 'pair not found' });
+  res.json({ pair: updated });
+});
+
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));

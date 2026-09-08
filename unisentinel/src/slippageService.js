@@ -78,6 +78,32 @@ class SlippageService {
     return this.listPairs().find((pair) => pair.id === id) || null;
   }
 
+  addPair({ id, pairAddress = null, tokenA = null, tokenB = null, threshold = 5 } = {}) {
+    if (!id) throw new Error('pair id required');
+    const exists = this.pairs.find((p) => p.id === id);
+    if (exists) return exists;
+    const entry = {
+      id,
+      pairAddress,
+      tokenA,
+      tokenB,
+      currentPrice: 0,
+      previousPrice: 1,
+      threshold,
+      status: 'unknown',
+      lastAlertAt: null,
+    };
+    this.pairs.push(entry);
+    return entry;
+  }
+
+  updateThreshold(id, threshold) {
+    const pair = this.pairs.find((p) => p.id === id);
+    if (!pair) return null;
+    pair.threshold = threshold;
+    return pair;
+  }
+
   async scan() {
     // try on-chain price update first
     if (this.provider) {
