@@ -9163,22 +9163,22 @@ function _notificationOptions(body,options={}){
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
-  const delivered=()=>({delivered:true,alreadyDisplayed:false,retryable:false,reason:'delivered'});
-  const failed=reason=>({delivered:false,alreadyDisplayed:false,retryable:true,reason});
+  const delivered=()=>({delivered:true,alreadyDisplayed:false});
+  const failed=()=>({delivered:false,alreadyDisplayed:false});
   const direct=()=>{
     try{new Notification(title||botName,opts);return Promise.resolve(delivered());}
-    catch(_err){return Promise.resolve(failed('direct-presentation-failed'));}
+    catch(_err){return Promise.resolve(failed());}
   };
   const showWithFallback=reg=>{
     if(!reg||!reg.active||!reg.showNotification) return direct();
     return Promise.resolve().then(()=>reg.showNotification(title||botName,opts))
-      .then(()=>delivered(),()=>direct().then(result=>result.delivered?result:failed('worker-and-direct-presentation-failed')));
+      .then(()=>delivered(),()=>direct().then(result=>result.delivered?result:failed()));
   };
   const inspectAndShow=reg=>{
     if(options&&options.dedupe&&opts.tag&&reg&&typeof reg.getNotifications==='function'){
       return Promise.resolve().then(()=>reg.getNotifications({tag:opts.tag})).then(records=>{
         if(Array.isArray(records)&&records.length>0)
-          return {delivered:false,alreadyDisplayed:true,retryable:false,reason:'already-displayed'};
+          return {delivered:false,alreadyDisplayed:true};
         return showWithFallback(reg);
       },()=>showWithFallback(reg));
     }
@@ -9231,20 +9231,20 @@ function sendBrowserNotification(title,body,options={}){
   // notifications-enabled SETTING is still honored (unlike `force`, which is the
   // explicit "Send test" override); only the visibility gate is bypassed.
   const forceHidden=!!(options&&options.forceHidden);
-  const outcome=(reason,retryable=false)=>Promise.resolve({delivered:false,alreadyDisplayed:false,retryable,reason});
-  if(!force&&!window._notificationsEnabled) return outcome('setting-disabled');
-  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return outcome('foreground');
-  if(!('Notification' in window)) return outcome('unsupported');
+  const skip=()=>Promise.resolve({delivered:false,alreadyDisplayed:false});
+  if(!force&&!window._notificationsEnabled) return skip();
+  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return skip();
+  if(!('Notification' in window)) return skip();
   if(Notification.permission==='granted'){
     return _showPwaNotification(title,body,options);
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
-    return outcome('permission-denied');
+    return skip();
   }else{
     return requestNotificationPermission().then(p=>p==='granted'
       ? _showPwaNotification(title,body,options)
-      : outcome('permission-not-granted')).catch(()=>outcome('permission-request-failed',true));
+      : skip()).catch(()=>skip());
   }
 }
 

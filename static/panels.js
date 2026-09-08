@@ -12986,22 +12986,30 @@ function startCronPolling(){
       if(completionBackgrounded&&backgroundNotificationUnavailable()) return;
       if(data.completions&&data.completions.length>0){
         const completions=[...data.completions].sort((a,b)=>{
-          const timeDiff=Number(a.completed_at)-Number(b.completed_at);
-          return timeDiff||String(a.job_id||'').localeCompare(String(b.job_id||''));
+          return Number(a.completed_at)-Number(b.completed_at);
         });
-        for(const c of completions){
+        for(let i=0;i<completions.length;i++){
+          const c=completions[i];
           if(c.toast_notifications !== false){
             if(completionBackgrounded){
               if(backgroundNotificationUnavailable()) return;
               const completionStatus=t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed'));
+              let notificationBody=completionStatus;
+              if(typeof c.output_preview==='string'&&c.output_preview){
+                const preview=typeof _completionNotificationPreviewText==='function'
+                  ? _completionNotificationPreviewText(null,{liveDisplayText:c.output_preview})
+                  : c.output_preview;
+                if(preview) notificationBody=preview;
+              }
               const tag=`hermes-cron-${pollProfile}-${c.job_id||'unknown'}-${c.completed_at}`;
-              const outcome=await sendBrowserNotification(c.name||t('untitled'),completionStatus,{forceHidden:true,sid:c.session_id||'',tag,renotify:false,dedupe:true});
+              const outcome=await sendBrowserNotification(c.name||t('untitled'),notificationBody,{forceHidden:true,sid:c.session_id||'',tag,renotify:false,dedupe:true});
               if(pollGeneration!==_cronPollGeneration) return;
               if(!outcome||(outcome.delivered!==true&&outcome.alreadyDisplayed!==true)) return;
             }
             else showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           }
-          _cronPollSince=Math.max(_cronPollSince,c.completed_at);
+          const next=completions[i+1];
+          if(!next||Number(next.completed_at)!==Number(c.completed_at)) _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           committedCompletion=true;
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
           if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){

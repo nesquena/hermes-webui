@@ -6,10 +6,15 @@ OS delivery, and OS-level tag collapse remain unreached.
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import shutil
 import subprocess
+import sys
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,7 +74,7 @@ _owner_start = MESSAGES.index("let _desktopBackgroundedForNotifications=false;")
 _owner_end = MESSAGES.index("function _isSessionCurrentPane", _owner_start)
 OWNER = "const _STREAM_NOTIFICATION_BACKGROUND={};" + MESSAGES[_owner_start:_owner_end] + "\n" + "\n".join(
     _function(MESSAGES, name)
-    for name in ("_isBrowserNotificationReady", "_notificationOptions", "_showPwaNotification", "sendBrowserNotification")
+    for name in ("_isBrowserNotificationReady", "_notificationOptions", "_completionNotificationPreviewText", "_showPwaNotification", "sendBrowserNotification")
 )
 POLLER = _function(PANELS, "startCronPolling")
 
@@ -98,6 +103,63 @@ async function run(source,isHead) {{
 Promise.all([run(base,false),run(head,true)]).then(([baseResult,headResult])=>process.stdout.write(JSON.stringify({{base:baseResult,head:headResult}}))).catch(e=>{{console.error(e);process.exit(1)}});
 """
     return json.loads(subprocess.run([NODE, "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True).stdout)
+
+
+def _run_equal_timestamp_cursor(include_earlier: bool = False) -> dict:
+    earlier = "  {name:'Earlier',status:'success',completed_at:99,job_id:'job-earlier',session_id:'',message_count:0,toast_notifications:true},\n" if include_earlier else ""
+    script = f"""
+const vm=require('vm'),owner={json.dumps(OWNER)},poller={json.dumps(POLLER)};
+const rows=[
+{earlier}  {{name:'Job A',status:'success',completed_at:100,job_id:'job-a',session_id:'',message_count:0,toast_notifications:true}},
+  {{name:'Job B',status:'success',completed_at:100,job_id:'job-b',session_id:'',message_count:0,toast_notifications:true}},
+  {{name:'Job C',status:'success',completed_at:101,job_id:'job-c',session_id:'',message_count:0,toast_notifications:true}},
+];
+const registry=new Map(),queries=[],responses=[],outcomes=[],alerts=[];
+let failedWorker=false,failedDirect=false;
+function Notification(title,options) {{
+  if(options.tag.endsWith('-job-b-100')&&!failedDirect) {{ failedDirect=true; throw new Error('direct failed'); }}
+  alerts.push({{title,options}});
+}}
+Notification.permission='granted';
+const registration={{active:null}}; registration.active=registration;
+registration.getNotifications=({{tag}})=>Promise.resolve(registry.has(tag)?[registry.get(tag)]:[]);
+registration.showNotification=(title,options)=>{{
+  if(options.tag.endsWith('-job-b-100')&&!failedWorker) {{ failedWorker=true; return Promise.reject(new Error('worker failed')); }}
+  registry.set(options.tag,{{title,options}}); alerts.push({{title,options}}); return Promise.resolve();
+}};
+const window={{_notificationsEnabled:true,location:{{origin:'https://example.test',href:'https://example.test/'}},Notification,addEventListener:()=>{{}}}};
+const context={{window,document:{{hidden:true,baseURI:'https://example.test/'}},Notification,
+  navigator:{{serviceWorker:{{getRegistration:()=>Promise.resolve(registration)}}}},location:window.location,
+  S:{{activeProfile:'profile-a',session:null}},_cronPollTimer:null,_cronPollSince:0,_cronPollGeneration:0,_cronNewJobIds:new Set(),
+  _sessionUrlForSid:s=>'/session/'+s,_appRootPath:()=>'/app/',assistantDisplayName:()=> 'Hermes',
+  t:(key,...args)=>key+':'+args.join('|'),showToast:()=>{{}},updateCronBadge:()=>{{}},
+  _markSessionCompletionUnreadIfBackground:()=>{{}},setInterval:cb=>{{context.timer=cb;return 1;}},
+  setTimeout,clearTimeout,Promise,console,globalThis:null}};
+context.globalThis=context; context.window.Notification=Notification; vm.createContext(context);
+vm.runInContext(owner,context);
+const realSend=context.sendBrowserNotification;
+context.sendBrowserNotification=(...args)=>realSend(...args).then(outcome=>{{outcomes.push({{tag:args[2].tag,outcome}});return outcome;}});
+vm.runInContext(poller,context);
+vm.runInContext('startCronPolling()',context);
+context.api=async url=>{{
+  const since=Number(new URL(url,'https://example.test').searchParams.get('since'));
+  queries.push(since);
+  const completions=rows.filter(row=>row.completed_at>since);
+  responses.push(completions.length);
+  return {{completions}};
+}};
+async function main() {{
+  await context.timer();
+  const afterFirst={{since:context._cronPollSince,queries:queries.slice(),responses:responses.slice(),alerts:alerts.length}};
+  await context.timer();
+  process.stdout.write(JSON.stringify({{afterFirst,queries,responses,alerts,outcomes,since:context._cronPollSince,tags:[...registry.keys()]}}));
+}}
+main().catch(e=>{{console.error(e);process.exit(1)}});
+    """
+    result = subprocess.run([NODE, "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=False)
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    return json.loads(result.stdout)
 
 
 def _run(case: str) -> dict:
@@ -154,7 +216,7 @@ async function main() {{
     const result=await vm.runInContext("sendBrowserNotification('title','body',{{force:true}})",context);
     return {{result,ownerCalls,getNotificationCalls,shown}};
   }}
-  const all=[{{name:'Nightly',status:'success',completed_at:42,job_id:'job-1',session_id:caseName==='sessionless'?'':'sid-1',message_count:7,toast_notifications:caseName!=='muted'&&caseName!=='after-unavailable-muted'}},{{name:'Later',status:'success',completed_at:43,job_id:'job-1',session_id:'',message_count:0,toast_notifications:true}}];
+  const all=[{{name:'Nightly',status:'success',completed_at:42,job_id:'job-1',session_id:caseName==='sessionless'?'':'sid-1',message_count:7,toast_notifications:caseName!=='muted'&&caseName!=='after-unavailable-muted',output_preview:caseName==='preview'?'  Preview   text\\nwith   spacing   '+'x'.repeat(150):caseName==='empty-preview'?'':undefined}},{{name:'Later',status:'success',completed_at:43,job_id:'job-1',session_id:'',message_count:0,toast_notifications:true}}];
   const completions=caseName==='ordered'?all.slice().reverse():all.slice(0,(caseName==='later'||caseName==='partial-failure'||caseName==='force-hidden-transition'||caseName==='permission-transition')?2:1);
   const p=setupPoller(completions); vm.runInContext('startCronPolling()',context);
   if(caseName==='desktop'||caseName==='desktop-unavailable') {{ document.hidden=false; window.__hermesSetBackgrounded(true); }} if(caseName==='unavailable'||caseName==='desktop-unavailable') window._notificationsEnabled=false;
@@ -212,6 +274,32 @@ def test_issue_repro_hidden_completion_reaches_presentation_owner():
 def test_issue_reproduction_base_fails_head_reaches_presentation_owner():
     result = _run_base_head_reproduction()
     assert result == {"base": {"apiCalls": 0, "presentations": 0}, "head": {"apiCalls": 1, "presentations": 1}}
+
+
+def test_equal_timestamp_failure_keeps_the_group_eligible_for_retry():
+    result = _run_equal_timestamp_cursor()
+    assert result["afterFirst"] == {"since": 0, "queries": [0], "responses": [3], "alerts": 1}
+    assert result["queries"] == [0, 0]
+    assert result["responses"] == [3, 3]
+    assert result["since"] == 101
+    assert len(result["tags"]) == 3 and len(result["alerts"]) == 3
+    assert sum(item["options"]["tag"].endswith("-job-a-100") for item in result["alerts"]) == 1
+    assert any(
+        item["tag"].endswith("-job-a-100") and item["outcome"].get("alreadyDisplayed") is True
+        for item in result["outcomes"]
+    )
+    assert all(
+        any(item["tag"].endswith(f"-{job_id}-{timestamp}") and item["outcome"].get("delivered") is True for item in result["outcomes"])
+        for job_id, timestamp in (("job-b", 100), ("job-c", 101))
+    )
+
+
+def test_completed_group_progress_survives_a_later_equal_timestamp_failure():
+    result = _run_equal_timestamp_cursor(include_earlier=True)
+    assert result["afterFirst"]["since"] == 99
+    assert result["queries"] == [0, 99]
+    assert result["since"] == 101
+    assert len(result["tags"]) == 4 and len(result["alerts"]) == 4
 
 
 def test_desktop_background_recomputed_before_and_after_await():
@@ -335,9 +423,9 @@ def test_sessionless_poller_uses_root_url_and_no_session_unread():
     assert options["tag"] == "hermes-cron-profile-a-job-1-42" and result["marks"] == []
 
 
-def test_request_permission_rejection_is_retryable_outcome():
+def test_request_permission_rejection_returns_reduced_outcome():
     result = _run("permission-reject")["result"]
-    assert result == {"delivered": False, "alreadyDisplayed": False, "retryable": True, "reason": "permission-request-failed"}
+    assert result == {"delivered": False, "alreadyDisplayed": False}
 
 
 def test_existing_caller_defaults_preserve_omitted_sid_and_renotify():
@@ -356,7 +444,7 @@ def test_explicit_renotify_false_is_preserved():
 
 def test_owner_without_dedupe_does_not_query_displayed_records():
     result = _run("owner-no-dedupe")
-    assert result["result"] == {"delivered": True, "alreadyDisplayed": False, "retryable": False, "reason": "delivered"}
+    assert result["result"] == {"delivered": True, "alreadyDisplayed": False}
     assert result["getNotificationCalls"] == 0
 
 
@@ -379,3 +467,163 @@ def test_mid_batch_permission_loss_preserves_backlog_without_prompting():
 def test_badge_failure_does_not_stick_in_flight_guard():
     result = _run("badge-failure")
     assert result["apiCalls"] == 2 and result["since"] == 42
+
+
+def test_completion_preview_uses_owner_shaping_and_status_fallback():
+    preview = _run("preview")["shown"][0]
+    empty = _run("empty-preview")["shown"][0]
+    absent = _run("hidden")["shown"][0]
+    expected_preview = ("Preview text with spacing " + "x" * 150)[:100] + "…"
+    assert preview["title"] == "Nightly" and preview["options"]["body"] == expected_preview
+    assert empty["title"] == "Nightly" and empty["options"]["body"].startswith("cron_completion_status:")
+    assert absent["title"] == "Nightly" and absent["options"]["body"].startswith("cron_completion_status:")
+
+
+class _JSONHandler:
+    def __init__(self):
+        self.status = None
+        self.wfile = io.BytesIO()
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+def _payload(handler):
+    return json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+
+def _stub_cron_jobs(monkeypatch, *, output_dir=None, jobs=None):
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    if output_dir is not None:
+        cron_jobs.OUTPUT_DIR = output_dir
+    if jobs is not None:
+        cron_jobs.list_jobs = lambda include_disabled=True: jobs
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
+
+
+def test_recent_success_preview_uses_latest_output_at_or_before_completion(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    out_dir = tmp_path / "cron-out" / "job42"
+    out_dir.mkdir(parents=True)
+    files = {
+        "old.md": (90, "## Response\nold response\n"),
+        "new.md": (100, "## Response\nnew response\n"),
+        "later.md": (110, "## Response\nlater response\n"),
+    }
+    for name, (mtime, content) in files.items():
+        output = out_dir / name
+        output.write_text(content, encoding="utf-8")
+        os.utime(output, (mtime, mtime))
+    jobs = [{"id": "job42", "name": "Job 42", "last_run_at": 100, "last_status": "ok"}]
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out", jobs=jobs)
+
+    handler = _JSONHandler()
+    routes._handle_cron_recent(handler, SimpleNamespace(query="since=0"))
+
+    assert handler.status == 200
+    completion = _payload(handler)["completions"][0]
+    assert completion["output_preview"] == "new response"
+    assert "later response" not in completion["output_preview"]
+    assert set(completion) == {
+        "job_id",
+        "name",
+        "status",
+        "completed_at",
+        "toast_notifications",
+        "session_id",
+        "output_preview",
+    }
+
+
+@pytest.mark.parametrize("case", ["missing", "unreadable", "empty", "metadata"])
+def test_recent_preview_omits_unsafe_or_empty_output(monkeypatch, tmp_path, case):
+    import api.routes as routes
+
+    output_dir = tmp_path / "cron-out"
+    output_file = output_dir / "job42" / "run.md"
+    if case != "missing":
+        output_file.parent.mkdir(parents=True)
+        if case == "empty":
+            content = "## Response\n"
+        elif case == "metadata":
+            content = "# Cron Job: Job 42\n\n**Job ID:** job42\n**Status:** ok\n"
+        else:
+            content = "## Response\nbody\n"
+        output_file.write_text(content, encoding="utf-8")
+        os.utime(output_file, (100, 100))
+    if case == "unreadable":
+        original_read_text = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == output_file:
+                raise OSError("permission denied")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable)
+    jobs = [{"id": "job42", "name": "Job 42", "last_run_at": 100, "last_status": "ok"}]
+    _stub_cron_jobs(monkeypatch, output_dir=output_dir, jobs=jobs)
+
+    handler = _JSONHandler()
+    routes._handle_cron_recent(handler, SimpleNamespace(query="since=0"))
+
+    assert handler.status == 200
+    completion = _payload(handler)["completions"][0]
+    assert "output_preview" not in completion
+
+
+def test_recent_preview_reads_no_agent_output_after_separator(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    output_dir = tmp_path / "cron-out" / "job42"
+    output_dir.mkdir(parents=True)
+    output = output_dir / "run.md"
+    output.write_text(
+        "# Cron Job: Job 42\n\n**Job ID:** job42\n**Mode:** no_agent (script)\n\n---\n\nscript output\n",
+        encoding="utf-8",
+    )
+    os.utime(output, (100, 100))
+    jobs = [{"id": "job42", "name": "Job 42", "last_run_at": 100, "last_status": "ok"}]
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out", jobs=jobs)
+
+    handler = _JSONHandler()
+    routes._handle_cron_recent(handler, SimpleNamespace(query="since=0"))
+
+    assert handler.status == 200
+    completion = _payload(handler)["completions"][0]
+    assert completion["output_preview"] == "script output"
+
+
+def test_recent_error_completion_keeps_projected_fields_without_preview(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    output_dir = tmp_path / "cron-out" / "job42"
+    output_dir.mkdir(parents=True)
+    output = output_dir / "run.md"
+    output.write_text("## Response\nold output\n", encoding="utf-8")
+    os.utime(output, (100, 100))
+    jobs = [{"id": "job42", "name": "Job 42", "last_run_at": 100, "last_status": "error", "toast_notifications": False}]
+    _stub_cron_jobs(monkeypatch, output_dir=tmp_path / "cron-out", jobs=jobs)
+
+    handler = _JSONHandler()
+    routes._handle_cron_recent(handler, SimpleNamespace(query="since=0"))
+
+    assert handler.status == 200
+    completion = _payload(handler)["completions"][0]
+    assert completion == {
+        "job_id": "job42",
+        "name": "Job 42",
+        "status": "error",
+        "completed_at": 100.0,
+        "toast_notifications": False,
+        "session_id": "",
+    }

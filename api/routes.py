@@ -21847,6 +21847,55 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
     return body[:limit] or "(empty)"
 
 
+_CRON_PREVIEW_LIMIT = 400
+
+
+def _cron_completion_output_preview(job_id: str, completed_at: float) -> str:
+    try:
+        from cron.jobs import OUTPUT_DIR as CRON_OUT
+        import re as _re
+
+        if job_id in (".", "..") or not _re.fullmatch(
+            r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}", job_id
+        ):
+            return ""
+        out_dir = CRON_OUT / job_id
+        if not out_dir.exists():
+            return ""
+        output_file = max(
+            (
+                path
+                for path in out_dir.glob("*.md")
+                if path.is_file() and path.stat().st_mtime <= completed_at
+            ),
+            key=lambda path: path.stat().st_mtime,
+            default=None,
+        )
+        if output_file is None:
+            return ""
+        # The scheduler saves output before mark_job_run writes last_run_at, so
+        # the newest qualifying file belongs to this successful completion.
+        text = output_file.read_text(encoding="utf-8", errors="replace")
+        if any(
+            line.startswith("## Response") or line.startswith("# Response")
+            for line in text.splitlines()
+        ):
+            preview = _cron_output_snippet(text, limit=_CRON_PREVIEW_LIMIT)
+        else:
+            lines = text.splitlines()
+            separator = next(
+                (index for index, line in enumerate(lines) if line.strip() == "---"),
+                None,
+            )
+            if separator is None:
+                return ""
+            preview = "\n".join(lines[separator + 1:]).strip()[:_CRON_PREVIEW_LIMIT] or "(empty)"
+        return "" if preview == "(empty)" else preview
+    except (ImportError, OSError, TypeError, ValueError) as exc:
+        logger.debug("Failed to read cron completion preview for %s: %s", job_id, exc)
+        return ""
+
+
 def _handle_cron_output(handler, parsed):
     from cron.jobs import OUTPUT_DIR as CRON_OUT
     import re as _re
@@ -21928,15 +21977,18 @@ def _handle_cron_recent(handler, parsed):
             else:
                 ts = float(last_run)
             if ts > since:
-                completions.append(
-                    {
-                        "job_id": job_id,
-                        "name": job.get("name", "Unknown"),
-                        "status": job.get("last_status", "unknown"),
-                        "completed_at": ts,
-                        "toast_notifications": job.get("toast_notifications") is not False,
-                    }
-                )
+                completion = {
+                    "job_id": job_id,
+                    "name": job.get("name", "Unknown"),
+                    "status": job.get("last_status", "unknown"),
+                    "completed_at": ts,
+                    "toast_notifications": job.get("toast_notifications") is not False,
+                }
+                completions.append(completion)
+                if completion["status"] == "ok":
+                    preview = _cron_completion_output_preview(job_id, ts)
+                    if preview:
+                        completion["output_preview"] = preview
         latest_session_info = _latest_cron_session_info_for_jobs(
             [job.get("id", "") for job in jobs],
             [c["job_id"] for c in completions],
