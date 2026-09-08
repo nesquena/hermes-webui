@@ -84,9 +84,33 @@ def main():
                               if(!selectedText||selection.toString()!==selectedText)throw new Error('selection lost');
                               if(detail&&(!detail.isConnected||detail.style.display!=='block'))throw new Error('detail lost');
                               selection.removeAllRanges();
+                              const snapshots=[];
+                              const snapshot=window.snapshotLiveTurnHtmlForSession;
+                              window.snapshotLiveTurnHtmlForSession=function(...args){snapshots.push(document.querySelector('#liveAssistantTurn').textContent);return snapshot(...args)};
+                              let paints=0;
+                              const paint=window._renderLiveAnchorActivitySceneForStream;
+                              window._renderLiveAnchorActivitySceneForStream=function(...args){paints++;return paint(...args)};
                               source.emit('tool',{name:'terminal',tid:'later',args:{command:'printf later'},preview:'later'},'run-fixture:1006');
                               source.emit('tool_complete',{name:'terminal',tid:'later',preview:'LATER RESULT',duration:1},'run-fixture:1007');
                               const completed=select().length===101&&document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT');
+                              if(paints!==2)throw new Error('tool pair scene paints: '+paints+' (expected 2)');
+                              if(!snapshots.at(-1).includes('LATER RESULT'))throw new Error('snapshot preceded completed paint');
+                              source.emit('token',{text:'Before orphan '},'run-fixture:1008');
+                              paints=0;
+                              source.emit('tool_complete',{name:'terminal',tid:'orphan',preview:'ORPHAN ERROR',is_error:true},'run-fixture:1009');
+                              if(paints!==1)throw new Error('orphan paints '+paints);
+                              if(!snapshots.at(-1).includes('Before orphan')||!snapshots.at(-1).includes('ORPHAN ERROR'))throw new Error('pending prose or orphan missing from snapshot');
+                              if(select().length!==102)throw new Error('orphan missing');
+                              source.emit('tool_complete',{name:'terminal',tid:'orphan',snippet:'CORRECTED ORPHAN'},'run-fixture:1010');
+                              if(select().length!==102||!snapshots.at(-1).includes('CORRECTED ORPHAN'))throw new Error('correction stale '+JSON.stringify({count:select().length,tail:snapshots.at(-1).slice(-1200)}));
+                              const previous=S.activeStreamId;
+                              const oldPaints=paints;
+                              S.activeStreamId='replacement';
+                              source.emit('tool',{name:'terminal',tid:'stale'},'run-fixture:1011');
+                              S.activeStreamId=previous;
+                              if(paints!==oldPaints||select().length!==102)throw new Error('stale stream painted');
+                              window._renderLiveAnchorActivitySceneForStream=paint;
+                              window.snapshotLiveTurnHtmlForSession=snapshot;
                               return {textBuilds,retained,completed};
                             }""")
                             print(json.dumps(dict(engine=engine, mode=mode, **result)), flush=True)
