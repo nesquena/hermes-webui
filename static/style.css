@@ -3851,7 +3851,8 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-@keyframes wlpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-bg-strong);}50%{box-shadow:0 0 0 5px rgba(255,215,0,0);}}
+/* Opacity avoids repainting the surrounding scene on every pulse frame. */
+@keyframes wlpulse{0%,100%{opacity:.45;}50%{opacity:1;}}
 .tool-card-running-dot{
   display:inline-block;
   width:7px;
@@ -3864,6 +3865,9 @@ body.resizing .sidebar{transition:none!important;}
   animation:wlpulse 1.3s ease-in-out infinite;
 }
 .tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+@media (prefers-reduced-motion:reduce){
+  .tool-card-running-dot,.tl-rundot{animation:none;}
+}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
