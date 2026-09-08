@@ -48,8 +48,8 @@ def test_active_session_idle_reconcile_clears_stale_busy_and_inflight_state():
     assert "S.activeStreamId=null" in body, "stale active stream id must be cleared"
     assert "delete INFLIGHT[sid]" in body, "stale active-session inflight cache must be purged"
     assert "clearInflightState(sid)" in body, "persisted inflight cache must be cleared too"
-    assert "_sessionStreamingById.set(sid, false)" in body, "observed active streaming state must be reset"
-    assert "_forgetObservedStreamingSession(sid)" in body, "persisted observed streaming marker must be cleared"
+    assert "_sessionStreamingById.set(runtimeKey, false)" in body, "observed active streaming state must be reset"
+    assert "_forgetObservedStreamingSession(serverRow||sid,runtimeContext)" in body, "persisted observed streaming marker must be cleared"
     assert "updateSendBtn()" in body, "composer controls must reflect the idle state after cleanup"
     assert "hideApprovalCard(true)" in body, "stale approval UI must be cleared when server says the run is idle"
     assert "hideLiveRunStatus(sid)" in body, "stale live footer must be cleared when server says the run is idle"
@@ -108,7 +108,7 @@ def test_session_list_payload_reconciles_active_idle_state_before_optimistic_mer
     body = _function_body(SESSIONS_SRC, "function _applySessionListPayload(")
 
     filter_pos = body.find("const serverSessions=_optimisticallyRemovedSessionIds.size")
-    reconcile_pos = body.find("_reconcileActiveSessionIdleStateFromList(serverSessions)")
+    reconcile_pos = body.find("_reconcileActiveSessionIdleStateFromList(serverSessions,runtimeContext)")
     merge_pos = body.find("_allSessions = _mergeOptimisticFirstTurnSessions")
     render_pos = body.find("renderSessionListFromCache()")
 

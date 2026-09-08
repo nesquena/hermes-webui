@@ -101,11 +101,14 @@ def test_handoff_summary_fallback_displays_clear_user_note():
 
 
 def test_handoff_delete_clears_local_storage_markers():
-    assert "function _clearHandoffStorageForSession(sid) {" in SESSIONS_JS
+    assert "function _clearHandoffStorageForSession(sid, row = null, runtimeContext=null)" in SESSIONS_JS
     assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);" in SESSIONS_JS
     assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, null);" in SESSIONS_JS
-    assert "_clearHandoffStorageForSession(sid);" in SESSIONS_JS
-    assert "ids.forEach(_clearHandoffStorageForSession);" in SESSIONS_JS
+    assert "_clearHandoffStorageForSession(sid, session, operationContext);" in SESSIONS_JS
+    assert "const batchRows=ids.map(sid=>sessionsById.get(sid)||null).filter(Boolean);" in SESSIONS_JS
+    assert "const operationContext=_createSidebarRuntimeContext(" in SESSIONS_JS
+    assert "ids.forEach(sid=>_clearHandoffStorageForSession(" in SESSIONS_JS
+    assert "sessionsById.get(sid)||null,\n        operationContext));" in SESSIONS_JS
 
 
 def test_handoff_catch_surfaces_400_message_verbatim():

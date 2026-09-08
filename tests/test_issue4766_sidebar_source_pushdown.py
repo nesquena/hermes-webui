@@ -8,6 +8,7 @@ import subprocess
 from urllib.parse import urlparse
 
 import api.profiles as profiles
+import api.models as models
 import api.routes as routes
 import pytest
 
@@ -197,6 +198,161 @@ def test_sidebar_source_webui_includes_hidden_archived_parent_reference(monkeypa
     assert [row["session_id"] for row in body["sidebar_reference_sessions"]] == ["webui-parent"]
     assert body["sidebar_reference_sessions"][0]["archived"] is True
     assert body["sidebar_reference_sessions"][0]["_sidebar_reference_only"] is True
+
+
+def test_hidden_archived_reference_identity_includes_profile_and_project():
+    visible = [
+        {
+            "session_id": "child",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projA",
+            "parent_session_id": "parent",
+        },
+        {
+            "session_id": "child",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projB",
+            "parent_session_id": "parent",
+        },
+    ]
+    archived = [
+        {
+            "session_id": "parent",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projA",
+            "archived": True,
+        },
+        {
+            "session_id": "parent",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projB",
+            "archived": True,
+        },
+    ]
+
+    references = routes._hidden_archived_sidebar_reference_sessions(visible, archived)
+
+    assert [(row["profile_scope"], row["project_id"]) for row in references] == [
+        ("work", "projA"),
+        ("work", "projB"),
+    ]
+
+
+def test_hidden_archived_reference_resolves_unassigned_delegate_parent_project():
+    visible = [
+        {
+            "session_id": "child",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": None,
+            "read_only": True,
+            "relationship_type": "child_session",
+            "parent_session_id": "parent",
+        }
+    ]
+    archived = [
+        {
+            "session_id": "parent",
+            "profile": "work",
+            "profile_scope": "work",
+            "project_id": "projA",
+            "archived": True,
+        }
+    ]
+
+    references = routes._hidden_archived_sidebar_reference_sessions(visible, archived)
+
+    assert [(row["session_id"], row["project_id"]) for row in references] == [("parent", "projA")]
+
+
+def test_lineage_metadata_reads_the_database_for_each_row_profile(monkeypatch):
+    rows = [
+        {"session_id": "same-id", "profile": "work"},
+        {"session_id": "same-id", "profile": "other"},
+    ]
+    paths = []
+
+    def profile_db_path(*, profile, fallback_to_active):
+        paths.append((profile, fallback_to_active))
+        return f"{profile}.db"
+
+    def profile_metadata(db_path, session_ids):
+        return {sid: {"_lineage_root_id": f"{db_path}:{sid}"} for sid in session_ids}
+
+    monkeypatch.setattr(models, "_agent_state_db_path", profile_db_path)
+    monkeypatch.setattr(models, "read_session_lineage_metadata", profile_metadata)
+
+    models._enrich_sidebar_lineage_metadata(rows)
+
+    assert paths == [("work", False), ("other", False)]
+    assert rows[0]["_lineage_root_id"] == "work.db:same-id"
+    assert rows[1]["_lineage_root_id"] == "other.db:same-id"
+
+
+def test_profileless_sidebar_rows_do_not_inherit_a_named_active_profile_db(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: "active.db")
+
+    def profile_db_path(*, profile, fallback_to_active):
+        calls.append((profile, fallback_to_active))
+        return "default.db"
+
+    monkeypatch.setattr(models, "_agent_state_db_path", profile_db_path)
+
+    assert models._sidebar_state_db_path(None) == "default.db"
+    assert calls == [("default", False)]
+
+
+def test_profileless_sidebar_rows_keep_the_pinned_root_alias_in_isolated_mode(monkeypatch):
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "profile-a")
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name in {"default", "profile-a"})
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: "pinned-profile-a.db")
+
+    def unexpected_profile_lookup(**_kwargs):
+        raise AssertionError("profileless root alias must use the pinned active database")
+
+    monkeypatch.setattr(models, "_agent_state_db_path", unexpected_profile_lookup)
+
+    assert models._sidebar_state_db_path(None) == "pinned-profile-a.db"
+
+
+def test_state_db_overrides_read_the_database_for_each_row_profile(monkeypatch):
+    rows = [
+        {"session_id": "same-id", "profile": "work", "is_cli_session": True},
+        {"session_id": "same-id", "profile": "other", "is_cli_session": True},
+    ]
+    calls = []
+
+    def profile_db_path(*, profile, fallback_to_active):
+        calls.append((profile, fallback_to_active))
+        return f"{profile}.db"
+
+    def profile_overrides(db_path, session_ids, count_session_ids=None):
+        return {
+            sid: {
+                "_state_db_source": "webui",
+                "_state_db_source_tag": "webui",
+                "_state_db_raw_source": "webui",
+                "_state_db_session_source": "webui",
+                "_state_db_source_label": "WebUI",
+            }
+            for sid in session_ids
+        }
+
+    monkeypatch.setattr(models, "_agent_state_db_path", profile_db_path)
+    monkeypatch.setattr(models, "_read_state_db_sidebar_overrides", profile_overrides)
+
+    models._apply_sidebar_state_db_overrides(rows)
+
+    assert calls == [("work", False), ("other", False)]
+    assert [row["is_cli_session"] for row in rows] == [False, False]
 
 
 def test_sidebar_source_cli_excludes_webui_rows(monkeypatch):
@@ -455,6 +611,11 @@ def test_apply_payload_and_tab_count_helpers_cover_old_and_new_payloads():
     apply_fn = _extract_function(src, "_applySessionListPayload")
     count_fn = _extract_function(src, "_sessionSourceTabCount")
     clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
+    profile_fn = _extract_function(src, "_sessionProfileScope")
+    source_fn = _extract_function(src, "_sidebarLineageSourceBucket")
+    readonly_fn = _extract_function(src, "_isReadOnlySession")
+    index_fn = _extract_function(src, "_buildSidebarLineageIndex")
+    context_fn = _extract_function(src, "_createSidebarRuntimeContext")
     script = f"""
 global.window = {{ _showCliSessions: true }};
 global._otherProfileCount = 0;
@@ -477,10 +638,15 @@ global._lastSessionListRenderSig = null;
 global._activeProject = null;
 global.NO_PROJECT_FILTER = '__none__';
 global._showAllProfiles = false;
-global._sessionSourceFilter = 'webui';
+        global._sessionSourceFilter = 'webui';
 global._renamingSid = null;
 global._sessionActionMenu = null;
-global.S = {{ activeProfile: 'default' }};
+        global.S = {{ activeProfile: 'default' }};
+        {profile_fn}
+        {source_fn}
+        {readonly_fn}
+            {index_fn}
+            {context_fn}
 global._reconcileActiveSessionIdleStateFromList = rows => rows;
 global._mergeOptimisticFirstTurnSessions = rows => rows;
 global._sessionListRenderSignature = () => '';
@@ -538,6 +704,15 @@ def test_source_filtered_cache_preserves_hidden_bucket_runtime_state():
     remember_snapshot_fn = _extract_function(src, "_rememberRenderedSessionSnapshot")
     purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
     mark_fn = _extract_function(src, "_markPollingCompletionUnreadTransitions")
+    profile_fn = _extract_function(src, "_sessionProfileScope")
+    source_fn = _extract_function(src, "_sidebarLineageSourceBucket")
+    readonly_fn = _extract_function(src, "_isReadOnlySession")
+    index_fn = _extract_function(src, "_buildSidebarLineageIndex")
+    runtime_key_fn = _extract_function(src, "_sidebarRuntimeIdentityKey")
+    runtime_scope_key_fn = _extract_function(src, "_sidebarRuntimeKey")
+    active_key_fn = _extract_function(src, "_sidebarActiveSessionIdentityKey")
+    active_identity_fn = _extract_function(src, "_sidebarIdentityMatchesActiveSession")
+    active_match_fn = _extract_function(src, "_sidebarSessionMatchesActiveSession")
     script = f"""
 global._allSessions = [{{
   session_id: 'cli-1',
@@ -566,6 +741,15 @@ global._setSessionViewedCount = () => {{}};
 global._rememberObservedStreamingSession = () => {{}};
 global._forgetObservedStreamingSession = () => {{}};
 {is_cli_fn}
+{profile_fn}
+{source_fn}
+{readonly_fn}
+{index_fn}
+{active_key_fn}
+{active_identity_fn}
+{active_match_fn}
+{runtime_key_fn}
+{runtime_scope_key_fn}
 {remember_source_fn}
 {remember_streaming_fn}
 {remember_snapshot_fn}
@@ -610,11 +794,13 @@ def test_sid_only_source_remembering_skips_scope_fallback():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     is_cli_fn = _extract_function(src, "_isCliSession")
     remember_source_fn = _extract_function(src, "_rememberSessionListSource")
+    runtime_key_fn = _extract_function(src, "_sidebarRuntimeIdentityKey")
     script = f"""
 global._allSessions = [];
 global._allSessionsScope = {{ sidebarSource: 'cli' }};
 global._sessionListSourceById = new Map();
 {is_cli_fn}
+{runtime_key_fn}
 {remember_source_fn}
 _rememberSessionListSource(null, 'detached-sid', false);
 console.log(JSON.stringify({{
@@ -667,6 +853,14 @@ def test_scope_mismatch_error_path_respects_sidebar_source():
         _extract_function(src, "_runRenderSessionListRefresh"),
         "_runRenderSessionListRefresh",
     )
+    profile_fn = _extract_function(src, "_sessionProfileScope")
+    source_fn = _extract_function(src, "_sidebarLineageSourceBucket")
+    readonly_fn = _extract_function(src, "_isReadOnlySession")
+    index_fn = _extract_function(src, "_buildSidebarLineageIndex")
+    runtime_key_fn = _extract_function(src, "_sidebarRuntimeIdentityKey")
+    active_key_fn = _extract_function(src, "_sidebarActiveSessionIdentityKey")
+    active_identity_fn = _extract_function(src, "_sidebarIdentityMatchesActiveSession")
+    active_match_fn = _extract_function(src, "_sidebarSessionMatchesActiveSession")
     script = f"""
 global.window = {{ _showCliSessions: true }};
 global._showAllProfiles = false;
@@ -703,6 +897,14 @@ global.renderSessionListFromCache = () => {{
 global.api = () => Promise.reject(new Error('boom'));
     global.clearInflightState = sid => cleared.push(sid);
     {purge_fn}
+    {profile_fn}
+    {source_fn}
+    {readonly_fn}
+    {index_fn}
+    {active_key_fn}
+    {active_identity_fn}
+    {active_match_fn}
+    {runtime_key_fn}
     {clear_fn}
     {requested_source_fn}
     {exclude_hidden_fn}

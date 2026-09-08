@@ -6,6 +6,7 @@ import time
 import pytest
 
 import api.models as models
+import api.profiles as profiles
 import api.routes as routes
 from api.models import SESSIONS, STREAMS, Session, all_sessions
 
@@ -633,6 +634,8 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 100
     try:
+        monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+        monkeypatch.setattr(models, "_sidebar_state_db_path", lambda _profile: _isolate)
         archived_parent = _save_webui_session(
             "lineage_api_archived_parent",
             title="Hermes WebUI",

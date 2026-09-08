@@ -50,17 +50,17 @@ def _function_block(name: str, next_marker: str) -> str:
 # ── Structural anchors ──────────────────────────────────────────────────────
 
 def test_visit_ack_helpers_exist():
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
-    assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt)" in SESSIONS_JS
-    assert "function _sessionVisitHasUnreadState(sid)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, row = null, runtimeContext=null)" in SESSIONS_JS
+    assert "function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, runtimeContext=null)" in SESSIONS_JS
+    assert "function _sessionVisitHasUnreadState(sid, row = null, runtimeContext=null)" in SESSIONS_JS
 
 
 def test_acknowledge_visit_syncs_viewed_snapshot_and_repaints():
     body = _function_block("_acknowledgeSessionVisit", "function _sessionVisitHasUnreadState")
     # Clears viewed count (which clears the stale completion-unread marker, #3020),
     # syncs the polling snapshot, and repaints the sidebar from cache.
-    assert "_setSessionViewedCount(sid, messageCount);" in body
-    assert "_syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);" in body
+    assert "_setSessionViewedCount(sid, messageCount, activeRow, operationContext);" in body
+    assert "_syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt, operationContext);" in body
     assert "renderSessionListFromCache" in body
 
 
@@ -98,7 +98,7 @@ def test_post_load_reack_is_guarded_by_active_view():
 def test_same_session_reselect_clears_stale_unread():
     block = _load_session_block()
     guard = block.find("if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid)){")
-    unread_check = block.find("_sessionVisitHasUnreadState(sid)", guard)
+    unread_check = block.find("_sessionVisitHasUnreadState(sid,S.session)", guard)
     acknowledge = block.find("_acknowledgeSessionVisit(", unread_check)
     ret = block.find("return;", acknowledge)
 
@@ -120,15 +120,15 @@ def test_completion_paths_keep_focus_gate_for_hidden_tab_completions():
     focus-gated _isSessionActivelyViewedForList, not a focus-independent variant.
     """
     background = _function_block("_markSessionCompletionUnreadIfBackground", "function _clearSessionCompletionUnread")
-    assert "_isSessionActivelyViewedForList(sid)" in background, (
+    assert "_isSessionActivelyViewedForList(sid, stateRow, operationContext)" in background, (
         "background completion must keep the focus-gated read check so a hidden-tab "
         "completion is not prematurely marked read"
     )
 
-    polling_start = SESSIONS_JS.index("function _markPollingCompletionUnreadTransitions(sessions)")
+    polling_start = SESSIONS_JS.index("function _markPollingCompletionUnreadTransitions(sessions, runtimeContext=null)")
     polling_end = SESSIONS_JS.index("const staleRuntimeStateSids", polling_start)
     polling = SESSIONS_JS[polling_start:polling_end]
-    assert "!_isSessionActivelyViewedForList(sid)" in polling, (
+    assert "!_isSessionActivelyViewedForList(sid, s, sharedContext)" in polling, (
         "polling completion must keep the focus-gated read check so a hidden-tab "
         "completion is not prematurely marked read"
     )
@@ -357,6 +357,11 @@ const document = {{
   hasFocus: () => _focused,
 }};
 let S = {{ session: {{ session_id: 'open', message_count: 0 }}, messages: [], lastUsage: {{}} }};
+let _allSessions = [];
+let _sidebarReferenceSessions = [];
+function _createSidebarRuntimeContext(rows, refs) {{
+  return {{ index: {{}}, key: (rowOrSid, sidOverride=null) => String(sidOverride || (rowOrSid && rowOrSid.session_id) || rowOrSid || '') }};
+}}
 
 // Stubs for the incidental side effects _ensureMessagesLoaded touches.
 function _clearSameSessionForceReloadHint() {{}}
