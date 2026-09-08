@@ -179,17 +179,35 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
-**Symptom.** An action that uses the in-process Agent runtime stops with a retryable message while Hermes WebUI prepares to restart. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
+**Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI manually. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
 
-**Why.** WebUI currently imports `run_agent.AIAgent` into its long-lived Python process. Python keeps imported modules in memory. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision, producing misleading `ImportError`s or inconsistent runtime state. For local Agent-backed chat, WebUI therefore returns a retryable `409 agent_runtime_stale` before claiming or mutating session state instead of attempting a partial in-process reload. Gateway-backed chat runs in the gateway process and is not blocked by this WebUI-local check. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare.
+**Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
-**Diagnostic.** Compare the running WebUI process start time with the Agent checkout revision and recent update history. WebUI waits while the Agent's update transaction is active or its recovery markers report an incomplete environment. It treats unreadable transaction state as unknown and does not restart automatically until the state becomes healthy.
+**Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
 
-**Fix.** Wait for the Agent update or recovery to finish. WebUI then uses its normal safe-restart path: it lets the retry response reach the browser, drains active work, rechecks the final Agent revision, and reloads only after `/health` reports a new WebUI process generation.
+| Value | Observation |
+| --- | --- |
+| `active` | A recent Agent update marker names a live PID. |
+| `incomplete` | An Agent recovery marker exists in the loaded checkout or configured venv installation. |
+| `stale` | The update marker names a dead PID or is older than the diagnostic age limit. |
+| `unknown` | Marker contents, PID liveness, or recovery-marker presence cannot be read or classified. |
+| `unverified` | No active or recovery marker was found. Update completion and environment health remain unverified. |
 
-If the message says the automatic restart could not be scheduled, or an Agent recovery marker remains after the Agent is healthy, restart WebUI using the same launch method that started it and investigate the incomplete Agent update. Restarting the whole computer or WSL is not required when restarting the WebUI backend succeeds.
+These are observations, not success receipts. Hermes Agent removes `.hermes-update-in-progress` on failed and interrupted exits too. A missing or stale marker, or a readable Git revision, does not prove a completed update or a healthy environment. WebUI only reads these markers; it does not remove or repair them.
 
-**When to file a bug.** File a WebUI bug if the stale-runtime message appears even though the Agent revision did not change, the automatic restart runs before the Agent update is complete, or a clean WebUI restart still produces the same import error. Include the WebUI launch method, WebUI revision, Agent revision, and the sanitized error text.
+**Fix.** Check the Agent updater's outcome and resolve any failed or incomplete Agent update first. Once the Agent checkout and environment are healthy and no updater is running, restart WebUI using the same launch method that started it:
+
+```bash
+./ctl.sh restart
+# Or, for a user systemd service:
+systemctl --user restart hermes-webui.service
+```
+
+For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again. Restarting the whole computer or WSL is not required when restarting the WebUI backend succeeds. Retry the action after restarting the backend; refreshing the browser alone does not replace its imported Agent modules.
+
+**Automatic restart prerequisite.** Revision mismatch does not schedule a WebUI restart. Safe automation requires an Agent-owned terminal success receipt bound to the exact update transaction, final revision, and healthy environment, plus an Agent-owned atomic handoff or lease that excludes new mutations across process replacement (or an Agent updater that performs the restart itself). No such public contract is verified for this integration. Repeated readiness checks followed by `os.execv()` leave a race; WebUI's own update lock does not exclude an external Agent updater. Explicit updates initiated through WebUI retain their existing behavior and are outside this revision-mismatch guard.
+
+**When to file a bug.** File a WebUI bug if the restart-required message appears even though the Agent revision did not change or become unreadable, or if a clean WebUI restart still produces the same import error. Include the launch method, WebUI and Agent revisions, the marker diagnostic, and sanitized error text.
 
 ---
 

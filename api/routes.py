@@ -26024,8 +26024,8 @@ def _manual_compression_status_payload(job):
             payload["retryable"] = bool(job["retryable"])
         if job.get("restart_scheduled") is not None:
             payload["restart_scheduled"] = bool(job["restart_scheduled"])
-        if job.get("server_started_at") is not None:
-            payload["server_started_at"] = job["server_started_at"]
+        if job.get("agent_update_state") is not None:
+            payload["agent_update_state"] = job["agent_update_state"]
     elif status == "cancelled":
         payload["ok"] = False
         payload["error"] = job.get("error") or "Compression cancelled"
@@ -26063,7 +26063,7 @@ def _run_manual_compression_job(sid, body):
                         "error_type": (payload or {}).get("type"),
                         "retryable": (payload or {}).get("retryable"),
                         "restart_scheduled": (payload or {}).get("restart_scheduled"),
-                        "server_started_at": (payload or {}).get("server_started_at"),
+                        "agent_update_state": (payload or {}).get("agent_update_state"),
                         "updated_at": now,
                     }
                 )
@@ -26089,7 +26089,7 @@ def _run_manual_compression_job(sid, body):
                         "error_type": stale_payload["type"],
                         "retryable": stale_payload["retryable"],
                         "restart_scheduled": stale_payload.get("restart_scheduled"),
-                        "server_started_at": stale_payload.get("server_started_at"),
+                        "agent_update_state": stale_payload.get("agent_update_state"),
                         "updated_at": time.time(),
                     }
                 )

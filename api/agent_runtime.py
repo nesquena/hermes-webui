@@ -9,7 +9,6 @@ mixed runtime and require a clean WebUI restart instead.
 from __future__ import annotations
 
 import errno
-import logging
 import math
 import os
 from pathlib import Path
@@ -22,30 +21,22 @@ import time
 # runtime identity is deliberately captured from the loaded module below.
 from api.config import (
     PYTHON_EXE,
-    SERVER_START_TIME,
     _AGENT_DIR,  # noqa: F401
     _DEFAULT_STATE_HOME,
 )
 from api.subprocess_utils import windows_hide_flags
 
-logger = logging.getLogger(__name__)
-
-_RESTART_PENDING_MESSAGE = (
+_RESTART_REQUIRED_MESSAGE = (
     "Hermes Agent was updated while Hermes WebUI was running. "
-    "Hermes WebUI will restart after the Agent update finishes. "
-    "Retry this action after WebUI reconnects."
-)
-_RESTART_FAILED_MESSAGE = (
-    "Hermes Agent was updated while Hermes WebUI was running. "
-    "The automatic WebUI restart could not be scheduled. "
-    "Restart Hermes WebUI before retrying this action."
+    "WebUI cannot verify that the Agent update completed safely. "
+    "Check the Agent update outcome and environment first. "
+    "Restart Hermes WebUI manually before retrying this action."
 )
 _AGENT_UPDATE_MARKER = ".hermes-update-in-progress"
 _AGENT_RECOVERY_MARKERS = (".update-incomplete", ".lazy-refresh-incomplete")
 _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
 _HERMES_HOME = Path(_DEFAULT_STATE_HOME)
 _AGENT_PYTHON = Path(PYTHON_EXE).expanduser() if PYTHON_EXE else None
-_SERVER_STARTED_AT = SERVER_START_TIME
 
 
 def _read_agent_revision(
@@ -119,8 +110,6 @@ _AGENT_MODULE_PATH: Path | None = None
 _AGENT_REVISION: str | None = None
 _AIAgent = None
 _RUNTIME_LOCK = threading.Lock()
-_AUTO_RESTART_LOCK = threading.Lock()
-_AUTO_RESTART_SCHEDULED = False
 
 
 class AgentRuntimeChangedError(RuntimeError):
@@ -130,12 +119,10 @@ class AgentRuntimeChangedError(RuntimeError):
         self,
         message: str,
         *,
-        restart_scheduled: bool | None = None,
-        server_started_at: float | None = None,
+        agent_update_state: str | None = None,
     ) -> None:
         super().__init__(message)
-        self.restart_scheduled = restart_scheduled
-        self.server_started_at = server_started_at
+        self.agent_update_state = agent_update_state
 
 
 def agent_runtime_stale_payload(exc: AgentRuntimeChangedError) -> dict:
@@ -144,11 +131,10 @@ def agent_runtime_stale_payload(exc: AgentRuntimeChangedError) -> dict:
         "error": str(exc),
         "type": "agent_runtime_stale",
         "retryable": True,
+        "restart_scheduled": False,
     }
-    if exc.restart_scheduled is not None:
-        payload["restart_scheduled"] = exc.restart_scheduled
-    if exc.server_started_at is not None:
-        payload["server_started_at"] = exc.server_started_at
+    if exc.agent_update_state is not None:
+        payload["agent_update_state"] = exc.agent_update_state
     return payload
 
 
@@ -156,6 +142,8 @@ def _pid_is_alive(pid: int) -> bool | None:
     """Return PID liveness, or ``None`` when the platform cannot confirm it."""
     if pid <= 0:
         return False
+    if pid.bit_length() > 32:
+        return None
     if sys.platform == "win32":
         try:
             import ctypes
@@ -199,6 +187,8 @@ def _pid_is_alive(pid: int) -> bool | None:
         return False
     except PermissionError:
         return True
+    except (OverflowError, ValueError):
+        return None
     except OSError as exc:
         if exc.errno == errno.ESRCH:
             return False
@@ -220,7 +210,7 @@ def _read_live_agent_update(marker: Path) -> str:
         except OSError:
             return "unknown"
         return "unknown"
-    except OSError:
+    except (OSError, UnicodeError):
         return "unknown"
 
     lines = raw.splitlines()
@@ -260,10 +250,9 @@ def _agent_install_roots() -> tuple[Path, ...]:
     if _AGENT_SOURCE_DIR is not None:
         candidates.append(_AGENT_SOURCE_DIR)
     if _AGENT_PYTHON is not None:
-        try:
-            python_path = _AGENT_PYTHON.resolve()
-        except (OSError, RuntimeError):
-            python_path = _AGENT_PYTHON
+        # A venv Python is commonly a symlink to a shared interpreter. Keep the
+        # configured venv path so its installation's recovery markers are read.
+        python_path = _AGENT_PYTHON
         if python_path.parent.name.lower() in {"bin", "scripts"}:
             venv_dir = python_path.parent.parent
             if venv_dir.name.lower() in {"venv", ".venv"}:
@@ -280,7 +269,11 @@ def _agent_install_roots() -> tuple[Path, ...]:
 
 
 def _agent_update_transaction_state() -> str:
-    """Return ``active``, ``incomplete``, ``complete``, or ``unknown``."""
+    """Report marker diagnostics, never proof of successful completion.
+
+    The Agent removes its active marker on failed/interrupted exits too. Neither
+    its absence nor a stale PID proves the checkout or environment is healthy.
+    """
     live_state = _read_live_agent_update(_HERMES_HOME / _AGENT_UPDATE_MARKER)
     if live_state == "unknown":
         return "unknown"
@@ -294,63 +287,7 @@ def _agent_update_transaction_state() -> str:
             recovery_present = recovery_present or presence == "present"
     if recovery_present:
         return "incomplete"
-    if live_state == "active":
-        return "active"
-    return "complete"
-
-
-def _agent_restart_readiness() -> str:
-    """Confirm transaction completion and re-read the final Agent revision."""
-    transaction_state = _agent_update_transaction_state()
-    if transaction_state != "complete":
-        return transaction_state
-    final_revision = _read_agent_revision(
-        _AGENT_SOURCE_DIR,
-        module_path=_AGENT_MODULE_PATH,
-    )
-    return "ready" if final_revision is not None else "unknown"
-
-
-def _wait_for_agent_restart_ready(poll_seconds: float = 2.0) -> bool:
-    """Wait without a watchdog until Agent-owned transaction state is healthy."""
-    last_state = None
-    while True:
-        state = _agent_restart_readiness()
-        if state == "ready":
-            return True
-        if state != last_state:
-            logger.info("Automatic WebUI restart waiting on Agent update state: %s", state)
-            last_state = state
-        time.sleep(max(0.1, poll_seconds))
-
-
-def _delegate_webui_restart(*, restart_ready) -> bool:
-    """Call the existing self-restart authority without copying launch logic."""
-    from api.updates import _schedule_restart  # noqa: PLC0415
-
-    return _schedule_restart(restart_ready=restart_ready)
-
-
-def _schedule_automatic_restart() -> bool:
-    """Schedule one transaction-aware WebUI restart for this process."""
-    global _AUTO_RESTART_SCHEDULED
-
-    with _AUTO_RESTART_LOCK:
-        if _AUTO_RESTART_SCHEDULED:
-            return True
-        _AUTO_RESTART_SCHEDULED = True
-        try:
-            scheduled = bool(
-                _delegate_webui_restart(
-                    restart_ready=_wait_for_agent_restart_ready,
-                )
-            )
-        except Exception:
-            logger.exception("Could not schedule automatic WebUI restart")
-            scheduled = False
-        if not scheduled:
-            _AUTO_RESTART_SCHEDULED = False
-        return scheduled
+    return "unverified" if live_state == "absent" else live_state
 
 
 def _loaded_agent_source_identity() -> tuple[Path, Path] | None:
@@ -392,11 +329,13 @@ def ensure_agent_runtime_current() -> None:
         _read_agent_revision(_AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH)
         != _AGENT_REVISION
     ):
-        restart_scheduled = _schedule_automatic_restart()
+        # Automatic restart needs an Agent-owned success receipt bound to this
+        # transaction, final revision and healthy environment, plus an atomic
+        # handoff excluding mutations across replacement. Marker polling and a
+        # final revision read supply neither contract. Keep this path manual.
         raise AgentRuntimeChangedError(
-            _RESTART_PENDING_MESSAGE if restart_scheduled else _RESTART_FAILED_MESSAGE,
-            restart_scheduled=restart_scheduled,
-            server_started_at=_SERVER_STARTED_AT,
+            _RESTART_REQUIRED_MESSAGE,
+            agent_update_state=_agent_update_transaction_state(),
         )
 
 

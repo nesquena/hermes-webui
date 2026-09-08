@@ -68,33 +68,17 @@ async function api(path,opts={}){
           // Parse JSON error body and surface the human-readable message,
           // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
           let message=text;
-          let payload=null;
-          try{payload=JSON.parse(text);message=payload.error||payload.message||text;}catch(e){}
-          if(
-            payload&&payload.type==='agent_runtime_stale'&&payload.restart_scheduled===true&&
-            typeof _handleAgentRuntimeStaleResponse==='function'
-          ){
-            void _handleAgentRuntimeStaleResponse(payload);
-          }
+          try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
           // Attach the raw HTTP context so callers can branch on status (404 stale-session
           // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
           const err=new Error(message);
           err.status=res.status;
           err.statusText=res.statusText;
           err.body=text;
-          err.payload=payload;
           throw err;
         }
         const ct=res.headers.get('content-type')||'';
-        if(!ct.includes('application/json')) return await res.text();
-        const payload=await res.json();
-        if(
-          payload&&payload.type==='agent_runtime_stale'&&payload.restart_scheduled===true&&
-          typeof _handleAgentRuntimeStaleResponse==='function'
-        ){
-          void _handleAgentRuntimeStaleResponse(payload);
-        }
-        return payload;
+        return ct.includes('application/json')?await res.json():await res.text();
       })();
       return useTimeout?await Promise.race([
         requestPromise,
