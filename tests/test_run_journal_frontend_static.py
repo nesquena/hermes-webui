@@ -97,6 +97,7 @@ def _run_current_turn_scope_probe() -> dict:
             _function_body(UI_SRC, "function msgContent"),
             _function_body(UI_SRC, "function _isContextCompactionText"),
             _function_body(UI_SRC, "function _isContextCompactionMessage"),
+            _function_body(UI_SRC, "function _shouldShowSettledCompressionReference"),
             _function_body(SESSIONS_SRC, "function _messageComparableText"),
             _function_body(SESSIONS_SRC, "function _stripAttachedFilesMarker"),
             _function_body(SESSIONS_SRC, "function _stripForcedSkillEnvelope"),
@@ -150,6 +151,8 @@ const compaction = {{
   content:'[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.',
   _ts:3.5,
 }};
+const ordinaryCompactionProse = 'context compaction retained this ordinary user reference';
+const bracketedCompactionReference = '[context compaction retained this synthetic reference]';
 const compactionBase = [historical, historicalAnswer, optimisticCurrent, compaction];
 const compactionCandidate = {{role:'user', content:{json.dumps(prompt)}, _ts:3}};
 const compactionCurrentTail = _currentTailUserMessage(compactionBase);
@@ -189,6 +192,8 @@ process.stdout.write(JSON.stringify({{
   compactionPromptCount,
   compactionMarkerRetained,
   compactionLiveAssistantRetained,
+  ordinaryCompactionReferenceVisible: _shouldShowSettledCompressionReference(ordinaryCompactionProse),
+  bracketedCompactionReferenceHidden: !_shouldShowSettledCompressionReference(bracketedCompactionReference),
   completedBoundaryDedupe,
   distinctCompletedTurnPromptCount,
 }}));
@@ -565,6 +570,8 @@ def test_user_turn_dedupe_is_scoped_to_current_turn_by_behavior():
     assert result["compactionPromptCount"] == 1
     assert result["compactionMarkerRetained"] is True
     assert result["compactionLiveAssistantRetained"] is True
+    assert result["ordinaryCompactionReferenceVisible"] is True
+    assert result["bracketedCompactionReferenceHidden"] is True
     assert result["completedBoundaryDedupe"] is False
     assert result["distinctCompletedTurnPromptCount"] == 2
 

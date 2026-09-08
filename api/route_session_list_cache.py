@@ -398,9 +398,9 @@ def _session_list_cache_state_db_fingerprint_impl(state_db_path: Path | None):
     if state_db_path is None:
         return None
     try:
-        from api.models import _sqlite_content_fingerprint
+        from api.models import _sqlite_content_fingerprint, _sqlite_data_version
 
-        return _sqlite_content_fingerprint(state_db_path)
+        return (_sqlite_data_version(state_db_path), _sqlite_content_fingerprint(state_db_path))
     except Exception:
         return None
 
