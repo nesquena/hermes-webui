@@ -50,6 +50,7 @@ function _composerDraftFileSignature(file) {
     path: String(file.path || ''),
     size: Number.isFinite(Number(file.size)) ? Number(file.size) : null,
     type: String(file.type || file.mime || ''),
+    lastModified: Number.isFinite(Number(file.lastModified)) ? Number(file.lastModified) : null,
   };
 }
 
@@ -285,15 +286,15 @@ function _saveComposerDraftNow(sid, text, files) {
   }).catch(() => {});
 }
 
-// Restore composer draft from server onto #msg textarea.
-// Only restores if there's actual text (skip empty/None drafts).
+// Restore composer draft from server onto #msg.
+// Empty, whitespace-only, and file-only drafts remain valid accepted states, and the function returns their transient payload report.
 // Guards against double-restore when rapidly switching sessions.
 function _restoreComposerDraft(draft, targetSid, opts={}) {
   const ta = $('msg');
-  if (!ta) return;
+  if (!ta) return null;
   // targetSid is the session that was requested — if it no longer matches
   // _loadingSessionId, a newer session switch has already begun, so skip.
-  if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
+  if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return null;
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
@@ -301,7 +302,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   const restoreSid = targetSid || (S.session && S.session.session_id);
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
 
-  if (restoreSid && hasServerDraftPayload && _isComposerDraftRestoreSuppressed(restoreSid, text, files)) return;
+  if (restoreSid && hasServerDraftPayload && _isComposerDraftRestoreSuppressed(restoreSid, text, files)) return null;
   if (restoreSid && !hasServerDraftPayload) _clearComposerDraftRestoreSuppression(restoreSid);
 
   // Same-session force refreshes are driven by external state changes and may
@@ -309,7 +310,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // composer is the authoritative in-progress draft; never replace non-empty
   // local input with an older server draft. Cross-session switches still restore
   // normally so the previous session's composer contents do not leak forward.
-  if (preserveActiveInput && current && current !== text) return;
+  if (preserveActiveInput && current && current !== text) return null;
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
@@ -319,7 +320,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
       if (typeof autoResize === 'function') autoResize();
       if (typeof updateSendBtn === 'function') updateSendBtn();
     }
-    return;
+    return {text, files};
   }
   // Only update if different to avoid cursor jumps on unrelated session switches.
   if (current !== text) {
@@ -328,6 +329,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
   // Files restoration is skipped for now (requires S.pendingFiles plumbing).
+  return {text, files};
 }
 
 // Clear the saved draft for a session (called when message is sent).
@@ -1393,6 +1395,7 @@ function _setNewSessionPending(pending){
 }
 
 async function newSession(flash, options={}){
+  // #2518: keep cross-provider fallback provenance attached to this path.
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
@@ -1478,7 +1481,7 @@ async function newSession(flash, options={}){
       // designed to fix — see routes.py docstring around line 1891-1894). For
       // those models we leave the wire shape with model_provider=null so the
       // slow path's cross-provider repair still runs. Closes the open
-      // follow-up from #2518.
+      // #2518: keep cross-provider fallback provenance attached to this path.
       const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
       // Second guard (#3410-followup): even a bare model can carry a known
       // family prefix (gpt→openai, claude→anthropic, gemini→google). If that
@@ -1501,11 +1504,25 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    const _creationStartSid=S.session&&S.session.session_id||null;
+    const _creationStartLoadGeneration=typeof _loadSessionGeneration==='number'
+      ? _loadSessionGeneration : null;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    const createdSessionId=data&&data.session&&data.session.session_id||null;
+    // A blank-page owner acquisition may be superseded while the create request
+    // is in flight. Leave the newer pane load authoritative instead of installing
+    // the late-created session over it.
+    const _creationOwnerAccepted=typeof _newSessionOwnerResponseIsCurrent==='function'
+      ? _newSessionOwnerResponseIsCurrent(data,_creationStartSid,_creationStartLoadGeneration)
+      : true;
+    if(!_creationOwnerAccepted) return null;
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
-    S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    S.session=data.session;
+    if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+    S.messages=data.session.messages||[];
+    const installedSessionId=S.session&&S.session.session_id||null;
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -1580,6 +1597,7 @@ async function newSession(flash, options={}){
     }
     // Refresh sidebar to include the newly created session (#3874).
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    return installedSessionId;
   })();
   try{
     return await _newSessionInFlight;
@@ -1587,6 +1605,30 @@ async function newSession(flash, options={}){
     _newSessionInFlight=null;
     _setNewSessionPending(false);
   }
+}
+
+function _newSessionOwnerResponseIsCurrent(data,startSid,startLoadGeneration){
+  const createdSessionId=data&&data.session&&data.session.session_id||null;
+  if(typeof _loadSessionGeneration==='number'&&startLoadGeneration!==null
+    &&_loadSessionGeneration!==startLoadGeneration) return false;
+  if(typeof _loadingSessionId!=='undefined'&&_loadingSessionId) return false;
+  if(S.session&&S.session.session_id!==startSid) return false;
+  return true;
+}
+
+async function _ensureSessionOwner(){
+  const currentSid=S.session&&S.session.session_id||null;
+  if(currentSid){
+    return typeof _isSessionCurrentPane==='function'&&_isSessionCurrentPane(currentSid)
+      ? currentSid
+      : null;
+  }
+  const createdSid=await newSession();
+  if(!createdSid) return null;
+  if(typeof renderSessionList==='function') await renderSessionList();
+  return typeof _isSessionCurrentPane==='function'&&_isSessionCurrentPane(createdSid)
+    ? createdSid
+    : null;
 }
 
 /**
@@ -1842,6 +1884,7 @@ async function loadSession(sid){
     if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
       closeOtherLiveStreams(sid);
     }
+    if(typeof _loadingOlderLease!=='undefined') _loadingOlderLease=null;
     _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
@@ -2162,6 +2205,7 @@ async function loadSession(sid){
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
+    if(activeStreamId) _bumpMessagesGeneration();
     S.activeStreamId=activeStreamId;
     const liveToolReplayId=(tc)=>String(tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'')||'').trim();
     const replayPersistedLiveToolCards=(opts)=>{
@@ -2308,6 +2352,7 @@ async function loadSession(sid){
 
     if(activeStreamId){
       S.busy=true;
+      _bumpMessagesGeneration();
       S.activeStreamId=activeStreamId;
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
@@ -2374,12 +2419,13 @@ async function loadSession(sid){
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
+  let _acceptedDraft=null;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
-    _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+    _acceptedDraft=_restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
-  if (_isCurrentLoad()) _loadingSessionId = null;
+if (_isCurrentLoad()) _loadingSessionId = null;
 
   // Re-acknowledge the visit after the async message-load gap. A deferred
   // sidebar /api/sessions poll can land while _ensureMessagesLoaded is in
@@ -2402,6 +2448,11 @@ async function loadSession(sid){
     );
   }
 
+  // Project page-local results after transcript loading and its final render.
+  // An earlier projection would be replaced by the loaded transcript.
+  if(typeof projectSubmittedPayloadForOwner==='function') projectSubmittedPayloadForOwner(sid, _acceptedDraft);
+  if(typeof projectBtwStreamsForOwner==='function') projectBtwStreamsForOwner(sid);
+  if(typeof projectBackgroundResultsForOwner==='function') projectBackgroundResultsForOwner(sid);
   if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(sid);
 
   // ── Cross-channel handoff hint ──
@@ -3150,6 +3201,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
   const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
   if (!_ownsLoad()) return;
+  const replacementTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     _clearSameSessionForceReloadHint(sid);
@@ -3182,6 +3236,8 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  if(typeof _transcriptReplacementIsCurrent==='function'&&replacementTicket
+     && !_transcriptReplacementIsCurrent(replacementTicket)) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
@@ -3212,7 +3268,13 @@ async function _ensureMessagesLoaded(sid, opts) {
     _pendingCarryForwardSnapshot = null;
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
-  S.messages = msgs;
+  const commitMessages=()=>{ S.messages = msgs; };
+  if(typeof _commitTranscriptReplacement==='function'&&replacementTicket){
+    if(!_commitTranscriptReplacement(replacementTicket,commitMessages)) return;
+  }else{
+    _bumpMessagesGeneration();
+    commitMessages();
+  }
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
@@ -3675,15 +3737,22 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
 // Load older messages when the user scrolls to the top of the conversation.
 // Prepends them to S.messages and re-renders, preserving scroll position.
 let _loadingOlder = false;
+let _loadingOlderLease = null;
+function _releaseLoadingOlder(lease){
+  if(!_loadingOlderLease || _loadingOlderLease!==lease) return false;
+  _loadingOlderLease=null;
+  _loadingOlder=false;
+  return true;
+}
 // _oldestIdx tracks the index (in the server's full message array) of the
 // oldest message currently loaded in S.messages. Starts at 0 when all
 // messages are loaded, or > 0 when truncated by msg_limit.
 let _oldestIdx = 0;
-// Generation token bumped every time S.messages is wholesale-replaced
-// (rather than incrementally extended). _loadOlderMessages snapshots it
-// before its `await` and re-checks after, so a late-resolving prefetch
-// does not prepend onto a transcript that was rebuilt under it
-// (e.g. by _ensureAllMessagesLoaded after a Start-jump). See #1937.
+// Generation token bumped whenever active-transcript ownership changes through
+// a live-turn claim or wholesale message replacement. _loadOlderMessages and
+// _ensureAllMessagesLoaded snapshot it before their awaits and re-check after,
+// so a late-resolving response cannot prepend onto or replace a transcript
+// that changed under it. See #1937 and PR #6494 round 3.
 let _messagesGeneration = 0;
 function _bumpMessagesGeneration() {
   // Wrap to keep the counter bounded; the only operation that matters is
@@ -3692,18 +3761,74 @@ function _bumpMessagesGeneration() {
   _messagesGeneration = (_messagesGeneration + 1) | 0;
   return _messagesGeneration;
 }
+function _captureTranscriptReplacement() {
+  return {
+    sessionId: S.session && S.session.session_id || null,
+    generation: _messagesGeneration,
+    loadGeneration: typeof _loadSessionGeneration==='number' ? _loadSessionGeneration : null,
+    used: false,
+  };
+}
+function _transcriptReplacementIsCurrent(ticket) {
+  return !!(
+    ticket &&
+    S.session &&
+    S.session.session_id === ticket.sessionId &&
+    _messagesGeneration === ticket.generation &&
+    (ticket.loadGeneration===undefined || ticket.loadGeneration===null
+      || ticket.loadGeneration===_loadSessionGeneration)
+  );
+}
+function _commitTranscriptReplacement(ticket, commit) {
+  if (!_transcriptReplacementIsCurrent(ticket) || ticket.used) return false;
+  ticket.used = true;
+  _bumpMessagesGeneration();
+  ticket.committedGeneration = _messagesGeneration;
+  commit();
+  return true;
+}
+function settleTranscriptReplacement(commit) {
+  const ticket=_captureTranscriptReplacement();
+  return _commitTranscriptReplacement(ticket,commit);
+}
+async function _readFullSessionSnapshot(sid) {
+  if (!sid) return null;
+  const data = await api(
+    `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
+    {timeoutMs:120000}
+  );
+  if (!data || !data.session) return null;
+  const session = data.session;
+  return {
+    session,
+    messages: (session.messages || []).filter(m => m && m.role),
+    toolCalls: Array.isArray(session.tool_calls) ? session.tool_calls : [],
+    truncated: !!session._messages_truncated,
+  };
+}
 
 async function _loadOlderMessages() {
   if (_loadingOlder || !_messagesTruncated) return;
   const sid = S.session ? S.session.session_id : null;
   if (!sid || !S.messages.length) return;
   if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
+  const loadLease={sid,loadGeneration:typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null};
+  const _setLoadingOlderLease=lease=>{
+    if(typeof _loadingOlderLease!=='undefined') _loadingOlderLease=lease;
+  };
+  const _releaseLoadingOlderForRequest=lease=>{
+    if(typeof _releaseLoadingOlder==='function') return _releaseLoadingOlder(lease);
+    _loadingOlder=false;
+    return true;
+  };
   _loadingOlder = true;
+  _setLoadingOlderLease(loadLease);
   // Snapshot the generation BEFORE we await. If S.messages is wholesale
   // replaced while the request is in flight, the post-await check below
   // bails out so we never prepend stale older messages onto a freshly
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
+  const replacementTicket = _captureTranscriptReplacement();
   try {
     // Two strategies, chosen by whether the growing tail window still fits under
     // the server's msg_limit ceiling (_MSG_LIMIT_MAX, mirroring backend
@@ -3734,7 +3859,7 @@ async function _loadOlderMessages() {
           {timeoutMs:120000}
         );
     // Guard: api() may have redirected (401) and returned undefined.
-    if (!data || !data.session) { _loadingOlder = false; return; }
+    if (!data || !data.session) { _releaseLoadingOlderForRequest(loadLease); return; }
     //  - response shape sane
     //  - the active session is still the one we issued the request for.
     //    Compare against S.session.session_id, NOT _loadingSessionId — the
@@ -3790,7 +3915,7 @@ async function _loadOlderMessages() {
           `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
           {timeoutMs:120000}
         );
-        if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+        if (!fallback || !fallback.session) { _releaseLoadingOlderForRequest(loadLease); return; }
         if (!S.session || S.session.session_id !== sid) return;
         if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
         if (_messagesGeneration !== startGeneration) return;
@@ -3811,14 +3936,6 @@ async function _loadOlderMessages() {
     const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')
       ? _captureMessageViewportAnchor()
       : null;
-    // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard/_anchor_stream_id) before the wholesale replace so the badge
-    // does not briefly appear and disappear during older-message expansion.
-    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-      nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
-    }
-    S.messages = nextMessages;
-    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
@@ -3835,39 +3952,49 @@ async function _loadOlderMessages() {
       const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
       return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m))||(typeof _assistantMessageHasVisibleContent==='function'&&_assistantMessageHasVisibleContent(m)))));
     }).length;
-    _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
-    _messagesTruncated = !!responseSession._messages_truncated;
-    _oldestIdx = responseSession._messages_offset || 0;
-    renderMessages({ preserveScroll: true });
-    if (container) {
-      // Prepending older messages must not teleport the reader. Anchor to the
-      // first visible rendered row and restore that row's top offset after the
-      // prepend so synthetic virtual spacer heights cannot skew the delta.
-      const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
-        ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
-        : false;
-      if (!restoredViaAnchor) {
-        const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')
-          ? _messageVirtualPrependedHeightDelta(addedRenderable)
-          : null;
-        const newScrollH = container.scrollHeight;
-        const addedHeight = Number.isFinite(virtualAddedHeight)
-          ? virtualAddedHeight
-          : Math.max(0, newScrollH - prevScrollH);
-        _programmaticScroll = true;
-        _programmaticScrollSetAt = performance.now();
-        container.scrollTop = oldTop + addedHeight;
-        requestAnimationFrame(()=>{ _programmaticScroll = false; });
-      }
+    // #3306: preserve ephemeral turn fields across the guarded replacement.
+    // Keep the canonical nextMessages assignment shape so existing lifecycle
+    // consumers continue to recognize this replacement seam.
+    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+      nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
     }
-    _scrollPinned = false;
+    if (!_commitTranscriptReplacement(replacementTicket, () => {
+      S.messages = nextMessages;
+      _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+      _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
+      _messagesTruncated = !!responseSession._messages_truncated;
+      _oldestIdx = responseSession._messages_offset || 0;
+      renderMessages({ preserveScroll: true });
+      if (container) {
+        // Prepending older messages must not teleport the reader. Anchor to the
+        // first visible rendered row and restore that row's top offset after the
+        // prepend so synthetic virtual spacer heights cannot skew the delta.
+        const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
+          ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
+          : false;
+        if (!restoredViaAnchor) {
+          const virtualAddedHeight = (typeof _messageVirtualPrependedHeightDelta === 'function')
+            ? _messageVirtualPrependedHeightDelta(addedRenderable)
+            : null;
+          const newScrollH = container.scrollHeight;
+          const addedHeight = Number.isFinite(virtualAddedHeight)
+            ? virtualAddedHeight
+            : Math.max(0, newScrollH - prevScrollH);
+          _programmaticScroll = true;
+          _programmaticScrollSetAt = performance.now();
+          container.scrollTop = oldTop + addedHeight;
+          requestAnimationFrame(()=>{ _programmaticScroll = false; });
+        }
+      }
+      _scrollPinned = false;
+    })) return;
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);
   } finally {
     // Always clear the loading lock. If the user switched sessions while
     // this request was in flight, loadSession() already set _loadingOlder=false
     // (see line ~122), so this is a harmless double-reset.
-    _loadingOlder = false;
+    _releaseLoadingOlderForRequest(loadLease);
   }
 }
 
@@ -3886,6 +4013,8 @@ async function _loadOlderMessages() {
 //      in-flight prefetch's post-await generation check bails out.
 async function _ensureAllMessagesLoaded() {
   if (!_messagesTruncated || !S.session) return;
+  const entrySid=S.session.session_id;
+  const entryLoadGeneration=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
   if (_loadingOlder) {
     // A prefetch is mid-flight (between the `_loadingOlder = true` line
     // and its post-await guards). Bumping the generation token now
@@ -3898,11 +4027,20 @@ async function _ensureAllMessagesLoaded() {
     while (_loadingOlder) {
       await new Promise(resolve => setTimeout(resolve, 16));
     }
-    if (!_messagesTruncated || !S.session) return;
+    if (!_messagesTruncated || !S.session
+       || S.session.session_id!==entrySid
+       || (entryLoadGeneration!==null && _loadSessionGeneration!==entryLoadGeneration)
+       || S.busy || S.activeStreamId) return;
   }
+  if(!S.session || S.session.session_id!==entrySid
+     || (entryLoadGeneration!==null && _loadSessionGeneration!==entryLoadGeneration)
+     || S.busy || S.activeStreamId) return;
+  const loadLease={sid:entrySid,loadGeneration:entryLoadGeneration};
   _loadingOlder = true;
+  _loadingOlderLease=loadLease;
   try {
-    const sid = S.session.session_id;
+    const sid = entrySid;
+    const replacementTicket = _captureTranscriptReplacement();
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) return;
@@ -3910,33 +4048,34 @@ async function _ensureAllMessagesLoaded() {
     // overwrite the new session's messages.
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-    const msgs = (data.session.messages || []).filter(m => m && m.role);
-    // Bump the generation BEFORE the wholesale replace so any racing
-    // prefetch (whose snapshot was taken before this call's mutex
-    // acquisition) sees the new value and aborts.
-    _bumpMessagesGeneration();
-    // #3306: Same ephemeral-field carry-forward as _ensureMessagesLoaded.
-    // Loading older messages also does a wholesale replace of S.messages
-    // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
-    // _gatewayRouting/_statusCard/_anchor_stream_id on the existing turns.
+    if (!_transcriptReplacementIsCurrent(replacementTicket)) return;
+    // A same-session live turn can start while this fetch is in flight. Let the
+    // live path own S.messages rather than replace it with settled history.
+    if (S.busy || S.activeStreamId) return;
+    let msgs = (data.session.messages || []).filter(m => m && m.role);
     let _msgsToAssign = msgs;
-    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
-      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
-    }
-    S.messages = _msgsToAssign;
-    _messagesTruncated = false;
-    _oldestIdx = 0;
-    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
-    if (S.session && S.session.session_id === sid) {
-      S.session.message_count = Number(data.session.message_count || msgs.length);
-      if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
-        S.session.regeneration_revision = data.session.regeneration_revision;
-      } else {
-        delete S.session.regeneration_revision;
+    if (!_transcriptReplacementIsCurrent(replacementTicket)) return;
+    if (!_commitTranscriptReplacement(replacementTicket, () => {
+      // #3306: preserve ephemeral turn fields across the guarded replacement.
+      if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+        _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
       }
-    }
+      S.messages = _msgsToAssign;
+      _messagesTruncated = false;
+      _oldestIdx = 0;
+      _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+      if (S.session && S.session.session_id === sid) {
+        S.session.message_count = Number(data.session.message_count || msgs.length);
+        if (Object.prototype.hasOwnProperty.call(data.session, 'regeneration_revision')) {
+          S.session.regeneration_revision = data.session.regeneration_revision;
+        } else {
+          delete S.session.regeneration_revision;
+        }
+      }
+    })) return;
   } finally {
-    _loadingOlder = false;
+    // The scoped releaser performs the previous _loadingOlder = false; transition.
+    _releaseLoadingOlder(loadLease);
   }
 }
 
@@ -6359,6 +6498,7 @@ function startGatewaySSE(){
               // Capture active session ID before async fetch — race guard.
               // If the user switches sessions while the fetch is in-flight, discard the result.
               const activeSid = S.session.session_id;
+              const replacementTicket = _captureTranscriptReplacement();
               api('/api/session/import_cli',{method:'POST',body:JSON.stringify(_externalImportPayload(S.session))})
                 .then(res=>{
                   if(!S.session || S.session.session_id !== activeSid) return;
@@ -6375,20 +6515,22 @@ function startGatewaySSE(){
                     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
                       _nextToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], next);
                     }
-                    S.messages = _nextToAssign;
-                    if(S.session && S.session.session_id === activeSid){
-                      S.session.message_count = next.length;
-                      const newest = next.length ? next[next.length - 1] : null;
-                      const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
-                      if(newestTs){
-                        S.session.last_message_at = newestTs;
-                        S.session.updated_at = newestTs;
+                    _commitTranscriptReplacement(replacementTicket, () => {
+                      S.messages = _nextToAssign;
+                      if(S.session && S.session.session_id === activeSid){
+                        S.session.message_count = next.length;
+                        const newest = next.length ? next[next.length - 1] : null;
+                        const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
+                        if(newestTs){
+                          S.session.last_message_at = newestTs;
+                          S.session.updated_at = newestTs;
+                        }
                       }
-                    }
-                    if(S.messages.length !== prev){
-                      renderMessages({preserveScroll:true});
-                      if(typeof highlightCode==='function') highlightCode();
-                    }
+                      if(S.messages.length !== prev){
+                        renderMessages({preserveScroll:true});
+                        if(typeof highlightCode==='function') highlightCode();
+                      }
+                    });
                   }
                 })
                 .catch(()=>{ /* ignore — next poll will retry */ });

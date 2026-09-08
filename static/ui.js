@@ -274,7 +274,8 @@ function getQueuedSessionCount(sid){
 function _compressionSessionLock(){
   return window._compressionLockSid||null;
 }
-function _setCompressionSessionLock(sid){
+function _setCompressionSessionLock(sid,ownerSid){
+  if(!sid&&ownerSid&&window._compressionLockSid&&window._compressionLockSid!==ownerSid)return;
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -10037,22 +10038,43 @@ async function refreshSession() {
   if (window._restartingForUpdate) { location.reload(); return; }
   dismissReconnect();
   if (!S.session) return;
+  const refreshSid=S.session.session_id;
+  const refreshOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(refreshSid)
+    : !!(S.session&&S.session.session_id===refreshSid);
+  if(!refreshOwnerIsCurrent()) return;
+  const refreshTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : {sessionId:refreshSid,generation:typeof _messagesGeneration==='number'?_messagesGeneration:0,used:false};
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
-    S.session = data.session;
-    if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
-    S.messages = data.session.messages || [];
-    _messagesTruncated = !!data.session._messages_truncated;
-    _oldestIdx = data.session._messages_offset || 0;
-    if (typeof _mergePendingSessionMessage !== 'function') {
-      throw new Error('Pending-session merge helper unavailable');
+    const data = await api(`/api/session?session_id=${encodeURIComponent(refreshSid)}`);
+    if(!data||!data.session) return;
+    if(!refreshOwnerIsCurrent()) return;
+    const applyRefresh=()=>{
+      if(!refreshOwnerIsCurrent()) return;
+      S.session = data.session;
+      if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+      S.messages = data.session.messages || [];
+      _messagesTruncated = !!data.session._messages_truncated;
+      _oldestIdx = data.session._messages_offset || 0;
+      if (typeof _mergePendingSessionMessage !== 'function') {
+        throw new Error('Pending-session merge helper unavailable');
+      }
+      _mergePendingSessionMessage(data.session, S.messages);
+      S.activeStreamId = data.session.active_stream_id || null;
+      syncTopbar(); _renderMessagesWithScrollSnapshot();
+      showToast('Conversation refreshed');
+    };
+    if(typeof _commitTranscriptReplacement!=='function'){
+      applyRefresh();
+      return;
     }
-    _mergePendingSessionMessage(data.session, S.messages);
-    S.activeStreamId = data.session.active_stream_id || null;
-
-    syncTopbar(); _renderMessagesWithScrollSnapshot();
-    showToast('Conversation refreshed');
-  } catch(e) { setStatus('Refresh failed: ' + e.message); }
+    if(!refreshOwnerIsCurrent()) return;
+    const commit=_commitTranscriptReplacement(refreshTicket, applyRefresh);
+    if(!commit) return;
+  } catch(e) {
+    if(refreshOwnerIsCurrent()) setStatus('Refresh failed: ' + e.message);
+  }
 }
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
@@ -14757,10 +14779,16 @@ function _restoreCompressionPlaceholder(){
   }
   _compressionPlaceholderSaved=null;
 }
-function clearCompressionUi(){
+function clearCompressionUi(ownerSid,ownerOperationId){
+  if(ownerSid&&window._compressionUi&&window._compressionUi.sessionId
+    &&window._compressionUi.sessionId!==ownerSid)return;
+  if(ownerOperationId&&window._compressionUi&&window._compressionUi.automatic
+    &&window._compressionUi.operationId!==ownerOperationId)return;
+  if(ownerOperationId&&window._compressionUi&&window._compressionUi.operationId
+    &&window._compressionUi.operationId!==ownerOperationId)return;
   window._compressionUi=null;
   _clearCompressionElapsedTimer();
-  _setCompressionSessionLock(null);
+  _setCompressionSessionLock(null,ownerSid);
   _restoreCompressionPlaceholder();
   renderCompressionUi();
 }
@@ -19314,6 +19342,9 @@ function autoResizeTextarea(ta) {
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy) return;
   const initialSid = S.session.session_id;
+  const editOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(initialSid)
+    : !!(S.session&&S.session.session_id===initialSid);
   const absoluteKeepCount = _oldestIdx + msgIdx;
   // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
   // initialSid — a non-default session model (vs profile default), which is
@@ -19323,7 +19354,10 @@ async function submitEdit(msgIdx, newText) {
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!editOwnerIsCurrent()||S.session.session_id !== initialSid) return;
+  const editTicket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
   try {
     await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
       session_id: initialSid,
@@ -19332,17 +19366,18 @@ async function submitEdit(msgIdx, newText) {
     // #5924 SILENT-race guard: a session switch during the truncate await must not
     // let this recovery apply session A's intent (truncate/re-arm/send) to the
     // newly-visible session.
-    if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = newText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // Re-arm the single-shot explicit-pick marker from the captured non-default
-    // pick — only if still safe at fire time (session unchanged, current model
-    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-    _reArmRecoveryPick(initialSid, _recoveryPick);
+    if(!editOwnerIsCurrent()||S.session.session_id !== initialSid) return;
+    const committed=typeof _commitTranscriptReplacement==='function'
+      && _commitTranscriptReplacement(editTicket, () => {
+        S.messages = S.messages.slice(0, absoluteKeepCount);
+        renderMessages();
+        $('msg').value = newText;
+        // #5924: re-arm only for the session that supplied the edit request.
+        _reArmRecoveryPick(initialSid, _recoveryPick);
+      });
+    if(!committed)return;
     await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+  } catch(e) { if(editOwnerIsCurrent()) setStatus(t('edit_failed') + e.message); }
 }
 
 async function regenerateResponse(btn) {
@@ -19351,10 +19386,13 @@ async function regenerateResponse(btn) {
   if(!row)return;
   const clickedAbsoluteIndex=_oldestIdx+parseInt(row.dataset.msgIdx,10);
   const initialSid = S.session.session_id;
+  const regenerateOwnerIsCurrent=()=>typeof _isSessionCurrentPane==='function'
+    ? _isSessionCurrentPane(initialSid)
+    : !!(S.session&&S.session.session_id===initialSid);
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!regenerateOwnerIsCurrent()) return;
   if(!S.session.regeneration_revision){ setStatus(t('regen_failed')); return; }
   let latestAssistantIndex=-1;
   for(let i=S.messages.length-1;i>=0;i--){
@@ -19364,9 +19402,10 @@ async function regenerateResponse(btn) {
     setStatus(t('regen_failed'));
     return;
   }
+  if(typeof _bumpMessagesGeneration==='function') _bumpMessagesGeneration();
   try {
     await startRegeneration(initialSid, S.session.regeneration_revision);
-  } catch(e) { setStatus(t('regen_failed') + e.message); }
+  } catch(e) { if(regenerateOwnerIsCurrent()) setStatus(t('regen_failed') + e.message); }
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll

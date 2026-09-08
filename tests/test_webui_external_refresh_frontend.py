@@ -410,7 +410,7 @@ def test_same_session_force_reload_preserves_non_empty_composer_input():
     """
     assert "function _restoreComposerDraft(draft, targetSid, opts={})" in SESSIONS_JS
     assert "const preserveActiveInput = !!(opts && opts.preserveActiveInput);" in SESSIONS_JS
-    assert "if (preserveActiveInput && current && current !== text) return;" in SESSIONS_JS
+    assert "if (preserveActiveInput && current && current !== text) return null;" in SESSIONS_JS
     assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});" in SESSIONS_JS
 
 

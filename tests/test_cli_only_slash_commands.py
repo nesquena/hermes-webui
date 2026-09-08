@@ -535,7 +535,7 @@ def test_bundle_collisions_stay_hidden_until_agent_metadata_is_ready():
 def test_send_intercepts_cli_only_commands_before_agent_round_trip():
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
     assert intercept_idx != -1
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find("ownerSid=await _ensureSessionOwner();", intercept_idx)
     assert normal_send_idx != -1
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
@@ -547,7 +547,7 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
 
 def test_send_intercepts_bundle_commands_before_agent_round_trip():
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find("ownerSid=await _ensureSessionOwner();", intercept_idx)
     assert normal_send_idx != -1
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
@@ -559,7 +559,7 @@ def test_send_intercepts_bundle_commands_before_agent_round_trip():
 
 def test_send_consults_agent_metadata_before_bundle_resolution():
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find("ownerSid=await _ensureSessionOwner();", intercept_idx)
     assert normal_send_idx != -1
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
@@ -572,7 +572,7 @@ def test_send_consults_agent_metadata_before_bundle_resolution():
 
 def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find("ownerSid=await _ensureSessionOwner();", intercept_idx)
     assert normal_send_idx != -1
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
@@ -635,7 +635,7 @@ def test_codex_runtime_agent_command_metadata_resolves_alias():
 def test_unknown_slash_commands_still_fall_through_to_agent():
     """Only explicitly supported metadata-backed commands should be intercepted."""
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find("ownerSid=await _ensureSessionOwner();", intercept_idx)
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
     assert "if(_bundleCmd){" in intercept
@@ -651,7 +651,7 @@ def test_unknown_slash_commands_still_fall_through_to_agent():
 def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
     """Built-in fall-through commands like /reasoning high keep their old path."""
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find("ownerSid=await _ensureSessionOwner();", intercept_idx)
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
     optout_idx = intercept.find("if(_cmd.fn(_parsedCmd.args)===false)")
     metadata_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")

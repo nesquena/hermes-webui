@@ -67,7 +67,9 @@ function _ensureOutlineMessagesLoaded(sid) {
   }
   if (typeof _ensureAllMessagesLoaded !== 'function') return Promise.resolve(false);
   return _ensureAllMessagesLoaded().then(function() {
-    if (!S.session || S.session.session_id !== sid) return false;
+    if (typeof _isSessionCurrentPane === 'function'
+        ? !_isSessionCurrentPane(sid)
+        : (!S.session || S.session.session_id !== sid)) return false;
     _expandOutlineRenderWindow();
     return true;
   }).catch(function() {
@@ -112,16 +114,28 @@ function _jumpToMessage(rawIdx) {
   // to request the full transcript here.)
   if (typeof api !== 'function') return;
   if (S.busy || S.activeStreamId) return;
-  api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0')
-    .then(function(data) {
+  const ticket=typeof _captureTranscriptReplacement==='function'
+    ? _captureTranscriptReplacement()
+    : null;
+  const loadSnapshot=typeof _readFullSessionSnapshot==='function'
+    ? _readFullSessionSnapshot(sid)
+    : api('/api/session?session_id=' + encodeURIComponent(sid) + '&messages=1&resolve_model=0');
+  loadSnapshot.then(function(data) {
       if (!data || !data.session) return;
-      if (!S.session || S.session.session_id !== sid) return;  // session switched
-      S.messages = data.session.messages || [];                // populate S
-      _expandOutlineRenderWindow();
-      if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
+      if (typeof _isSessionCurrentPane==='function'
+        ? !_isSessionCurrentPane(sid)
+        : (!S.session || S.session.session_id !== sid)) return;
+      const committed=typeof _commitTranscriptReplacement==='function'
+        && _commitTranscriptReplacement(ticket, () => {
+          S.messages = data.messages || data.session.messages || []; // populate S
+          _expandOutlineRenderWindow();
+          if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
+        });
+      if(!committed)return;
       window.setTimeout(function() {
-        if (!S.session || S.session.session_id !== sid) return;
+        if (typeof _isSessionCurrentPane==='function'
+          ? !_isSessionCurrentPane(sid)
+          : (!S.session || S.session.session_id !== sid)) return;
         const r = document.getElementById('msg-user-' + rawIdx);
         if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); _flashRow(r); }
       }, 120);
@@ -221,7 +235,10 @@ function toggleOutlinePanel() {
     const panel = document.getElementById('outlinePanel');
     if (panel) panel.innerHTML = '<p class="outline-empty">' + t('outline_loading') + '</p>';
     _ensureOutlineMessagesLoaded(sid).then(function() {
-      if (!_panelOpen || _currentSid() !== sid) return;
+      const ownerCurrent=typeof _isSessionCurrentPane === 'function'
+        ? _isSessionCurrentPane(sid)
+        : _currentSid() === sid;
+      if (!_panelOpen || !ownerCurrent) return;
       _renderPanel();
       // Keep rendered data fresh after every renderMessages() call.
       _outlineSid = _currentSid();
