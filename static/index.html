@@ -1829,6 +1829,13 @@
 <div class="kanban-modal-overlay" id="kanbanTaskModal" hidden onclick="if(event.target===this)closeKanbanTaskModal()">
   <div class="kanban-modal" role="dialog" aria-modal="true" aria-labelledby="kanbanTaskModalTitle">
     <h3 id="kanbanTaskModalTitle" data-i18n="kanban_new_task">New task</h3>
+    <div class="kanban-modal-row" id="kanbanTaskModalIdRow" style="display:none">
+      <label data-i18n="kanban_task_id">Task ID</label>
+      <div class="kanban-modal-id-display">
+        <span id="kanbanTaskModalIdValue" class="kanban-modal-id-value"></span>
+        <button type="button" class="kanban-modal-id-copy" onclick="copyKanbanTaskModalId()" title="Copy task ID" aria-label="Copy task ID" data-i18n-title="kanban_copy_task_id" data-i18n-aria-label="kanban_copy_task_id"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+      </div>
+    </div>
     <div class="kanban-modal-row">
       <label for="kanbanTaskModalTitleInput" data-i18n="kanban_title">Title</label>
       <input type="text" id="kanbanTaskModalTitleInput" maxlength="500" autocomplete="off" required>

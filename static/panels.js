@@ -2441,6 +2441,19 @@ async function quickKanbanCardAction(event, taskId, status){
   return updateKanbanTask(taskId, {status});
 }
 
+function copyKanbanTaskId(event, taskId){
+  if (event) event.stopPropagation();
+  if (!taskId) return;
+  const btn = event && event.currentTarget;
+  _copyText(taskId).then(() => {
+    if (!btn) return;
+    const orig = btn.innerHTML;
+    btn.innerHTML = li('check', 11);
+    btn.style.color = 'var(--blue)';
+    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 1500);
+  }).catch(() => showToast(t('copy_failed')));
+}
+
 function _kanbanSuppressNextCardClick(){
   _kanbanSuppressCardClickUntil = Date.now() + 700;
 }
@@ -2583,8 +2596,8 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
-  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
-    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.target!==event.currentTarget) return; if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span><button type="button" class="kanban-card-copy" onclick="copyKanbanTaskId(event, '${esc(task.id)}')" title="${esc(t('kanban_copy_task_id'))}" aria-label="${esc(t('kanban_copy_task_id'))}">${li('copy', 11)}</button>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
     <div class="kanban-card-meta">${assignee}${comments ? `<span class="kanban-card-metric">💬 ${comments}</span>` : ''}${linkTotal ? `<span class="kanban-card-metric">↔ ${linkTotal}</span>` : ''}${age ? `<span class="kanban-card-age">${esc(age)}</span>` : ''}</div>
@@ -3363,6 +3376,7 @@ async function openKanbanEdit(taskId){
     status: initialDisplayedStatus,
     tenant: task.tenant || '',
     priority: typeof task.priority === 'number' ? task.priority : 0,
+    id: task.id || '',
   });
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
@@ -3409,6 +3423,8 @@ function _kanbanResetTaskModalFields(values){
   set('kanbanTaskModalSkills', Array.isArray(v.skills) ? v.skills.join(', ') : (v.skills || ''));
   set('kanbanTaskModalMaxRuntimeSeconds', v.max_runtime_seconds != null ? v.max_runtime_seconds : '');
   set('kanbanTaskModalParents', '');
+  const idValueEl = document.getElementById('kanbanTaskModalIdValue');
+  if (idValueEl) idValueEl.textContent = v.id || '';
   const errEl = document.getElementById('kanbanTaskModalError');
   if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
@@ -3418,12 +3434,15 @@ function _kanbanResetTaskModalFields(values){
 function _kanbanSetTaskModalLabels(mode){
   const titleH = document.getElementById('kanbanTaskModalTitle');
   const submitBtn = document.getElementById('kanbanTaskModalSubmit');
+  const idRow = document.getElementById('kanbanTaskModalIdRow');
   if (mode === 'edit') {
     if (titleH) titleH.textContent = t('kanban_edit_task') || 'Edit task';
     if (submitBtn) submitBtn.textContent = t('save') || 'Save';
+    if (idRow) idRow.style.display = '';
   } else {
     if (titleH) titleH.textContent = t('kanban_new_task') || 'New task';
     if (submitBtn) submitBtn.textContent = t('create') || 'Create';
+    if (idRow) idRow.style.display = 'none';
   }
   // Workspace and new backend fields are create-only; backend patch doesn't handle them.
   const createOnlyIds = [
@@ -3438,6 +3457,19 @@ function _kanbanSetTaskModalLabels(mode){
     const el = document.getElementById(id);
     if (el) el.disabled = disabled;
   }
+}
+
+function copyKanbanTaskModalId(){
+  const taskId = _kanbanTaskModalEditingId;
+  if (!taskId) return;
+  const btn = document.querySelector('#kanbanTaskModalIdRow .kanban-modal-id-copy');
+  _copyText(taskId).then(() => {
+    if (!btn) return;
+    const orig = btn.innerHTML;
+    btn.innerHTML = li('check', 12);
+    btn.classList.add('copied');
+    setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 1500);
+  }).catch(() => showToast(t('copy_failed')));
 }
 
 function _kanbanSetTaskModalStatusHint(realStatus, editableStatus){
