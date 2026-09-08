@@ -609,6 +609,9 @@ function _resetMessageRenderWindow(sid){
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
 }
+function _restoreMessageRenderWindowAfterSettledRender(){
+  _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+}
 function _cancelMessageVirtualizedRender(){
   if(_messageVirtualScrollRaf){
     cancelAnimationFrame(_messageVirtualScrollRaf);
@@ -1625,6 +1628,14 @@ async function jumpToSessionStart(){
     // insertion is blocked by !S.busy, losing Activity until "done" fires.
     if(!(S.busy||S.activeStreamId)){
       renderMessages({ preserveScroll:true });
+    }else if(typeof _scheduleMessageVirtualizedRender==='function'){
+      // ...but on a virtualized transcript SOMETHING still has to mount the new
+      // render window. The scroll listener used to do it; it now correctly skips
+      // while a programmatic scroll is in flight (the idle re-render-loop fix),
+      // and this path deliberately does not call renderMessages() — so without an
+      // explicit schedule the jump lands on an all-spacer, zero-row transcript.
+      // Force the window update here, after invalidating _messageVirtualWindowKey.
+      _scheduleMessageVirtualizedRender(true);
     }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
@@ -1727,9 +1738,50 @@ let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps t
 let _dashboardSettingsLoadSeq=0;
 let _dashboardSettingsWriteSeq=0;
 
+function _dashboardHostIsLoopback(host){
+  // Canonical loopback classifier shared by the browser origin and the
+  // resolved dashboard target. Normalizes brackets, case, zone ids, and a
+  // terminal hostname dot; classifies IPv4 127/8, IPv6 ::1, IPv4-mapped IPv6
+  // whose embedded IPv4 is 127/8, and localhost/.localhost names (RFC 6761).
+  if(!host) return false;
+  let h=String(host).replace(/^\[|\]$/g,'').toLowerCase();
+  if(h.endsWith('.')) h=h.slice(0,-1);
+  if(h==='localhost'||h.endsWith('.localhost')) return true;
+  const ipv4=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if(ipv4){
+    const octets=ipv4.slice(1).map(Number);
+    return octets.every(o=>o>=0&&o<=255)&&octets[0]===127;
+  }
+  if(h.includes(':')){
+    const zone=h.indexOf('%');
+    if(zone!==-1) h=h.slice(0,zone);
+    if(h==='::1'||h==='0:0:0:0:0:0:0:1') return true;
+    const mapped=/^(?:::ffff:|0:0:0:0:0:ffff:)(.+)$/.exec(h);
+    if(mapped){
+      const tail=mapped[1];
+      const dotted=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail);
+      if(dotted){
+        const octets=dotted.slice(1).map(Number);
+        return octets.every(o=>o>=0&&o<=255)&&octets[0]===127;
+      }
+      const hex=/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+      if(hex) return (parseInt(hex[1],16)>>>8)===127;
+      return false;
+    }
+    return false;
+  }
+  return false;
+}
+
 function _dashboardIsBrowserLoopback(){
-  const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
-  return host==='127.0.0.1'||host==='localhost'||host==='::1';
+  return _dashboardHostIsLoopback(window.location.hostname||'');
+}
+
+function _dashboardUrlIsLoopback(url){
+  if(!url) return false;
+  try{
+    return _dashboardHostIsLoopback(new URL(url).hostname);
+  }catch(_){return false;}
 }
 
 function _normalizeDashboardEnabledMode(mode){
@@ -1833,7 +1885,7 @@ else _initNavActionMirrors();
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
-  const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  const warning=running&&!_dashboardIsBrowserLoopback()&&_dashboardUrlIsLoopback(url)?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
     btn.classList.toggle('nav-action-visible',running);
@@ -4531,10 +4583,16 @@ function renderModelDropdown(){
     else if(_prevHasSearch){ for(const k in _groupOpenState) delete _groupOpenState[k]; }
     _prevHasSearch=hasSearch;
     const found=new Set();
+    // Fold whitespace/hyphens/dots on both sides so "ox alpha", "ox-alpha" and
+    // "ox.alpha" all match the same model (OpenRouter display names use spaces,
+    // ids use slashes/hyphens) (#7228).
+    const _foldModelSearch=(s)=>String(s||'').toLowerCase().replace(/[\s._-]+/g,'');
+    const foldTerm=_foldModelSearch(term);
     for(const m of _modelData){
       const name=m.name.toLowerCase();
       const id=m.id.toLowerCase();
-      if(name.includes(term)||id.includes(term)){
+      if(name.includes(term)||id.includes(term)
+         ||(foldTerm&&(_foldModelSearch(name).includes(foldTerm)||_foldModelSearch(id).includes(foldTerm)))){
         found.add(m.value);
       }
     }
@@ -6304,12 +6362,12 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
     if(_freshProgrammaticScrollActive()) return;
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -7455,7 +7513,7 @@ function _stripXmlToolCallsDisplay(s){
   s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
   // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
   s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
-  return s.trim();
+  return s.replace(/^\s+/, '');
 }
 
 function _sanitizeThinkingDisplayText(text){

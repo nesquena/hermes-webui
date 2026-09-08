@@ -13,7 +13,9 @@ import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, overload
 
 try:  # pragma: no cover - platform-specific imports.
     import fcntl as _fcntl
@@ -5948,6 +5950,9 @@ def _read_state_db_sidebar_overrides(
         import sqlite3
     except ImportError:
         return {}
+    ids = list(wanted)
+    chunk_size = 500
+    overrides: dict[str, dict] = {}
     try:
         with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
@@ -5973,10 +5978,7 @@ def _read_state_db_sidebar_overrides(
                 messages_has_timestamp = 'timestamp' in message_cols
                 messages_has_title_fields = {'session_id', 'role', 'content', 'timestamp'}.issubset(message_cols)
 
-            overrides: dict[str, dict] = {}
             delegated_title_ids: set[str] = set()
-            ids = list(wanted)
-            chunk_size = 500
             for i in range(0, len(ids), chunk_size):
                 chunk = ids[i:i + chunk_size]
                 placeholders = ','.join('?' * len(chunk))
@@ -6070,7 +6072,38 @@ def _read_state_db_sidebar_overrides(
                             overrides.setdefault(sid, {})['_state_db_display_title'] = display_title
             return overrides
     except Exception:
-        return {}
+        missing_source_ids = [
+            sid for sid in ids
+            if not overrides.get(sid, {}).get('_state_db_source')
+        ]
+        if not missing_source_ids:
+            return overrides
+        try:
+            with closing(open_state_db_readonly(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                for i in range(0, len(missing_source_ids), chunk_size):
+                    chunk = missing_source_ids[i:i + chunk_size]
+                    placeholders = ','.join('?' * len(chunk))
+                    cur.execute(
+                        f"SELECT id, source FROM sessions WHERE id IN ({placeholders})",
+                        chunk,
+                    )
+                    for row in cur.fetchall():
+                        sid = str(row['id'])
+                        state_source = str(row['source'] or '').strip().lower()
+                        if not state_source:
+                            continue
+                        entry = overrides.setdefault(sid, {})
+                        entry['_state_db_source'] = state_source
+                        source_meta = normalize_agent_session_source(state_source)
+                        entry['_state_db_source_tag'] = state_source
+                        entry['_state_db_raw_source'] = source_meta.get('raw_source')
+                        entry['_state_db_session_source'] = source_meta.get('session_source')
+                        entry['_state_db_source_label'] = source_meta.get('source_label')
+                return overrides
+        except Exception:
+            return overrides
 
 
 def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
@@ -6123,12 +6156,14 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_message_count = entry.pop('_state_db_message_count', None)
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
-        if state_db_source == 'webui':
+        if state_db_source in ('webui', 'subagent'):
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
             session['session_source'] = state_db_session_source
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
+            if state_db_source == 'subagent':
+                session['read_only'] = True
         # Overlay the real state.db message count for WebUI-owned rows AND for
         # delegated subagent children (#5308). A subagent child
         # (state_db_source == 'subagent') is backed by the delegate runner's
@@ -6139,9 +6174,9 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         # session vanishes from the sidebar entirely (regression seam behind
         # #5308, same state.db-blind-metadata root as the #5307 transcript
         # recovery). The count overlay keeps the same conservative
-        # anti-resurrection guard used for WebUI rows. The source-tag / title
-        # reassignment above stays WebUI-only — a subagent child keeps its
-        # subagent classification.
+        # anti-resurrection guard used for WebUI rows. Source metadata is
+        # authoritative for WebUI rows and delegated subagent children;
+        # foreign CLI sources retain their existing flags.
         if state_db_source in ('webui', 'subagent'):
             try:
                 current_count = max(0, int(session.get('message_count') or 0))
@@ -8107,6 +8142,78 @@ def _json_loads_if_string(value):
         return value
 
 
+@dataclass(frozen=True)
+class StateDBSessionMessagesSnapshot:
+    """Internal message projection paired with its durable SQLite revision."""
+
+    messages: list
+    revision: dict | None
+
+
+def _state_db_session_messages_result(messages, revision, *, with_revision):
+    if with_revision:
+        return StateDBSessionMessagesSnapshot(messages=list(messages or []), revision=revision)
+    return list(messages or [])
+
+
+def _state_db_active_rows_digest(rows) -> str:
+    """Match the Agent fence for model-facing fields mutable in place."""
+    digest = hashlib.sha256()
+    stamped = False
+    for row in rows:
+        keys = row.keys()
+        api_content = row['api_content'] if 'api_content' in keys else None
+        if api_content is None:
+            continue
+        stamped = True
+        digest.update(
+            json.dumps(
+                [row['id'], api_content],
+                ensure_ascii=False,
+                separators=(',', ':'),
+                default=str,
+            ).encode('utf-8', errors='surrogatepass')
+        )
+        digest.update(b'\n')
+    return digest.hexdigest() if stamped else ''
+
+
+def _project_state_db_message(row, available, id_col, optional):
+    """Authoritative state.db row → WebUI message projection (#6826 r4).
+
+    Shared by ``get_state_db_session_messages`` and the regeneration
+    single-snapshot helper so the bounded tail can never drift from the
+    canonical reader: JSON-decode tool_calls/reasoning payloads, omit
+    empty fields, keep durable row id private (``_state_db_row_id`` only for
+    real Agent api_content replays), and apply ``tool_name → name``.
+    """
+    msg = {
+        'role': row['role'],
+        'content': row['content'],
+        'timestamp': row['timestamp'],
+    }
+    for col in optional:
+        if col not in row.keys():
+            continue
+        value = row[col]
+        if value in (None, ''):
+            continue
+        if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
+            value = _json_loads_if_string(value)
+        msg[col] = value
+    if (
+        id_col
+        and row['id'] is not None
+        and isinstance(msg.get('api_content'), str)
+        and msg['api_content']
+    ):
+        msg['_state_db_row_id'] = row['id']
+    if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
+        msg['name'] = msg['tool_name']
+    return msg
+
+
+@overload
 def get_state_db_session_messages(
     sid,
     *,
@@ -8115,7 +8222,33 @@ def get_state_db_session_messages(
     since_timestamp=None,
     include_inactive: bool = False,
     limit=None,
-) -> list:
+    with_revision: Literal[False] = False,
+) -> list: ...
+
+
+@overload
+def get_state_db_session_messages(
+    sid,
+    *,
+    stitch_continuations: bool = False,
+    profile=None,
+    since_timestamp=None,
+    include_inactive: bool = False,
+    limit=None,
+    with_revision: Literal[True],
+) -> StateDBSessionMessagesSnapshot: ...
+
+
+def get_state_db_session_messages(
+    sid,
+    *,
+    stitch_continuations: bool = False,
+    profile=None,
+    since_timestamp=None,
+    include_inactive: bool = False,
+    limit=None,
+    with_revision: bool = False,
+):
     """Read messages for a Hermes session from state.db.
 
     When *profile* is supplied, reads from that profile's state.db; otherwise
@@ -8145,20 +8278,23 @@ def get_state_db_session_messages(
     ``active=0`` archive rows back in resurrects pre-compaction history and can
     make every later turn re-trigger compression. Pass ``include_inactive=True``
     only for explicit recovery/audit views.
+
+    ``with_revision=True`` returns a :class:`StateDBSessionMessagesSnapshot`.
+    Its revision is derived from the exact rows fetched by the same SQLite
+    query and is available only for an unbounded, active, current-segment read.
+    Existing callers keep the historical list return by default.
     """
     try:
         import sqlite3
     except ImportError:
-        return []
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
 
     if isinstance(profile, str) and profile:
         db_path = _get_profile_home(profile) / 'state.db'
-        if not db_path.exists():
-            db_path = _active_state_db_path()
     else:
         db_path = _active_state_db_path()
     if not db_path.exists():
-        return []
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
 
     try:
         with closing(open_state_db_readonly(db_path)) as conn:
@@ -8168,7 +8304,7 @@ def get_state_db_session_messages(
             available = {str(row['name']) for row in cur.fetchall()}
             required = {'role', 'content', 'timestamp'}
             if not required.issubset(available):
-                return []
+                return _state_db_session_messages_result([], None, with_revision=with_revision)
             optional = [
                 'tool_call_id',
                 'tool_calls',
@@ -8185,7 +8321,18 @@ def get_state_db_session_messages(
                 'api_content',
             ]
             id_col = ['id'] if 'id' in available else []
-            selected = id_col + ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
+            revision_cols = []
+            if with_revision:
+                if 'active' in available:
+                    revision_cols.append('active')
+                if 'api_content' in available:
+                    revision_cols.append('api_content')
+            selected = (
+                id_col
+                + ['role', 'content', 'timestamp']
+                + revision_cols
+                + [c for c in optional if c in available]
+            )
 
             session_chain = [str(sid)]
             if stitch_continuations:
@@ -8244,6 +8391,7 @@ def get_state_db_session_messages(
             active_clause = ""
             if 'active' in available and not include_inactive:
                 active_clause = " AND (active IS NULL OR active != 0)"
+            durable_order_column = 'id' if 'id' in available else 'timestamp'
             # Defensive row cap (backstop only — see docstring). Applied as a
             # SQL LIMIT bound parameter (?) so the tail (newest) rows are
             # retained and a pathological state.db can't materialize unbounded
@@ -8255,10 +8403,9 @@ def get_state_db_session_messages(
                 except (TypeError, ValueError):
                     limit_int = None
                 if limit_int is not None:
-                    # The query orders ASC (oldest first); to keep the NEWEST
-                    # rows under the cap, take a descending-ordered subquery and
-                    # re-sort ascending — a plain LIMIT would keep the oldest.
-                    limit_clause = " ORDER BY timestamp DESC, id DESC LIMIT ?"
+                    # Keep the newest durable rows under the cap, then restore
+                    # canonical append order for the caller.
+                    limit_clause = f" ORDER BY {durable_order_column} DESC LIMIT ?"
                     params.append(limit_int)
             if limit_clause:
                 cur.execute(f"""
@@ -8269,7 +8416,7 @@ def get_state_db_session_messages(
                         {since_clause}
                         {active_clause}
                         {limit_clause}
-                    ) ORDER BY timestamp ASC, id ASC
+                    ) ORDER BY {durable_order_column} ASC
                 """, params)
             else:
                 cur.execute(f"""
@@ -8278,45 +8425,40 @@ def get_state_db_session_messages(
                     WHERE session_id IN ({placeholders})
                     {since_clause}
                     {active_clause}
-                    ORDER BY timestamp ASC, id ASC
+                    ORDER BY {durable_order_column} ASC
                 """, params)
-            msgs = []
-            for row in cur.fetchall():
-                msg = {
-                    'role': row['role'],
-                    'content': row['content'],
-                    'timestamp': row['timestamp'],
+            rows = cur.fetchall()
+            revision = None
+            if (
+                with_revision
+                and 'id' in available
+                and 'active' in available
+                and len(session_chain) == 1
+                and str(session_chain[0]) == str(sid)
+                and since_timestamp is None
+                and not include_inactive
+                and limit is None
+                and all(row['active'] == 1 for row in rows)
+            ):
+                revision = {
+                    'session_id': str(sid),
+                    'active_message_count': len(rows),
+                    'max_active_message_id': max(
+                        (int(row['id']) for row in rows),
+                        default=0,
+                    ),
                 }
-                # ``id`` is the durable SQLite row identity, not the WebUI's
-                # session-local stable message id.  Keep it in a private
-                # provenance field so duplicate reconciliation can align a
-                # state.db sidecar without changing the existing ``id`` key
-                # used by WebUI transcript merge/dedup logic.
-                for col in optional:
-                    if col not in row.keys():
-                        continue
-                    value = row[col]
-                    if value in (None, ''):
-                        continue
-                    if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
-                        value = _json_loads_if_string(value)
-                    msg[col] = value
-                # Keep durable provenance only alongside a real Agent replay
-                # sidecar. Ordinary state.db rows must retain their historic
-                # shape and must not acquire internal bookkeeping fields.
-                if (
-                    id_col
-                    and row['id'] is not None
-                    and isinstance(msg.get('api_content'), str)
-                    and msg['api_content']
-                ):
-                    msg['_state_db_row_id'] = row['id']
-                if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
-                    msg['name'] = msg['tool_name']
-                msgs.append(msg)
+                if 'api_content' in available:
+                    revision['active_rows_digest'] = _state_db_active_rows_digest(rows)
+
+            msgs = []
+            for row in rows:
+                msgs.append(
+                    _project_state_db_message(row, available, bool(id_col), optional)
+                )
     except Exception:
-        return []
-    return msgs
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
+    return _state_db_session_messages_result(msgs, revision, with_revision=with_revision)
 
 
 def get_state_db_session_message_prefix_summary(
@@ -8462,6 +8604,157 @@ def get_state_db_session_message_keys_before_timestamp(
         return None
 
 
+def get_state_db_regeneration_tail_snapshot(
+    sid,
+    floor,
+    *,
+    profile=None,
+):
+    """Return prefix proof + bounded tail from ONE read transaction (#6826 r3).
+
+    The regeneration guard must not suffer TOCTOU: the prefix summary, the
+    ordered prefix keys, and the bounded tail must come from the same SQLite
+    snapshot, otherwise a row inserted between the proof and the data read
+    can be silently omitted while the proof still authorizes the bounded path.
+
+    Returns ``None`` when a stable single-connection snapshot cannot be
+    obtained (callers must fall back to the full read). Otherwise returns::
+
+        {
+          "prefix": {"count": N, "null_timestamp_count": M},
+          "prefix_keys": [visible-key, ...],       # rows < floor, db order
+          "tail": [message-dict, ...],             # rows >= floor (bounded)
+          "tail_keys": [visible-key, ...],         # rows >= floor, db order
+        }
+    """
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+
+    if not sid:
+        return None
+    try:
+        floor_ts = float(floor)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return {"prefix": {"count": 0, "null_timestamp_count": 0}, "prefix_keys": [], "tail": [], "tail_keys": []}
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA data_version")
+            dv_before = cur.fetchone()[0]
+            cur.execute("BEGIN")
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'role', 'content', 'timestamp'}.issubset(available):
+                cur.execute("ROLLBACK")
+                return None
+            active_clause = ""
+            if 'active' in available:
+                active_clause = " AND (active IS NULL OR active != 0)"
+            # durable order: id ASC when present (matches the canonical reader),
+            # else timestamp ASC
+            durable_order = 'id' if 'id' in available else 'timestamp'
+            # 1) prefix summary (rows with timestamp < floor)
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(CASE WHEN timestamp IS NOT NULL AND timestamp < ? THEN 1 END) AS count,
+                    COUNT(CASE WHEN timestamp IS NULL THEN 1 END) AS null_timestamp_count
+                FROM messages
+                WHERE session_id = ? {active_clause}
+                """,
+                (floor_ts, str(sid)),
+            )
+            row = cur.fetchone()
+            prefix = {
+                "count": int(row["count"]) if row else 0,
+                "null_timestamp_count": int(row["null_timestamp_count"]) if row else 0,
+            }
+            # 2) ordered prefix keys (rows < floor) in durable order
+            prefix_key_cols = "COALESCE(role,'') AS role, COALESCE(content,'') AS content"
+            if 'tool_calls' in available:
+                prefix_key_cols += ", tool_calls"
+            if 'api_content' in available:
+                prefix_key_cols += ", api_content"
+            prefix_key_sql = (
+                f"SELECT {prefix_key_cols} FROM messages "
+                "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
+                f"{active_clause} ORDER BY {durable_order} ASC"
+            )
+            try:
+                cur.execute(prefix_key_sql, (str(sid), floor_ts))
+            except Exception:
+                cur.execute("ROLLBACK")
+                return None
+            prefix_keys = [
+                _session_message_visible_key({
+                    "role": r["role"],
+                    "content": r["content"],
+                    "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
+                    "api_content": r["api_content"] if "api_content" in r.keys() else None,
+                }, normalize_workspace_prefix=True)
+                for r in cur.fetchall()
+            ]
+            # 3) bounded tail (rows >= floor) with the canonical projection
+            optional = [
+                'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
+                'reasoning_details', 'codex_reasoning_items', 'reasoning_content',
+                'codex_message_items', 'api_content',
+            ]
+            tail_select = ['id', 'role', 'content', 'timestamp'] if 'id' in available else ['role', 'content', 'timestamp']
+            for col in optional + (['active'] if 'active' in available else []):
+                if col in available and col not in tail_select:
+                    tail_select.append(col)
+            tail_sql = (
+                f"SELECT {', '.join(tail_select)} FROM messages "
+                f"WHERE session_id = ? AND (timestamp IS NULL OR timestamp >= ?) {active_clause} "
+                f"ORDER BY {durable_order} ASC"
+            )
+            cur.execute(tail_sql, (str(sid), floor_ts))
+            tail_rows = [
+                _project_state_db_message(r, available, 'id' in available, optional)
+                for r in cur.fetchall()
+            ]
+            tail_keys = [
+                _session_message_visible_key(
+                    {
+                        "role": r.get("role"),
+                        "content": r.get("content"),
+                        "tool_calls": r.get("tool_calls"),
+                        "api_content": r.get("api_content"),
+                    },
+                    normalize_workspace_prefix=True,
+                )
+                for r in tail_rows
+            ]
+            cur.execute("COMMIT")
+            cur.execute("PRAGMA data_version")
+            dv_after = cur.fetchone()[0]
+            if dv_before != dv_after:
+                # a concurrent WAL commit landed during the proof → stale
+                # snapshot; refuse the bounded path (TOCTOU).
+                return None
+            return {
+                "prefix": prefix,
+                "prefix_keys": prefix_keys,
+                "tail": tail_rows,
+                "tail_keys": tail_keys,
+            }
+    except Exception:
+        return None
+
+
 def get_state_db_session_summary(sid, *, profile=None) -> dict:
     """Return a cheap message count/timestamp summary for one state.db session."""
     try:
@@ -8540,7 +8833,7 @@ def _message_timestamp_as_float(msg):
     return timestamp if math.isfinite(timestamp) else None
 
 
-def _session_message_api_content_key(msg: dict):
+def _session_message_api_content_key(msg: dict | None):
     """Return the exact trusted provider sidecar used in duplicate identity."""
     if not isinstance(msg, dict):
         return None
@@ -8557,6 +8850,74 @@ def _session_message_key_with_sidecar(base_key: tuple, msg: dict) -> tuple:
     """
     sidecar = _session_message_api_content_key(msg)
     return base_key if sidecar is None else (*base_key, sidecar)
+
+
+_SESSION_MESSAGE_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+
+
+def _agent_durable_multimodal_content(msg: dict) -> str | None:
+    """Project one native image-bearing turn to Hermes Agent's stored text."""
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return None
+    normalized_parts = []
+    image_parts = 0
+    for part in content:
+        if not isinstance(part, dict):
+            return None
+        part_type = part.get("type")
+        if isinstance(part_type, str) and part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+            normalized_parts.append("[screenshot]")
+            image_parts += 1
+        elif part_type == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                return None
+            normalized_parts.append(text)
+        else:
+            return None
+    if not image_parts:
+        return None
+    return " ".join("\n".join(normalized_parts).split())
+
+
+def _session_message_multimodal_mirror_key(
+    msg: dict,
+    *,
+    require_image_parts: bool = False,
+):
+    """Return exact cross-store identity for a native multimodal mirror."""
+    if not isinstance(msg, dict):
+        return None
+    role = str(msg.get("role") or "").strip().lower()
+    if role != "user":
+        return None
+    raw_content = msg.get("content")
+    content = _agent_durable_multimodal_content(msg)
+    if require_image_parts and content is None:
+        return None
+    if content is None:
+        if not isinstance(raw_content, str):
+            return None
+        content = _normalized_session_message_content(msg)
+    timestamp, timestamp_valid = _message_exact_timestamp_details(msg)
+    if not timestamp_valid or timestamp is None:
+        return None
+    tool_calls = msg.get("tool_calls")
+    tool_calls_key = json.dumps(tool_calls, sort_keys=True, default=str) if tool_calls else ""
+    # api_content is checked as private identity below, not projected content:
+    # one store may carry the trusted provider sidecar while the other does not.
+    return (
+        "multimodal_mirror",
+        role,
+        content,
+        timestamp,
+        str(msg.get("tool_call_id") or ""),
+        str(msg.get("tool_name") or msg.get("name") or ""),
+        tool_calls_key,
+    )
 
 
 def _session_message_merge_key(msg: dict):
@@ -8646,7 +9007,7 @@ def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bo
     if not isinstance(message, dict):
         return None, True
     values = set()
-    for key in ("_state_db_row_id", "_db_row_id", "state_db_row_id"):
+    for key in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
         if key not in message or message.get(key) in (None, ""):
             continue
         value = message.get(key)
@@ -8702,8 +9063,31 @@ def _stable_message_identity_details(message: dict | None) -> tuple[str | None, 
     return (next(iter(values)) if values else None), True
 
 
-def _message_identity_compatible(target: dict | None, source: dict | None) -> bool:
+def _message_private_identity_compatible(target: dict | None, source: dict | None) -> bool:
     """Return whether private identities do not contradict one another."""
+    target_stable, target_stable_valid = _stable_message_identity_details(target)
+    source_stable, source_stable_valid = _stable_message_identity_details(source)
+    if not target_stable_valid or not source_stable_valid:
+        return False
+    if target_stable is not None and source_stable is not None and target_stable != source_stable:
+        return False
+    target_row_id, target_row_id_valid = _state_db_row_identity_details(target)
+    source_row_id, source_row_id_valid = _state_db_row_identity_details(source)
+    if not target_row_id_valid or not source_row_id_valid:
+        return False
+    if target_row_id is not None and source_row_id is not None and target_row_id != source_row_id:
+        return False
+    target_api_content = _session_message_api_content_key(target)
+    source_api_content = _session_message_api_content_key(source)
+    return not (
+        target_api_content is not None
+        and source_api_content is not None
+        and target_api_content != source_api_content
+    )
+
+
+def _message_identity_compatible(target: dict | None, source: dict | None) -> bool:
+    """Check legacy ordinary visible-content identity; intentionally excludes api_content."""
     target_stable, target_stable_valid = _stable_message_identity_details(target)
     source_stable, source_stable_valid = _stable_message_identity_details(source)
     if not target_stable_valid or not source_stable_valid:
@@ -8800,7 +9184,15 @@ def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
     if target_role is None or target_role != source_role:
         return False
     if not _visible_content_compatible(target, source):
-        return False
+        target_mirror_key = _session_message_multimodal_mirror_key(
+            target,
+            require_image_parts=True,
+        )
+        if (
+            target_mirror_key is None
+            or target_mirror_key != _session_message_multimodal_mirror_key(source)
+        ):
+            return False
     if target.get("api_content") not in (None, ""):
         return True
     api_content = source.get("api_content")
@@ -9898,6 +10290,8 @@ def merge_session_messages_append_only(
     sidecar_visible_messages = []
     sidecar_visible_keys = set()
     sidecar_visible_counts = {}
+    sidecar_multimodal_mirrors = {}
+    ambiguous_multimodal_mirrors = set()
     merged_by_message_key = {}
     merged_by_dedup_key = {}
     merged_by_visible_key = {}
@@ -9935,11 +10329,51 @@ def merge_session_messages_append_only(
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         sidecar_visible_messages.append(msg)
+        multimodal_mirror_key = _session_message_multimodal_mirror_key(
+            msg,
+            require_image_parts=True,
+        )
+        if multimodal_mirror_key is not None:
+            if multimodal_mirror_key in sidecar_multimodal_mirrors:
+                ambiguous_multimodal_mirrors.add(multimodal_mirror_key)
+            else:
+                sidecar_multimodal_mirrors[multimodal_mirror_key] = msg
         merged_messages.append(msg)
         _remember_merged_message(msg, source="sidecar")
     if _sidecar_has_terminal_partial_error(sidecar_messages):
         return merged_messages
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
+    state_multimodal_mirror_keys = {}
+    ambiguous_state_multimodal_mirrors = set()
+    if sidecar_multimodal_mirrors:
+        state_multimodal_mirror_identities = {}
+        for state_message in state_messages:
+            mirror_key = _session_message_multimodal_mirror_key(state_message)
+            state_multimodal_mirror_keys[id(state_message)] = mirror_key
+            if (
+                mirror_key is not None
+                and mirror_key in sidecar_multimodal_mirrors
+                and mirror_key not in ambiguous_multimodal_mirrors
+            ):
+                stable_id, stable_id_valid = _stable_message_identity_details(
+                    state_message
+                )
+                row_id, row_id_valid = _state_db_row_identity_details(state_message)
+                if not stable_id_valid or not row_id_valid:
+                    ambiguous_state_multimodal_mirrors.add(mirror_key)
+                    continue
+                identities = state_multimodal_mirror_identities.setdefault(
+                    mirror_key, set()
+                )
+                identities.add(
+                    (
+                        stable_id,
+                        row_id,
+                        _session_message_api_content_key(state_message),
+                    )
+                )
+                if len(identities) > 1:
+                    ambiguous_state_multimodal_mirrors.add(mirror_key)
     state_replay_idx = 0
     skipped_state_visible_counts = {}
     # Loop-invariant: a session whose original truncate cutoff (truncation_boundary)
@@ -9960,6 +10394,34 @@ def merge_session_messages_append_only(
         dedup_key = _cached_message_key(msg, "dedup")
         visible_key = _cached_message_key(msg, "visible_state")
         content_key = _cached_message_key(msg, "content_state")
+        multimodal_mirror_key = (
+            state_multimodal_mirror_keys.get(id(msg))
+            if sidecar_multimodal_mirrors
+            else None
+        )
+        multimodal_replay_target = (
+            sidecar_multimodal_mirrors.get(multimodal_mirror_key)
+            if (
+                multimodal_mirror_key not in ambiguous_multimodal_mirrors
+                and multimodal_mirror_key not in ambiguous_state_multimodal_mirrors
+            )
+            else None
+        )
+        if (
+            multimodal_replay_target is not None
+            and not _message_private_identity_compatible(multimodal_replay_target, msg)
+        ):
+            multimodal_replay_target = None
+        if multimodal_replay_target is not None:
+            _copy_api_content_sidecar(multimodal_replay_target, msg)
+            _merge_session_display_metadata(multimodal_replay_target, msg)
+            if (
+                state_replay_idx < len(sidecar_visible_messages)
+                and sidecar_visible_messages[state_replay_idx] is multimodal_replay_target
+            ):
+                state_replay_idx += 1
+            seen_dedup_keys.add(dedup_key)
+            continue
         replays_sidecar_prefix = False
         replay_target = None
         if state_replay_idx < len(sidecar_visible_sequence):
@@ -10210,12 +10672,40 @@ def merge_session_messages_append_only(
     return merged_messages
 
 
+@overload
 def reconciled_state_db_messages_for_session(
-    session, *, prefer_context: bool = False, state_messages: list | None = None
-) -> list:
+    session,
+    *,
+    prefer_context: bool = False,
+    state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    with_revision: Literal[False] = False,
+) -> list: ...
+
+
+@overload
+def reconciled_state_db_messages_for_session(
+    session,
+    *,
+    prefer_context: bool = False,
+    state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    with_revision: Literal[True],
+) -> StateDBSessionMessagesSnapshot: ...
+
+
+def reconciled_state_db_messages_for_session(
+    session,
+    *,
+    prefer_context: bool = False,
+    state_messages: list | StateDBSessionMessagesSnapshot | None = None,
+    with_revision: bool = False,
+):
     """Return append-only messages reconciled with state.db for a WebUI session."""
     if session is None:
-        return []
+        return _state_db_session_messages_result([], None, with_revision=with_revision)
+    state_revision = None
+    if isinstance(state_messages, StateDBSessionMessagesSnapshot):
+        state_revision = state_messages.revision
+        state_messages = state_messages.messages
     local_messages = []
     using_context_messages = False
     if prefer_context:
@@ -10226,7 +10716,28 @@ def reconciled_state_db_messages_for_session(
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
-        state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+        session_id = getattr(session, 'session_id', None)
+        session_profile = getattr(session, 'profile', None)
+        if with_revision:
+            state_result = get_state_db_session_messages(
+                session_id,
+                profile=session_profile,
+                with_revision=True,
+            )
+        elif session_profile:
+            state_result = get_state_db_session_messages(
+                session_id,
+                profile=session_profile,
+            )
+        else:
+            # Preserve the historical one-argument call contract for ordinary
+            # reconciliation and for integrations that replace this reader.
+            state_result = get_state_db_session_messages(session_id)
+        if isinstance(state_result, StateDBSessionMessagesSnapshot):
+            state_revision = state_result.revision
+            state_messages = state_result.messages
+        else:
+            state_messages = state_result
     if prefer_context and local_messages:
         if using_context_messages:
             sidecar_messages = getattr(session, 'messages', None) or []
@@ -10253,21 +10764,34 @@ def reconciled_state_db_messages_for_session(
                             "Compressed context for session %s has no compression anchor; using context_messages only",
                             getattr(session, "session_id", None),
                         )
-                        return list(local_messages)
+                        return _state_db_session_messages_result(
+                            local_messages,
+                            state_revision,
+                            with_revision=with_revision,
+                        )
                     anchor_index = _state_db_anchor_index(state_messages, anchor_key)
                     if anchor_index is None:
                         logger.debug(
                             "Compressed context for session %s has an unverifiable compression anchor; using context_messages only",
                             getattr(session, "session_id", None),
                         )
-                        return list(local_messages)
+                        return _state_db_session_messages_result(
+                            local_messages,
+                            state_revision,
+                            with_revision=with_revision,
+                        )
                     state_messages = list(state_messages or [])[anchor_index + 1 :]
         state_messages = state_db_delta_after_context(local_messages, state_messages)
-    return merge_session_messages_append_only(
+    reconciled_messages = merge_session_messages_append_only(
         local_messages,
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+    )
+    return _state_db_session_messages_result(
+        reconciled_messages,
+        state_revision,
+        with_revision=with_revision,
     )
 
 

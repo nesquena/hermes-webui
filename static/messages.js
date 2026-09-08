@@ -4249,7 +4249,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         || (text.includes('compressed')&&!text.includes('compressing'))
       ) return 'compressed';
       if(
-        phase==='running'||phase==='compressing'
+        // NOT a bare phase==='running'. routes.py appends a placeholder
+        // "live anchor shell" row (role lifecycle, status running,
+        // source_event_type runtime_journal_snapshot) whenever a stream has
+        // events but no visible rows yet. That falls through the source check
+        // above, and a bare running phase then classified every such shell as
+        // a compression start - a permanent phantom "Compressing context"
+        // divider on sessions that never compressed anything.
+        phase==='compressing'
         || text.includes('compressing context')
         || text.includes('compacting context')
         || text.includes('preflight compression')
@@ -4379,7 +4386,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
     // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
     s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
-    return s.trim();
+    return s.replace(/^\s+/, '');
   }
   function _streamDisplay(){
     return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content;
@@ -6364,6 +6371,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }else if(_doneLiveScrollSnapshot&&typeof _restoreMessageScrollSnapshotSameFrame==='function'){
             _restoreMessageScrollSnapshotSameFrame(_doneLiveScrollSnapshot);
           }
+          if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
           if(typeof noteWorkspaceMutationsFromToolCalls==='function') noteWorkspaceMutationsFromToolCalls(S.toolCalls);
           loadDir('.', { preservePreview: true });
@@ -7064,6 +7072,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
         }
         syncTopbar();renderMessages({preserveScroll:true});
+        if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
@@ -8605,7 +8614,7 @@ function _clarifyExpiryMs(pending) {
   if (Number.isFinite(expiresAt) && expiresAt > 0) return expiresAt * 1000;
   const requestedAt = Number(pending && pending.requested_at);
   const timeoutSeconds = Number(pending && pending.timeout_seconds);
-  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds)) {
+  if (Number.isFinite(requestedAt) && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
     return (requestedAt + timeoutSeconds) * 1000;
   }
   return 0;
