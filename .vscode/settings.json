@@ -13,7 +13,7 @@
       ],
       "env": {
         "AUTH_HEADER": "Bearer hch-your-key-here",
-        "USER_NAME": "YourName"
+        "USER_NAME": "Jan"
       }
     }
   }

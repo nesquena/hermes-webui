@@ -26,10 +26,16 @@ class AlertService extends EventEmitter {
   }
 
   async createAlert({ level = 'info', type = 'generic', message = '', meta = {} } = {}) {
-    const alert = { level, type, message, meta };
+    let alert = { level, type, message, meta };
     if (this.db) {
       try {
-        this.db.insertAlert(alert);
+        // support both sync and async insertAlert implementations
+        const res = this.db.insertAlert(alert);
+        if (res && typeof res.then === 'function') {
+          alert = await res;
+        } else if (res) {
+          alert = res;
+        }
       } catch (e) {
         console.warn('AlertService: failed to persist alert', e && e.message);
       }

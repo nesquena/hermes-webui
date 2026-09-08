@@ -1,0 +1,33 @@
+﻿[start.ps1] Hermes WebUI native Windows launcher
+[start.ps1] Python:     C:\Users\Jan\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+[start.ps1] Agent dir:  C:\Users\Jan\AppData\Local\hermes\hermes-agent
+[start.ps1] State dir:  C:\Users\Jan\AppData\Local\hermes\webui
+[start.ps1] Binding:    127.0.0.1:8787
+
+
+  Hermes Web UI -- startup config
+  --------------------------------
+  repo root   : C:\Users\Jan\llm\hermes-webui
+  agent dir   : C:\Users\Jan\AppData\Local\hermes\hermes-agent  [32m[ok][0m
+  python      : C:\Users\Jan\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe
+  state dir   : C:\Users\Jan\AppData\Local\hermes\webui
+  workspace   : C:\Users\Jan\workspace
+  host:port   : 127.0.0.1:8787
+  config file : C:\Users\Jan\AppData\Local\hermes\config.yaml  (found)
+
+  [security] fixed permissions on .env (0o666 -> 0600)
+  [security] fixed permissions on auth.json (0o666 -> 0600)
+  [tip] No password set. Any process on this machine can read sessions
+        and memory via the local API. Set HERMES_WEBUI_PASSWORD to
+        enable authentication.
+[ok] bg_task_complete drain thread started
+[ok] SessionChannel reaper thread started
+[!!] FATAL: Another server is already responding on 127.0.0.1:8787. Stop the existing instance first.
+powershell.exe : [crash-visibility] process exit pid=28932 thread=MainThread
+At line:5 char:5
++     & powershell -NoProfile -ExecutionPolicy Bypass -File '.\start.ps ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([crash-visibili...read=MainThread 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

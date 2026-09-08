@@ -1,9 +1,10 @@
-const { ethers } = require('ethers');
+const ethers = require('ethers');
 
 class SlippageService {
-  constructor({ alertService, provider = null, pairs = [] } = {}) {
+  constructor({ alertService, provider = null, pairs = [], contractFactory = null } = {}) {
     this.alertService = alertService;
     this.provider = provider;
+    this.contractFactory = contractFactory;
 
     // allow external configuration of pairs (id, pairAddress, threshold)
     if (pairs && pairs.length > 0) {
@@ -33,6 +34,13 @@ class SlippageService {
       'function token0() view returns (address)',
       'function token1() view returns (address)'
     ];
+
+    // Uniswap V3 minimal ABI (slot0 + token0/token1)
+    this.v3PoolAbi = [
+      'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)',
+      'function token0() view returns (address)',
+      'function token1() view returns (address)'
+    ];
   }
 
   computeSlippage(pair) {
@@ -44,10 +52,10 @@ class SlippageService {
 
   async updateOnChainPrices() {
     if (!this.provider) return;
-    for (const pair of this.pairs) {
+    for (const pair of this.pairs.filter(p => !p.pairType || p.pairType === 'v2')) {
       if (!pair.pairAddress) continue;
       try {
-        const contract = new ethers.Contract(pair.pairAddress, this.pairAbi, this.provider);
+        const contract = this.contractFactory ? this.contractFactory(pair.pairAddress, this.pairAbi, this.provider) : new ethers.Contract(pair.pairAddress, this.pairAbi, this.provider);
         const [reserve0, reserve1] = await contract.getReserves();
         // determine token0/token1 order to compute price as token1 per token0
         const token0 = await contract.token0();
@@ -65,6 +73,30 @@ class SlippageService {
         console.warn('SlippageService: on-chain price update failed for', pair.id, e && e.message);
       }
     }
+
+    // support Uniswap V3 pools when pair.pairType === 'v3'
+    for (const pair of this.pairs.filter(p => p.pairType === 'v3' && p.pairAddress)) {
+      try {
+        const contract = this.contractFactory ? this.contractFactory(pair.pairAddress, this.v3PoolAbi, this.provider) : new ethers.Contract(pair.pairAddress, this.v3PoolAbi, this.provider);
+        const slot0 = await contract.slot0();
+        // slot0.sqrtPriceX96 is BigInt-like; use precise conversion helper
+        const { sqrtPriceX96ToNumber } = require('./v3Math');
+        const sqrtPriceVal = slot0[0].toString ? slot0[0].toString() : slot0.sqrtPriceX96.toString();
+        const approx = sqrtPriceX96ToNumber(sqrtPriceVal, 12);
+        pair.previousPrice = pair.currentPrice || approx;
+        pair.currentPrice = approx;
+        // also keep string form for higher precision storage
+        pair.currentPriceString = require('./v3Math').sqrtPriceX96ToPriceString(sqrtPriceVal, 18);
+        pair.status = 'updated';
+      } catch (e) {
+        console.warn('SlippageService: v3 on-chain price update failed for', pair.id, e && e.message);
+      }
+    }
+  }
+
+  async updateAllPairs() {
+    await this.updateOnChainPrices();
+    return this.pairs;
   }
 
   listPairs() {
@@ -78,15 +110,18 @@ class SlippageService {
     return this.listPairs().find((pair) => pair.id === id) || null;
   }
 
-  addPair({ id, pairAddress = null, tokenA = null, tokenB = null, threshold = 5 } = {}) {
+  addPair({ id, pairAddress = null, tokenA = null, tokenB = null, token0 = null, token1 = null, pairType = 'v2', threshold = 5 } = {}) {
     if (!id) throw new Error('pair id required');
     const exists = this.pairs.find((p) => p.id === id);
     if (exists) return exists;
     const entry = {
       id,
       pairAddress,
+      pairType,
       tokenA,
       tokenB,
+      token0,
+      token1,
       currentPrice: 0,
       previousPrice: 1,
       threshold,
