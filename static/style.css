@@ -4574,9 +4574,14 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-progress::after{
   content:none;
 }
+/* The running segment is 60% of the track. Translate it across the clip
+   instead of changing offsets and relaying out the transcript each frame. */
 @keyframes transparent-progress-shimmer{
-  0%{left:0;right:100%;}
-  100%{left:100%;right:0;}
+  0%{transform:translateX(-100%);}
+  100%{transform:translateX(200%);}
+}
+@media (prefers-reduced-motion:reduce){
+  .transparent-event-progress[data-progress-running="1"]::before{animation:none;}
 }
 .transparent-event-row + .transparent-event-row::before{
   content:none;
