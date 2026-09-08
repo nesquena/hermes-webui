@@ -1,5 +1,9 @@
 class GovernanceService {
-  constructor() {
+  constructor({ provider = null, alertService = null, governorAddress = null } = {}) {
+    this.provider = provider;
+    this.alertService = alertService;
+    this.governorAddress = governorAddress;
+
     this.proposals = [
       {
         id: 'UNI-42',
@@ -35,6 +39,25 @@ class GovernanceService {
         summary: 'Rebalanced grants and emergency operational reserves for migration support.',
       },
     ];
+
+    // if a provider and governorAddress are supplied, subscribe to events
+    if (this.provider && this.governorAddress) {
+      try {
+        const filter = { address: this.governorAddress };
+        this.provider.on(filter, (log) => this._handleLog(log));
+      } catch (e) {
+        console.warn('GovernanceService: failed to subscribe to on-chain logs', e && e.message);
+      }
+    }
+  }
+
+  _handleLog(log) {
+    // Basic on-chain log handler: create a generic governance alert
+    const message = `On-chain governance event at tx ${log.transactionHash}`;
+    const meta = { topics: log.topics, data: log.data, tx: log.transactionHash };
+    if (this.alertService) {
+      this.alertService.createAlert({ level: 'high', type: 'governance', message, meta }).catch(() => {});
+    }
   }
 
   listProposals() {

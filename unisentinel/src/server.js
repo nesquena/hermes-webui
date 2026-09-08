@@ -4,8 +4,6 @@ const path = require('path');
 const Web3Service = require('./web3Service');
 const FileDB = require('./db');
 const AlertService = require('./alertService');
-const GovernanceService = require('./governanceService');
-const SlippageService = require('./slippageService');
 
 dotenv.config();
 
@@ -13,8 +11,63 @@ const app = express();
 const port = process.env.PORT || 3000;
 const db = new FileDB(process.env.UNISENTINEL_DB_FILE);
 const alerts = new AlertService({ db, webhookUrl: process.env.WEBHOOK_URL });
-const governance = new GovernanceService();
-const slippage = new SlippageService({ alertService: alerts });
+
+function parsePairsEnv(envStr) {
+  if (!envStr) return [];
+  try {
+    const parsed = JSON.parse(envStr);
+    if (Array.isArray(parsed)) return parsed;
+    return [];
+  } catch (e) {
+    console.warn('Failed to parse UNISENTINEL_PAIRS env var; expected JSON array');
+    return [];
+  }
+}
+
+let governance = null;
+let slippage = null;
+
+const providerUrl = process.env.ETHEREUM_RPC_URL || null;
+const web3 = new Web3Service(providerUrl);
+web3.start();
+
+// Obtain provider: Web3Service exposes provider after start; fallback to creating one if necessary
+let provider = web3.provider || null;
+if (!provider && providerUrl) {
+  try {
+    const { ethers } = require('ethers');
+    provider = new ethers.JsonRpcProvider(providerUrl);
+  } catch (e) {
+    console.warn('Failed to construct fallback JsonRpcProvider', e && e.message);
+  }
+}
+
+// Instantiate monitors with provider (if available)
+const configuredPairs = parsePairsEnv(process.env.UNISENTINEL_PAIRS);
+const GovernanceService = require('./governanceService');
+const SlippageService = require('./slippageService');
+
+governance = new GovernanceService({ provider, alertService: alerts, governorAddress: process.env.GOVERNOR_ADDRESS || null });
+slippage = new SlippageService({ alertService: alerts, provider, pairs: configuredPairs });
+
+// On each new block, refresh lightweight monitors and create heartbeat alerts
+web3.on('block', async (bn) => {
+  console.log(`New block ${bn}`);
+  try {
+    await alerts.createAlert({ level: 'info', type: 'block', message: `New Ethereum block ${bn} observed`, meta: { block: bn } });
+  } catch (e) {
+    console.warn('Failed to create block alert', e && e.message);
+  }
+
+  if (slippage) {
+    try {
+      const result = await slippage.scan();
+      if (result.detections.length > 0) console.log('Slippage detection:', result.detections);
+    } catch (e) {
+      console.warn('Slippage scan failed on block', e && e.message);
+    }
+  }
+});
 
 function seedDefaultAlerts() {
   const current = db.listAlerts();
