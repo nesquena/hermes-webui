@@ -1,0 +1,37 @@
+name: oxbench integration
+
+on:
+  push:
+    paths:
+      - 'oxbench/**'
+      - 'tests/**'
+      - '.github/workflows/oxbench-integration.yml'
+  pull_request:
+    paths:
+      - 'oxbench/**'
+      - 'tests/**'
+
+jobs:
+  test-oxbench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run oxbench integration test
+        env:
+          # The test uses the mock server and does not require secrets
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python -m pytest -q tests/test_oxbench_mock.py

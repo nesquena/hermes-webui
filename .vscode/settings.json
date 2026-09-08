@@ -1,0 +1,20 @@
+{
+  "servers": {
+    "honcho": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.honcho.dev",
+        "--header",
+        "Authorization:${AUTH_HEADER}",
+        "--header",
+        "X-Honcho-User-Name:${USER_NAME}"
+      ],
+      "env": {
+        "AUTH_HEADER": "Bearer hch-your-key-here",
+        "USER_NAME": "YourName"
+      }
+    }
+  }
+}

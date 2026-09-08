@@ -105,6 +105,29 @@ def _auto_state_dir_name(repo_root, port=None) -> str:
     h = hashlib.md5(str(repo_root).encode()).hexdigest()[:8]
     return f"webui-test-{h}-{port}" if port else f"webui-test-{h}"
 
+
+def _link_path_or_copy(src: pathlib.Path, dest: pathlib.Path) -> None:
+    """Create a symlink when possible, otherwise copy the source tree/file.
+
+    Windows can reject symlink creation without elevated privileges (WinError
+    1314), which breaks test bootstrap even though the content is otherwise
+    usable. Falling back to a copy keeps the isolated test environment working
+    on developer machines and CI agents alike.
+    """
+    if dest.exists():
+        return
+
+    try:
+        dest.symlink_to(src, target_is_directory=src.is_dir())
+        return
+    except (OSError, NotImplementedError):
+        pass
+
+    if src.is_dir():
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+    else:
+        shutil.copy2(src, dest)
+
 # Whether the test port was explicitly pinned (vs auto-allocated). An auto port
 # is a fresh free OS port unique to this process, so it never needs the
 # _kill_port_owner() reap at setup — and reaping it would be DANGEROUS: fuser -k
@@ -888,12 +911,13 @@ def test_server():
     TEST_STATE_DIR.mkdir(parents=True)
     TEST_WORKSPACE.mkdir(parents=True)
 
-    # Symlink real skills into test home so skill-related tests work,
-    # but all write-heavy state stays isolated.
-    real_skills  = HERMES_HOME / 'skills'
-    test_skills  = TEST_STATE_DIR / 'skills'
+    # Link real skills into test home so skill-related tests work,
+    # but all write-heavy state stays isolated. On Windows, symlink creation
+    # may be blocked by privilege policy, so we fall back to copying.
+    real_skills = HERMES_HOME / 'skills'
+    test_skills = TEST_STATE_DIR / 'skills'
     if real_skills.exists() and not test_skills.exists():
-        test_skills.symlink_to(real_skills)
+        _link_path_or_copy(real_skills, test_skills)
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)

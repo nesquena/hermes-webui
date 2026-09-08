@@ -1,0 +1,13 @@
+typing_inspection-0.4.4.dist-info/INSTALLER,sha256=zuuue4knoyJ-UwPPXg8fezS7VCrXJQrAP7zeNuwvFQg,4
+typing_inspection-0.4.4.dist-info/METADATA,sha256=utPZ5jQu9nUM9RKOyUIye4vr3OC25Nb2fLFbJ65RGNo,2554
+typing_inspection-0.4.4.dist-info/RECORD,,
+typing_inspection-0.4.4.dist-info/WHEEL,sha256=zOwg4jB6zX2kU910N-cMawjivD6tO8NEWvE12je1bVk,87
+typing_inspection-0.4.4.dist-info/licenses/LICENSE,sha256=gEtZsl8sMb0nj5ICoZrkmjlFqiZkOH4tChKMfKzGHsM,1090
+typing_inspection/__init__.py,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+typing_inspection/__pycache__/__init__.cpython-313.pyc,,
+typing_inspection/__pycache__/introspection.cpython-313.pyc,,
+typing_inspection/__pycache__/typing_objects.cpython-313.pyc,,
+typing_inspection/introspection.py,sha256=WIjEW9Yn2mktlSdpnj9Umt81ZRWWsWVncjEOEhgbQ5Y,22550
+typing_inspection/py.typed,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+typing_inspection/typing_objects.py,sha256=p3jWKQ1RWBycmiPgJjrypGBMdt71xNQKfNGjdbAEb_Y,17838
+typing_inspection/typing_objects.pyi,sha256=O9JN2S0CcNMdZP1Aq8HvhpP1Miqrmnius8W2L5kvhL4,9635
