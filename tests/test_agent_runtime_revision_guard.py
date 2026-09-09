@@ -301,7 +301,10 @@ def test_in_memory_agent_swap_does_not_mimic_source_revision_change(
     replacement_module.__dict__["AIAgent"] = replacement_class
     monkeypatch.setitem(sys.modules, "run_agent", replacement_module)
 
-    assert agent_runtime.require_ai_agent_class() is replacement_class
+    guarded_class = agent_runtime.require_ai_agent_class()
+    assert guarded_class is not replacement_class
+    assert issubclass(guarded_class, replacement_class)
+    assert getattr(guarded_class, "_webui_destination_reasoning_guard", False) is True
     assert agent_runtime._AGENT_SOURCE_DIR == agent_dir.resolve()
     assert agent_runtime._AGENT_MODULE_PATH == module_file.resolve()
     assert agent_runtime._AGENT_REVISION == _git(agent_dir, "rev-parse", "HEAD")

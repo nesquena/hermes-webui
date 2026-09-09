@@ -12,6 +12,7 @@ Covers:
 
 import pathlib
 import re
+import subprocess
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -292,6 +293,39 @@ class TestReasoningCommand:
             "(effort now round-trips through /api/reasoning → config.yaml)"
         )
 
+    def test_cmd_reasoning_effort_post_drives_model_aware_downgrade(self):
+        src = read('static/commands.js')
+        fn = 'function cmdReasoning(args){' + function_body(src, 'cmdReasoning') + '}'
+        script = f"""
+const calls=[];
+const chips=[];
+const toasts=[];
+const window={{}};
+function _reasoningEffortContext(){{return {{model:'gpt-5.5',provider:'openai-codex'}};}}
+function api(path, options){{
+  const body=JSON.parse(options.body);
+  calls.push({{path,body}});
+  const downgraded=body.model==='gpt-5.5' && body.provider==='openai-codex'
+    ? 'xhigh' : body.effort;
+  return Promise.resolve({{reasoning_effort:downgraded}});
+}}
+function showToast(message){{toasts.push(message);}}
+function _applyReasoningChip(effort){{chips.push(effort);}}
+{fn}
+cmdReasoning('max');
+setImmediate(()=>{{
+  if(calls.length!==1) throw new Error('slash branch did not POST exactly once');
+  if(calls[0].body.model!=='gpt-5.5' || calls[0].body.provider!=='openai-codex')
+    throw new Error('active reasoning context missing from slash POST');
+  if(chips[0]!=='xhigh' || !toasts[0].includes('xhigh'))
+    throw new Error('downgraded effort was not rendered');
+}});
+"""
+        result = subprocess.run(
+            ['node', '-e', script], capture_output=True, text=True, timeout=30
+        )
+        assert result.returncode == 0, result.stderr
+
     def test_cmd_reasoning_routes_display_through_api_reasoning(self):
         """show|hide|on|off must POST to /api/reasoning (config.yaml
         display.show_reasoning — the CLI's key) in addition to mirroring
@@ -312,7 +346,7 @@ class TestReasoningCommand:
         m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
             assert f"'{level}'" in fn, (
                 f"cmdReasoning must accept '{level}' (CLI parity with "
                 f"hermes_constants.parse_reasoning_effort)"
@@ -325,7 +359,7 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         ):
             assert f"'{suggestion}'" in entry, (
                 f"reasoning subArgs must include '{suggestion}' for CLI parity"
@@ -359,7 +393,7 @@ class TestReasoningConfigHelpers:
         # Snapshot-style assertion: if hermes_constants adds a level, this
         # test will fail fast so we know to update WebUI too.
         assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         )
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
