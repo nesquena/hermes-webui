@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
@@ -14,6 +19,21 @@ MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+
+@pytest.fixture(scope="module")
+def browser():
+    if sync_playwright is None:
+        pytest.skip("Playwright is unavailable")
+    with sync_playwright() as playwright:
+        if not Path(playwright.chromium.executable_path).exists():
+            pytest.skip("Playwright Chromium is unavailable")
+        instance = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        yield instance
+        instance.close()
 
 _DRIVER_SRC = r"""
 const fs = require('fs');
@@ -70,6 +90,36 @@ def _render(driver_path: str, markdown: str) -> str:
     return result.stdout
 
 
+def _function_source(source: str, name: str) -> str:
+    marker = f"function {name}("
+    start = source.index(marker)
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"unterminated {name}")
+
+
+def _workspace_click_delegate(source: str) -> str:
+    marker = "document.addEventListener('click', e => {"
+    start = source.index(marker)
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 3]
+    raise AssertionError("workspace click delegate is unterminated")
+
+
 def test_render_md_rewrites_workspace_links_to_internal_anchor(driver_path):
     html = _render(driver_path, "[Open plan](workspace://notes/plan.md)")
 
@@ -92,6 +142,68 @@ def test_workspace_link_click_delegate_opens_workspace_preview():
     assert "async function openArtifactPath(path)" in (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
     assert "/api/list?session_id=" in (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
     assert "file_open_failed" in (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("workspace", ["", None])
+@pytest.mark.parametrize("renderer", ["settled", "streaming"])
+def test_production_workspace_link_clicks_open_relative_artifacts(
+    browser, driver_path, workspace, renderer
+):
+    workspace_js = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    for rel in ("reports/output.md", "README"):
+        page = browser.new_page(viewport={"width": 1024, "height": 600}, device_scale_factor=2)
+        try:
+            page_errors = []
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            if renderer == "settled":
+                link = _render(driver_path, f"[Open artifact](workspace://{rel})")
+            else:
+                link = '<a href="__STREAMING_LINK__">Open artifact</a>'
+            page.set_content(f"<main id='transcript'>{link}</main>")
+            page.add_script_tag(
+                content=f"""
+                window.S = {{session: {{session_id:'session-a', workspace: {json.dumps(workspace)}}}, messages: [], toolCalls: []}};
+                window.$ = id => document.getElementById(id);
+                window.esc = value => String(value).replace(/[&<>\\"']/g, c =>
+                  ({{'&':'&amp;','<':'&lt;','>':'&gt;','\\"':'&quot;',"'":'&#39;'}}[c]));
+                window.t = key => key;
+                window.switchWorkspacePanelTab = tab => {{ window.activeTab = tab; }};
+                window.setStatus = value => {{ window.lastStatus = value; }};
+                window.openFile = value => {{ window.openedPath = value; }};
+                window.__apiCalls = [];
+                """
+            )
+            page.add_script_tag(content=workspace_js)
+            page.add_script_tag(
+                content="""
+                window.switchWorkspacePanelTab = tab => { window.activeTab = tab; };
+                window.openFile = value => { window.openedPath = value; };
+                window.api = async url => {
+                  window.__apiCalls.push(url);
+                  const path = decodeURIComponent(url.match(/[?&]path=([^&]*)/)[1]);
+                  const name = path === 'reports' ? 'output.md' : 'README';
+                  return {entries:[{name, path:name}]};
+                };
+                """
+            )
+            if renderer == "streaming":
+                page.add_script_tag(content=_function_source(MESSAGES_JS, "_smdLinkHref"))
+                page.evaluate(
+                    "rel => document.querySelector('a').setAttribute('href', _smdLinkHref('workspace://' + rel))",
+                    rel,
+                )
+            page.add_script_tag(content=_workspace_click_delegate(UI_JS))
+            page.locator("a[href^='#workspace=']").click()
+            page.wait_for_timeout(500)
+            assert not page_errors, page_errors
+            state = page.evaluate("() => ({opened: window.openedPath || null, status: window.lastStatus || null, calls: window.__apiCalls, href: document.querySelector('a').getAttribute('href')})")
+            assert state["opened"] == rel, state
+            assert page.evaluate("() => window.lastStatus || null") is None
+            assert page.evaluate("() => window.__apiCalls") == [
+                f"/api/list?session_id=session-a&path={'reports' if '/' in rel else '.'}"
+            ]
+        finally:
+            page.close()
 
 
 def test_streaming_markdown_rewrites_workspace_links_before_sanitizing():

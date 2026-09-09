@@ -446,22 +446,28 @@ function _sanitizeArtifactPath(path){
   return path;
 }
 
+function _normalizeExplicitArtifactPath(path){
+  if(path === null || path === undefined) return '';
+  const raw = String(path).trim();
+  if(!raw || raw.length > 240 || raw.includes('://') || raw.includes('\0')) return '';
+  if(raw.startsWith('~')) return '';
+  return raw.replace(/\\/g,'/');
+}
+
 function _classifyArtifactPath(path, workspace){
   const input = String(path || '').trim().replace(/\\/g,'/');
   if(input.split('/').includes('..')){
-    const displayPath = _sanitizeArtifactPath(path);
+    const displayPath = _normalizeExplicitArtifactPath(path);
     return {kind:'unsupported', displayPath, dedupeKey:displayPath, openPath:null};
   }
-  const raw = _sanitizeArtifactPath(path);
+  const raw = _normalizeExplicitArtifactPath(path);
   const displayPath = raw;
   const blocked = kind => ({kind, displayPath, dedupeKey:displayPath, openPath:null});
-  if(!raw || !workspace || typeof workspace !== 'string') return blocked('unsupported');
-  if(raw.startsWith('~') || raw.includes('://')) return blocked('unsupported');
+  if(!raw) return blocked('unsupported');
   const normalized = raw.replace(/\\/g,'/');
-  let ws = workspace.trim().replace(/\\/g,'/');
+  let ws = typeof workspace === 'string' ? workspace.trim().replace(/\\/g,'/') : '';
   const workspaceRoot = ws === '/' || /^[A-Za-z]:\/$/.test(ws);
   if(!workspaceRoot) ws = ws.replace(/\/+$/,'');
-  if(!ws || normalized.includes('\0')) return blocked('unsupported');
   if(normalized.split('/').includes('..')) return blocked('unsupported');
   if(/^\/\//.test(normalized) || /^[A-Za-z]:[^/]/.test(normalized)) return blocked('unsupported');
   const pathIsWindows = /^[A-Za-z]:\//.test(normalized);
@@ -477,6 +483,7 @@ function _classifyArtifactPath(path, workspace){
       openPath:relative,
     };
   }
+  if(!ws) return blocked('unsupported');
   if(pathIsWindows !== workspaceIsWindows) return blocked('outside');
   if(!(workspaceIsWindows || ws.startsWith('/'))) return blocked('outside');
   const split = value => {
