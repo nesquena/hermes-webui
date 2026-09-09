@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import api.config as config
 from api.run_journal import SSE_RELAY_CLOSE_EVENTS, TERMINAL_SSE_EVENTS
 
 
@@ -35,9 +36,33 @@ def test_routes_relay_loops_import_sse_relay_close_events():
 
 
 def test_cancel_drop_list_allows_apperror_not_phantom_error():
-    src = Path("api/streaming.py").read_text(encoding="utf-8")
-    assert "event not in ('cancel', 'apperror')" in src
-    assert "event not in ('cancel', 'error')" not in src
+    session_id = "unowned-cancel-apperror-oracle-session"
+    stream_id = "unowned-cancel-apperror-oracle-stream"
+    key = (session_id, stream_id)
+    assert key not in config.STREAM_CANCEL_GENERATIONS
+    assert session_id not in config.SESSION_WRITEBACK_OWNERS
+
+    assert config.admit_stream_publication(
+        session_id,
+        stream_id,
+        "apperror",
+        cancelled=True,
+    ) is None
+    assert config.admit_stream_publication(
+        session_id,
+        stream_id,
+        "error",
+        cancelled=True,
+    ) is False
+    assert config.admit_stream_publication(
+        session_id,
+        stream_id,
+        "token",
+        cancelled=True,
+    ) is False
+
+    assert key not in config.STREAM_CANCEL_GENERATIONS
+    assert session_id not in config.SESSION_WRITEBACK_OWNERS
 
 
 def test_apperror_terminates_relay_close_predicate():
