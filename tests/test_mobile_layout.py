@@ -398,8 +398,32 @@ def test_composer_controls_switch_to_fit_stage_classes():
         assert selector in CSS, f"{selector} should be present in the .cf-burger rules"
     assert ".composer-footer.cf-burger .composer-workspace-chip{display:none!important".replace(" ", "") in CSS.replace(" ", ""), \
         ".cf-burger must remove the blank workspace switch slot"
-    assert ".composer-footer.cf-burger .provider-quota-chip" in CSS and ".composer-footer.cf-burger .composer-left > .composer-toolsets-wrap{display:none!important" in CSS, \
+    assert ".composer-footer.cf-burger .provider-quota-chip" in CSS, \
         ".cf-burger must fold the inline quota chip into the shared config menu"
+    # The toolsets control folds into the menu the same way, but it can no longer
+    # be expressed as `display:none` on the wrap: the dropdown markup lives INSIDE
+    # .composer-toolsets-wrap and would not render under a hidden ancestor. The
+    # observable contract is now "the chip is not shown inline, and the wrap
+    # occupies no space" — assert that instead of the old single rule, which a
+    # later override neutralises (it would still be found in CSS, so asserting it
+    # would pass while describing behaviour the stylesheet no longer has).
+    _burger_chip = ".composer-footer.cf-burger .composer-toolsets-chip{display:none!important"
+    assert _burger_chip.replace(" ", "") in CSS.replace(" ", ""), \
+        ".cf-burger must not show the toolsets chip inline; the panel action drives it"
+    # The selector appears twice: upstream's `display:none` and the later
+    # override that wins. _rule_body() returns the first match, so assert on the
+    # effective (last) one — otherwise this would inspect the rule that no longer
+    # decides the outcome, which is the exact trap this assertion replaced.
+    _wrap_bodies = re.findall(
+        r"\.composer-footer\.cf-burger \.composer-left > \.composer-toolsets-wrap\s*\{([^}]*)\}",
+        CSS,
+    )
+    assert _wrap_bodies, ".cf-burger toolsets wrap rule must exist"
+    _wrap_decls = _declarations(_wrap_bodies[-1])
+    assert _wrap_decls.get("width") == "0" and _wrap_decls.get("height") == "0", \
+        ".cf-burger toolsets wrap must stay in flow at zero size so its dropdown can render"
+    assert _wrap_decls.get("display", "").startswith("block"), \
+        ".cf-burger toolsets wrap must not be display:none, or its dropdown cannot render"
     assert ".composer-footer.cf-burger .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important" in CSS, \
         ".cf-burger must expose the config button even on wider viewports"
 
@@ -1483,6 +1507,7 @@ def test_mobile_config_kickers_have_i18n_fallbacks():
         ("composer_mobile_model", "Model"),
         ("composer_mobile_quota", "Quota"),
         ("composer_mobile_reasoning", "Reasoning"),
+        ("composer_mobile_toolsets", "Toolsets"),
         ("composer_mobile_context", "Context"),
     ):
         assert f'data-i18n="{key}">{label}</span>' in panel_html, \
