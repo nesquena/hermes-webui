@@ -321,12 +321,14 @@ def test_artifact_boundary_keys_are_english_fallback_owned_and_runtime_covered()
         "  __i18n.setLocale('en');\n"
         "  const english = keys.map(key => __i18n.t(key));\n"
         "  const fallbacks = {};\n"
+        "  const activeSpeech = {};\n"
         "  for (const locale of __i18n.locales.filter(locale => locale !== 'en')) {\n"
         "    __i18n.setLocale(locale);\n"
+        "    activeSpeech[locale] = document.documentElement.lang;\n"
         "    fallbacks[locale] = keys.map(key => __i18n.t(key));\n"
         "  }\n"
         "  __i18n.setLocale('en');\n"
-        "  return {locales: __i18n.locales, english, fallbacks, unknown: __i18n.t('workspace_artifact_missing_control')};\n"
+        "  return {locales: __i18n.locales, english, fallbacks, activeSpeech, unknown: __i18n.t('workspace_artifact_missing_control')};\n"
         "})()"
     ))
     expected_locales = ["en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "cs", "tr", "pl", "vi"]
@@ -338,6 +340,22 @@ def test_artifact_boundary_keys_are_english_fallback_owned_and_runtime_covered()
     assert out["unknown"] == "workspace_artifact_missing_control"
     assert set(out["fallbacks"]) == set(expected_locales[1:])
     assert all(values == out["english"] for values in out["fallbacks"].values())
+    assert out["activeSpeech"] == {
+        "it": "it-IT",
+        "ja": "ja-JP",
+        "ru": "ru-RU",
+        "es": "es-ES",
+        "de": "de-DE",
+        "zh": "zh-CN",
+        "zh-Hant": "zh-TW",
+        "pt": "pt-BR",
+        "ko": "ko-KR",
+        "fr": "fr-FR",
+        "cs": "cs-CZ",
+        "tr": "tr-TR",
+        "pl": "pl-PL",
+        "vi": "vi-VN",
+    }
 
 
 def test_collection_render_and_open_route_through_classifier():
