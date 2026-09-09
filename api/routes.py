@@ -9744,6 +9744,39 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     return merged
 
 
+def _manual_squash_projection_is_active(session, sidecar_messages: list) -> bool:
+    """Return whether this persisted squash generation still owns its state tail."""
+    is_squashed_transcript = (
+        bool(sidecar_messages)
+        and isinstance(sidecar_messages[0], dict)
+        and sidecar_messages[0].get("_squash_summary") is True
+        and getattr(session, "truncation_watermark", None) is not None
+    )
+    if not is_squashed_transcript:
+        return False
+    if getattr(session, "squash_projection_superseded_by", None) is not None:
+        return False
+    projection_generation = getattr(session, "squash_projection_generation", None)
+    projection_cutoff = getattr(session, "squash_projection_cutoff", None)
+    if projection_generation is None and projection_cutoff is None:
+        # Compatibility for manual squash sidecars created before generation
+        # authority was persisted. Their next save claims an explicit UUID.
+        return True
+    if projection_generation is None or projection_cutoff is None:
+        return False
+    try:
+        parsed_generation = uuid.UUID(str(projection_generation))
+        cutoff = float(projection_cutoff)
+        watermark = float(getattr(session, "truncation_watermark", None))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return (
+        parsed_generation.version == 4
+        and -float("inf") < cutoff < float("inf")
+        and cutoff == watermark
+    )
+
+
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """Return the message coordinate space exposed by ``GET /api/session``.
 
@@ -9755,7 +9788,23 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    is_squashed_transcript = (
+        bool(sidecar_messages)
+        and isinstance(sidecar_messages[0], dict)
+        and sidecar_messages[0].get("_squash_summary") is True
+        and getattr(session, "truncation_watermark", None) is not None
+    )
     if cli_messages:
+        if is_squashed_transcript:
+            return merge_session_messages_append_only(
+                sidecar_messages,
+                cli_messages,
+                truncation_watermark=getattr(session, "truncation_watermark", None),
+                truncation_boundary=getattr(session, "truncation_boundary", None),
+                preserve_state_rows_after_watermark=_manual_squash_projection_is_active(
+                    session, sidecar_messages
+                ),
+            )
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
                 return merge_session_messages_append_only(
@@ -10317,6 +10366,7 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    retire_session_sidecar,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -15934,25 +15984,20 @@ def handle_post(handler, parsed) -> bool:
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
             try:
-                p.unlink(missing_ok=True)
+                # Agent lock is already held: acquire the shared sidecar
+                # authority second and commit unlink + durable marker together.
+                retire_session_sidecar(
+                    sid,
+                    remove_backup=True,
+                    record_deleted_tombstone=not is_messaging_session,
+                )
             except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
+                logger.debug("Failed to retire session sidecar %s", p, exc_info=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
                 logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
-                try:
-                    _record_webui_deleted_session_tombstone(sid)
-                except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
@@ -22478,7 +22523,7 @@ def _handle_background(handler, body):
             # clutter the sidebar or SESSION_DIR. The index is pruned on the
             # next rebuild via _index_entry_exists().
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                retire_session_sidecar(bg_sid, record_deleted_tombstone=False)
             except Exception:
                 pass
         except Exception:

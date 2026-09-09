@@ -284,6 +284,11 @@ class TestIssue765FollowupHardening:
         with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
         threads would target the same path and the second replace would deterministically
         fail once the first consume/remove happened.
+
+        The workers rendezvous immediately BEFORE `save()` rather than inside
+        os.replace(): the per-session save authority admits one same-SID save at a
+        time, so a barrier held inside the protected transaction could never be
+        satisfied. Contending on entry still exercises the same temp-path scheme.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
@@ -291,17 +296,19 @@ class TestIssue765FollowupHardening:
         original_replace = models.os.replace
         barrier = threading.Barrier(2)
         replace_sources = []
+        replace_sources_lock = threading.Lock()
         errors = []
 
-        def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
+        def _recording_replace(src, dst):
+            with replace_sources_lock:
+                replace_sources.append(str(src))
             return original_replace(src, dst)
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _recording_replace)
 
         def _save_worker():
             try:
+                barrier.wait(timeout=5)
                 s.save(skip_index=True)
             except Exception as e:
                 errors.append(e)

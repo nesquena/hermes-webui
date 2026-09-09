@@ -66,7 +66,9 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _collapse_duplicate_incomplete_message_ids,
     _is_empty_partial_activity_message,
+    _strict_incomplete_message_id_key,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
     get_state_db_session_messages,
@@ -2296,8 +2298,13 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_started_at = None
     session.pending_user_source = None
     try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
+        from api.models import retire_session_sidecar
+        sidecar_path = Path(session.path)
+        retire_session_sidecar(
+            getattr(session, "session_id", None) or sidecar_path.stem,
+            sidecar_path=sidecar_path,
+            record_deleted_tombstone=False,
+        )
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
@@ -6024,6 +6031,30 @@ def _message_identity(msg):
         # Now, _partial messages with empty text get a stable identity
         # keyed on their role + _partial flag + reasoning/tool metadata,
         # so the merge can dedup identical empty partials.
+        # Codex can persist a reasoning-only assistant result with an empty
+        # visible body and finish_reason=incomplete without the legacy
+        # ``_partial`` flag. Those rows still carry the stable core message id.
+        # Returning None here made every reconcile treat the same result as a
+        # fresh context-only row, which amplified alternating replays such as
+        # FD05 message ids 1701/1702 on every subsequent turn.
+        # #6600: share the persistence boundary's strict typed scalar identity
+        # (api.models._strict_incomplete_message_id_key) so str/int/float ids
+        # never collapse across types and bools/containers/subclasses/non-finite
+        # floats are rejected in BOTH layers.
+        if (
+            role == 'assistant'
+            and str(msg.get('finish_reason') or '').lower() == 'incomplete'
+        ):
+            typed_id_key = _strict_incomplete_message_id_key(msg.get('id'))
+            if typed_id_key is not None:
+                return (
+                    role,
+                    '',
+                    '',
+                    '__incomplete_message_id__' + repr(typed_id_key),
+                )
+        # Canonical incomplete identity must win over the legacy partial arm:
+        # persistence keys `_partial + incomplete` rows by typed message id too.
         if msg.get('_partial'):
             reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
             return (
@@ -6827,6 +6858,7 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
+    previous_display, _ = _collapse_duplicate_incomplete_message_ids(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -6877,6 +6909,8 @@ def _merge_display_messages_after_agent_result(
     # would otherwise slip into the merged transcript as a real delta. (#5334)
     previous_context = _drop_synthetic_control_messages(previous_context)
     result_messages = _drop_synthetic_control_messages(result_messages)
+    previous_context, _ = _collapse_duplicate_incomplete_message_ids(previous_context)
+    result_messages, _ = _collapse_duplicate_incomplete_message_ids(result_messages)
     if not result_messages:
         return previous_display
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -10841,8 +10875,13 @@ def _run_agent_streaming(
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
                 try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    from api.models import retire_session_sidecar
+                    sidecar_path = Path(s.path)
+                    retire_session_sidecar(
+                        s.session_id,
+                        sidecar_path=sidecar_path,
+                        record_deleted_tombstone=False,
+                    )
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions
