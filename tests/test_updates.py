@@ -654,7 +654,14 @@ def test_force_update_dirty_stable_reset_failure_reports_head(tmp_path, monkeypa
         ['clean', '-fd'],
         ['reset', '--hard', 'HEAD'],
     ]
-    restart.assert_not_called()
+    # Mutation may have started (checkout/clean/reset ran): the failure is a
+    # partial-mutation failure — the tree may be mixed, so the wrapper must
+    # transfer ownership to a bounded replacement instead of serving again
+    # (issue #6992 re-gate: do not infer coherence from the absence of
+    # restart_scheduled).
+    restart.assert_called_once_with()
+    assert updates.update_in_progress() is True
+    updates.reset_update_freeze()
 
 
 @pytest.mark.parametrize('reset_ok', [True, False])
@@ -703,7 +710,14 @@ def test_force_update_clean_failure_preserves_reset_boundary(tmp_path, monkeypat
         restart.assert_called_once_with()
     else:
         assert result == {'ok': False, 'message': 'Force reset to origin/main failed'}
-        restart.assert_not_called()
+        # Mutation may have started (checkout/clean/reset ran): the failure is
+        # a partial-mutation failure — the tree may be mixed, so the wrapper
+        # must transfer ownership to a bounded replacement instead of serving
+        # again (issue #6992 re-gate: do not infer coherence from the absence
+        # of restart_scheduled).
+        restart.assert_called_once_with()
+        assert updates.update_in_progress() is True
+        updates.reset_update_freeze()
 
 
 def test_check_for_updates_can_skip_agent_repo(tmp_path):
