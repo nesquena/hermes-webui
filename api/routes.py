@@ -12682,6 +12682,22 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+def _serve_worker_identity_unavailable(handler) -> bool:
+    """Refuse a worker update when complete static-byte identity is unavailable."""
+    data = (
+        "// Hermes static asset identity is unavailable; "
+        "service-worker update refused.\n"
+    ).encode("utf-8")
+    handler.send_response(503)
+    handler.send_header("Content-Type", "application/javascript; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Service-Worker-Allowed", "/")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+    return True
+
+
 _SHUTDOWN_LOG_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -12812,6 +12828,14 @@ _INDEX_SHELL_CACHE: dict = {}
 _INDEX_SHELL_CACHE_LOCK = threading.Lock()
 
 
+_ASSET_IDENTITY_UNAVAILABLE_SUFFIX = "%2Fidentity-unavailable"
+_ASSET_IDENTITY_UNAVAILABLE_TOKEN = "asset-identity-unavailable"
+
+
+def _asset_identity_is_available(version_token: str) -> bool:
+    return not version_token.endswith(_ASSET_IDENTITY_UNAVAILABLE_SUFFIX)
+
+
 def _static_content_identity(static_root: Path) -> str:
     """Hash normalized paths and current bytes for every static resource.
 
@@ -12855,7 +12879,10 @@ def _assets_cache_bust_token(static_root: Path) -> str:
         )
         return quote(f"{WEBUI_VERSION}+a{fingerprint.hexdigest()[:10]}", safe="")
     except Exception:
-        return quote(WEBUI_VERSION, safe="")
+        # Preserve the historical string-returning helper for callers that only
+        # need a display/version fallback, while marking that identity is absent.
+        # Cache consumers must reject this explicit suffix as a cache signature.
+        return quote(WEBUI_VERSION, safe="") + _ASSET_IDENTITY_UNAVAILABLE_SUFFIX
 
 
 def _render_index_shell_base() -> str:
@@ -12867,6 +12894,14 @@ def _render_index_shell_base() -> str:
     """
     index_path = api_config.get_index_html_path()
     version_token = _assets_cache_bust_token(api_config.get_static_root())
+    if not _asset_identity_is_available(version_token):
+        # Metadata cannot authorize reuse when some inventoried bytes could not
+        # be read. Read the current index every time and never cache this path.
+        return (
+            index_path.read_text(encoding="utf-8")
+            .replace("__WEBUI_VERSION__", _ASSET_IDENTITY_UNAVAILABLE_TOKEN)
+            .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
+        )
     st = index_path.stat()
     sig = (index_path, version_token, st.st_size, st.st_mtime_ns)
     with _INDEX_SHELL_CACHE_LOCK:
@@ -13681,10 +13716,11 @@ def handle_get(handler, parsed) -> bool:
         static_root = api_config.get_static_root()
         sw_path = (static_root / "sw.js").resolve()
         if sw_path.exists():
-            # Inject the current git-derived version as the cache name so the
-            # service worker cache busts automatically on every new deploy.
+            # Inject a cache name covering both version and bundle bytes.
             # The token also changes for bundle edits via _assets_cache_bust_token, not only for a new WEBUI_VERSION deploy.
             version_token = _assets_cache_bust_token(static_root)
+            if not _asset_identity_is_available(version_token):
+                return _serve_worker_identity_unavailable(handler)
             text = sw_path.read_text(encoding="utf-8").replace(
                 "__WEBUI_VERSION__", version_token
             )

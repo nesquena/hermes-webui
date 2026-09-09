@@ -14,10 +14,11 @@ import struct
 import time
 import zlib
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import api.config as api_config
 import api.routes as routes
+from api.updates import WEBUI_VERSION
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -177,6 +178,67 @@ def test_shell_cache_and_worker_agree_after_nested_bundle_mutation(
     second_worker_token = worker_text.rsplit("hermes-shell-", 1)[1].rstrip("';\n")
     assert second_shell_token != first_shell_token
     assert second_worker_token == second_shell_token
+
+
+def test_unavailable_identity_does_not_authorize_cached_shell_reuse(
+    tmp_path, monkeypatch
+):
+    """An unreadable inventoried asset must not make version-only metadata stable."""
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    index_path = static_root / "index.html"
+    index_path.write_text(
+        'old <script src="static/ui.js?v=__WEBUI_VERSION__"></script>',
+        encoding="utf-8",
+    )
+    bundle = static_root / "ui.js"
+    bundle.write_bytes(b"alpha")
+    (static_root / "sw.js").write_text(
+        "const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';",
+        encoding="utf-8",
+    )
+    unavailable = static_root / "unreadable.txt"
+    unavailable.write_bytes(b"identity input")
+
+    monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
+    monkeypatch.setattr(api_config, "get_index_html_path", lambda: index_path)
+    monkeypatch.setattr(routes, "_INDEX_SHELL_CACHE", {})
+    real_read_bytes = Path.read_bytes
+
+    def fail_unavailable_read(path):
+        if path == unavailable:
+            raise PermissionError("controlled inventory failure")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_unavailable_read)
+
+    first = routes._render_index_shell_base()
+    assert first.startswith("old ")
+    assert "base" not in routes._INDEX_SHELL_CACHE
+
+    index_stat = index_path.stat()
+    index_path.write_text(
+        'new <script src="static/ui.js?v=__WEBUI_VERSION__"></script>',
+        encoding="utf-8",
+    )
+    os.utime(index_path, ns=(index_stat.st_atime_ns, index_stat.st_mtime_ns))
+    bundle.write_bytes(b"bravo")
+    assert index_path.stat().st_mtime_ns == index_stat.st_mtime_ns
+    second = routes._render_index_shell_base()
+
+    assert second.startswith("new ")
+    assert second != first
+    assert routes._ASSET_IDENTITY_UNAVAILABLE_TOKEN in second
+    assert quote(WEBUI_VERSION, safe="") not in second
+    assert "base" not in routes._INDEX_SHELL_CACHE
+
+    worker_handler = _RouteHandler()
+    assert routes.handle_get(worker_handler, urlparse("http://test/sw.js")) is True
+    assert worker_handler.status == 503
+    assert ("Cache-Control", "no-store") in worker_handler.sent_headers
+    assert quote(WEBUI_VERSION, safe="") not in bytes(worker_handler.body).decode(
+        "utf-8"
+    )
 
 
 def test_sw_route_uses_bundle_fingerprint_token():
