@@ -29,6 +29,7 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
+    parse_reasoning_effort,
     register_active_run,
     unregister_active_run,
     unregister_stream_owner,
@@ -394,6 +395,147 @@ def _auto_approve_gateway_run(
     )
 
 
+def _gateway_reasoning_effort_label(reasoning_effort):
+    """Translate the resolved gateway request value to display metadata."""
+    value = str(reasoning_effort or "").strip().lower()
+    if not value:
+        return None
+    return "off" if value == "none" else value
+
+
+def _gateway_request_model_options(reasoning_effort, service_tier=None) -> dict[str, Any]:
+    """Build the model-options envelope consumed by the Gateway Agent."""
+    model_options: dict[str, Any] = {}
+    reasoning = parse_reasoning_effort(reasoning_effort)
+    if reasoning is not None:
+        model_options["reasoning"] = reasoning
+    normalized_service_tier = str(service_tier or "").strip().lower()
+    if normalized_service_tier == "priority":
+        model_options["service_tier"] = normalized_service_tier
+    return model_options
+
+
+def _gateway_accepted_reasoning_effort_label(model_options: dict[str, Any]) -> str | None:
+    """Return display metadata from the model options accepted for transport."""
+    reasoning = model_options.get("reasoning")
+    if not isinstance(reasoning, dict):
+        return None
+    if reasoning.get("enabled") is False:
+        return "off"
+    if reasoning.get("enabled") is True:
+        return _gateway_reasoning_effort_label(reasoning.get("effort"))
+    return None
+
+
+def _gateway_effective_runtime_metadata(payload: dict) -> dict:
+    """Extract display-safe effective runtime fields from a terminal payload.
+
+    Gateway versions expose the answered identity either in ``runtime`` (the
+    current runs-API contract) or routing metadata using ``used_*`` fields.
+    Requested top-level ``model`` values are deliberately ignored: without an
+    explicit runtime/routing container they are not proof of what answered.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    usage_value = payload.get("usage")
+    usage = usage_value if isinstance(usage_value, dict) else {}
+
+    runtime = {}
+    for container in (payload, usage):
+        for key in ("runtime", "effective_runtime"):
+            value = container.get(key)
+            if isinstance(value, dict):
+                runtime.update(value)
+    effective_value = runtime.get("effective")
+    effective = effective_value if isinstance(effective_value, dict) else {}
+
+    routing = {}
+    for container in (payload, usage):
+        for key in ("routing", "routing_metadata", "gateway_routing", "llm_gateway"):
+            value = container.get(key)
+            if isinstance(value, dict):
+                routing.update(value)
+
+    has_explicit_runtime = bool(runtime or routing)
+    has_explicit_routing_fields = any(
+        key in payload or key in usage
+        for key in ("used_model", "used_provider", "effective_model", "effective_provider")
+    )
+    if not has_explicit_runtime and not has_explicit_routing_fields:
+        return {}
+
+    def _clean(value, limit=240):
+        if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+            return None
+        text = str(value).strip()
+        return text[:limit] if text else None
+
+    runtime_sources = (effective, runtime, routing)
+    direct_sources = (payload, usage)
+
+    def _first(sources, keys, *, limit=240):
+        for source in sources:
+            for key in keys:
+                value = _clean(source.get(key), limit=limit)
+                if value:
+                    return value
+        return None
+
+    result = {}
+    model = _first(runtime_sources, ("effective_model", "used_model", "model"))
+    if model is None:
+        model = _first(direct_sources, ("effective_model", "used_model"))
+    provider = _first(
+        runtime_sources,
+        ("effective_provider", "used_provider", "provider", "provider_id"),
+        limit=80,
+    )
+    if provider is None:
+        provider = _first(
+            direct_sources, ("effective_provider", "used_provider"), limit=80
+        )
+    if model:
+        result["model"] = model
+    if provider:
+        result["provider"] = provider
+
+    sources = (*runtime_sources, *direct_sources)
+    effort_value = _first(
+        sources,
+        ("effective_reasoning_effort", "reasoning_effort", "effort"),
+        limit=32,
+    )
+    reasoning_cfg = None
+    for source in sources:
+        for key in ("reasoning_config", "reasoning"):
+            value = source.get(key)
+            if isinstance(value, dict):
+                reasoning_cfg = value
+                break
+        if reasoning_cfg is not None:
+            break
+    if reasoning_cfg is not None:
+        if reasoning_cfg.get("enabled") is False:
+            effort_value = "off"
+        elif effort_value is None:
+            effort_value = _clean(reasoning_cfg.get("effort"), limit=32)
+    effort_label = _gateway_reasoning_effort_label(effort_value)
+    if effort_label is not None:
+        result["reasoning_effort"] = effort_label
+    return result
+
+
+def _gateway_merge_effective_runtime(usage: dict, payload: dict) -> None:
+    """Accumulate terminal effective metadata under a private transient key."""
+    effective = _gateway_effective_runtime_metadata(payload)
+    if not effective:
+        return
+    current = usage.get("_effective_runtime")
+    merged = dict(current) if isinstance(current, dict) else {}
+    merged.update(effective)
+    usage["_effective_runtime"] = merged
+
+
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
     """Return redacted Gateway-backed chat configuration status."""
     mode = webui_chat_backend_mode(config_data, environ)
@@ -747,6 +889,7 @@ def _run_gateway_runs_api_streaming(
                     if stream_id in STREAM_PARTIAL_TEXT:
                         STREAM_PARTIAL_TEXT[stream_id] = output
                 usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+                _gateway_merge_effective_runtime(usage, payload)
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
@@ -770,6 +913,7 @@ def _run_gateway_runs_api_streaming(
                     STREAM_PARTIAL_TEXT[stream_id] += delta
                 put_gateway_event("token", {"text": delta})
             usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
+            _gateway_merge_effective_runtime(usage, payload)
     return final_text, usage
 
 
@@ -985,7 +1129,7 @@ def _run_gateway_chat_streaming(
     s = None
     final_text = ""
     terminal_error = ""
-    usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
+    usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
         from api.config import get_config  # imported lazily to avoid config-cycle churn
@@ -1007,6 +1151,19 @@ def _run_gateway_chat_streaming(
             )
         except Exception:
             _gw_overrides = {}
+        request_model_options = _gateway_request_model_options(
+            reasoning_effort,
+            _gw_overrides.get("service_tier"),
+        )
+        reasoning_effort_label = _gateway_accepted_reasoning_effort_label(
+            request_model_options
+        )
+        put_gateway_event("run_meta", {
+            "session_id": session_id,
+            "model": model,
+            "provider": model_provider or "",
+            "reasoning_effort": reasoning_effort_label,
+        })
         _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
         _use_runs_api = _runs_api_enabled and gateway_supports_approval(base_url, api_key)
         if not _use_runs_api and runs_api_pending_marked:
@@ -1054,10 +1211,8 @@ def _run_gateway_chat_streaming(
             body_extras = {}
             if model_provider:
                 body_extras["provider"] = model_provider
-            if reasoning_effort is not None:
-                body_extras["reasoning_effort"] = reasoning_effort
-            if _gw_overrides.get("service_tier"):
-                body_extras["service_tier"] = _gw_overrides["service_tier"]
+            if request_model_options:
+                body_extras["model_options"] = request_model_options
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
@@ -1130,10 +1285,8 @@ def _run_gateway_chat_streaming(
             }
             if model_provider:
                 body["provider"] = model_provider
-            if reasoning_effort is not None:
-                body["reasoning_effort"] = reasoning_effort
-            if _gw_overrides.get("service_tier"):
-                body["service_tier"] = _gw_overrides["service_tier"]
+            if request_model_options:
+                body["model_options"] = request_model_options
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),
@@ -1242,6 +1395,48 @@ def _run_gateway_chat_streaming(
                         put_gateway_event("token", {"text": delta})
                     usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
             usage.update({k: v for k, v in _gateway_stream_usage(last_payload).items() if v})
+            _gateway_merge_effective_runtime(usage, last_payload)
+
+        # Reconcile request-side attribution with the runtime that actually
+        # answered.  The private accumulator is removed before done.usage is
+        # emitted so only the public effective fields leave this worker.
+        effective_runtime_value = usage.pop("_effective_runtime", {})
+        effective_runtime = (
+            effective_runtime_value if isinstance(effective_runtime_value, dict) else {}
+        )
+        effective_model = str(effective_runtime.get("model") or model or "").strip()
+        effective_provider = str(effective_runtime.get("provider") or model_provider or "").strip()
+        effective_reasoning_effort_label = effective_runtime.get(
+            "reasoning_effort", reasoning_effort_label
+        )
+        effective_gateway_routing = None
+        if effective_runtime:
+            from api.streaming import _normalize_gateway_routing_metadata
+
+            effective_gateway_routing = _normalize_gateway_routing_metadata(
+                {
+                    "used_model": effective_model,
+                    "used_provider": effective_provider,
+                    "requested_model": model,
+                    "requested_provider": model_provider,
+                },
+                requested_model=model,
+                requested_provider=model_provider,
+            )
+            replacement_meta = {
+                "session_id": session_id,
+                "model": effective_model,
+                "provider": effective_provider,
+                "reasoning_effort": effective_reasoning_effort_label,
+            }
+            requested_meta = {
+                "session_id": session_id,
+                "model": model,
+                "provider": model_provider or "",
+                "reasoning_effort": reasoning_effort_label,
+            }
+            if replacement_meta != requested_meta:
+                put_gateway_event("run_meta", replacement_meta)
         assistant_text = final_text.strip()
         if terminal_error:
             error_payload = _settle_gateway_terminal_error(
@@ -1293,6 +1488,12 @@ def _run_gateway_chat_streaming(
                 active_turn_identity.get("timestamp") or now
             )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            if effective_model:
+                assistant_msg["_usedModel"] = effective_model
+            if effective_reasoning_effort_label is not None:
+                assistant_msg["_reasoningEffort"] = effective_reasoning_effort_label
+            if effective_gateway_routing is not None:
+                assistant_msg["_gatewayRouting"] = effective_gateway_routing
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
@@ -1360,6 +1561,9 @@ def _run_gateway_chat_streaming(
             s.pending_started_at = None
             s.pending_user_source = None
             s.workspace = str(workspace)
+            # Runtime attribution belongs to the completed assistant row.  Keep
+            # the session's selected route request-owned so a Gateway fallback
+            # does not silently redirect the next turn to the fallback runtime.
             s.model = model
             s.model_provider = model_provider
 
@@ -1439,6 +1643,12 @@ def _run_gateway_chat_streaming(
                 goal_exc,
             )
         from api.streaming import _session_payload_with_full_messages
+        if effective_model:
+            usage["used_model"] = effective_model
+        if effective_provider:
+            usage["used_provider"] = effective_provider
+        if effective_reasoning_effort_label is not None:
+            usage["reasoning_effort"] = effective_reasoning_effort_label
         gateway_session_payload = _session_payload_with_full_messages(s, tool_calls=[])
         put_gateway_event("done", {"session": redact_session_data(gateway_session_payload), "usage": usage})
         put_gateway_event("stream_end", {"session_id": session_id})

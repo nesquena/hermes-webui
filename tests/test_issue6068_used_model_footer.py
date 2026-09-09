@@ -207,7 +207,7 @@ def test_settled_footer_orders_model_chip_after_duration():
 
 
 def test_transparent_turn_footer_includes_model_between_duration_and_ttft():
-    assert "function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle)" in UI_JS
+    assert "function _transparentTurnFooterHtml(durationText, modelText, ttftText, tokensText, statusText, modelTitle, effortText)" in UI_JS
     assert 'class="lf-model"' in UI_JS
     assert "modelText=_usedModelTurnChipLabel(msg)" in UI_JS
     assert ".transparent-turn-footer .lf-model" in STYLE_CSS

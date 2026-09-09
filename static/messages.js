@@ -1925,7 +1925,7 @@ async function send(){
       const _startedAt=typeof startData?.pending_started_at==='number'
         ? startData.pending_started_at
         : (S.session.pending_started_at||Date.now()/1000);
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+      showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
     }
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Third optimistic pass: stream_id is now known, so the row can reconcile
@@ -1985,7 +1985,7 @@ async function startRegeneration(sessionId, regenerationRevision){
     if(!INFLIGHT[sid])INFLIGHT[sid]={messages:S.messages.slice(),uploaded:[],toolCalls:[]};
     markInflight(sid,streamId);
     if(typeof saveInflightState==='function')saveInflightState(sid,{streamId,messages:S.messages.slice(),uploaded:[],toolCalls:[]});
-    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{startedAt:S.session.pending_started_at||Date.now()/1000});
+    if(typeof showLiveRunStatus==='function')showLiveRunStatus(sid,{streamId,startedAt:S.session.pending_started_at||Date.now()/1000});
     if(typeof updateSendBtn==='function')updateSendBtn();
     if(typeof renderSessionList==='function')void renderSessionList();
     attachLiveStream(sid,streamId,[]);
@@ -2061,10 +2061,11 @@ function closeLiveStream(sessionId, streamId, source){
   // thinking/tool content (only the elapsed clock survives). Capturing here
   // guarantees switch-back restores the exact state shown at switch-away. (#3668)
   if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(sessionId);
-  // Stop the live footer timer/status for the pane that is being detached; the
-  // reattach path will rebuild it from INFLIGHT/server state if the user returns.
-  if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(sessionId);
-  if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
+  // Stop the live footer timer/status only when this stream still owns it. A
+  // successor can already have claimed the same session before the old source
+  // reaches stream_end, and stale teardown must not hide the successor footer.
+  if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId,live.streamId||streamId);
+  else if(typeof _clearLiveRunStatusTimer==='function') _clearLiveRunStatusTimer(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
   _resumeSessionStreamAfterLiveChat(sessionId);
@@ -2128,6 +2129,7 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  if(typeof _claimLiveRunStatusOwner==='function') _claimLiveRunStatusOwner(activeSid,streamId);
   const reconnecting=!!options.reconnecting;
   const _extensionTurnStartedAt=(S.session&&S.session.session_id===activeSid&&Number.isFinite(S.session.pending_started_at))
     ?S.session.pending_started_at
@@ -2180,7 +2182,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
       const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
-      showLiveRunStatus(activeSid,{startedAt:_startedAt});
+      showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
     }
     return;
   }
@@ -2192,7 +2194,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // hides the status while tearing down stale EventSource ownership.
   if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
     const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
-    showLiveRunStatus(activeSid,{startedAt:_startedAt});
+    showLiveRunStatus(activeSid,{streamId,startedAt:_startedAt});
   }
   _suspendSessionStreamForLiveChat(activeSid);
 
@@ -6112,6 +6114,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     });
 
+    // run_meta: backend announces the run's effective model + reasoning effort
+    // up front so the live footer shows them during streaming, not only after
+    // the turn settles. Replayed by the run journal on reconnect.
+    source.addEventListener('run_meta',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        if(d&&d.session_id&&activeSid&&d.session_id!==activeSid)return;
+        if(typeof updateLiveRunStatus==='function'){
+          updateLiveRunStatus({sessionId:activeSid,streamId,meta:{
+            model:String((d&&d.model)||''),
+            effort:String((d&&d.reasoning_effort)||''),
+          }});
+        }
+      }catch(_){}
+    });
+
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
@@ -6283,6 +6301,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
               if(typeof d.usage.duration_seconds==='number'){
                 lastAsst._turnDuration=d.usage.duration_seconds;
+              }
+              if(typeof d.usage.reasoning_effort==='string'&&d.usage.reasoning_effort){
+                lastAsst._reasoningEffort=d.usage.reasoning_effort;
+              }
+              if(typeof d.usage.used_model==='string'&&d.usage.used_model){
+                lastAsst._usedModel=d.usage.used_model;
               }
               if(typeof d.usage.tps==='number'&&d.usage.tps>0){
                 lastAsst._turnTps=d.usage.tps;
@@ -6931,7 +6955,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','run_meta','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -6954,7 +6978,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return `${m.role}|${ts}|${body.slice(0,160)}`;
   }
-  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_usedModel','_reasoningEffort','_statusCard','_anchor_stream_id','_anchor_activity_scene'];
   function _isHistoricalAnchorActivityScene(scene){
     if(!scene||typeof scene!=='object') return false;
     const identity=scene.identity&&typeof scene.identity==='object'?scene.identity:null;

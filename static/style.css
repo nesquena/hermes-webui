@@ -4467,6 +4467,7 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-turn-footer .lf-sep{opacity:.4;}
 .transparent-turn-footer .lf-status{color:var(--muted);opacity:.85;}
 .transparent-turn-footer .lf-model{color:var(--muted);opacity:.85;}
+.transparent-turn-footer .lf-effort{color:var(--muted);opacity:.85;}
 .transparent-turn-footer .lf-ttft{color:var(--accent);opacity:.9;}
 .transparent-turn-footer .lf-tokens{font-variant-numeric:tabular-nums;}
 
@@ -4479,7 +4480,7 @@ body.resizing .sidebar{transition:none!important;}
   padding:0 24px;
 }
 /* LiveFooter: inline stream spark · elapsed · tokens · status */
-.live-run-status{display:flex;align-items:center;gap:8px;padding-left:0;margin:2px 0 6px;margin-left:var(--msg-rail);max-width:var(--msg-max);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1;}
+.live-run-status{display:flex;align-items:center;flex-wrap:wrap;gap:8px;row-gap:4px;padding-left:0;margin:2px 0 6px;margin-left:var(--msg-rail);max-width:var(--msg-max);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1.3;}
 .live-footer{display:flex;align-items:center;gap:8px;padding-left:var(--worklog-rail);margin:2px 0 6px;margin-left:0;max-width:var(--msg-max);font-size:13px;color:var(--muted);}
 .live-run-status[hidden]{display:none;}
 .lf-spark{color:var(--accent);font-size:13px;display:inline-block;animation:lfspin 1.7s linear infinite;line-height:1;}
@@ -4493,8 +4494,9 @@ body.resizing .sidebar{transition:none!important;}
 .lf-sep{opacity:.4;}
 .lf-tokens{font-variant-numeric:tabular-nums;}
 .lf-status{color:var(--muted);opacity:.85;}
+.live-run-status .lf-model,.live-run-status .lf-effort{color:var(--muted);opacity:.85;}
 @media(max-width:600px){
-  .live-run-status{padding-left:0;font-size:12px;}
+  .live-run-status{padding-left:0;font-size:12px;line-height:1.35;}
   .live-footer{padding-left:var(--worklog-rail);font-size:12px;}
 }
 .compression-block{
@@ -6170,6 +6172,7 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-duration-inline,
 .msg-gateway-inline,
 .msg-used-model-inline,
+.msg-reasoning-inline,
 .gateway-failover-inline,
 .msg-model-warning-inline {
   font-size: 11px;

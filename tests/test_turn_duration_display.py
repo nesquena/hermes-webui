@@ -4,6 +4,7 @@ The WebUI should expose how long an agent turn took, using backend timing so
 reload/reconnect does not lose the measurement.
 """
 from pathlib import Path
+import re
 
 REPO = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -78,7 +79,10 @@ def test_active_compact_activity_elapsed_timer_uses_persisted_start_time():
         "send() should copy chat-start pending_started_at into S.session before "
         "attaching the live stream."
     )
-    assert "showLiveRunStatus(activeSid,{startedAt:_startedAt});" in MESSAGES_JS, (
+    assert re.search(
+        r"showLiveRunStatus\(activeSid,\{[^}]*startedAt:_startedAt[^}]*\}\);",
+        MESSAGES_JS,
+    ), (
         "The first chat-start path should show the bottom live footer timer as soon "
         "as stream_id and pending_started_at are known; reconnect should not be the "
         "only path that restores it."
@@ -109,7 +113,10 @@ def test_live_footer_timer_is_re_synced_after_message_rerender():
         "renderMessages() should call the live-status sync helper after it "
         "rebuilds msgInner."
     )
-    assert "showLiveRunStatus(sid,{startedAt,tokens:_liveRunStatusTokens});" in UI_JS, (
+    assert re.search(
+        r"showLiveRunStatus\(sid,\{[^}]*startedAt[^}]*tokens:_liveRunStatusTokens[^}]*\}\);",
+        UI_JS,
+    ), (
         "If the timer node was torn down during a rerender, the helper should "
         "recreate it for the active session."
     )

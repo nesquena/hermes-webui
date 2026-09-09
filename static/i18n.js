@@ -696,6 +696,8 @@ const LOCALES = {
     settings_label_transparent_stream_event_timestamps: 'Show Transparent Stream event timestamps',
     settings_desc_transparent_stream_event_timestamps: 'Keeps the response footer time visible while hiding the per-event timestamp chips.',
     first_token_time: 'Time to first token',
+    reasoning_effort: 'Effective reasoning effort',
+    reasoning_off: 'reasoning off',
     processed_elapsed: _i18nProcessedElapsedEn,
     worklog_thinking: 'Thinking',
     tool_target_skill_suffix: 'skill',
@@ -1782,6 +1784,8 @@ const LOCALES = {
   },
 
   it: {
+    reasoning_effort: 'Sforzo di ragionamento effettivo',
+    reasoning_off: 'ragionamento disattivato',
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -3541,6 +3545,8 @@ const LOCALES = {
   },
 
   ja: {
+    reasoning_effort: '実際の推論エフォート',
+    reasoning_off: '推論オフ',
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -5305,6 +5311,8 @@ const LOCALES = {
   },
 
   ru: {
+    reasoning_effort: 'Фактическое усилие рассуждения',
+    reasoning_off: 'рассуждение выключено',
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -7043,6 +7051,8 @@ const LOCALES = {
   },
 
   es: {
+    reasoning_effort: 'Esfuerzo de razonamiento efectivo',
+    reasoning_off: 'razonamiento desactivado',
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -8748,6 +8758,8 @@ const LOCALES = {
   },
 
   de: {
+    reasoning_effort: 'Effektiver Reasoning-Aufwand',
+    reasoning_off: 'Reasoning deaktiviert',
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -10447,6 +10459,8 @@ const LOCALES = {
   },
 
   zh: {
+    reasoning_effort: '实际推理强度',
+    reasoning_off: '推理已关闭',
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -12140,6 +12154,8 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    reasoning_effort: '實際推理強度',
+    reasoning_off: '推理已關閉',
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -13902,6 +13918,8 @@ const LOCALES = {
   },
 
   pt: {
+    reasoning_effort: 'Esforço de raciocínio efetivo',
+    reasoning_off: 'raciocínio desativado',
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -15480,6 +15498,8 @@ const LOCALES = {
     wiki_not_configured: 'Wiki not configured',
   },
   ko: {
+    reasoning_effort: '실제 추론 강도',
+    reasoning_off: '추론 꺼짐',
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17906,6 +17926,8 @@ const LOCALES = {
     settings_label_transparent_stream_event_timestamps: 'Show Transparent Stream event timestamps',
     settings_desc_transparent_stream_event_timestamps: 'Keeps the response footer time visible while hiding the per-event timestamp chips.',
     first_token_time: 'Délai jusqu\'au premier jeton',
+    reasoning_effort: 'Effort de raisonnement effectif',
+    reasoning_off: 'raisonnement désactivé',
     processed_elapsed: _i18nProcessedElapsedEn,
     worklog_thinking: 'Réflexion',
     tool_target_skill_suffix: 'compétence',
@@ -18961,6 +18983,8 @@ const LOCALES = {
   },
 
   cs: {
+    reasoning_effort: 'Skutečná úroveň uvažování',
+    reasoning_off: 'uvažování vypnuto',
     _label: 'Čeština',
     _lang: 'cs',
     _speech: 'cs-CZ',
@@ -20679,6 +20703,8 @@ const LOCALES = {
     tool_summary_join: _i18nToolSummaryJoinCs,
   },
   tr: {
+    reasoning_effort: 'Gerçek akıl yürütme çabası',
+    reasoning_off: 'akıl yürütme kapalı',
 
 
 
@@ -22433,6 +22459,8 @@ const LOCALES = {
   
   },
   pl: {
+    reasoning_effort: 'Rzeczywisty poziom rozumowania',
+    reasoning_off: 'rozumowanie wyłączone',
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -24187,6 +24215,8 @@ const LOCALES = {
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
   },
   vi: {
+    reasoning_effort: 'Mức suy luận thực tế',
+    reasoning_off: 'đã tắt suy luận',
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',
