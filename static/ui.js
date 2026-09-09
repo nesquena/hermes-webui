@@ -630,6 +630,7 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
+  if(typeof _isProviderErrorCardMessage==='function'&&_isProviderErrorCardMessage(m)&&m._dismissed===true) return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
@@ -11264,6 +11265,62 @@ function _isRecoveryControlMessage(m){
   // interrupted" card carries 'Interruption details' and must stay visible.
   return _isRecoveryControlMessageText(msgContent(m)||String(m.content||''));
 }
+function _isProviderErrorCardMessage(m){
+  return !!(m&&typeof m._provider_error_dismiss_ref==='string'&&/^[0-9a-f]{64}$/.test(m._provider_error_dismiss_ref));
+}
+function _providerErrorDismissalButtonHtml(message, rawIdx, readOnlySession){
+  const dismissRef=message&&typeof message._provider_error_dismiss_ref==='string' ? message._provider_error_dismiss_ref : '';
+  if(readOnlySession||!/^[0-9a-f]{64}$/.test(dismissRef)||message._dismissed===true) return '';
+  const session=S&&S.session||{};
+  if(!!S.busy||!!S.activeStreamId||!!session.active_stream_id||!!session.pending_user_message||!!session.pending_started_at||!!session.has_pending_user_message) return '';
+  const label=esc(t('dismiss_error_card'));
+  return `<button type="button" class="msg-action-btn msg-dismiss-error-btn" title="${label}" aria-label="${label}" data-dismiss-ref="${esc(dismissRef)}" onclick="dismissProviderError(this)">${li('trash-2',13)}</button>`;
+}
+async function dismissProviderError(button){
+  if(!button||!S||!S.session) return;
+  const sid=String(S.session.session_id||'');
+  const dismissRef=String(button.dataset&&button.dataset.dismissRef||'');
+  if(!sid||!/^[0-9a-f]{64}$/.test(dismissRef)) return;
+  const generation=typeof _loadSessionGeneration==='number'?_loadSessionGeneration:null;
+  const ownsSessionId=()=>!!(S.session&&S.session.session_id===sid);
+  const ownsCurrentSession=()=>!!(S.session&&S.session.session_id===sid)&&(
+    generation===null||typeof _loadSessionGeneration!=='number'||_loadSessionGeneration===generation
+  );
+  button.disabled=true;
+  button.setAttribute('aria-busy','true');
+  try{
+    const confirmed=await showConfirmDialog({
+      title:t('dismiss_error_card'),
+      message:t('dismiss_error_confirm'),
+      confirmLabel:t('remove'),
+      danger:true,
+      focusCancel:true
+    });
+    if(!ownsCurrentSession()) return;
+    if(!confirmed) return;
+    await api('/api/session/message/dismiss-error',{method:'POST',body:JSON.stringify({
+      session_id:sid,dismiss_ref:dismissRef
+    })});
+    if(!ownsCurrentSession()) return;
+    await loadSession(sid,{force:true,externalRefreshReason:'dismiss-provider-error'});
+    if(!ownsSessionId()) return;
+  }catch(err){
+    if(!ownsCurrentSession()) return;
+    if(Number(err&&err.status)===409){
+      showToast(t('dismiss_error_stale'));
+      try{
+        await loadSession(sid,{force:true,externalRefreshReason:'dismiss-provider-error-conflict'});
+      }catch(_){ /* keep the current transcript when refresh also fails */ }
+    }else{
+      showToast(t('dismiss_error_failed'));
+    }
+  }finally{
+    if(ownsSessionId()){
+      button.disabled=false;
+      button.removeAttribute('aria-busy');
+    }
+  }
+}
 function _assistantAnchorSceneFinalAnswerText(m){
   const scene=m&&m._anchor_activity_scene&&typeof m._anchor_activity_scene==='object'
     ? m._anchor_activity_scene
@@ -17238,6 +17295,7 @@ function renderMessages(options){
       : false;
     const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const dismissErrorBtn = !isUser&&typeof _providerErrorDismissalButtonHtml==='function' ? _providerErrorDismissalButtonHtml(m, rawIdx, readOnlySession) : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -17254,7 +17312,7 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${dismissErrorBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;

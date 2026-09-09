@@ -12,9 +12,12 @@ import uuid
 import copy
 import hashlib
 import math
+import os
+import threading
 from dataclasses import dataclass
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from bisect import bisect_left
+from pathlib import Path
 from typing import Any
 
 from api.config import LOCK, _get_session_agent_lock
@@ -25,12 +28,587 @@ logger = logging.getLogger(__name__)
 
 AUTO_TITLE_LABELS = {'untitled', 'new chat'}
 
+_PROVIDER_ERROR_PUBLIC_ONLY_FIELDS = {
+    "_provider_error_dismiss_ref",
+    "_provider_error_dismissed",
+    "_anchor_activity_scene",
+    "_anchor_stream_id",
+    "api_content",
+}
+
+_PROVIDER_ERROR_PROJECTION_CACHE: dict[tuple, tuple[list[dict], str]] = {}
+_PROVIDER_ERROR_PROJECTION_CACHE_LOCK = threading.Lock()
+_PROVIDER_ERROR_PROJECTION_CACHE_MAX = 32
+
 
 class RegenerationUnavailable(Exception):
     def __init__(self, code: str, status: int = 409, message: str | None = None):
         super().__init__(message or code)
         self.code = code
         self.status = status
+
+
+class ProviderErrorDismissalUnavailable(Exception):
+    """Typed failure for a stale, foreign, or non-durable dismissal target."""
+
+    def __init__(self, code: str, status: int = 409, message: str | None = None):
+        super().__init__(message or code)
+        self.code = code
+        self.status = status
+
+
+@dataclass(frozen=True)
+class ProviderErrorDismissalPlan:
+    viewed_session_id: str
+    owner_session_id: str
+    owner_index: int
+    owner_revision: str
+    stable_id: str | None
+    row_digest: str
+    dismiss_ref: str
+
+
+def _provider_error_row_digest(row) -> str:
+    encoded = json.dumps(
+        row if isinstance(row, dict) else {},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _provider_error_reference_digest(row) -> str:
+    """Hash the durable row while excluding transport-only projection fields."""
+    reference_row = copy.deepcopy(row) if isinstance(row, dict) else {}
+    for key in {"_dismissed", *_PROVIDER_ERROR_PUBLIC_ONLY_FIELDS}:
+        reference_row.pop(key, None)
+    return _provider_error_row_digest(reference_row)
+
+
+def _provider_error_stable_id(row) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    for key in ("id", "_stable_id", "stable_id", "message_id"):
+        value = row.get(key)
+        if value not in (None, "") and isinstance(value, (str, int)) and not isinstance(value, bool):
+            return str(value)
+    return None
+
+
+def _provider_error_stable_id_conflicted(row) -> bool:
+    if not isinstance(row, dict):
+        return False
+    values = set()
+    for key in ("id", "_stable_id", "stable_id", "message_id"):
+        if key not in row or row[key] is None:
+            continue
+        if not isinstance(row[key], (str, int)) or isinstance(row[key], bool):
+            return True
+        if isinstance(row[key], str) and not row[key].strip():
+            return True
+        values.add(str(row[key]))
+    return len(values) > 1
+
+
+def _provider_error_api_content_matches(left, right) -> bool:
+    left_present = isinstance(left, dict) and left.get("api_content") not in (None, "")
+    right_present = isinstance(right, dict) and right.get("api_content") not in (None, "")
+    if left_present != right_present:
+        return False
+    return not left_present or left.get("api_content") == right.get("api_content")
+
+
+def _provider_error_row_is_dismissible(row) -> bool:
+    """Classify only terminal provider failures at the mutation owner."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("role") != "assistant" or row.get("_error") is not True:
+        return False
+    if _provider_error_stable_id_conflicted(row):
+        return False
+    if any(row.get(key) is not None for key in ("_compressionRecovery", "_statusCard", "recovery_control", "_pending_journal_recovery")):
+        return False
+    if row.get("type") == "interrupted" or row.get("interruption_cause"):
+        return False
+    label = str(row.get("provider_details_label") or "").strip().lower()
+    if label in {"cancellation details", "interruption details", "terminal state details"}:
+        return False
+    provider_type = str(row.get("_provider_error_type") or "").strip().lower()
+    if provider_type:
+        return provider_type in {
+            "error", "quota_exhausted", "rate_limit", "auth_mismatch", "model_not_found",
+            "no_response", "credential_pool_empty", "gateway_error", "gateway_http_error",
+            "gateway_auth_error", "gateway_empty_response",
+        }
+    if "provider_details" not in row:
+        return False
+    return not str(row.get("content") or "").strip().lower().startswith(
+        ("**task cancelled:", "**task canceled:", "**response interrupted:",
+         "**connection interrupted:", "**tool iteration limit reached:",
+         "**context compression exhausted:")
+    )
+
+
+def _provider_error_session_source(session) -> str:
+    values = {
+        _regeneration_source_class(value)
+        for value in (
+            getattr(session, "session_source", None),
+            getattr(session, "raw_source", None),
+            getattr(session, "source_tag", None),
+        )
+        if value not in (None, "")
+    }
+    try:
+        from api.routes import _state_db_session_source
+
+        state_source = _regeneration_source_class(
+            _state_db_session_source(str(getattr(session, "session_id", "") or ""))
+        )
+    except Exception:
+        state_source = ""
+    gateway_webui_source = values == {"webui"} and state_source == "api"
+    if state_source and state_source not in {"webui", "fork"} and not gateway_webui_source:
+        raise ProviderErrorDismissalUnavailable("read_only_session", 403)
+    explicit_source = next(iter(values)) if values else ""
+    source_conflict = bool(
+        values
+        and state_source
+        and explicit_source != state_source
+        and not (
+            (explicit_source == "fork" and state_source == "webui")
+            or (explicit_source == "webui" and state_source == "api")
+        )
+    )
+    if len(values) > 1 or source_conflict:
+        raise ProviderErrorDismissalUnavailable("ambiguous_source", 403)
+    if values:
+        return next(iter(values))
+    if state_source:
+        return state_source
+    raise ProviderErrorDismissalUnavailable("unknown_source", 403)
+
+
+def _provider_error_session_is_idle(session) -> bool:
+    if any(
+        getattr(session, key, None)
+        for key in (
+            "active_stream_id",
+            "pending_user_message",
+            "pending_started_at",
+            "pending_user_source",
+        )
+    ):
+        return False
+    if getattr(session, "pending_attachments", None):
+        return False
+    for row in getattr(session, "messages", None) or []:
+        if isinstance(row, dict) and row.get("_pending_journal_recovery"):
+            return False
+    return True
+
+
+def _provider_error_sidecar_is_available(session) -> bool:
+    try:
+        sidecar_path = session.path
+    except AttributeError:
+        return True
+    return bool(
+        not getattr(session, "_loaded_metadata_only", False)
+        and sidecar_path.exists()
+        and isinstance(getattr(session, "messages", None), list)
+    )
+
+
+def _provider_error_lineage_sessions(session) -> list:
+    """Resolve the durable sidecar owners for a viewed compression continuation."""
+    if getattr(session, "read_only", False) or getattr(session, "is_cli_session", False):
+        raise ProviderErrorDismissalUnavailable("read_only_session", 403)
+    source = _provider_error_session_source(session)
+    if not _provider_error_sidecar_is_available(session):
+        raise ProviderErrorDismissalUnavailable("owner_unavailable", 409)
+    if source not in {"webui", "fork"} or getattr(session, "pre_compression_snapshot", False):
+        raise ProviderErrorDismissalUnavailable("read_only_session", 403)
+    if not _provider_error_session_is_idle(session):
+        raise ProviderErrorDismissalUnavailable("session_active", 409)
+
+    sessions = [session]
+    seen = {str(getattr(session, "session_id", "") or "")}
+    current = session
+    for _ in range(20):
+        parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
+        if not parent_id:
+            break
+        if parent_id in seen:
+            raise ProviderErrorDismissalUnavailable("ambiguous_lineage", 409)
+        try:
+            parent = get_session(parent_id)
+        except (KeyError, OSError, ValueError) as exc:
+            raise ProviderErrorDismissalUnavailable("lineage_unavailable", 409) from exc
+        if parent is None:
+            raise ProviderErrorDismissalUnavailable("lineage_unavailable", 409)
+        if not getattr(parent, "pre_compression_snapshot", False):
+            break
+        if (
+            getattr(parent, "read_only", False)
+            or getattr(parent, "is_cli_session", False)
+            or str(getattr(parent, "profile", None) or "default")
+            != str(getattr(session, "profile", None) or "default")
+            or not _provider_error_sidecar_is_available(parent)
+        ):
+            raise ProviderErrorDismissalUnavailable("lineage_unavailable", 409)
+        parent_source = _provider_error_session_source(parent)
+        if source == "fork" and parent_source != "fork":
+            break
+        if source != "fork" and parent_source not in {"webui", "fork"}:
+            raise ProviderErrorDismissalUnavailable("lineage_unavailable", 409)
+        if not _provider_error_session_is_idle(parent):
+            raise ProviderErrorDismissalUnavailable("session_active", 409)
+        if len(sessions) == 1:
+            try:
+                from api.models import _session_message_visible_key
+
+                child_rows = getattr(session, "messages", None) or []
+                parent_rows = getattr(parent, "messages", None) or []
+                if len(child_rows) >= len(parent_rows) and all(
+                    _session_message_visible_key(child_rows[index])
+                    == _session_message_visible_key(parent_rows[index])
+                    for index in range(len(parent_rows))
+                ):
+                    return [session]
+            except Exception:
+                raise ProviderErrorDismissalUnavailable("lineage_unavailable", 409) from None
+        sessions.append(parent)
+        seen.add(parent_id)
+        current = parent
+    else:
+        raise ProviderErrorDismissalUnavailable("lineage_unavailable", 409)
+    return list(reversed(sessions))
+
+
+def _provider_error_owner_entries(session, *, projection_cache: bool = False) -> tuple[list[dict], str]:
+    owners = _provider_error_lineage_sessions(session)
+    if projection_cache and any(hasattr(owner, "path") for owner in owners):
+        try:
+            from api.models import Session
+
+            persisted_owners = []
+            for owner in owners:
+                persisted = Session.load(str(getattr(owner, "session_id", "") or ""))
+                if persisted is None:
+                    raise ProviderErrorDismissalUnavailable("owner_unavailable", 409)
+                persisted_owners.append(persisted)
+            owners = persisted_owners
+        except ProviderErrorDismissalUnavailable:
+            raise
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise ProviderErrorDismissalUnavailable("owner_unavailable", 409) from exc
+    cache_key = None
+    cache_requires_signature = projection_cache and any(
+        hasattr(owner, "path") for owner in owners
+    )
+    if projection_cache:
+        try:
+            from api.models import _sidecar_stat_signature
+
+            owner_signatures = []
+            for owner in owners:
+                sidecar_path = owner.path
+                signature = _sidecar_stat_signature(sidecar_path)
+                if signature is None:
+                    raise ValueError("sidecar signature unavailable")
+                owner_signatures.append(
+                    (
+                        str(getattr(owner, "session_id", "") or ""),
+                        tuple(signature),
+                        len(getattr(owner, "messages", None) or []),
+                    )
+                )
+            cache_key = (
+                str(getattr(session, "session_id", "") or ""),
+                tuple(owner_signatures),
+            )
+            with _PROVIDER_ERROR_PROJECTION_CACHE_LOCK:
+                cached = _PROVIDER_ERROR_PROJECTION_CACHE.get(cache_key)
+            if cached is not None:
+                return copy.deepcopy(cached[0]), cached[1]
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            if cache_requires_signature:
+                raise ProviderErrorDismissalUnavailable("owner_unavailable", 409) from exc
+            cache_key = None
+    entries = []
+    for owner in owners:
+        rows = getattr(owner, "messages", None)
+        if not isinstance(rows, list):
+            raise ProviderErrorDismissalUnavailable("noncanonical_transcript", 409)
+        for owner_index, row in enumerate(rows):
+            entries.append(
+                {
+                    "session": owner,
+                    "session_id": str(getattr(owner, "session_id", "") or ""),
+                    "index": owner_index,
+                    "row": row,
+                    "stable_id": _provider_error_stable_id(row),
+                    "row_digest": _provider_error_reference_digest(row),
+                }
+            )
+    revision_payload = [
+        {
+            "session_id": entry["session_id"],
+            "index": entry["index"],
+            "stable_id": entry["stable_id"],
+            "row_digest": entry["row_digest"],
+        }
+        for entry in entries
+    ]
+    revision = _provider_error_row_digest(
+        {
+            "viewed_session_id": str(getattr(session, "session_id", "") or ""),
+            "entries": revision_payload,
+        }
+    )
+    if cache_key is not None:
+        cached_entries = [
+            dict(entry, row=copy.deepcopy(entry["row"]))
+            for entry in entries
+        ]
+        with _PROVIDER_ERROR_PROJECTION_CACHE_LOCK:
+            _PROVIDER_ERROR_PROJECTION_CACHE[cache_key] = (cached_entries, revision)
+            while len(_PROVIDER_ERROR_PROJECTION_CACHE) > _PROVIDER_ERROR_PROJECTION_CACHE_MAX:
+                _PROVIDER_ERROR_PROJECTION_CACHE.pop(next(iter(_PROVIDER_ERROR_PROJECTION_CACHE)))
+    return entries, revision
+
+
+def _provider_error_reference_payload(viewed_session_id, owner_session_id, revision, stable_id, owner_index, row_digest):
+    return {
+        "version": 1,
+        "viewed_session_id": str(viewed_session_id),
+        "owner_session_id": str(owner_session_id),
+        "owner_revision": str(revision),
+        "stable_id": stable_id,
+        "owner_index": int(owner_index),
+        "row_digest": str(row_digest),
+    }
+
+
+def _provider_error_reference(**parts) -> str:
+    encoded = json.dumps(parts, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def provider_error_dismissal_plan(session, row_index: int, *, lock_held: bool = False):
+    lock = nullcontext() if lock_held else _get_session_agent_lock(session.session_id)
+    with lock:
+        entries, revision = _provider_error_owner_entries(session)
+        viewed_id = str(getattr(session, "session_id", "") or "")
+        if isinstance(row_index, bool) or not isinstance(row_index, int):
+            raise ProviderErrorDismissalUnavailable("message_not_found", 404)
+        matches = [
+            entry
+            for entry in entries
+            if entry["session_id"] == viewed_id and entry["index"] == row_index
+        ]
+        if len(matches) != 1:
+            raise ProviderErrorDismissalUnavailable("message_not_found", 404)
+        entry = matches[0]
+        row = entry["row"]
+        if not _provider_error_row_is_dismissible(row):
+            raise ProviderErrorDismissalUnavailable("not_dismissible", 409)
+        stable_id = entry["stable_id"]
+        payload = _provider_error_reference_payload(
+            viewed_id, entry["session_id"], revision, stable_id, row_index, entry["row_digest"],
+        )
+        return ProviderErrorDismissalPlan(
+            viewed_session_id=viewed_id, owner_session_id=entry["session_id"],
+            owner_index=row_index, owner_revision=revision, stable_id=stable_id,
+            row_digest=entry["row_digest"], dismiss_ref=_provider_error_reference(**payload),
+        )
+
+
+def provider_error_dismissal_ref(session, row_index: int, *, lock_held: bool = False) -> str | None:
+    try:
+        return provider_error_dismissal_plan(session, row_index, lock_held=lock_held).dismiss_ref
+    except ProviderErrorDismissalUnavailable:
+        return None
+
+
+def apply_provider_error_dismissal(session, dismiss_ref: str, *, lock_held: bool = False):
+    if not isinstance(dismiss_ref, str) or len(dismiss_ref) != 64 or any(c not in "0123456789abcdef" for c in dismiss_ref):
+        raise ProviderErrorDismissalUnavailable("invalid_dismiss_ref", 400)
+    initial_owner_ids = [
+        str(getattr(owner, "session_id", "") or "")
+        for owner in _provider_error_lineage_sessions(session)
+    ]
+    lock_ids = sorted(set(initial_owner_ids))
+    if not lock_held:
+        with ExitStack() as stack:
+            acquired_locks = set()
+            for lock_id in lock_ids:
+                lock = _get_session_agent_lock(lock_id)
+                lock_key = id(lock)
+                if lock_key in acquired_locks:
+                    continue
+                acquired_locks.add(lock_key)
+                stack.enter_context(lock)
+            fresh_owner_ids = [
+                str(getattr(owner, "session_id", "") or "")
+                for owner in _provider_error_lineage_sessions(session)
+            ]
+            if fresh_owner_ids != initial_owner_ids:
+                raise ProviderErrorDismissalUnavailable("lineage_changed", 409)
+            return apply_provider_error_dismissal(session, dismiss_ref, lock_held=True)
+
+    entries, revision = _provider_error_owner_entries(session)
+    matches = []
+    viewed_id = str(getattr(session, "session_id", "") or "")
+    for entry in entries:
+        if not _provider_error_row_is_dismissible(entry["row"]):
+            continue
+        payload = _provider_error_reference_payload(
+            viewed_id,
+            entry["session_id"],
+            revision,
+            entry["stable_id"],
+            entry["index"],
+            entry["row_digest"],
+        )
+        if _provider_error_reference(**payload) == dismiss_ref:
+            matches.append(entry)
+    if len(matches) != 1:
+        raise ProviderErrorDismissalUnavailable(
+            "ambiguous_dismiss_ref" if len(matches) > 1 else "stale_dismiss_ref",
+            409,
+        )
+    entry = matches[0]
+    owner = entry["session"]
+    owner_rows = getattr(owner, "messages", None)
+    if not isinstance(owner_rows, list) or entry["index"] >= len(owner_rows):
+        raise ProviderErrorDismissalUnavailable("stale_dismiss_ref", 409)
+    current = owner_rows[entry["index"]]
+    if (
+        not _provider_error_row_is_dismissible(current)
+        or _provider_error_reference_digest(current) != entry["row_digest"]
+        or _provider_error_stable_id(current) != entry["stable_id"]
+    ):
+        raise ProviderErrorDismissalUnavailable("stale_dismiss_ref", 409)
+    plan = ProviderErrorDismissalPlan(
+        viewed_session_id=viewed_id,
+        owner_session_id=entry["session_id"],
+        owner_index=entry["index"],
+        owner_revision=revision,
+        stable_id=entry["stable_id"],
+        row_digest=entry["row_digest"],
+        dismiss_ref=dismiss_ref,
+    )
+    if current.get("_dismissed") is True:
+        return plan
+    snapshot = copy.deepcopy(owner.__dict__)
+    sidecar_snapshot = _provider_error_sidecar_snapshot(owner)
+    if sidecar_snapshot is not None and not sidecar_snapshot[2]:
+        raise ProviderErrorDismissalUnavailable("persistence_failed", 409)
+    try:
+        current["_dismissed"] = True
+        owner.save(touch_updated_at=False, skip_index=True)
+    except Exception as exc:
+        restored = _restore_provider_error_sidecar(sidecar_snapshot)
+        if not restored and _provider_error_sidecar_contains_new_dismissed_row(sidecar_snapshot, current):
+            return plan
+        restore_regeneration_state(owner, snapshot)
+        raise ProviderErrorDismissalUnavailable("persistence_failed", 409) from exc
+    return plan
+
+
+def project_provider_error_dismissal_capabilities(session, projected: dict) -> dict:
+    """Add only detached public references to an already-scrubbed projection."""
+    result = copy.deepcopy(projected) if isinstance(projected, dict) else {}
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return result
+    for message in messages:
+        if isinstance(message, dict):
+            message.pop("_provider_error_dismiss_ref", None)
+            message.pop("_provider_error_dismissed", None)
+    try:
+        entries, revision = _provider_error_owner_entries(session, projection_cache=True)
+    except ProviderErrorDismissalUnavailable:
+        return result
+    used: set[tuple[str, int]] = set()
+    viewed_id = str(getattr(session, "session_id", "") or "")
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        stable_id = _provider_error_stable_id(message)
+        digest = _provider_error_reference_digest(message)
+        candidates = [
+            entry
+            for entry in entries
+            if (entry["session_id"], entry["index"]) not in used
+            and _provider_error_row_is_dismissible(entry["row"])
+            and entry["row_digest"] == digest
+            and entry["stable_id"] == stable_id
+            and _provider_error_api_content_matches(message, entry["row"])
+        ]
+        if not candidates:
+            continue
+        if stable_id is None and len(candidates) != 1:
+            continue
+        if stable_id is not None:
+            if len(candidates) != 1:
+                continue
+        entry = candidates[0]
+        used.add((entry["session_id"], entry["index"]))
+        source_row = entry["row"]
+        payload = _provider_error_reference_payload(
+            viewed_id, entry["session_id"], revision,
+            entry["stable_id"], entry["index"], entry["row_digest"],
+        )
+        message["_provider_error_dismiss_ref"] = _provider_error_reference(**payload)
+        if source_row.get("_dismissed") is True:
+            message["_dismissed"] = True
+        else:
+            message.pop("_dismissed", None)
+    return result
+
+
+def settle_provider_error_session(session, error_message: dict, *, save=True, snapshot=None) -> bool:
+    """Append and durably settle one provider-error row atomically.
+
+    Producers use this adapter so an error notification never carries a dirty
+    in-memory transcript after the sidecar write fails.
+    """
+    snapshot = copy.deepcopy(session.__dict__) if snapshot is None else copy.deepcopy(snapshot)
+    sidecar_snapshot = _provider_error_sidecar_snapshot(session) if save else None
+    if sidecar_snapshot is not None and not sidecar_snapshot[2]:
+        restore_regeneration_state(session, snapshot)
+        return False
+    row = None
+    try:
+        row = copy.deepcopy(error_message)
+        if isinstance(row, dict) and not _provider_error_stable_id(row):
+            try:
+                from api.streaming import _assign_stable_message_ids
+
+                _assign_stable_message_ids(
+                    [row],
+                    getattr(session, "messages", None) or [],
+                    getattr(session, "context_messages", None) or [],
+                )
+            except Exception:
+                logger.debug("Failed to stamp stable provider-error row id", exc_info=True)
+        if not isinstance(getattr(session, "messages", None), list):
+            session.messages = []
+        session.messages.append(row)
+        if save:
+            session.save()
+        return True
+    except Exception:
+        restored = _restore_provider_error_sidecar(sidecar_snapshot)
+        if not restored and _provider_error_sidecar_contains_row(sidecar_snapshot, row):
+            return True
+        restore_regeneration_state(session, snapshot)
+        return False
 
 
 def _regeneration_source_class(value):
@@ -186,6 +764,113 @@ def snapshot_regeneration_state(session):
 def restore_regeneration_state(session, snapshot):
     session.__dict__.clear()
     session.__dict__.update(copy.deepcopy(snapshot))
+
+
+def _provider_error_sidecar_snapshot(session):
+    try:
+        path = Path(session.path)
+    except (AttributeError, TypeError, ValueError, OSError):
+        return None
+    try:
+        if not path.exists():
+            return path, None, True
+        return path, path.read_bytes(), True
+    except OSError:
+        return path, None, False
+
+
+def _restore_provider_error_sidecar(snapshot) -> bool:
+    if snapshot is None:
+        return True
+    path, contents, readable = snapshot
+    if not readable:
+        return False
+    tmp = path.with_suffix(
+        f".rollback.tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
+    try:
+        if contents is None:
+            path.unlink(missing_ok=True)
+            return True
+        with open(tmp, "wb") as handle:
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        logger.debug("Failed to restore provider-error sidecar", exc_info=True)
+        return False
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _provider_error_sidecar_contains_row(snapshot, row) -> bool:
+    if snapshot is None or row is None:
+        return False
+    path, original_contents, readable = snapshot
+    if not readable:
+        return False
+    try:
+        expected_digest = _provider_error_reference_digest(row)
+        def matching_count(contents) -> int:
+            payload = json.loads(contents)
+            rows = payload.get("messages") if isinstance(payload, dict) else None
+            return sum(
+                1
+                for candidate in rows or []
+                if (
+                    isinstance(candidate, dict)
+                    and _provider_error_reference_digest(candidate) == expected_digest
+                    and _provider_error_stable_id(candidate) == _provider_error_stable_id(row)
+                )
+            )
+
+        try:
+            original_count = matching_count(original_contents) if original_contents is not None else 0
+        except (TypeError, ValueError, json.JSONDecodeError):
+            original_count = 0
+        current_count = matching_count(path.read_bytes())
+        return current_count > original_count
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _provider_error_sidecar_contains_new_dismissed_row(snapshot, row) -> bool:
+    if snapshot is None or row is None:
+        return False
+    path, original_contents, readable = snapshot
+    if not readable:
+        return False
+    try:
+        expected_digest = _provider_error_reference_digest(row)
+        expected_stable_id = _provider_error_stable_id(row)
+
+        def dismissed_count(contents) -> int:
+            payload = json.loads(contents)
+            rows = payload.get("messages") if isinstance(payload, dict) else None
+            return sum(
+                1
+                for candidate in rows or []
+                if (
+                    isinstance(candidate, dict)
+                    and candidate.get("_dismissed") is True
+                    and _provider_error_reference_digest(candidate) == expected_digest
+                    and _provider_error_stable_id(candidate) == expected_stable_id
+                )
+            )
+
+        try:
+            original_count = dismissed_count(original_contents) if original_contents is not None else 0
+        except (TypeError, ValueError, json.JSONDecodeError):
+            original_count = 0
+        current_count = dismissed_count(path.read_bytes())
+        return current_count > original_count
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def regeneration_revision_for(rows, *, session=None, context=None) -> str:

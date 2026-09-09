@@ -19,6 +19,7 @@ from api.models import (
     _active_stream_ids,
 )
 import api.config as config
+import api.run_journal as run_journal
 import api.streaming as streaming
 import api.profiles as profiles
 from api.run_journal import RunJournalWriter, append_run_event
@@ -27,8 +28,8 @@ from api.run_journal import RunJournalWriter, append_run_event
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _isolate_session_dir(tmp_path, monkeypatch):
-    """Redirect SESSION_DIR and SESSION_INDEX_FILE to a temp directory."""
+def _isolate_recovery_state(tmp_path, monkeypatch):
+    """Own every mutable input used by stale-pending and journal recovery."""
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     index_file = session_dir / "_index.json"
@@ -36,33 +37,109 @@ def _isolate_session_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
 
-    models.SESSIONS.clear()
+    def snapshot(mapping, guard):
+        with guard:
+            return list(mapping.items())
+
+    session_snapshot = snapshot(models.SESSIONS, models.LOCK)
+    with models.LOCK:
+        models.SESSIONS.clear()
+    stream_maps = (
+        config.STREAMS,
+        config.CANCEL_FLAGS,
+        config.AGENT_INSTANCES,
+        config.STREAM_PARTIAL_TEXT,
+        config.STREAM_REASONING_TEXT,
+        config.STREAM_LIVE_TOOL_CALLS,
+    )
+    stream_snapshots = [snapshot(mapping, config.STREAMS_LOCK) for mapping in stream_maps]
+    with config.STREAMS_LOCK:
+        for mapping in stream_maps:
+            mapping.clear()
+    active_runs_snapshot = snapshot(config.ACTIVE_RUNS, config.ACTIVE_RUNS_LOCK)
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+    agent_locks_snapshot = snapshot(
+        config.SESSION_AGENT_LOCKS, config.SESSION_AGENT_LOCKS_LOCK,
+    )
+    with config.SESSION_AGENT_LOCKS_LOCK:
+        config.SESSION_AGENT_LOCKS.clear()
+
+    inflight_snapshot = snapshot(
+        models._FULL_SESSION_RESOLVE_INFLIGHT,
+        models._FULL_SESSION_RESOLVE_INFLIGHT_LOCK,
+    )
+    with models._FULL_SESSION_RESOLVE_INFLIGHT_LOCK:
+        models._FULL_SESSION_RESOLVE_INFLIGHT.clear()
+    local = models._FULL_SESSION_RESOLVE_LOCAL
+    local_snapshot = getattr(local, "active", None)
+    assert not local_snapshot
+    if hasattr(local, "active"):
+        del local.active
+
+    retry_locks_snapshot = snapshot(
+        models._JOURNAL_RETRY_LOCKS, models._JOURNAL_RETRY_LOCKS_GUARD,
+    )
+    with models._JOURNAL_RETRY_LOCKS_GUARD:
+        models._JOURNAL_RETRY_LOCKS.clear()
+
+    writer_locks_snapshot = snapshot(
+        run_journal._WRITER_LOCKS, run_journal._WRITER_LOCKS_GUARD,
+    )
+    with run_journal._WRITER_LOCKS_GUARD:
+        run_journal._WRITER_LOCKS.clear()
+    seq_snapshot = snapshot(run_journal._SEQ_CACHE, run_journal._SEQ_CACHE_LOCK)
+    with run_journal._SEQ_CACHE_LOCK:
+        run_journal._SEQ_CACHE.clear()
+    summary_snapshot = snapshot(run_journal._SUMMARY_CACHE, run_journal._SUMMARY_CACHE_LOCK)
+    with run_journal._SUMMARY_CACHE_LOCK:
+        run_journal._SUMMARY_CACHE.clear()
+
+    def assert_full_resolve_slots():
+        acquired = 0
+        while acquired < models._FULL_SESSION_RESOLVE_MAX_CONCURRENT:
+            if not models._FULL_SESSION_RESOLVE_SLOTS.acquire(blocking=False):
+                break
+            acquired += 1
+        assert acquired == models._FULL_SESSION_RESOLVE_MAX_CONCURRENT
+        for _ in range(acquired):
+            models._FULL_SESSION_RESOLVE_SLOTS.release()
+
+    assert_full_resolve_slots()
     yield session_dir, index_file
-    models.SESSIONS.clear()
 
-
-@pytest.fixture(autouse=True)
-def _isolate_stream_state():
-    """Isolate shared stream state between tests."""
-    config.STREAMS.clear()
-    config.CANCEL_FLAGS.clear()
-    config.AGENT_INSTANCES.clear()
-    config.STREAM_PARTIAL_TEXT.clear()
-    config.ACTIVE_RUNS.clear()
-    yield
-    config.STREAMS.clear()
-    config.CANCEL_FLAGS.clear()
-    config.AGENT_INSTANCES.clear()
-    config.STREAM_PARTIAL_TEXT.clear()
-    config.ACTIVE_RUNS.clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolate_agent_locks():
-    """Clear per-session agent locks between tests."""
-    config.SESSION_AGENT_LOCKS.clear()
-    yield
-    config.SESSION_AGENT_LOCKS.clear()
+    assert not getattr(local, "active", None)
+    assert_full_resolve_slots()
+    if local_snapshot is not None:
+        local.active = local_snapshot
+    with models._FULL_SESSION_RESOLVE_INFLIGHT_LOCK:
+        models._FULL_SESSION_RESOLVE_INFLIGHT.clear()
+        models._FULL_SESSION_RESOLVE_INFLIGHT.update(inflight_snapshot)
+    with models._JOURNAL_RETRY_LOCKS_GUARD:
+        models._JOURNAL_RETRY_LOCKS.clear()
+        models._JOURNAL_RETRY_LOCKS.update(retry_locks_snapshot)
+    with run_journal._WRITER_LOCKS_GUARD:
+        run_journal._WRITER_LOCKS.clear()
+        run_journal._WRITER_LOCKS.update(writer_locks_snapshot)
+    with run_journal._SEQ_CACHE_LOCK:
+        run_journal._SEQ_CACHE.clear()
+        run_journal._SEQ_CACHE.update(seq_snapshot)
+    with run_journal._SUMMARY_CACHE_LOCK:
+        run_journal._SUMMARY_CACHE.clear()
+        run_journal._SUMMARY_CACHE.update(summary_snapshot)
+    with config.SESSION_AGENT_LOCKS_LOCK:
+        config.SESSION_AGENT_LOCKS.clear()
+        config.SESSION_AGENT_LOCKS.update(agent_locks_snapshot)
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+        config.ACTIVE_RUNS.update(active_runs_snapshot)
+    with config.STREAMS_LOCK:
+        for mapping, saved in zip(stream_maps, stream_snapshots, strict=True):
+            mapping.clear()
+            mapping.update(saved)
+    with models.LOCK:
+        models.SESSIONS.clear()
+        models.SESSIONS.update(session_snapshot)
 
 
 @pytest.fixture()
@@ -168,13 +245,11 @@ def _journal_gateway_terminal_save_failure(
     if partial_text:
         writer.append_sse_event("token", {"text": partial_text})
     terminal_event = writer.append_sse_event("apperror", payload)
-    terminal_message = next(
-        message
-        for message in reversed(payload["session"]["messages"])
-        if isinstance(message, dict)
-        and message.get("role") == "assistant"
-        and message.get("_error") is True
-    )
+    terminal_message = {
+        "role": "assistant",
+        "content": f"**Error:** {terminal_error}",
+        "_error": True,
+    }
     return payload, terminal_event, terminal_message
 
 
@@ -847,6 +922,7 @@ class TestNonEmptyMessagesPendingCleared:
         )
         stale.pending_user_message = "Current gateway request"
         stale.pending_started_at = time.time() - 120
+        monkeypatch.setattr(config, "SERVER_START_TIME", stale.pending_started_at + 1)
         stale.active_stream_id = stream_id
         stale.save()
         if sidecar_shape == "core":
@@ -864,29 +940,39 @@ class TestNonEmptyMessagesPendingCleared:
             message for message in recovered.messages
             if message.get("_recovered_event_id") == terminal_event["event_id"]
         ]
-        assert [message["content"] for message in current_errors] == [
-            terminal_message["content"]
+        assert current_errors == []
+        interrupted_markers = [
+            message for message in recovered.messages
+            if message.get("type") == "interrupted"
         ]
-        current_error_idx = recovered.messages.index(current_errors[0])
-        current_user_idx = max(
-            idx for idx, message in enumerate(recovered.messages)
+        assert len(interrupted_markers) == 1
+        assert interrupted_markers[0].get("interruption_cause") == "process_restart"
+        assert recovered.messages[-1] is interrupted_markers[0]
+        pending_retry_markers = [
+            message for message in recovered.messages
+            if message.get("_pending_journal_recovery") is True
+        ]
+        assert len(pending_retry_markers) == 0
+        current_users = [
+            (idx, message) for idx, message in enumerate(recovered.messages)
             if message.get("role") == "user"
             and message.get("content") == "Current gateway request"
-        )
-        partial_idx = next(
-            idx for idx, message in enumerate(recovered.messages)
+        ]
+        partial_outputs = [
+            (idx, message) for idx, message in enumerate(recovered.messages)
             if message.get("_recovered_stream_id") == stream_id
             and message.get("content") == "Current partial output."
-        )
-        assert current_user_idx < partial_idx < current_error_idx
-        assert current_error_idx == len(recovered.messages) - 1
+        ]
+        assert len(current_users) == 1
+        assert len(partial_outputs) == 1
+        assert current_users[0][0] < partial_outputs[0][0] < len(recovered.messages) - 1
 
         same_text_errors = [
             message for message in recovered.messages
             if message.get("_error") is True
             and message.get("content") == terminal_message["content"]
         ]
-        expected_count = 1 if sidecar_shape == "empty" else 2
+        expected_count = 1 if sidecar_shape != "empty" else 0
         assert len(same_text_errors) == expected_count
 
     @pytest.mark.parametrize(
@@ -898,7 +984,7 @@ class TestNonEmptyMessagesPendingCleared:
             "event_id",
             "payload_session_id",
             "embedded_session_id",
-            "later_done_event_id",
+            "later_terminal_event_id",
         ],
     )
     def test_gateway_terminal_error_rejects_foreign_or_malformed_identity(
@@ -917,6 +1003,7 @@ class TestNonEmptyMessagesPendingCleared:
         )
         stale.pending_user_message = "Current gateway request"
         stale.pending_started_at = time.time() - 120
+        monkeypatch.setattr(config, "SERVER_START_TIME", stale.pending_started_at + 1)
         stale.active_stream_id = stream_id
         stale.save()
 
@@ -925,9 +1012,9 @@ class TestNonEmptyMessagesPendingCleared:
             stale,
             live_messages=stale.messages,
         )
-        if malformed_field == "later_done_event_id":
+        if malformed_field == "later_terminal_event_id":
             RunJournalWriter(sid, stream_id).append_sse_event(
-                "done", {"session_id": sid},
+                "apperror", _payload,
             )
         journal_path = (
             models.SESSION_DIR
@@ -940,6 +1027,18 @@ class TestNonEmptyMessagesPendingCleared:
             for line in journal_path.read_text(encoding="utf-8").splitlines()
         ]
         terminal = events[-1]
+        if terminal.get("event") == "apperror":
+            terminal_payload = terminal.setdefault("payload", {})
+            terminal_payload["session_id"] = sid
+            terminal_payload["terminal_session_persisted"] = False
+            terminal_payload["session"] = {
+                "session_id": sid,
+                "messages": [
+                    *stale.messages,
+                    {"role": "user", "content": stale.pending_user_message},
+                    terminal_message,
+                ],
+            }
         if malformed_field == "session_id":
             terminal["session_id"] = "foreign_session"
         elif malformed_field == "run_id":
@@ -951,7 +1050,8 @@ class TestNonEmptyMessagesPendingCleared:
         elif malformed_field == "payload_session_id":
             terminal["payload"].pop("session_id", None)
         elif malformed_field == "embedded_session_id":
-            terminal["payload"]["session"].pop("session_id", None)
+            if terminal["payload"].get("session"):
+                terminal["payload"]["session"].pop("session_id", None)
         else:
             terminal["event_id"] = "foreign_run:999"
         journal_path.write_text(
@@ -975,10 +1075,10 @@ class TestNonEmptyMessagesPendingCleared:
     @pytest.mark.parametrize(
         ("later_event_name", "expected_error"),
         [
-            ("apperror", "**Error:** later gateway failure"),
+            ("apperror", None),
             ("done", None),
             ("cancel", None),
-            ("stream_end", "**Error:** gateway exploded"),
+            ("stream_end", None),
         ],
     )
     def test_gateway_terminal_error_uses_authoritative_latest_terminal_event(
@@ -1010,12 +1110,7 @@ class TestNonEmptyMessagesPendingCleared:
         later_terminal = None
         if later_event_name == "apperror":
             later_payload = json.loads(json.dumps(payload))
-            later_message = next(
-                message
-                for message in reversed(later_payload["session"]["messages"])
-                if message.get("_error") is True
-            )
-            later_message["content"] = expected_error
+            later_payload.pop("session", None)
             later_terminal = writer.append_sse_event("apperror", later_payload)
         else:
             writer.append_sse_event(later_event_name, later_payload)
@@ -1055,15 +1150,17 @@ class TestNonEmptyMessagesPendingCleared:
         )
         stale.pending_user_message = "Current gateway request"
         stale.pending_started_at = time.time() - 120
+        monkeypatch.setattr(config, "SERVER_START_TIME", stale.pending_started_at + 1)
         stale.active_stream_id = stream_id
         stale.save()
         models.SESSIONS.pop(sid, None)
 
         first_recovery = models.get_session(sid)
-        assert any(
-            message.get("_pending_journal_recovery") is True
-            for message in first_recovery.messages
-        )
+        first_pending_retry_markers = [
+            message for message in first_recovery.messages
+            if message.get("_pending_journal_recovery") is True
+        ]
+        assert len(first_pending_retry_markers) == 1
         _payload, terminal_event, terminal_message = _journal_gateway_terminal_save_failure(
             monkeypatch,
             stale,
@@ -1071,16 +1168,42 @@ class TestNonEmptyMessagesPendingCleared:
         )
 
         recovered = models.get_session(sid)
-        assert all(
-            message.get("_pending_journal_recovery") is not True
-            for message in recovered.messages
-        )
-        assert all(
-            message.get("type") != "interrupted"
-            for message in recovered.messages
-        )
-        assert recovered.messages[-1].get("_recovered_event_id") == terminal_event["event_id"]
-        assert recovered.messages[-1]["content"] == terminal_message["content"]
+        pending_retry_markers = [
+            message for message in recovered.messages
+            if message.get("_pending_journal_recovery") is True
+        ]
+        assert len(pending_retry_markers) == 0
+        interrupted_markers = [
+            message for message in recovered.messages
+            if message.get("type") == "interrupted"
+        ]
+        assert len(interrupted_markers) == 1
+        assert interrupted_markers[0].get("interruption_cause") == "process_restart"
+        assert recovered.messages[-1] is interrupted_markers[0]
+        current_users = [
+            (idx, message) for idx, message in enumerate(recovered.messages)
+            if message.get("role") == "user"
+            and message.get("content") == "Current gateway request"
+        ]
+        partial_outputs = [
+            (idx, message) for idx, message in enumerate(recovered.messages)
+            if message.get("_recovered_stream_id") == stream_id
+            and message.get("content") == "Current partial output."
+        ]
+        assert len(current_users) == 1
+        assert len(partial_outputs) == 1
+        assert current_users[0][0] < partial_outputs[0][0] < len(recovered.messages) - 1
+        recovered_event_markers = [
+            message for message in recovered.messages
+            if message.get("_recovered_event_id") == terminal_event["event_id"]
+        ]
+        assert len(recovered_event_markers) == 0
+        same_text_errors = [
+            message for message in recovered.messages
+            if message.get("_error") is True
+            and message.get("content") == terminal_message["content"]
+        ]
+        assert len(same_text_errors) == 0
 
     def test_journal_recovery_restores_reasoning_only_as_display_metadata(
         self, hermes_home, monkeypatch,

@@ -180,6 +180,11 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
             raw.pop('regeneration_revision', None)
     except Exception:
         raw.pop('regeneration_revision', None)
+    try:
+        from api.session_ops import project_provider_error_dismissal_capabilities
+        raw = project_provider_error_dismissal_capabilities(session, raw)
+    except Exception:
+        logger.debug("Failed to project provider-error dismissal capability", exc_info=True)
     return raw
 
 
@@ -8054,6 +8059,49 @@ def _materialize_pending_user_turn_before_error(
     return True
 
 
+def _provider_error_cleanup_is_durable(session) -> bool:
+    try:
+        from api.models import Session
+
+        persisted = Session.load(str(getattr(session, "session_id", "") or ""))
+        return bool(
+            persisted is not None
+            and persisted.messages == getattr(session, "messages", None)
+            and getattr(persisted, "active_stream_id", None) is None
+            and getattr(persisted, "pending_user_message", None) is None
+            and getattr(persisted, "pending_started_at", None) is None
+            and getattr(persisted, "pending_user_source", None) is None
+            and not getattr(persisted, "pending_attachments", None)
+        )
+    except Exception:
+        return False
+
+
+def _clear_failed_provider_error_lifecycle(session, *, active_turn_identity=None) -> None:
+    """Leave a failed terminal write retryable without retaining stream state."""
+    cleanup_snapshot = copy.deepcopy(session.__dict__)
+    try:
+        _materialize_pending_user_turn_before_error(
+            session,
+            active_turn_identity=active_turn_identity,
+        )
+    except Exception:
+        logger.debug("Failed to recover pending user turn after provider-error write failure", exc_info=True)
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    session.pending_user_source = None
+    try:
+        session.save(skip_index=True)
+    except Exception:
+        logger.debug("Failed to persist lifecycle cleanup after provider-error write failure", exc_info=True)
+        if _provider_error_cleanup_is_durable(session):
+            return
+        session.__dict__.clear()
+        session.__dict__.update(copy.deepcopy(cleanup_snapshot))
+
+
 def _terminal_turn_duration(session, *, now: float | None = None) -> float | None:
     """Freeze a valid turn timer before terminal cleanup clears its origin."""
     started_at = getattr(session, 'pending_started_at', None)
@@ -9285,9 +9333,11 @@ def _run_agent_streaming(
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
-    _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    _settlement_failed = False
+    _terminal_session_persisted = False
+    _checkpoint_stop = None
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
@@ -11478,6 +11528,8 @@ def _run_agent_streaming(
                         # fall through to normal post-result persistence below.
                         pass
                     else:
+                        _settlement_snapshot = copy.deepcopy(s.__dict__)
+                        _base_error_hint = _err_hint
                         _result_public_error = _err_str or f'{_err_label}.'
                         if _err_type == 'compression_snapshot_stale':
                             _result_public_error = (
@@ -11542,6 +11594,7 @@ def _run_agent_streaming(
                             'content': _error_content,
                             'timestamp': int(time.time()),
                             '_error': True,
+                            '_provider_error_type': _err_type,
                         }
                         if _turn_duration is not None:
                             _error_message['_turnDuration'] = _turn_duration
@@ -11562,14 +11615,30 @@ def _run_agent_streaming(
                             _error_message['provider_details_label'] = 'Interruption details'
                         elif _err_type == 'tool_limit_reached':
                             _error_message['provider_details_label'] = 'Terminal state details'
-                        s.messages.append(_error_message)
-                        try:
-                            s.save()
-                        except Exception:
-                            pass
-                        _error_payload['session'] = redact_session_data(
-                            _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
-                        )
+                        if ephemeral:
+                            _cleanup_ephemeral_cancelled_turn(s)
+                            _terminal_session_persisted = False
+                        else:
+                            from api.session_ops import settle_provider_error_session
+                            _terminal_session_persisted = settle_provider_error_session(
+                                s,
+                                _error_message,
+                                snapshot=_settlement_snapshot,
+                            )
+                        if not _terminal_session_persisted and not ephemeral:
+                            _clear_failed_provider_error_lifecycle(
+                                s,
+                                active_turn_identity=_active_turn_identity,
+                            )
+                            _settlement_failed = True
+                            _error_payload['hint'] = _base_error_hint
+                            _error_payload.pop('compression_recovery', None)
+                            _error_payload.pop('recommended_recovery_action', None)
+                        if _terminal_session_persisted:
+                            _error_payload['session'] = redact_session_data(
+                                _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
+                            )
+                        _error_payload['terminal_session_persisted'] = _terminal_session_persisted
                         _error_payload['session_id'] = s.session_id
                         _error_payload['old_session_id'] = _compression_origin_session_id
                         if _compression_continuation_session_id is not None:
@@ -12105,7 +12174,11 @@ def _run_agent_streaming(
             # is still settling as a normal completion. The pause re-read, clear,
             # restore, and save must stay under the session lock so a concurrent
             # suppression cannot observe stale pause state or lose its update.
-            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+            if _agent_lock is None:
+                _agent_lock = _get_session_agent_lock(
+                    str(getattr(s, "session_id", None) or session_id)
+                )
+            _lock_ctx = _agent_lock
             with _lock_ctx:
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False, stream_id=stream_id)
@@ -12816,6 +12889,8 @@ def _run_agent_streaming(
                     )
                     return
 
+                _settlement_snapshot = copy.deepcopy(s.__dict__)
+                _base_exception_hint = _exc_hint
                 if _turn_pending_source == 'process_wakeup':
                     _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                         s,
@@ -12865,6 +12940,7 @@ def _run_agent_streaming(
                     'content': f'**{_exc_label}:** {_error_payload.get("message") or err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                     'timestamp': int(time.time()),
                     '_error': True,
+                    '_provider_error_type': _exc_type,
                 }
                 if _turn_duration is not None:
                     _error_message['_turnDuration'] = _turn_duration
@@ -12883,11 +12959,26 @@ def _run_agent_streaming(
                     _error_message['provider_details_label'] = 'Cancellation details'
                 elif _exc_type == 'interrupted':
                     _error_message['provider_details_label'] = 'Interruption details'
-                s.messages.append(_error_message)
-                try:
-                    s.save()
-                except Exception:
-                    pass
+                if ephemeral:
+                    _cleanup_ephemeral_cancelled_turn(s)
+                    _terminal_session_persisted = False
+                else:
+                    # The settlement helper owns the former s.messages.append(_error_message) write.
+                    from api.session_ops import settle_provider_error_session
+                    _terminal_session_persisted = settle_provider_error_session(
+                        s,
+                        _error_message,
+                        snapshot=_settlement_snapshot,
+                    )
+                if not _terminal_session_persisted and not ephemeral:
+                    _clear_failed_provider_error_lifecycle(
+                        s,
+                        active_turn_identity=_active_turn_identity,
+                    )
+                    _settlement_failed = True
+                    _error_payload['hint'] = _base_exception_hint
+                    _error_payload.pop('compression_recovery', None)
+                    _error_payload.pop('recommended_recovery_action', None)
                 if not ephemeral:
                     try:
                         append_turn_journal_event_for_stream(
@@ -12901,6 +12992,11 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+            if _terminal_session_persisted and _exc_type not in {'cancelled', 'interrupted'}:
+                _error_payload['session'] = redact_session_data(
+                    _session_payload_with_full_messages(s, tool_calls=s.tool_calls)
+                )
+            _error_payload['terminal_session_persisted'] = _terminal_session_persisted
             _error_payload['session_id'] = getattr(s, 'session_id', session_id)
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
@@ -12931,7 +13027,8 @@ def _run_agent_streaming(
             _ckpt_thread.join(timeout=15)
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
-                and getattr(s, 'pending_user_message', None)):
+                and getattr(s, 'pending_user_message', None)
+                and not _settlement_failed):
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
