@@ -2405,9 +2405,10 @@ async function loadSession(sid){
   if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(sid);
 
   // ── Cross-channel handoff hint ──
-  // After session fully loaded, check if this is a messaging session with
-  // enough conversation rounds to warrant a handoff hint bar.
-  if (S.session && _isMessagingSession(S.session)) {
+  // Canonical continuation lets the user type into the same session, so the
+  // handoff keyword bar is not shown. Keep the hint only for truly read-only
+  // messaging imports.
+  if (S.session && _isMessagingSession(S.session) && !_sessionAllowsCanonicalContinuation(S.session)) {
     _checkAndShowHandoffHint(sid);
   } else {
     _hideHandoffHint();
@@ -2519,6 +2520,15 @@ async function _openSidebarSession(session, loadOpts={}){
 
 function _isReadOnlySession(session) {
   return !!(session && (session.read_only || session.is_read_only));
+}
+
+function _sessionAllowsCanonicalContinuation(session) {
+  return !!(session && session.canonical_continuation);
+}
+
+function _sessionBlocksComposer(session) {
+  if (_sessionAllowsCanonicalContinuation(session)) return false;
+  return _isReadOnlySession(session);
 }
 
 function _isBranchableReadOnlySession(session) {

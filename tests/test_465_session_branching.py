@@ -216,8 +216,8 @@ def test_branch_endpoint_consults_foreign_session_guard_on_missing_sidecar():
     helper = helper_match.group(1)
     assert '_claim_or_synthesize_cli_session(sid)' in helper, \
         "Helper should classify missing-sidecar foreign sessions before returning"
-    assert 'if _reason == "not_claimable":' in helper, \
-        "Helper should branch on not_claimable foreign ownership"
+    assert 'if _reason in ("not_claimable", "canonical_continuation"):' in helper, \
+        "Helper should branch on not_claimable and canonical_continuation foreign ownership"
     assert '_source_kind == "cron"' in helper, \
         "Helper should narrow read-only branch sources to resolved cron source metadata"
     assert 'is_cron_session(' not in helper, \

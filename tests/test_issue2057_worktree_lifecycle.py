@@ -176,7 +176,7 @@ def test_delete_messaging_session_reopens_read_only_without_deleted_webui_tombst
     assert not (session_dir / f"{sid}.json").exists()
     assert sid not in models._load_webui_deleted_session_tombstone()
     assert delete_calls == []
-    assert reason == "not_claimable"
+    assert reason == "canonical_continuation"
     assert sess is not None
     assert sess.read_only is True
     assert sess.session_source == "messaging"

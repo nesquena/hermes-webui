@@ -614,10 +614,11 @@ def test_helper_refuses_messaging_session(
                       "session_source": "messaging"},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
-    assert reason == "not_claimable"
+    assert reason == "canonical_continuation"
     assert sess is not None
     assert sess.read_only is True
     assert sess.session_source == "messaging"
+    assert sess.canonical_continuation is True
 
 
 def test_helper_refuses_external_agent_session_source(
@@ -908,7 +909,7 @@ def test_helper_sets_read_only_for_source_refused_sessions(
                       "session_source": "messaging"},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
-    assert reason == "not_claimable"
+    assert reason == "canonical_continuation"
     # The contract: source-refused sessions have read_only=True on
     # the synthesized Session, even though cli_meta.read_only is None.
     assert sess.read_only is True, (
@@ -916,6 +917,7 @@ def test_helper_sets_read_only_for_source_refused_sessions(
         "the GET response reads it from synth.read_only (line ~6043) "
         "and the frontend renders the read-only banner based on this"
     )
+    assert sess.canonical_continuation is True
 
 
 def test_import_cli_reads_read_only_from_persisted_session():
@@ -988,12 +990,12 @@ def test_helper_refuses_bare_gateway_session(
                       "session_source": "other"},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
-    assert reason == "not_claimable", (
-        "bare 'gateway' sessions must be refused — the conversation "
-        "is owned by the gateway process, not WebUI (#4911 residual "
-        "review gap)"
+    assert reason == "canonical_continuation", (
+        "bare 'gateway' sessions must continue against the original "
+        "state.db session id instead of being claimed as a WebUI sidecar"
     )
     assert sess.read_only is True
+    assert sess.canonical_continuation is True
 
 
 def test_helper_refuses_cron_session(
@@ -1275,8 +1277,9 @@ def test_helper_refuses_gateway_via_state_db_source(
         routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
-    assert reason == "not_claimable"
+    assert reason == "canonical_continuation"
     assert sess.read_only is True
+    assert sess.canonical_continuation is True
 
 
 def test_helper_denylist_includes_gateway_and_unknown():
