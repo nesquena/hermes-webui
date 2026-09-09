@@ -18,10 +18,51 @@ import threading
 from api.config import _AGENT_DIR  # noqa: F401
 from api.subprocess_utils import windows_hide_flags
 
-_RESTART_MESSAGE = (
-    "Hermes Agent was updated while Hermes WebUI was running. "
-    "Restart Hermes WebUI before retrying this action."
-)
+
+def _format_stale_message(
+    old_revision: str | None,
+    current_agent_dir: Path | None,
+) -> str:
+    """Build a diagnostic error message when Agent HEAD has changed.
+
+    Includes old SHA, new SHA, and the latest commit info so operators
+    can quickly tell *what* changed without extra git commands.
+    """
+    old_str = old_revision[:8] if old_revision else "?"
+
+    # Read current HEAD info for diagnostics
+    new_sha = "?"
+    author_info = ""
+    if current_agent_dir is not None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(current_agent_dir), "rev-parse", "--short", "HEAD"],
+                check=False, capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0:
+                new_sha = result.stdout.strip()
+
+            log_result = subprocess.run(
+                ["git", "-C", str(current_agent_dir), "log", "-1",
+                 "--format=%h %an <%ae> %ai"],
+                check=False, capture_output=True, text=True, timeout=2,
+            )
+            if log_result.returncode == 0:
+                author_info = log_result.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    msg = (
+        f"Hermes Agent source revision changed "
+        f"(was {old_str}, now {new_sha})."
+    )
+    if author_info and author_info != new_sha:
+        msg += f" Latest: {author_info}."
+    msg += (
+        " The running WebUI process still holds the old modules in memory. "
+        "Restart Hermes WebUI before retrying this action."
+    )
+    return msg
 
 
 def _read_agent_revision(
@@ -136,11 +177,10 @@ def ensure_agent_runtime_current() -> None:
     """Reject a known Git checkout change instead of mixing Python modules."""
     if _AGENT_REVISION is None:
         return
-    if (
-        _read_agent_revision(_AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH)
-        != _AGENT_REVISION
-    ):
-        raise AgentRuntimeChangedError(_RESTART_MESSAGE)
+    current = _read_agent_revision(_AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH)
+    if current != _AGENT_REVISION:
+        msg = _format_stale_message(_AGENT_REVISION, _AGENT_SOURCE_DIR)
+        raise AgentRuntimeChangedError(msg)
 
 
 def require_ai_agent_class():
