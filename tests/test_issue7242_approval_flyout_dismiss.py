@@ -220,9 +220,12 @@ def test_dismiss_deny_always_carries_approval_id():
         "deny body must embed the captured approval_id unconditionally"
     )
     assert "body:JSON.stringify(body)" in body
-    # The response must never be emitted without an identity: the only api()
-    # call in the whole function is the identified deny POST.
-    assert body.count("api(") == 1, "idless dismiss must never reach api()"
+    # The only api() calls in the whole function are the identified deny POST
+    # and the read-only pending re-fetch (both carry the captured identity):
+    # an idless dismiss must never emit a response.
+    assert body.count("api(") == 2, "idless dismiss must never reach api()"
+    assert '"/api/approval/respond"' in body
+    assert '"/api/approval/pending?session_id="' in body
 
 
 def test_dismiss_idless_card_hides_without_response():
@@ -267,13 +270,42 @@ def test_dismiss_rollback_restores_card_after_failure():
     )
 
 
-def test_dismiss_404_409_is_authoritative_terminal():
-    """An authoritative 404/409 (another actor already settled it, or the
-    entry expired server-side) keeps the dismissal — never re-renders."""
+def test_dismiss_404_is_authoritative_terminal():
+    """A 404 (the entry or its session no longer exists server-side) is
+    authoritative — it keeps the dismissal and never re-renders."""
     body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
-    assert "err.status===404||err.status===409" in body or (
-        "err.status===409||err.status===404" in body
-    ), "catch must treat 404/409 as authoritative terminal states"
+    assert "err.status===404" in body, "catch must keep 404 as an authoritative terminal"
+    term_start = body.find("err.status===404")
+    assert "_releaseApprovalResponseOwner(owner)" in body[term_start:term_start + 160], (
+        "404 must release the response owner and keep the card hidden"
+    )
+
+
+def test_dismiss_409_requires_structured_code_before_terminality():
+    """An HTTP 409 alone is NOT proof of settlement: the catch must parse the
+    structured error code first, restore the card for the retryable codes
+    (gateway_approval_in_progress / gateway_run_unavailable) and keep it
+    hidden only when the re-fetched pending state is authoritatively
+    absent/settled."""
+    body = _fn_body(_compact(MESSAGES_JS), "dismissApprovalCard")
+    assert "JSON.parse(err.body)" in body, "catch must parse the structured error body"
+    assert 'code==="gateway_approval_in_progress"' in body, (
+        "in-progress 409s are retryable — must restore, never hide"
+    )
+    assert 'code==="gateway_run_unavailable"' in body, (
+        "run-unavailable 409s need the re-fetch decision path"
+    )
+    assert '"/api/approval/pending?session_id="' in body, (
+        "run-unavailable must re-fetch the authoritative pending state"
+    )
+    # The only bare-status terminal left is 404; the 409 branch must not
+    # contain a status-only release.
+    parse_start = body.find("JSON.parse(err.body)")
+    code_idx = body.find('code==="gateway_approval_in_progress"')
+    assert parse_start != -1 and code_idx != -1
+    assert parse_start < body.find("err.status===404") < code_idx, (
+        "404 may stay terminal, but 409 handling must be code-driven"
+    )
 
 
 def test_dismiss_label_says_dismiss_and_deny_via_i18n():
@@ -551,22 +583,123 @@ async function main() {
     assert out["visible"] is True
 
 
-def test_node_dismiss_409_keeps_hidden():
-    """An authoritative 409 (another actor already settled the approval) must
-    keep the dismissal — never restore a card whose server entry is gone."""
+def test_node_dismiss_404_keeps_hidden():
+    """An authoritative 404 (the entry or its session is gone) keeps the
+    dismissal — never restores a card whose server entry no longer exists."""
     out = _run_node_scenario(r'''
 async function main() {
   showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
-  const err = new Error("stale approval");
+  const err = new Error("not found");
+  err.status = 404;
+  apiImpl = async () => { throw err; };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(!cardVisible(), "404 keeps the card hidden");
+  assertTrue(_isApprovalDismissed("sidA", "a1"), "dismissal stands after 404");
+  assertEq(toasts.length, 0, "no restore toast for authoritative 404");
+  assertEq(_approvalResponding, null, "response owner released");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is False
+
+
+def test_node_dismiss_409_without_code_restores_card():
+    """A 409 without a structured body/code is a proxy artifact, not backend
+    settlement — the card must come back with a retry affordance."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  const err = new Error("conflict");
   err.status = 409;
   apiImpl = async () => { throw err; };
   dismissApprovalCard();
   await flush();
-  assertTrue(!cardVisible(), "409 keeps the card hidden");
-  assertTrue(_isApprovalDismissed("sidA", "a1"), "dismissal stands after 409");
-  assertEq(apiCalls.length, 1, "single POST");
-  assertEq(toasts.length, 0, "no restore toast for authoritative 409");
+  assertTrue(cardVisible(), "unstructured 409 restores the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "marker removed on unstructured 409");
+  assertTrue(toasts.length >= 1, "restore toast with retry shown");
   assertEq(_approvalResponding, null, "response owner released");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is True
+
+
+def test_node_dismiss_409_in_progress_restores_card():
+    """A retryable 409 gateway_approval_in_progress means another response
+    owns the run — the exact approval is NOT settled. The card must be
+    unmarked and restored so the user keeps the deny affordance."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_approval_in_progress", error: "Another approval response for this Gateway run is already in progress. Wait for it to finish, then retry if the card is still visible." });
+  apiImpl = async () => { throw err; };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "in-progress 409 restores the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "dismissal marker removed");
+  assertEq(toasts.length, 1, "restore toast with the backend message");
+  assertEq(els.approvalBtnDeny.disabled, false, "controls re-enabled");
+  assertEq(apiCalls.length, 1, "no extra call from the restore path");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is True
+
+
+def test_node_dismiss_409_run_unavailable_retained_restores_card():
+    """A retryable 409 gateway_run_unavailable whose re-fetch shows the exact
+    mirror still pending must restore the card (the deny remains possible)."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "Gateway approval could not be relayed because the active run is unavailable." });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: { approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd" }, pending_count: 1 };
+    }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "retained run-unavailable mirror restores the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "dismissal marker removed");
+  assertTrue(toasts.length >= 1, "restore toast shown");
+  assertEq(apiCalls.length, 2, "deny POST + pending re-fetch");
+  assertEq(_approvalResponding, null, "response owner released");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is True
+
+
+def test_node_dismiss_409_run_unavailable_settled_keeps_hidden():
+    """A 409 gateway_run_unavailable whose re-fetch shows the captured tuple
+    is authoritatively absent/settled keeps the dismissal hidden — no zombie
+    card for an approval that is gone server-side."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "Gateway approval could not be relayed because the active run is unavailable." });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: null, pending_count: 0 };
+    }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(!cardVisible(), "settled mirror keeps the card hidden");
+  assertTrue(_isApprovalDismissed("sidA", "a1"), "dismissal stands when settled");
+  assertEq(toasts.length, 0, "no restore toast when authoritatively settled");
+  assertEq(_approvalResponding, null, "response owner released");
+  assertEq(apiCalls.length, 2, "deny POST + pending re-fetch");
   return { visible: cardVisible() };
 }
 ''')

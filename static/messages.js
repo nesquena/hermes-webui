@@ -7752,21 +7752,76 @@ function dismissApprovalCard() {
       restoreAfterFailure(errMsg);
     })
     .catch(err => {
-      if (err && (err.status === 404 || err.status === 409)) {
-        // Authoritative: another actor already settled the entry (or it
-        // expired server-side). It can never re-render — keep it hidden.
+      // Parse the structured error BEFORE deciding terminality: an HTTP 409
+      // alone is not proof of settlement. The respond contract returns
+      // RETRYABLE 409s — `gateway_approval_in_progress` while another
+      // response owns the run, `gateway_run_unavailable` while the exact
+      // mirror can remain pending/retryable — and a 409 with no JSON body or
+      // unrecognized code is a proxy artifact, never backend settlement.
+      // Treating every 409 as terminal released the local response owner but
+      // kept the dismissal marker, so the fallback poll suppressed the
+      // still-pending approval and the user lost the retry affordance
+      // (re-gate 09/08).
+      let errorPayload = null;
+      if (err && typeof err.body === "string") {
+        try { errorPayload = JSON.parse(err.body); } catch (_) { /* non-JSON HTTP error body */ }
+      }
+      if (err && err.status === 404) {
+        // Authoritative: the entry (or its session) no longer exists
+        // server-side — it can never re-render. Keep it hidden. (#7242)
         _releaseApprovalResponseOwner(owner);
         return;
       }
-      let errMsg = (err && err.message) || "Dismissal failed — try again.";
-      if (err && typeof err.body === "string") {
-        try {
-          const payload = JSON.parse(err.body);
-          if (payload && (payload.error || payload.message)) {
-            errMsg = payload.error || payload.message;
-          }
-        } catch (_) { /* non-JSON HTTP error body */ }
+      const code = errorPayload && errorPayload.code;
+      const errMsg = (errorPayload && (errorPayload.error || errorPayload.message))
+        || (err && err.message)
+        || "Approval dismissal not accepted.";
+      if (err && err.status === 409) {
+        if (code === "gateway_approval_in_progress") {
+          // Another response owns the run right now — the exact approval is
+          // NOT settled. Unmark/re-show/re-enable so the user (or the poll)
+          // can retry once the winner finishes.
+          restoreAfterFailure(errMsg);
+          return;
+        }
+        if (code === "gateway_run_unavailable") {
+          // The exact mirror may be gone (another actor settled it) or merely
+          // out of the current head while still pending. Re-fetch the
+          // authoritative pending state before deciding: restore only when
+          // the captured tuple is still pending; keep the dismissal hidden
+          // when it is authoritatively absent/settled.
+          void (async () => {
+            let pending = null;
+            try {
+              const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(ownerSid), {timeoutToast: false});
+              pending = data && data.pending;
+            } catch (_) { /* re-fetch failed: not authoritative either way */ }
+            if (!_approvalResponseOwnerIsCurrent(owner)) {
+              // A successor or a parallel poll took over while we re-fetched
+              // — that flow owns the card now; just release our owner.
+              _releaseApprovalResponseOwner(owner);
+              return;
+            }
+            const sameRun = !owner.runId || (
+              String((pending && pending.run_id) || "").trim() === owner.runId &&
+              String((pending && pending._gateway_mirror_token) || "").trim() === owner.mirrorToken
+            );
+            if (pending && pending.approval_id === ownerApprovalId && sameRun) {
+              // Still pending/retryable — bring the card back.
+              restoreAfterFailure(errMsg);
+              return;
+            }
+            // Authoritatively absent/settled — the dismissal stands hidden.
+            _releaseApprovalResponseOwner(owner);
+          })();
+          return;
+        }
+        // A 409 without a recognized retryable code is not authoritative
+        // backend settlement — restore with a retry affordance.
+        restoreAfterFailure(errMsg + " Try again.");
+        return;
       }
+      // Network / 5xx / other — never authoritative.
       restoreAfterFailure(errMsg + " Try again.");
     });
 }
