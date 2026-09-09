@@ -2,6 +2,7 @@
 setting ONCE per response, not once per row. Regression guard for the per-row
 settings.json reload that dominated /api/sessions response_write on large lists.
 """
+import json
 import api.routes as routes
 
 
@@ -115,16 +116,67 @@ def test_redact_sidebar_title_fields_helper():
 
 
 def test_sessions_search_branches_redact_derived_titles():
-    """Every /api/sessions/search response branch must call the shared title-field
-    redactor so search rows can't leak a derived display_title the sidebar hides.
-    Source-guard: the #6056 class-fix is easy to regress by adding a 4th branch."""
+    """Every /api/sessions/search response branch must redact the derived
+    title fields so search rows can't leak a derived display_title the sidebar
+    hides (#6056).
+
+    Behavioral, not source-shaped: the original version counted literal
+    `_redact_sidebar_title_fields(item` occurrences in the handler source. That
+    oracle broke the moment #6985 round 6 routed all three branches through the
+    single bounded `_sidebar_session_response_item` serializer (which redacts
+    internally) — even though redaction was strictly preserved. Asserting the
+    response bodies instead keeps the same guarantee (add a 4th unredacted
+    branch and this still fails) without coupling it to one call shape.
+    """
     import inspect
-    src = inspect.getsource(routes._handle_sessions_search)
-    # 3 response branches (empty-query list, title-match, content-match) each build
-    # an `item` and must pass it through _redact_sidebar_title_fields.
-    assert src.count("_redact_sidebar_title_fields(item") >= 3, (
-        "a /api/sessions/search branch builds a row without redacting the derived "
-        "title fields (display_title/_state_db_title/parent_title)"
-    )
-    # And it must read the setting once, not per-_redact_text call.
-    assert "_search_redact_enabled" in src
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from urllib.parse import urlparse
+
+    secret = "sk-" + ("C" * 44)
+    row = {
+        "session_id": "leaky",
+        "title": "needle title",
+        "display_title": f"d {secret}",
+        "_state_db_title": f"s {secret}",
+        "parent_title": f"p {secret}",
+        "profile": "default",
+        "message_count": 1,
+    }
+
+    def _run(url, *, scan_text=""):
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+
+        with patch.object(routes, "all_sessions", return_value=[dict(row)]), \
+             patch.object(
+                 routes, "get_session_for_scan",
+                 side_effect=lambda sid: SimpleNamespace(
+                     messages=[{"role": "user", "content": scan_text}]
+                 ),
+             ), \
+             patch("api.profiles.get_active_profile_name", return_value="default"), \
+             patch.object(routes, "load_settings", return_value={"api_redact_enabled": True}), \
+             patch.object(routes, "j", side_effect=fake_j):
+            routes._handle_sessions_search(SimpleNamespace(), urlparse(url))
+        return captured["payload"]["sessions"]
+
+    branches = {
+        "empty-query": _run("/api/sessions/search"),
+        "title-match": _run("/api/sessions/search?q=needle"),
+        "content-match": _run(
+            "/api/sessions/search?q=haystack", scan_text="a haystack here",
+        ),
+    }
+    for label, rows in branches.items():
+        assert rows, f"{label} branch returned no row to assert on"
+        blob = json.dumps(rows)
+        assert secret not in blob, (
+            f"the /api/sessions/search {label} branch leaked an unredacted "
+            "derived title field (display_title/_state_db_title/parent_title)"
+        )
+
+    # And it must still read the setting once, not per-_redact_text call.
+    assert "_search_redact_enabled" in inspect.getsource(routes._handle_sessions_search)

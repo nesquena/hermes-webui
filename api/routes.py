@@ -44,6 +44,7 @@ from api.agent_sessions import (
     _looks_like_default_cli_title,
     is_cli_session_row,
     is_cli_session_row_visible,
+    open_state_db_readonly,
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
@@ -63,6 +64,31 @@ from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
 
 logger = logging.getLogger(__name__)
+
+
+_SIDEBAR_SOURCES_MAX_VALUES = 8
+
+def _normalize_sidebar_sources(values: list[str] | tuple[str, ...] | None) -> tuple[str, ...] | None:
+    if not values:
+        return None
+    # Treat blank strings as not specified (e.g. ?sidebar_source=).
+    filtered = [str(v or "").strip() for v in values if str(v or "").strip() != ""]
+    if not filtered:
+        return None
+    if len(filtered) > _SIDEBAR_SOURCES_MAX_VALUES:
+        raise ValueError("Too many sidebar_source values")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in filtered:
+        source = str(value).strip().lower()
+        if len(source) > 48 or not re.fullmatch(r"[a-z0-9_]+", source):
+            raise ValueError("Invalid sidebar_source")
+        if source not in seen:
+            seen.add(source)
+            normalized.append(source)
+    if len(normalized) > _SIDEBAR_SOURCES_MAX_VALUES:
+        raise ValueError("Too many sidebar_source values")
+    return tuple(normalized)
 
 
 def _publish_session_list_changed(
@@ -1993,6 +2019,7 @@ def _session_list_cache_key(
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    show_matrix_sessions: bool = False,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -2000,6 +2027,7 @@ def _session_list_cache_key(
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
+    sidebar_sources: tuple[str, ...] | list[str] | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
@@ -2010,6 +2038,7 @@ def _session_list_cache_key(
         show_cli_sessions=show_cli_sessions,
         show_previous_messaging_sessions=show_previous_messaging_sessions,
         show_cron_sessions=show_cron_sessions,
+        show_matrix_sessions=show_matrix_sessions,
         include_archived=include_archived,
         exclude_hidden=exclude_hidden,
         visible_only=visible_only,
@@ -2017,6 +2046,7 @@ def _session_list_cache_key(
         show_kanban_sessions=show_kanban_sessions,
         source_filter=source_filter,
         sidebar_source=sidebar_source,
+        sidebar_sources=sidebar_sources,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
     ) + (bool(show_claude_code_sessions),)
@@ -2255,6 +2285,7 @@ def _build_session_list_cache_payload(
     show_cli_sessions: bool,
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
+    show_matrix_sessions: bool = False,
     show_claude_code_sessions: bool = True,
     include_archived: bool = False,
     exclude_hidden: bool = False,
@@ -2263,6 +2294,7 @@ def _build_session_list_cache_payload(
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
     sidebar_source: str | None = None,
+    sidebar_sources: tuple[str, ...] | list[str] | None = None,
     archived_limit: int | None = None,
     archived_offset: int = 0,
     diag=None,
@@ -2311,8 +2343,28 @@ def _build_session_list_cache_payload(
     show_cli_sessions = bool(show_cli_sessions)
     show_previous_messaging_sessions = bool(show_previous_messaging_sessions)
     show_cron_sessions = bool(show_cron_sessions)
+    show_matrix_sessions = bool(show_matrix_sessions)
     show_webhook_sessions = bool(show_webhook_sessions)
     show_kanban_sessions = bool(show_kanban_sessions)
+    # The sidebar's origin tabs are explicit requests for one high-level
+    # source. Opt into the external-session loader for any non-WebUI origin;
+    # the per-origin flags below still control the default mixed view.
+    selected_sidebar_sources = sidebar_sources
+    if selected_sidebar_sources is None and sidebar_source:
+        selected_sidebar_sources = (sidebar_source,)
+    selected_sidebar_sources = tuple(selected_sidebar_sources or ())
+    selected_sidebar_source_set = set(selected_sidebar_sources)
+    external_sidebar_origins = selected_sidebar_source_set - {'webui'}
+    if external_sidebar_origins:
+        show_cli_sessions = True
+        if 'cron' in external_sidebar_origins:
+            show_cron_sessions = True
+        if 'matrix' in external_sidebar_origins:
+            show_matrix_sessions = True
+        if 'webhook' in external_sidebar_origins:
+            show_webhook_sessions = True
+        if 'kanban' in external_sidebar_origins:
+            show_kanban_sessions = True
     webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
     if show_cli_sessions:
         diag_stage("get_cli_sessions")
@@ -2458,6 +2510,7 @@ def _build_session_list_cache_payload(
             cli,
             represented_webui_ids,
             show_cron_sessions=show_cron_sessions,
+            show_matrix_sessions=show_matrix_sessions,
             show_webhook_sessions=show_webhook_sessions,
             show_kanban_sessions=show_kanban_sessions,
             source_filter=source_filter,
@@ -2480,6 +2533,7 @@ def _build_session_list_cache_payload(
         deduped_cli = []
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
+    merged = [_normalize_sidebar_source_flags(s) for s in merged]
     merged.sort(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
@@ -2537,14 +2591,159 @@ def _build_session_list_cache_payload(
         if s.get("archived") and _is_cli_session_for_settings(s)
     )
     archived_count = archived_webui_count + archived_cli_count
+    full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
+
+    # ── Effective origin: walk parent chain (bounded, cycle-safe) ──────
+    # Build profile-scoped map before filtering so children can resolve to
+    # external parents even when the parent row is archived/hidden. Keyed by
+    # (profile, session_id) — see _canonical_row_profile — never bare id.
+    _effective_session_by_id: dict[tuple[str, str], dict] = {}
+    for _s in scoped:  # scoped is profile-scoped merged before messaging dedupe
+        _sid = str(_s.get("session_id") or "").strip()
+        if _sid:
+            _effective_session_by_id[(_canonical_row_profile(_s.get("profile")), _sid)] = _s
+    for _s in full_scoped_all_sources:
+        _sid = str(_s.get("session_id") or "").strip()
+        _key = (_canonical_row_profile(_s.get("profile")), _sid)
+        if _sid and _key not in _effective_session_by_id:
+            _effective_session_by_id[_key] = _s
+    # Also include archived rows in map so grandchild can reach grandparent.
+    for _s in archived_scoped:
+        _sid = str(_s.get("session_id") or "").strip()
+        _key = (_canonical_row_profile(_s.get("profile")), _sid)
+        if _sid and _key not in _effective_session_by_id:
+            _effective_session_by_id[_key] = _s
+
+    # Memoizes _effective_origin_fallback_lookup() results, INCLUDING misses
+    # (None), so a sidebar with many children whose ancestor sits outside
+    # this request's loaded scope queries that ancestor id at most once,
+    # regardless of how many descendants' walks pass through it. Keyed by
+    # (profile, pid) for the same cross-profile-collision reason as above.
+    _origin_fallback_cache: dict[tuple[str, str], object | None] = {}
+
+    def _effective_origin_fallback_lookup(pid: str, profile: str):
+        """One bounded, profile-scoped read for a lineage ancestor the
+        request's own visible/archived scope didn't include.
+
+        ``profile`` is the OWNING row's own canonical profile (#6985 round
+        4), not the request's active_profile — an all_profiles=True payload
+        mixes rows from every profile, and resolving a profile-B child's
+        missing ancestor against profile A's state.db could silently borrow
+        A's taxonomy (or a same-id ancestor that happens to exist in both
+        profiles with different origins) instead of correctly resolving
+        within B.
+
+        Tries the WebUI sidecar first (Session.load_metadata_only() — compact
+        metadata prefix only, no messages) since it's the cheaper local read
+        when present. Delegated subagent ancestors (#5307) frequently have NO
+        sidecar at all — they ran server-side and only exist in the active
+        profile's state.db — so a sidecar-only lookup would misclassify them
+        as unresolvable and fall back to the child's own webui/subagent
+        placeholder, the exact defect #6985 review round 3 flagged. When the
+        sidecar misses, falls back to a bounded state.db row read scoped to
+        ``profile`` (never a different profile). Any failure (missing
+        file/row, unreadable data) fails closed to None.
+        """
+        cache_key = (profile, pid)
+        if cache_key in _origin_fallback_cache:
+            return _origin_fallback_cache[cache_key]
+        result = None
+        try:
+            result = Session.load_metadata_only(pid)
+        except Exception:
+            result = None
+        if result is not None and _canonical_row_profile(getattr(result, "profile", None)) != profile:
+            # The sidecar exists but belongs to a DIFFERENT profile than the
+            # one this walk is scoped to (a session id can collide across
+            # profiles) — that hit is not authoritative for this lookup,
+            # fall through to the profile-scoped state.db read instead of
+            # letting a foreign profile's sidecar answer for this profile.
+            result = None
+        if result is None:
+            # Always pass the row's own canonical profile explicitly, INCLUDING
+            # "default" — _state_db_lineage_lookup resolves a named profile
+            # via _get_profile_home(), which answers for that profile
+            # regardless of which profile happens to be globally active.
+            # Passing None here (rather than the literal "default") would
+            # route through _active_state_db_path() instead and reopen the
+            # exact cross-profile leak the round-3 fix closed, for the one
+            # profile whose canonical name is "default".
+            result = _state_db_lineage_lookup(pid, profile)
+        _origin_fallback_cache[cache_key] = result
+        return result
+
+    def _effective_sidebar_origin(session: dict) -> str:
+        if not isinstance(session, dict):
+            return "other"
+        # The row's OWN profile scopes its entire lineage walk (#6985 round
+        # 4) — a delegated subagent's ancestor chain stays within the
+        # profile that owns the child, regardless of which profile is
+        # "active" for this request (all_profiles=True mixes every profile).
+        profile = _canonical_row_profile(session.get("profile"))
+        visited: set[str] = set()
+        cur: dict | None = session
+        for _ in range(16):
+            if not isinstance(cur, dict):
+                break
+            origin = _sidebar_session_origin(cur)
+            # A non-webui origin is definitive; subagent/all-webui continues.
+            if origin != "webui":
+                return origin
+            # origin is webui — if markers were all subagent, try parent.
+            pid = str(cur.get("parent_session_id") or "").strip()
+            if not pid or pid in visited:
+                break
+            visited.add(pid)
+            parent = _effective_session_by_id.get((profile, pid))
+            if parent is None:
+                # Parent not in the visible/archived scoped set (e.g. paged
+                # out, or excluded from this request's window) — one bounded
+                # sidecar-or-state.db read for just this id (memoized on
+                # both hit and miss — see _effective_origin_fallback_lookup),
+                # scoped to THIS row's own profile.
+                parent_obj = _effective_origin_fallback_lookup(pid, profile)
+                if parent_obj is None:
+                    break
+                parent = {
+                    "session_origin": getattr(parent_obj, "session_origin", None),
+                    "source_tag": getattr(parent_obj, "source_tag", None),
+                    "raw_source": getattr(parent_obj, "raw_source", None),
+                    "source": getattr(parent_obj, "source", None),
+                    "platform": getattr(parent_obj, "platform", None),
+                    "source_label": getattr(parent_obj, "source_label", None),
+                    "session_source": getattr(parent_obj, "session_source", None),
+                    "is_cli_session": getattr(parent_obj, "is_cli_session", None),
+                    "parent_session_id": getattr(parent_obj, "parent_session_id", None),
+                    "profile": profile,
+                }
+                _effective_session_by_id[(profile, pid)] = parent
+            cur = parent
+        else:
+            # The for loop completed all 16 hops without ever breaking or
+            # returning — the ancestor resolved on the very last permitted
+            # hop was assigned to `cur` but never classified (#6985 round 4:
+            # a definitive external origin reached exactly at the bound was
+            # being silently dropped to the webui fallback below). Give it
+            # the one classification check it's owed before giving up, same
+            # rule as every other hop, still bounded to exactly 16 total.
+            if isinstance(cur, dict):
+                origin = _sidebar_session_origin(cur)
+                if origin != "webui":
+                    return origin
+        # Chain exhausted the 16-hop bound, hit a cycle, or the ancestor was
+        # unresolvable even via the state.db fallback: every origin seen
+        # along the walk was itself a placeholder (webui, or an explicit-
+        # but-nonstandard marker). Return the single deterministic "webui"
+        # sentinel rather than re-deriving from `cur` or `session` — either
+        # could, in an edge case, echo a non-standard explicit marker back
+        # out raw instead of the intended give-up value (#6985 round 3).
+        return "webui"
+
     def _filter_sidebar_source(rows: list[dict]) -> list[dict]:
-        if sidebar_source == "webui":
-            return [s for s in rows if not _is_cli_session_for_settings(s)]
-        if sidebar_source == "cli":
-            return [s for s in rows if _is_cli_session_for_settings(s)]
+        if selected_sidebar_source_set:
+            return [s for s in rows if _effective_sidebar_origin(s) in selected_sidebar_source_set]
         return list(rows)
 
-    full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
     webui_session_count = sum(
         1 for s in full_scoped_all_sources
         if not _is_cli_session_for_settings(s)
@@ -2553,6 +2752,14 @@ def _build_session_list_cache_payload(
         1 for s in full_scoped_all_sources
         if _is_cli_session_for_settings(s)
     )
+    session_origin_counts: dict[str, int] = defaultdict(int)
+    session_origin_labels: dict[str, str] = {}
+    for session in full_scoped_all_sources:
+        origin = _effective_sidebar_origin(session)
+        session_origin_counts[origin] += 1
+        session_origin_labels.setdefault(origin, _sidebar_session_origin_label(origin))
+    # Intentionally do NOT merge _sidebar_state_origin_counts() via max():
+    # that helper is unscoped and would advertise origins with zero filtered rows.
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
     scoped = _filter_sidebar_source(full_scoped_all_sources)
@@ -2612,6 +2819,8 @@ def _build_session_list_cache_payload(
         "archived_cli_count": archived_cli_count,
         "webui_session_count": webui_session_count,
         "cli_session_count": cli_session_count,
+        "session_origin_counts": dict(session_origin_counts),
+        "session_origin_labels": session_origin_labels,
         "include_archived": include_archived,
         "archived_limit": archived_limit,
         "archived_offset": archived_offset,
@@ -2622,6 +2831,7 @@ def _build_session_list_cache_payload(
             "show_cli_sessions": show_cli_sessions,
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
+            "show_matrix_sessions": show_matrix_sessions,
             "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
             "show_kanban_sessions": show_kanban_sessions,
@@ -2671,6 +2881,16 @@ def _session_list_payload_to_response(payload: dict) -> dict:
         response["webui_session_count"] = int(payload.get("webui_session_count", 0))
     if "cli_session_count" in payload:
         response["cli_session_count"] = int(payload.get("cli_session_count", 0))
+    if "session_origin_counts" in payload:
+        response["session_origin_counts"] = {
+            str(key): int(value or 0)
+            for key, value in dict(payload.get("session_origin_counts") or {}).items()
+        }
+    if "session_origin_labels" in payload:
+        response["session_origin_labels"] = {
+            str(key): str(value)
+            for key, value in dict(payload.get("session_origin_labels") or {}).items()
+        }
     if payload.get("archived_limit") is not None:
         response["archived_limit"] = int(payload.get("archived_limit") or 0)
         response["archived_offset"] = int(payload.get("archived_offset") or 0)
@@ -8087,6 +8307,68 @@ def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
         return False
 
 
+def _state_db_lineage_lookup(pid: str, profile: str | None):
+    """Return a lightweight lineage object for ``pid`` read from the given
+    profile's state.db ``sessions`` table, or ``None`` on any miss/error.
+
+    Used by ``_effective_sidebar_origin``'s missing-ancestor fallback (#6985
+    review round 3): a WebUI-sidecar-only lookup misses every delegated
+    subagent ancestor that ran server-side (#5307), since those have no
+    sidecar at all — state.db is their only record. Only the two lineage
+    columns the caller needs (``source``, ``parent_session_id``) are read —
+    no messages, no full row.
+
+    Deliberately does NOT use ``_agent_state_db_path()`` for a named
+    ``profile``: that helper falls back to ``_active_state_db_path()`` (the
+    server-wide currently-active session's db) whenever the named profile's
+    own state.db file doesn't exist yet. That fallback is fine for its other
+    callers, but here it would silently serve a DIFFERENT profile's data —
+    a profile queried for the first time (no state.db of its own created
+    yet) would leak whatever profile happens to be globally active at that
+    moment instead of correctly resolving to nothing. Verified: a probe that
+    populates only the mocked active-session db (not the target profile's
+    own) with a foreign ancestor row reproduces the leak via
+    ``_agent_state_db_path`` and is closed by resolving the named profile's
+    path directly with no such fallback. ``profile=None`` (no specific
+    profile requested) still legitimately means "the current active
+    session," so that case alone still resolves via
+    ``_active_state_db_path()``.
+    """
+    if not pid or not is_safe_session_id(pid):
+        return None
+    try:
+        from api.models import _active_state_db_path, _get_profile_home
+        if isinstance(profile, str) and profile:
+            db_path = _get_profile_home(profile) / "state.db"
+        else:
+            db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return None
+        with closing(open_state_db_readonly(Path(db_path))) as conn:
+            row = conn.execute(
+                "SELECT source, parent_session_id FROM sessions WHERE id = ?",
+                (pid,),
+            ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    import types
+    source = str(row[0] or "").strip() or None
+    parent_session_id = str(row[1] or "").strip() or None
+    return types.SimpleNamespace(
+        session_origin=None,
+        source_tag=source,
+        raw_source=None,
+        source=None,
+        platform=None,
+        source_label=None,
+        session_source=None,
+        is_cli_session=None,
+        parent_session_id=parent_session_id,
+    )
+
+
 def _state_db_session_source(sid: str) -> str:
     """Return the lowercased ``sessions.source`` for ``sid`` from state.db.
 
@@ -8658,6 +8940,82 @@ def _is_messaging_session_record(session) -> bool:
         session.get("source_label") if isinstance(session, dict) else None,
     )
     return _is_known_messaging_source(raw)
+
+
+def _is_matrix_session_record(session) -> bool:
+    """Return True only for rows whose external source is Matrix."""
+    if not session:
+        return False
+    values = []
+    for key in ("source", "source_tag", "raw_source", "platform"):
+        value = (
+            getattr(session, key, None)
+            if not isinstance(session, dict)
+            else session.get(key)
+        )
+        normalized = str(value or "").strip().lower()
+        if normalized:
+            values.append(normalized)
+    return "matrix" in values
+
+
+def _apply_matrix_organization_metadata(session, cli_meta: dict) -> None:
+    """Stamp only source metadata on a WebUI-owned Matrix organization sidecar."""
+    session.is_cli_session = is_cli_session_row(cli_meta)
+    session.source_tag = cli_meta.get("source_tag") or cli_meta.get("source") or "matrix"
+    session.raw_source = cli_meta.get("raw_source") or session.source_tag
+    session.session_source = cli_meta.get("session_source") or "messaging"
+    session.source_label = cli_meta.get("source_label") or "Matrix"
+    session.profile = cli_meta.get("profile") or getattr(session, "profile", None) or "default"
+    session.read_only = True
+
+
+def _materialize_matrix_organization_metadata(sid: str, cli_meta: dict | None = None):
+    """Return a read-only WebUI sidecar for Matrix organization metadata.
+
+    Matrix transcripts remain owned by the external Agent state store. The
+    sidecar contains no transcript messages and is written only to the WebUI
+    session store so project/archive mutations cannot alter Agent state.db.
+    """
+    sid = str(sid or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        raise KeyError(sid)
+    cli_meta = dict(cli_meta or _lookup_cli_session_metadata(sid))
+    if not cli_meta or cli_meta.get("session_id") not in (None, sid):
+        raise KeyError(sid)
+    if not _is_matrix_session_record(cli_meta):
+        raise PermissionError("read-only imported session")
+
+    try:
+        session = get_session(sid)
+    except KeyError:
+        session = None
+    if session is None:
+        session = Session(
+            session_id=sid,
+            title=cli_meta.get("title") or "Matrix Session",
+            workspace=cli_meta.get("workspace") or get_last_workspace(),
+            model=cli_meta.get("model") or "unknown",
+            messages=[],
+            created_at=cli_meta.get("created_at"),
+            updated_at=cli_meta.get("updated_at"),
+            profile=cli_meta.get("profile") or "default",
+            read_only=True,
+        )
+    elif getattr(session, "_loaded_metadata_only", False):
+        session = Session.load(sid) or session
+
+    if cli_meta.get("title") and not getattr(session, "manual_title", False):
+        session.title = cli_meta["title"]
+    if cli_meta.get("model") and not getattr(session, "model", None):
+        session.model = cli_meta["model"]
+    if cli_meta.get("created_at") is not None:
+        session.created_at = cli_meta["created_at"]
+    if cli_meta.get("updated_at") is not None:
+        session.updated_at = cli_meta["updated_at"]
+    _apply_matrix_organization_metadata(session, cli_meta)
+    session.save(touch_updated_at=False)
+    return session
 
 
 def _messages_include_tool_metadata(messages) -> bool:
@@ -9983,7 +10341,119 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
         return session
     normalized = dict(session)
     normalized["is_cli_session"] = is_cli_session_row(normalized)
+    normalized["session_origin"] = _sidebar_session_origin(normalized)
     return normalized
+
+
+_SIDEBAR_ORIGIN_LABELS = {
+    "webui": "WebUI sessions",
+    "cli": "CLI sessions",
+    "tui": "TUI sessions",
+    "acp": "ACP sessions",
+    "matrix": "Matrix sessions",
+    "telegram": "Telegram sessions",
+    "slack": "Slack sessions",
+    "discord": "Discord sessions",
+    "email": "Email sessions",
+    "wecom": "WeCom sessions",
+    "wecom_callback": "WeCom Callback sessions",
+    "weixin": "Weixin sessions",
+    "cron": "Cron sessions",
+    "webhook": "Webhook sessions",
+    "kanban": "Kanban sessions",
+    "api": "API sessions",
+    "claude_code": "Claude Code sessions",
+    "tool": "Tool sessions",
+    "subagent": "Subagent sessions",
+    "other": "Other sessions",
+}
+
+
+def _sidebar_session_origin(session: dict) -> str:
+    """Return the durable high-level origin bucket for one sidebar row.
+
+    ``session_source`` is intentionally not the bucket: it is a broad
+    ownership/category field (for example, every gateway channel is
+    ``messaging``). The sidebar needs the raw origin so Matrix, Telegram,
+    Slack, TUI, and future channels can each be filtered independently.
+    """
+    if not isinstance(session, dict):
+        return "other"
+
+    explicit = str(session.get("session_origin") or "").strip().lower()
+    if explicit:
+        return explicit.replace("-", "_").replace(" ", "_")
+
+    markers = []
+    for key in ("source_tag", "raw_source", "source", "platform"):
+        value = _normalized_source_marker(session.get(key))
+        if value and value not in markers:
+            markers.append(value)
+    label_marker = _normalized_source_marker(session.get("source_label"))
+    if label_marker and label_marker not in markers:
+        markers.append(label_marker)
+
+    known = set(_SIDEBAR_ORIGIN_LABELS) | {"api_server", "external_agent", "messaging"}
+    for marker in markers:
+        if marker in known:
+            if marker == "api_server":
+                return "api"
+            if marker == "subagent":
+                continue
+            if marker in {"messaging", "external_agent"}:
+                continue
+            return marker
+
+    if markers and all(marker == "subagent" for marker in markers):
+        return "webui"
+    session_source = _normalized_source_marker(session.get("session_source"))
+    if session_source == "cli":
+        # Raw ``tui``/``acp`` markers were already handled above; blank raw
+        # metadata is the legacy CLI shape.
+        return "cli"
+    if session_source in {"cron", "webhook", "kanban", "tool", "api"}:
+        return session_source
+    if session_source in {"messaging", "external_agent", "other"}:
+        return "other"
+    if any(marker in {"cli", "tui", "acp"} for marker in markers):
+        return next(marker for marker in markers if marker in {"cli", "tui", "acp"})
+    if session.get("is_cli_session"):
+        return "cli"
+    if not markers and not session_source:
+        return "webui"
+    return markers[0] if markers else "other"
+
+
+def _sidebar_session_origin_label(origin: str) -> str:
+    normalized = _normalized_source_marker(origin) or "other"
+    return _SIDEBAR_ORIGIN_LABELS.get(
+        normalized,
+        f"{normalized.replace('_', ' ').title()} sessions",
+    )
+
+
+def _sidebar_state_origin_counts() -> dict[str, int]:
+    """Return cheap source counts so hidden origins still get filter tabs."""
+    try:
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return {}
+        with closing(open_state_db_readonly(Path(db_path))) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "source" not in columns:
+                return {}
+            rows = conn.execute(
+                "SELECT source, COUNT(*) FROM sessions "
+                "WHERE source IS NOT NULL AND trim(source) != '' GROUP BY source"
+            ).fetchall()
+        counts: dict[str, int] = defaultdict(int)
+        for raw_source, count in rows:
+            origin = _sidebar_session_origin({"source_tag": raw_source})
+            counts[origin] += int(count or 0)
+        return dict(counts)
+    except Exception:
+        logger.debug("Failed to read sidebar origin counts", exc_info=True)
+        return {}
 
 
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
@@ -10086,6 +10556,7 @@ def _dedupe_cli_sidebar_sessions_for_api(
     represented_webui_ids: set[str],
     *,
     show_cron_sessions: bool = False,
+    show_matrix_sessions: bool = False,
     show_webhook_sessions: bool = False,
     show_kanban_sessions: bool = False,
     source_filter: str | None = None,
@@ -10111,6 +10582,8 @@ def _dedupe_cli_sidebar_sessions_for_api(
     _sf = str(source_filter or '').strip().lower()
     if _sf == 'cron':
         show_cron_sessions = True
+    elif _sf == 'matrix':
+        show_matrix_sessions = True
     elif _sf == 'webhook':
         show_webhook_sessions = True
     elif _sf == 'kanban':
@@ -10127,6 +10600,7 @@ def _dedupe_cli_sidebar_sessions_for_api(
         if not _hide_background(
             s,
             show_cron=show_cron_sessions,
+            show_matrix=show_matrix_sessions,
             show_webhook=show_webhook_sessions,
             show_kanban=show_kanban_sessions,
         )
@@ -10676,6 +11150,33 @@ def _session_attention_summary(session_id: str) -> dict | None:
     return None
 
 
+def _canonical_row_profile(raw) -> str:
+    """Normalize a row's ``profile`` field to a stable map/cache/wire key.
+
+    Mirrors ``_profiles_match``'s equivalence rules (missing/blank ->
+    'default', any renamed-root alias -> 'default') so two rows that
+    ``_profiles_match`` would treat as the same profile always share one
+    lineage-map/cache key, while two rows from genuinely different profiles
+    never collide on a bare session id (#6985 round 4: an
+    ``all_profiles=True`` payload mixes rows from every profile, and a
+    session id existing in more than one profile's state.db must not let one
+    profile's origin leak into another's child).
+
+    Module-level (not a closure inside ``_build_session_list_cache_payload``)
+    so the shared row serializer can derive the SAME canonical value for the
+    wire. It is emitted as the separate ``profile_key`` field and the row's
+    own ``profile`` is left untouched for display (#6985 round 5 — overwriting
+    ``profile`` itself made a renamed root profile render as literal
+    "default"). The client's ``_rowProfileKey()`` (static/sessions.js) only
+    trims/defaults and has no way to replicate this server-side alias-folding
+    rule itself, so without a server-derived key a renamed-root profile's raw
+    alias could make the client's profile-scoped lineage map fail to match
+    rows the server would correctly treat as the same profile.
+    """
+    name = str(raw or "").strip() or "default"
+    return "default" if _is_root_profile(name) else name
+
+
 _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "session_id",
     "title",
@@ -10706,6 +11207,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "source_tag",
     "raw_source",
     "session_source",
+    "session_origin",
     "source_label",
     "is_cli_session",
     "is_messaging_session",
@@ -10729,8 +11231,11 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "_parent_lineage_root_id",
     "_parent_lineage_tip_id",
     "_cross_surface_child_session",
-    "match_type",
-    "match_preview",
+    # NOTE: `match_type` / `match_preview` are deliberately NOT allowlisted.
+    # They are search-only metadata the search branch supplies as trusted
+    # arguments to `_sidebar_session_response_item`; forwarding them from a
+    # raw session dict would let persisted/forged row state masquerade as a
+    # server-computed search match on either endpoint (#6985 round 6).
     # Preserved so the sidebar can suppress rename / action-menu / swipe on
     # read-only (imported CLI + Claude Code) sessions, and render the detailed
     # gateway model label. Dropping these silently regressed both surfaces.
@@ -10743,25 +11248,68 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
 }
 
 
-def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None = None) -> dict:
-    """Return the bounded /api/sessions row shape used by the sidebar.
+def _sidebar_session_response_item(
+    session: dict,
+    *,
+    redact_enabled: bool | None = None,
+    match_type: str | None = None,
+    match_preview: str | None = None,
+) -> dict:
+    """Return the bounded sidebar row shape used by list AND search.
 
     Full session/detail fields such as messages, tool calls, compression
     summaries, context-engine state, gateway routing history, drafts, and
     pending user text are intentionally excluded from the list endpoint. Large
     installs should not ship tens of KB of per-row detail just to render a
     conversation title.
+
+    #6985 round 6: this is the SINGLE bounded row serializer. `/api/sessions`
+    and every `/api/sessions/search` branch go through it, so one row can never
+    be serialized under two different wire contracts depending on which
+    endpoint produced it (search previously started from a bare ``dict(s)``,
+    forwarding internal out-of-contract fields the list endpoint strips).
+
+    ``match_type``/``match_preview`` are supplied by the search branch as
+    TRUSTED arguments and applied after allowlist filtering, so a raw session
+    dict carrying those keys can never forge a search match. ``profile_key``
+    is likewise always derived here from the row's own ``profile`` and never
+    accepted from the incoming dict.
     """
     item = {
         key: value
         for key, value in dict(session).items()
         if key in _SIDEBAR_SESSION_RESPONSE_FIELDS
     }
+    _add_profile_lineage_key(item)
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
     _redact_sidebar_title_fields(item, redact_enabled)
     item["attention"] = _session_attention_summary(str(item.get("session_id") or ""))
+    if match_type is not None:
+        item["match_type"] = match_type
+    if match_preview is not None:
+        item["match_preview"] = _redact_text(match_preview, _enabled=redact_enabled)
     return item
+
+
+def _add_profile_lineage_key(item: dict) -> None:
+    """Add the row's canonical, alias-folded profile as `profile_key`, in place.
+
+    #6985 round 4 needed the client to key cross-row lineage lookups
+    (`(profile, session_id)`) the same way the server does, so a renamed-root
+    profile's sessions still self-consistently resolve to their ancestors.
+    That fix originally OVERWROTE `item["profile"]` with the folded value —
+    which is also the field the detailed all-profiles UI displays as the
+    user's configured profile name/label, so a renamed root profile's rows
+    all showed literal "default" instead of the real name (round 5).
+    `profile` must stay untouched for display; `profile_key` is the
+    lineage-only value every consumer should key/compare on instead. Shared
+    by `_sidebar_session_response_item` (`/api/sessions`) and every
+    `/api/sessions/search` response branch so list and search rows for the
+    same session can never disagree on canonical lineage identity.
+    """
+    if "profile" in item:
+        item["profile_key"] = _canonical_row_profile(item.get("profile"))
 
 
 def _redact_sidebar_title_fields(item: dict, redact_enabled: bool | None = None) -> None:
@@ -14099,6 +14647,7 @@ def handle_get(handler, parsed) -> bool:
                 settings.get("show_previous_messaging_sessions")
             )
             show_cron_sessions = bool(settings.get("show_cron_sessions"))
+            show_matrix_sessions = bool(settings.get("show_matrix_sessions"))
             show_webhook_sessions = bool(settings.get("show_webhook_sessions"))
             show_kanban_sessions = bool(settings.get("show_kanban_sessions"))
             agent_session_source_filter = settings.get("agent_session_source_filter")
@@ -14108,9 +14657,12 @@ def handle_get(handler, parsed) -> bool:
             exclude_hidden = _query_flag(parsed, "exclude_hidden")
             archived_limit = _query_positive_int(parsed, "archived_limit", default=None, maximum=2000)
             archived_offset = _query_positive_int(parsed, "archived_offset", default=0, maximum=200000)
-            sidebar_source = parse_qs(parsed.query).get("sidebar_source", [""])[0].strip().lower() or None
-            if sidebar_source not in ("webui", "cli"):
-                sidebar_source = None
+            try:
+                sidebar_sources = _normalize_sidebar_sources(
+                    parse_qs(parsed.query, keep_blank_values=True).get("sidebar_source", [])
+                )
+            except ValueError:
+                return bad(handler, "Invalid sidebar_source", status=400)
             # /api/sessions is the default sidebar contract, so keep the route-owned
             # visible-row filter in the shared cache builder for both cache hits and misses.
             key = _session_list_cache_key(
@@ -14120,13 +14672,14 @@ def handle_get(handler, parsed) -> bool:
                 show_claude_code_sessions=show_claude_code_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
+                show_matrix_sessions=show_matrix_sessions,
                 include_archived=include_archived,
                 exclude_hidden=exclude_hidden,
                 visible_only=True,
                 show_webhook_sessions=show_webhook_sessions,
                 show_kanban_sessions=show_kanban_sessions,
                 source_filter=agent_session_source_filter,
-                sidebar_source=sidebar_source,
+                sidebar_sources=sidebar_sources,
                 archived_limit=archived_limit,
                 archived_offset=archived_offset,
             )
@@ -14143,13 +14696,14 @@ def handle_get(handler, parsed) -> bool:
                     show_claude_code_sessions=show_claude_code_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
+                    show_matrix_sessions=show_matrix_sessions,
                     include_archived=include_archived,
                     exclude_hidden=exclude_hidden,
                     visible_only=True,
                     show_webhook_sessions=show_webhook_sessions,
                     show_kanban_sessions=show_kanban_sessions,
                     source_filter=agent_session_source_filter,
-                    sidebar_source=sidebar_source,
+                    sidebar_sources=sidebar_sources,
                     archived_limit=archived_limit,
                     archived_offset=archived_offset,
                     diag=diag,
@@ -16836,6 +17390,7 @@ def handle_post(handler, parsed) -> bool:
                 "show_cli_sessions",
                 "show_claude_code_sessions",
                 "show_cron_sessions",
+                "show_matrix_sessions",
                 "show_webhook_sessions",
                 "show_kanban_sessions",
                 "show_previous_messaging_sessions",
@@ -17032,6 +17587,12 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
+        _matrix_meta = _lookup_cli_session_metadata(sid)
+        if _is_matrix_session_record(_matrix_meta):
+            try:
+                _materialize_matrix_organization_metadata(sid, _matrix_meta)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -17103,6 +17664,8 @@ def handle_post(handler, parsed) -> bool:
                 s.thread_id = cli_meta.get("thread_id")
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
+        if getattr(s, "read_only", False) and not _is_matrix_session_record(s):
+            return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 403)
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
@@ -17119,14 +17682,27 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        sid = str(body["session_id"] or "").strip()
+        matrix_meta = _lookup_cli_session_metadata(sid)
+        target_pid = body.get("project_id") or None
+        if _is_matrix_session_record(matrix_meta) and target_pid:
+            matrix_profile = matrix_meta.get("profile") or get_active_profile_name()
+            matrix_target = next(
+                (p for p in load_projects() if p["project_id"] == target_pid),
+                None,
+            )
+            if not matrix_target or not _profiles_match(matrix_target.get("profile"), matrix_profile):
+                return bad(handler, "Project not found", 404)
         try:
-            s = _get_or_materialize_session(body["session_id"])
+            if _is_matrix_session_record(matrix_meta):
+                s = _materialize_matrix_organization_metadata(sid, matrix_meta)
+            else:
+                s = _get_or_materialize_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be moved from WebUI", 403)
         # #1614: refuse moves into a project owned by another profile.
-        target_pid = body.get("project_id") or None
         if target_pid:
             # Use the session's own profile for authorization, not the global
             # active profile. A session belongs to a specific profile set at
@@ -17151,7 +17727,7 @@ def handle_post(handler, parsed) -> bool:
         # the wait converts that into an actionable HTTP 503 the client can retry.
         # We keep the lock (rather than dropping it for this metadata-only write)
         # because s.save() still races the streaming thread's atomic writer.
-        _move_lock = _get_session_agent_lock(body["session_id"])
+        _move_lock = _get_session_agent_lock(sid)
         if not _move_lock.acquire(timeout=5):
             return j(
                 handler,
@@ -17964,13 +18540,10 @@ def _handle_sessions_search(handler, parsed):
     except Exception:
         _search_redact_enabled = True  # fail safe: redact when settings unreadable
     if not q:
-        safe_sessions = []
-        for s in sessions:
-            item = dict(s)
-            if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
-            _redact_sidebar_title_fields(item, _search_redact_enabled)
-            safe_sessions.append(item)
+        safe_sessions = [
+            _sidebar_session_response_item(s, redact_enabled=_search_redact_enabled)
+            for s in sessions
+        ]
         return j(handler, {
             "sessions": safe_sessions,
             "all_profiles": all_profiles,
@@ -17980,11 +18553,9 @@ def _handle_sessions_search(handler, parsed):
     for s in sessions:
         title_match = q in (s.get("title") or "").lower()
         if title_match:
-            item = dict(s, match_type="title")
-            if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
-            _redact_sidebar_title_fields(item, _search_redact_enabled)
-            results.append(item)
+            results.append(_sidebar_session_response_item(
+                s, redact_enabled=_search_redact_enabled, match_type="title",
+            ))
             continue
         if content_search:
             try:
@@ -17998,14 +18569,12 @@ def _handle_sessions_search(handler, parsed):
                 for m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
-                        item = dict(s, match_type="content")
-                        preview = _session_search_preview(c, q)
-                        if preview:
-                            item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)
-                        if isinstance(item.get("title"), str):
-                            item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
-                        _redact_sidebar_title_fields(item, _search_redact_enabled)
-                        results.append(item)
+                        results.append(_sidebar_session_response_item(
+                            s,
+                            redact_enabled=_search_redact_enabled,
+                            match_type="content",
+                            match_preview=_session_search_preview(c, q) or None,
+                        ))
                         break
             except (KeyError, Exception):
                 pass
@@ -24200,7 +24769,7 @@ def _handle_chat_start(handler, body, diag=None):
                     "type": "compression_recovery_required",
                     "recommended_recovery_action": recovery.get("recommended_action"),
                     "compression_recovery": recovery,
-                    "session_id": getattr(s, "session_id", body["session_id"]),
+            "session_id": getattr(s, "session_id", body["session_id"]),
                 },
                 status=409,
             )

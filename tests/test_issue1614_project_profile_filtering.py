@@ -279,7 +279,9 @@ def test_session_move_uses_session_profile():
 
     move_idx = src.find('"/api/session/move"')
     assert move_idx > 0
-    move_block = src[move_idx:move_idx + 2000]
+    # Matrix organization validation now runs before the shared profile guard,
+    # so keep this source-contract window wide enough to cover both paths.
+    move_block = src[move_idx:move_idx + 20000]
     assert '_profiles_match(target.get("profile"), _session_profile)' in move_block, (
         "session/move must use session-scoped profile (not active_profile) for authorization"
     )

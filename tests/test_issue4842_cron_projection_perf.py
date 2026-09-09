@@ -199,7 +199,7 @@ def test_missing_sidecar_returns_default_without_caching_growth(tmp_path):
     session_dir.mkdir()
     with mock.patch("api.models.SESSION_DIR", session_dir):
         meta = models._state_projection_sidecar_metadata("cron_nope_999")
-    assert meta == {"title": None, "archived": False}
+    assert meta == {"title": None, "archived": False, "project_id": None}
     # No file → nothing cached (so the cache can't be poisoned by absent files).
     assert len(models._SIDECAR_METADATA_CACHE) == 0
 

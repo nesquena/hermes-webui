@@ -6,33 +6,34 @@ SESSIONS_JS = ROOT / "static" / "sessions.js"
 STYLE_CSS = ROOT / "static" / "style.css"
 
 
-def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
+def test_sidebar_has_dynamic_webui_and_cli_session_source_menu():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     assert "let _sessionSourceFilter = 'webui'" in src
     assert "hermes-session-source-filter" in src
-    assert "session-source-tabs" in src
+    assert "session-source-filter" in src
+    assert "session-source-menu" in src
     assert "WebUI sessions" in src
     assert "CLI sessions" in src
-    assert "_sessionSourceFilter==='cli'" in src
+    assert "_sessionSourceFilters" in src
 
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in src
     assert "cliSessionCount" in src
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in src
+    assert "const showCliOnly=selectedOrigins.size===1&&selectedOrigins.has('cli');" in src
     assert "const webuiProfileFiltered=[];" in src
     assert "const cliProfileFiltered=[];" in src
     assert "const webuiSessionsRaw=[];" in src
     assert "const cliSessionsRaw=[];" in src
-    assert "profileFiltered: showCliOnly ? cliProfileFiltered : webuiProfileFiltered," in src
-    assert "sessionsRaw: showCliOnly ? cliSessionsRaw : webuiSessionsRaw," in src
+    assert "profileFiltered: selectedProfileFiltered," in src
+    assert "sessionsRaw: selectedSessionsRaw," in src
 
 
-def test_session_source_tabs_have_dedicated_sidebar_styles():
+def test_session_source_menu_has_dedicated_sidebar_styles():
     css = STYLE_CSS.read_text(encoding="utf-8")
-    assert ".session-source-tabs" in css
-    assert ".session-source-tab.active" in css
+    assert ".session-source-filter" in css
+    assert ".session-source-menu-item.active" in css
     assert ".session-empty-note" in css
 
 
