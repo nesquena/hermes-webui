@@ -706,3 +706,280 @@ def test_server_side_turn_rejects_stale_runtime_before_session_acceptance(monkey
         "retryable": True,
         "_status": 409,
     }
+
+
+class TestAutoRestartScheduling:
+    """Auto-restart scheduling must reuse the shared restart authority (#6557).
+
+    Covers: response ordering (typed error before restart begins), concurrent
+    single-flight scheduling, schedule/restart failure recovery, rollback
+    cancellation (A→B→A), and unreadable-revision fail-closed without restart.
+    """
+
+    def test_concrete_transition_raises_and_schedules_single_restart(self, monkeypatch):
+        """The typed error is raised synchronously; exactly one restart scheduled."""
+        from api import agent_runtime
+
+        scheduled = []
+        monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
+        monkeypatch.setattr(
+            agent_runtime,
+            "_read_agent_revision",
+            lambda _path, **_kwargs: "rev-b",
+        )
+        monkeypatch.setattr(
+            agent_runtime,
+            "_schedule_self_restart",
+            lambda delay=2.0: scheduled.append(delay),
+        )
+
+        with pytest.raises(agent_runtime.AgentRuntimeChangedError) as excinfo:
+            agent_runtime.ensure_agent_runtime_current()
+
+        assert "Restart Hermes WebUI" in str(excinfo.value)
+        assert scheduled == [2.0], "exactly one restart must be scheduled"
+
+    def test_unreadable_known_revision_fails_closed_without_scheduling(self, monkeypatch):
+        """Fail-closed stays fail-closed: no restart is scheduled when unreadable."""
+        from api import agent_runtime
+
+        scheduled = []
+        monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "known-revision")
+        monkeypatch.setattr(
+            agent_runtime,
+            "_read_agent_revision",
+            lambda _path, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            agent_runtime,
+            "_schedule_self_restart",
+            lambda delay=2.0: scheduled.append(delay),
+        )
+
+        with pytest.raises(agent_runtime.AgentRuntimeChangedError):
+            agent_runtime.ensure_agent_runtime_current()
+
+        assert scheduled == [], "unreadable revision must fail closed without restart"
+
+    def test_concurrent_scheduling_is_single_flight(self, monkeypatch):
+        """Concurrent barrier hits must not stack restart timers."""
+        import queue
+        import threading as _threading
+
+        from api import agent_runtime
+        import api.updates as updates
+
+        calls = queue.Queue()
+        arrived = _threading.Event()
+
+        def fake_schedule_restart(delay=2.0, revalidate=None):
+            calls.put((delay, revalidate))
+            arrived.set()
+
+        monkeypatch.setattr(updates, "_schedule_restart", fake_schedule_restart)
+        monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
+        monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
+        monkeypatch.setattr(
+            agent_runtime,
+            "_read_agent_revision",
+            lambda _path, **_kwargs: "rev-b",
+        )
+
+        threads = [
+            _threading.Thread(
+                target=agent_runtime._schedule_self_restart, kwargs={"delay": 0.05}
+            )
+            for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert arrived.wait(timeout=5), "restart authority was never invoked"
+        collected = []
+        while not calls.empty():
+            collected.append(calls.get_nowait())
+        assert len(collected) == 1, f"expected a single restart, got {len(collected)}"
+
+    def test_rollback_cancels_scheduled_restart(self, monkeypatch):
+        """A→B→A: the pre-restart revalidation must cancel the re-exec."""
+        import queue
+
+        from api import agent_runtime
+        import api.updates as updates
+
+        calls = queue.Queue()
+
+        def fake_schedule_restart(delay=2.0, revalidate=None):
+            calls.put(revalidate)
+
+        monkeypatch.setattr(updates, "_schedule_restart", fake_schedule_restart)
+        monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
+        monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
+        # Barrier read sees rev-b; the pre-restart revalidation sees rev-a.
+        revisions = iter(["rev-b", "rev-a"])
+        monkeypatch.setattr(
+            agent_runtime,
+            "_read_agent_revision",
+            lambda _path, **_kwargs: next(revisions),
+        )
+
+        with pytest.raises(agent_runtime.AgentRuntimeChangedError):
+            agent_runtime.ensure_agent_runtime_current()
+
+        revalidate = calls.get(timeout=5)
+        assert revalidate is not None
+        assert revalidate() is False, "A→B→A rollback must cancel the restart"
+        assert agent_runtime._SCHEDULED_RESTART is False, "scheduler must re-arm"
+
+    def test_still_changed_revalidation_allows_restart(self, monkeypatch):
+        """A→B→B: revalidation still sees the concrete transition → proceed."""
+        import queue
+
+        from api import agent_runtime
+        import api.updates as updates
+
+        calls = queue.Queue()
+
+        def fake_schedule_restart(delay=2.0, revalidate=None):
+            calls.put(revalidate)
+
+        monkeypatch.setattr(updates, "_schedule_restart", fake_schedule_restart)
+        monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
+        monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
+        revisions = iter(["rev-b", "rev-b"])
+        monkeypatch.setattr(
+            agent_runtime,
+            "_read_agent_revision",
+            lambda _path, **_kwargs: next(revisions),
+        )
+
+        with pytest.raises(agent_runtime.AgentRuntimeChangedError):
+            agent_runtime.ensure_agent_runtime_current()
+
+        revalidate = calls.get(timeout=5)
+        assert revalidate() is True
+        assert agent_runtime._SCHEDULED_RESTART is True
+
+    def test_restart_authority_unavailable_exits_for_supervisor(self, monkeypatch):
+        """Authority import loss must exit non-zero, never serve a mixed runtime."""
+        import builtins
+        import queue
+
+        from api import agent_runtime
+
+        exited = queue.Queue()
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "api.updates":
+                raise ImportError("simulated authority loss")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        monkeypatch.setattr(agent_runtime.os, "_exit", lambda code: exited.put(code))
+        monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
+        monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
+        monkeypatch.setattr(
+            agent_runtime,
+            "_read_agent_revision",
+            lambda _path, **_kwargs: "rev-b",
+        )
+
+        with pytest.raises(agent_runtime.AgentRuntimeChangedError):
+            agent_runtime.ensure_agent_runtime_current()
+
+        assert exited.get(timeout=5) == 1, "must exit non-zero so a supervisor respawns"
+
+    def test_restart_authority_failure_exits_for_supervisor(self, monkeypatch):
+        """Restart authority failure must exit non-zero for the supervisor."""
+        import queue
+
+        from api import agent_runtime
+        import api.updates as updates
+
+        exited = queue.Queue()
+
+        def failing_restart(delay=2.0, revalidate=None):
+            raise RuntimeError("simulated authority failure")
+
+        monkeypatch.setattr(updates, "_schedule_restart", failing_restart)
+        monkeypatch.setattr(agent_runtime.os, "_exit", lambda code: exited.put(code))
+        monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
+        monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", "rev-a")
+        monkeypatch.setattr(
+            agent_runtime,
+            "_read_agent_revision",
+            lambda _path, **_kwargs: "rev-b",
+        )
+
+        with pytest.raises(agent_runtime.AgentRuntimeChangedError):
+            agent_runtime.ensure_agent_runtime_current()
+
+        assert exited.get(timeout=5) == 1, "must exit non-zero so a supervisor respawns"
+
+
+def test_restart_delegates_to_shared_authority_not_sigkill():
+    """The guard must reuse the shared restart authority, not hard-kill."""
+    from api import agent_runtime
+
+    src = Path(agent_runtime.__file__).read_text(encoding="utf-8")
+    assert "SIGKILL" not in src, "SIGKILL hard-kill authority must be removed"
+    assert "os.kill" not in src, "os.kill hard-kill authority must be removed"
+    assert "from api.updates import _schedule_restart" in src
+
+
+def test_shared_restart_authority_preserves_launch_modes():
+    """The delegated authority keeps POSIX self-exec, Windows, drain, purge."""
+    import api.updates as updates
+
+    src = Path(updates.__file__).read_text(encoding="utf-8")
+    for needle in (
+        "os.execv",                 # POSIX self-exec (start.sh / ctl.sh / python server.py)
+        "pythonw.exe",              # native-Windows silent replacement
+        "CREATE_NO_WINDOW",         # Windows detached restart
+        "_wait_until_restart_safe",  # active stream/run drain
+        "_purge_agent_pycache",     # bytecode purge before re-exec
+        "os._exit(0)",              # supervisor (systemd/Compose) fallback
+    ):
+        assert needle in src, f"shared restart authority lost {needle!r}"
+
+
+def test_fresh_import_captures_new_revision_after_update(monkeypatch, tmp_path: Path):
+    """A fresh process importing after the update binds the NEW revision."""
+    from api import agent_runtime
+
+    agent_dir = tmp_path / "loaded-agent"
+    agent_dir.mkdir()
+    module_file = agent_dir / "run_agent.py"
+    module_file.write_text("class AIAgent: pass\n", encoding="utf-8")
+    _git(agent_dir, "init", "-q")
+    _git(agent_dir, "add", "run_agent.py")
+    _git(agent_dir, "commit", "-qm", "before")
+
+    loaded_module = types.ModuleType("run_agent")
+    loaded_module.__file__ = str(module_file)
+    monkeypatch.setitem(sys.modules, "run_agent", loaded_module)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", None)
+    monkeypatch.setattr(agent_runtime, "_AGENT_MODULE_PATH", None)
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", None)
+    monkeypatch.setattr(agent_runtime, "_SCHEDULED_RESTART", False)
+
+    agent_runtime._capture_loaded_agent_revision()
+    before_rev = agent_runtime._AGENT_REVISION
+    assert before_rev == _git(agent_dir, "rev-parse", "HEAD")
+
+    module_file.write_text("class AIAgent: pass  # updated\n", encoding="utf-8")
+    _git(agent_dir, "add", "run_agent.py")
+    _git(agent_dir, "commit", "-qm", "after")
+    after_rev = _git(agent_dir, "rev-parse", "HEAD")
+    assert after_rev != before_rev
+
+    # Simulate the fresh process after the auto-restart: identity re-captured.
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", None)
+    monkeypatch.setattr(agent_runtime, "_AGENT_MODULE_PATH", None)
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", None)
+    agent_runtime._capture_loaded_agent_revision()
+
+    assert agent_runtime._AGENT_REVISION == after_rev
