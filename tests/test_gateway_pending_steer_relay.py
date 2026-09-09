@@ -22,6 +22,9 @@ no real gateway, sockets, or user state are used.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import textwrap
 import threading
 import urllib.request
 from pathlib import Path
@@ -310,4 +313,117 @@ def test_frontend_reconnect_contract_for_leftover_event():
     assert "'pending_steer_leftover'" in cursor_loop, (
         "pending_steer_leftover must advance the run-journal replay cursor "
         "or a reconnecting client double-queues the leftover guidance"
+    )
+
+
+def _leftover_listener_statement() -> str:
+    """Slice the real pending_steer_leftover listener registration out of
+    messages.js (implementation is never copied into the test)."""
+    src = MESSAGES_JS.read_text(encoding="utf-8")
+    start = src.index("source.addEventListener('pending_steer_leftover',e=>{")
+    end = src.index("\n    });", start) + len("\n    });")
+    return src[start:end]
+
+
+def _find_node() -> str:
+    for command in ("node", "node.exe"):
+        path = shutil.which(command)
+        if path:
+            return path
+    pytest.skip("node is not available for the messages.js VM test")
+
+
+def test_leftover_listener_queues_for_owner_across_session_switch():
+    """Greptile P1 (head 8be288f5): an accepted-but-unconsumed steer whose
+    owning session is no longer the active view must still be queued FOR THE
+    OWNER — the queue is persisted per-session data, so dropping the event on
+    a view mismatch loses the guidance outright. Visible UI (anchor scene,
+    toast) stays limited to the owning session being the active view, and the
+    current picker's model state must not leak into another session's queue
+    entry (setBusy's drain restores the model from the queued item).
+
+    Executes the REAL listener source (sliced from static/messages.js) in a
+    Node VM against stubbed collaborators, for viewed / switched-away /
+    empty-text / missing-session-id scenarios."""
+    listener_stmt = _leftover_listener_statement()
+    # Static guard first: the view-mismatch drop must be gone.
+    assert "sid!==activeSid" not in listener_stmt, (
+        "the leftover listener must not drop the event when the owning "
+        "session is not the active view"
+    )
+
+    def _fire_expr(data: dict) -> str:
+        return f"__handler({{data: {json.dumps(json.dumps(data))}}});"
+
+    scenario_scripts = {
+        "viewed": _fire_expr({"session_id": "sess-a", "text": "use the safer path"}),
+        "switched": _fire_expr({"session_id": "sess-a", "text": "use the safer path"}),
+        "empty": _fire_expr({"session_id": "sess-a", "text": "   "}),
+        "fallback_sid": _fire_expr({"text": "legacy event"}),
+    }
+
+    script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+        const ctx = vm.createContext({{
+            console, JSON, String,
+            activeSid: 'sess-a',
+            S: {{session: {{session_id: 'sess-a'}}, activeProfile: 'default'}},
+            queueSessionMessage: () => 0, updateQueueBadge: () => {{}},
+            showToast: () => {{}}, _applyToAnchor: () => {{}},
+            _chatPayloadModelState: () => ({{}}), t: (k) => k,
+        }});
+        vm.runInContext(
+            'this.__calls = {{queue: [], badge: [], toast: [], anchor: []}}; ' +
+            'this.source = {{addEventListener: (name, fn) => {{ this.__handler = fn; }}}};',
+            ctx);
+        vm.runInContext({json.dumps(listener_stmt)}, ctx,
+                        {{filename: 'messages.js#pending_steer_leftover'}});
+        const armStubs = () => vm.runInContext(
+            'this.__calls = {{queue: [], badge: [], toast: [], anchor: []}}; ' +
+            'queueSessionMessage = (sid, payload) => {{ __calls.queue.push([sid, payload]); return 1; }}; ' +
+            'updateQueueBadge = (sid) => {{ __calls.badge.push(sid); }}; ' +
+            'showToast = (msg, ms) => {{ __calls.toast.push([msg, ms]); }}; ' +
+            "_applyToAnchor = (kind, d, e) => {{ __calls.anchor.push(kind); }}; " +
+            "_chatPayloadModelState = () => ({{model: 'picker-model', model_provider: 'picker-provider'}}); " +
+            "t = (k) => 'translated:' + k;",
+            ctx);
+        const fire = (expr) => {{
+            armStubs();
+            vm.runInContext(expr, ctx);
+            return vm.runInContext('__calls', ctx);
+        }};
+        const failures = [];
+        let c;
+        // Scenario 1: owning session is the active view.
+        c = fire({json.dumps(scenario_scripts['viewed'])});
+        if (c.queue.length !== 1 || c.queue[0][0] !== 'sess-a') failures.push('viewed: not queued for owner ' + JSON.stringify(c.queue));
+        if (!c.queue[0] || c.queue[0][1].text !== 'use the safer path') failures.push('viewed: wrong payload ' + JSON.stringify(c.queue[0] && c.queue[0][1]));
+        if (c.queue[0][1].model !== 'picker-model' || c.queue[0][1].model_provider !== 'picker-provider') failures.push('viewed: picker model state missing ' + JSON.stringify(c.queue[0][1]));
+        if (c.anchor.length !== 1) failures.push('viewed: anchor not applied ' + JSON.stringify(c.anchor));
+        if (c.toast.length !== 1) failures.push('viewed: toast missing ' + JSON.stringify(c.toast));
+        if (c.badge.length !== 1 || c.badge[0] !== 'sess-a') failures.push('viewed: badge ' + JSON.stringify(c.badge));
+        // Scenario 2: user switched to sess-b before completion — queue for the OWNER anyway.
+        vm.runInContext("S = {{session: {{session_id: 'sess-b'}}, activeProfile: 'default'}}", ctx);
+        c = fire({json.dumps(scenario_scripts['switched'])});
+        if (c.queue.length !== 1 || c.queue[0][0] !== 'sess-a') failures.push('switched: not queued for owner ' + JSON.stringify(c.queue));
+        if (c.queue[0][1].model !== '' || c.queue[0][1].model_provider !== null) failures.push('switched: picker model leaked into owner queue entry ' + JSON.stringify(c.queue[0][1]));
+        if (c.anchor.length !== 0) failures.push('switched: anchor applied to foreign view ' + JSON.stringify(c.anchor));
+        if (c.toast.length !== 0) failures.push('switched: toast shown for foreign view ' + JSON.stringify(c.toast));
+        if (c.badge.length !== 1 || c.badge[0] !== 'sess-a') failures.push('switched: badge ' + JSON.stringify(c.badge));
+        // Scenario 3: empty text is still dropped.
+        vm.runInContext("S = {{session: {{session_id: 'sess-a'}}, activeProfile: 'default'}}", ctx);
+        c = fire({json.dumps(scenario_scripts['empty'])});
+        if (c.queue.length !== 0) failures.push('empty: queued empty text ' + JSON.stringify(c.queue));
+        // Scenario 4: missing session_id falls back to the wire-time session.
+        c = fire({json.dumps(scenario_scripts['fallback_sid'])});
+        if (c.queue.length !== 1 || c.queue[0][0] !== 'sess-a') failures.push('fallback_sid: ' + JSON.stringify(c.queue));
+        if (failures.length) {{ console.error('FAIL:\\n' + failures.join('\\n')); process.exit(1); }}
+        console.log('leftover listener owner-scoping OK');
+        """
+    )
+    result = subprocess.run([_find_node(), "-e", script], capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"leftover listener VM test failed (exit {result.returncode}):\n"
+        f"{result.stdout}\n{result.stderr}"
     )

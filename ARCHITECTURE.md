@@ -367,7 +367,11 @@ browser API, SSE, and session surface.
   flows through the journaling put_gateway_event, a reconnecting browser
   replays it exactly once per run-journal cursor window and never again once
   its cursor advances past it; cancelled turns and error completions emit
-  nothing (local-path parity).
+  nothing (local-path parity). Browser-side, the listener queues the leftover
+  for the OWNING session id even when the user has switched views (the
+  session queue is persisted per-session data — a view match must not gate
+  the queue write), while anchor/toast updates and the current picker's model
+  state stay scoped to the owning session being the active view.
 
 Operator-facing behavior (queue/draft policy for steer failures, container
 path agreement) is documented in docs/advanced-chat-setup.md.

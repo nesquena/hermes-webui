@@ -219,6 +219,7 @@ and a fake gateway or mocked relay — never a real user's sessions):
 | Steer endpoint redirects (302 to a 200 page) | Delivery reported as failed (draft/retry), never as accepted; redirect not followed |
 | Gateway configured via `webui_gateway_base_url` config key | Steer POST targets the configured gateway, not the env/default one |
 | Accepted steer not consumed before the run completes | `pending_steer_leftover` queued exactly once for the next turn (reconnect replays it at most once per cursor) |
+| Session switched away before an accepted steer completes | Leftover still queued for the OWNING session (visible when the user returns); no anchor/toast in the foreign view; no picker-model leak into the owner's queue entry |
 | Session switch with pending files after a failure | Guidance and files stay with the original owning session; the new session's files are untouched |
 | Session workspace at/below `/workspace` | `workspace` present in the `POST /v1/runs` body |
 | Session workspace outside `/workspace` (sibling, `..`, symlink) | `workspace` omitted; gateway default applies |

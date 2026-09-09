@@ -6464,22 +6464,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
       // so the existing drain in setBusy(false) ships it.
+      // Greptile P1 (#7440): the queue write targets the OWNING session (the
+      // event's session_id) even when the user has switched views — the
+      // session queue is persisted per-session data, so dropping the event on
+      // a view mismatch loses the guidance outright. Only the visible updates
+      // (anchor scene, toast) are limited to the owning session being the
+      // active view, and the current picker's model state must not leak into
+      // another session's queue entry (setBusy's drain restores the model
+      // from the queued item).
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
         const txt=String(d.text||'').trim();
-        if(!txt||sid!==activeSid) return;
-        _applyToAnchor('pending_steer_leftover',d,e);
+        if(!txt) return;
+        const _ownerIsViewed=!!(typeof S!=='undefined'&&S.session&&S.session.session_id===sid);
+        if(_ownerIsViewed) _applyToAnchor('pending_steer_leftover',d,e);
         if(typeof queueSessionMessage==='function'){
-          const _modelState=_chatPayloadModelState();
+          const _modelState=_ownerIsViewed?_chatPayloadModelState():{model:'',model_provider:null};
           queueSessionMessage(sid,{
             text:txt,files:[],
             model:_modelState.model,
             model_provider:_modelState.model_provider,
-            profile:S.activeProfile||'default',
+            profile:(S&&S.activeProfile)||'default',
           });
           if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
-          showToast(t('steer_leftover_queued'),3000);
+          if(_ownerIsViewed) showToast(t('steer_leftover_queued'),3000);
         }
       }catch(_){}
     });
