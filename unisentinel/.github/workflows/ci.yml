@@ -14,6 +14,14 @@ jobs:
         node-version: [18.x]
     steps:
       - uses: actions/checkout@v4
+      - name: Prevent committing .env into unisentinel build context
+        run: |
+          echo "Checking for accidental .env files in unisentinel/..."
+          if [ -e unisentinel/.env ] || [ -e unisentinel/.env.local ] || ls unisentinel/.env* 1> /dev/null 2>&1; then
+            echo "ERROR: Found one or more .env files inside the unisentinel/ build context.\nFor security, do NOT commit .env files. Remove them or add them to unisentinel/.dockerignore and re-run.";
+            ls -la unisentinel | sed -n '1,200p'
+            exit 1
+          fi
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
