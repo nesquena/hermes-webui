@@ -19624,6 +19624,10 @@ function _mediaPreviewErrorKey(error,fallbackKey){
   return fallbackKey;
 }
 
+function _mediaPreviewAllowsDownload(errorKey){
+  return errorKey!=='media_preview_forbidden'&&errorKey!=='media_preview_not_found';
+}
+
 function _requireMediaResponse(response){
   if(response.ok) return response;
   const error=new Error(String(response.status));
@@ -19710,7 +19714,10 @@ function buildCsvTablePreview(path, text, downloadUrl=''){
 function _csvPreviewErrorHtml(path, errorKey){
   const fname=path.split('/').pop()||path;
   const downloadUrl=_csvMediaUrl(path,{download:true});
-  return `<div class="diff-inline-error">${esc(fname)}<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+  const downloadHtml=_mediaPreviewAllowsDownload(errorKey)
+    ? `<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+    : '';
+  return `<div class="diff-inline-error">${esc(fname)}${downloadHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
 }
 
 function loadCsvInline(container){
@@ -19924,8 +19931,12 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(error=>{
+          const errorKey=_mediaPreviewErrorKey(error,'pdf_error');
           const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
-          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(_mediaPreviewErrorKey(error,'pdf_error'))}</span></div>`;
+          const fileHtml=_mediaPreviewAllowsDownload(errorKey)
+            ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+            : esc(fname);
+          el.outerHTML=`<div class="pdf-preview-fallback">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
         });
     };
     if(_pdfjsReady){
@@ -19981,8 +19992,12 @@ function loadHtmlInline(container){
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(error=>{
+        const errorKey=_mediaPreviewErrorKey(error,'html_error');
         const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
-        el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(_mediaPreviewErrorKey(error,'html_error'))}</span></div>`;
+        const fileHtml=_mediaPreviewAllowsDownload(errorKey)
+          ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+          : esc(fname);
+        el.outerHTML=`<div class="html-preview-fallback">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
       });
   });
 }
