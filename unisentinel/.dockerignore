@@ -1,0 +1,41 @@
+# Prevent local secrets and mutable runtime data from being baked into Docker images
+# Ignore environment files containing credentials
+.env
+.env.*
+.env.local
+
+# Runtime data and database files
+data/
+*.db
+*.sqlite
+unisentinel/data/
+unisentinel/data/*
+
+# Logs
+logs/
+*.log
+
+# Node modules - install in image during build
+node_modules
+
+# Git and CI metadata
+.git
+.gitignore
+.github
+patches/
+
+# Local IDE and test artifacts
+.vscode
+.idea
+coverage/
+test/
+tests/
+
+# Sensitive files
+*.key
+*.pem
+*.secret
+
+# OS files
+.DS_Store
+Thumbs.db

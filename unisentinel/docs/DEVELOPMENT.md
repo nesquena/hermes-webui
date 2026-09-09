@@ -13,6 +13,9 @@ Note: This project targets Node.js >= 18 (see package.json "engines"). Use Node 
 - Use MULTICALL_ADDRESS (optional) to configure a multicall contract to batch on-chain reads and reduce RPC calls
 - Metrics: the server exposes a simple Prometheus-format endpoint at /metrics providing counters for slippage scanning (multicall calls, multicall failures, single RPC calls, and pairs scanned)
 
+Security note:
+- A `.dockerignore` file has been added under `unisentinel/.dockerignore` to exclude `.env`, `data/`, `logs/`, and other sensitive or mutable files from Docker build contexts. Do not put credentials in files inside the `unisentinel/` folder; instead configure secrets as environment variables in your CI or hosting provider.
+
 Local dev notes
 
 - Copy .env.example to .env and set ETHEREUM_RPC_URL

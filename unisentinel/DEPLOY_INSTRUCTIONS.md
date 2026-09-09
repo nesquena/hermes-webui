@@ -28,7 +28,8 @@ Option A — Apply patches locally and push (recommended if you don't want to sh
        ETHEREUM_RPC_URL (optional for live RPC)
        MULTICALL_ADDRESS (if you want multicall batching)
        UNISENTINEL_DB_DRIVER=sqlite (for local/ephemeral DB in Vercel, consider external DB for prod)
-   - Deploy.
+      - IMPORTANT: Do NOT create a `.env` file inside the `unisentinel/` build context with secrets or credentials. A `.dockerignore` file has been added to the `unisentinel/` directory to prevent accidental inclusion of `.env`, `data/`, and `logs/` in image builds. Always set secrets via the Vercel UI or CI environment variables.
+      - Deploy.
 
 Option B — Grant push permissions (not recommended to share tokens publicly):
 
