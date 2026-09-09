@@ -5475,7 +5475,10 @@ function _applySessionListPayload(sessData, projData, opts){
   }
   _syncSessionAttentionSoundState(_allSessions);
   _pruneLineageReportCacheToVisibleSessions(_allSessions);
-  _allProjects = projData.projects||[];
+  _allProjects = (projData.projects||[]).slice().sort((a,b)=>{
+    const na=(a.name||'').toLowerCase(), nb=(b.name||'').toLowerCase();
+    return na<nb?-1:na>nb?1:0;
+  });
   // Capture the recovering-from-error state BEFORE clearing it: the error banner
   // DOM was rendered outside the signature path, so if this payload heals with
   // rows identical to the last render, the identical-signature skip below would

@@ -13993,12 +13993,33 @@ def handle_get(handler, parsed) -> bool:
             # the wire shape stays byte-equivalent to the previous inline
             # synthesis (the frontend has been reading these exact keys).
             msgs = list(synth.messages or [])
+            _all_msgs_count = len(msgs)
+            # Apply msg_limit/msg_before windowing for foreign sessions,
+            # matching the native WebUI path above (#6491). Without this, CLI/
+            # TUI/Desktop sessions return the full transcript on every load —
+            # ignoring msg_limit and omitting _messages_truncated / _messages_offset.
+            _truncated_msgs, _messages_offset = [], 0
+            if load_messages:
+                _truncated_msgs, _messages_offset = _message_window_for_display(
+                    msgs,
+                    msg_limit=msg_limit,
+                    msg_before=msg_before,
+                    expand_renderable=expand_renderable,
+                )
+            else:
+                # ?messages=0 (metadata-only fast switch) must NOT empty the
+                # message payload for foreign sessions: the legacy contract
+                # returned the full synthesized transcript unconditionally
+                # (test_claude_code_profile_agnostic_detail_load expects the
+                # 2 messages even with messages=0). The windowing applies only
+                # to real message loads (#6491).
+                _truncated_msgs = list(msgs)
             sess = {
                 "session_id": synth.session_id,
                 "title": synth.title,
                 "workspace": synth.workspace,
                 "model": synth.model,
-                "message_count": len(msgs),
+                "message_count": _all_msgs_count,
                 "created_at": synth.created_at,
                 "updated_at": synth.updated_at,
                 "last_message_at": (
@@ -14032,10 +14053,24 @@ def handle_get(handler, parsed) -> bool:
                 # sessions and the user only discovers the block at
                 # POST time with a confusing 403.
                 "read_only": bool(getattr(synth, "read_only", False)),
-                "messages": msgs,
+                "messages": _truncated_msgs,
                 "tool_calls": [],
             }
-            attach_todo_state(sess, msgs)
+            # Cold-load: derive the latest settled todo snapshot from the full
+            # merged transcript, not the truncated display window. This keeps
+            # the Todos panel correct after refresh even when the latest todo
+            # tool result is outside msg_limit, and treats an explicit empty
+            # todo list as the current state instead of falling through to an
+            # older non-empty write.
+            if load_messages and msgs:
+                attach_todo_state(sess, msgs)
+            # Signal to the frontend that older messages were omitted. The
+            # message window cursor already reflects visible-row pagination and
+            # avoids false positives when raw hidden tool rows exceed msg_limit.
+            _truncated = load_messages and msg_limit is not None and _messages_offset > 0
+            sess["_messages_truncated"] = _truncated
+            sess["_messages_offset"] = _messages_offset
+            sess["_msg_limit_max"] = _MAX_MSG_LIMIT
             sess = _merge_cli_sidebar_metadata(sess, cli_meta)
             return j(handler, {"session": public_session_projection(sess)})
 
@@ -22165,7 +22200,30 @@ def _read_active_project_context(workspace: Path | None) -> dict:
     return payload
 
 
+def _memory_config_flags():
+    """Return (memory_enabled, user_profile_enabled) from the active profile config.
+
+    Falls back to (True, True) on any error so a broken config doesn't lock
+    the user out of the Memory panel entirely.
+    """
+    config_path = _active_profile_config_path()
+    try:
+        if config_path.exists():
+            cfg = _load_yaml_config_file(config_path)
+            if isinstance(cfg, dict):
+                mem_cfg = cfg.get("memory", {})
+                if isinstance(mem_cfg, dict):
+                    return (
+                        mem_cfg.get("memory_enabled", True),
+                        mem_cfg.get("user_profile_enabled", True),
+                    )
+    except Exception:
+        pass
+    return True, True
+
+
 def _handle_memory_read(handler, parsed=None):
+    memory_enabled, user_profile_enabled = _memory_config_flags()
     try:
         from api.profiles import get_active_hermes_home
 
@@ -28090,7 +28148,6 @@ def _handle_memory_write(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     section = body["section"]
-
     # Respect memory_enabled and user_profile_enabled config flags (#6406)
     # Use get_config_snapshot() for per-profile isolation — get_config() returns
     # the process-global mutable _cfg_cache which races across profiles.
@@ -28098,13 +28155,14 @@ def _handle_memory_write(handler, body):
     cfg = get_config_snapshot()
     mem = cfg.get("memory") if isinstance(cfg, dict) else None
     mem_cfg = mem if isinstance(mem, dict) else {}
+    memory_enabled = _webui_truthy(mem_cfg.get("memory_enabled", True))
+    user_profile_enabled = _webui_truthy(mem_cfg.get("user_profile_enabled", True))
     if section == "memory":
-        if not _webui_truthy(mem_cfg.get("memory_enabled", True)):
+        if not memory_enabled:
             return bad(handler, "Memory is disabled by configuration (memory_enabled: false)", 403)
     elif section == "user":
-        if not _webui_truthy(mem_cfg.get("user_profile_enabled", True)):
+        if not user_profile_enabled:
             return bad(handler, "User profile is disabled by configuration (user_profile_enabled: false)", 403)
-
     try:
         from api.profiles import get_active_hermes_home
 
