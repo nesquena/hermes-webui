@@ -2295,9 +2295,36 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    from api.models import delete_session_record
+
+    _sid = str(getattr(session, "session_id", "") or "")
+    try:
+        delete_session_record(_sid, owner="ephemeral", pending_phases=["sidecar"])
+    except Exception:
+        # Retain retryable ownership: a failed authoritative deletion must
+        # not masquerade as a successful cleanup (or the row leaks while the
+        # index prune assumes success).
+        logger.warning(
+            "Failed to delete ephemeral cancelled session %s from store; retaining for retry",
+            _sid,
+            exc_info=True,
+        )
+        return
     try:
         import pathlib
+
+        # Mirrors exactly what this path always did (the ephemeral temp
+        # session's path can differ from the canonical SESSION_DIR sidecar
+        # the phase below covers).
         pathlib.Path(session.path).unlink(missing_ok=True)
+    except Exception:
+        logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
+    try:
+        # Durable residual phase: records/retries the canonical sidecar
+        # removal so a failure leaves a row for the cleanup janitor.
+        from api.routes import _run_residual_phases
+
+        _run_residual_phases(_sid, phases=["sidecar"])
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
@@ -4936,28 +4963,61 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     traversal, but it should not continue to appear as an active sidebar row.
     """
     old_path = SESSION_DIR / f'{old_sid}.json'
-    if not old_path.exists():
+    # Canonical store check: migrated sessions are SQLite-only (no sidecar),
+    # so a sidecar-only existence test would skip snapshot preservation and
+    # lose compression lineage for them.
+    from api.models import get_session_store
+
+    store = get_session_store()
+    if old_path.exists():
+        pass  # read below
+    elif store.session_exists(old_sid):
+        pass  # read below via the store
+    else:
         return
     try:
-        existing_text = old_path.read_text(encoding='utf-8')
-        try:
-            existing = json.loads(existing_text)
-            existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
-        except (json.JSONDecodeError, ValueError):
-            # Treat corrupt/malformed old JSON as missing history and rewrite it
-            # from the in-memory pre-compression messages below. That is safer
-            # than leaving an unreadable recovery snapshot behind.
-            existing_msgs = -1
-            existing_snapshot = False
+        if old_path.exists():
+            try:
+                existing = json.loads(old_path.read_text(encoding='utf-8'))
+                existing_msgs = len(existing.get('messages') or [])
+                existing_snapshot = bool(existing.get('pre_compression_snapshot'))
+            except (json.JSONDecodeError, ValueError, OSError):
+                # Treat corrupt/malformed old JSON as missing history and rewrite it
+                # from the in-memory pre-compression messages below. That is safer
+                # than leaving an unreadable recovery snapshot behind.
+                existing_msgs = -1
+                existing_snapshot = False
+        else:
+            try:
+                meta = store.read_metadata_only(old_sid) or {}
+                existing_msgs = meta.get('message_count') or 0
+                existing_snapshot = bool(meta.get('pre_compression_snapshot'))
+            except Exception:
+                existing_msgs = -1
+                existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
+            saved_generation = getattr(s, '_persisted_generation', None)
+            saved_incarnation = getattr(s, '_persisted_incarnation', None)
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
             saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
+            # The CAS lineage must follow the row being written (old_sid),
+            # not the continuation row this object was loaded from.
+            try:
+                _old_meta = store.read_metadata_only(old_sid) if store else None
+                s._persisted_generation = (
+                    _old_meta.get('generation') if _old_meta else None
+                )
+                s._persisted_incarnation = (
+                    _old_meta.get('incarnation') if _old_meta else None
+                )
+            except Exception:
+                s._persisted_generation = None
+                s._persisted_incarnation = None
             s.pre_compression_snapshot = True
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
@@ -4987,6 +5047,8 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 )
             finally:
                 s.session_id = saved_sid
+                s._persisted_generation = saved_generation
+                s._persisted_incarnation = saved_incarnation
                 s.pre_compression_snapshot = saved_snapshot
                 s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
@@ -10841,10 +10903,17 @@ def _run_agent_streaming(
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
                 try:
+                    from api.models import delete_session_record
+
+                    delete_session_record(str(getattr(s, "session_id", "") or ""), owner="ephemeral")
                     import pathlib
+
                     pathlib.Path(s.path).unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to remove ephemeral session record; retaining for retry",
+                        exc_info=True,
+                    )
                 return  # skip all normal persistence for ephemeral sessions
             if _checkpoint_stop is not None:
                 _checkpoint_stop.set()

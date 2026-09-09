@@ -81,7 +81,7 @@ def test_draft_validation_appears_before_persist():
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     # Anchor on the unique POST-validation comment marker.
     marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("s.composer_draft = next_draft\n                # Draft persistence is not conversation activity")
+    persist_idx = src.find('s.save_metadata({"composer_draft": next_draft})')
     assert marker_idx != -1 and persist_idx != -1, (
         "could not locate validation marker or persist site"
     )
@@ -95,24 +95,38 @@ def test_draft_save_does_not_touch_session_updated_at():
 
     If POST /api/session/draft bumps updated_at, the frontend's active-session
     external refresh poll treats every keystroke autosave as a remote session
-    update and force-reloads the current chat a few seconds later.
+    update and force-reloads the current chat a few seconds later. The route
+    persists via save_metadata({"composer_draft": ...}) only — no updated_at
+    field, no full-session save on the draft path. (The behavioral proof that
+    updated_at survives the save in both store orderings lives in
+    tests/test_webui_session_sqlite.py route-level tests.)
     """
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    persist_idx = src.find("s.composer_draft = next_draft")
+    persist_idx = src.find("# Draft persistence is not conversation activity")
     assert persist_idx != -1, "could not locate composer draft persist site"
-    save_idx = src.find("s.save(touch_updated_at=False, skip_index=True)", persist_idx)
-    assert save_idx != -1, "composer draft save must preserve session updated_at and skip index churn"
+    save_idx = src.find('s.save_metadata({"composer_draft": next_draft})', persist_idx)
+    assert save_idx != -1, (
+        "composer draft save must persist metadata only (composer_draft), "
+        "preserving session updated_at and skipping index churn"
+    )
+    # No full-session save may remain on the draft path after the persist site.
+    full_save_idx = src.find("s.save(", persist_idx)
+    draft_block_end = src.find("_draft_mark(\"after_save\")", persist_idx)
+    assert draft_block_end != -1
+    assert full_save_idx == -1 or full_save_idx > draft_block_end, (
+        "draft route must not fall back to a full session save"
+    )
 
 
 def test_draft_save_skips_unchanged_payload_before_persist():
-    """Duplicate debounced draft POSTs should not rewrite the full session JSON."""
+    """Duplicate debounced draft POSTs should not rewrite the session."""
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     draft_idx = src.find('current_draft = dict(getattr(s, "composer_draft", {}) or {})')
     unchanged_idx = src.find("if next_draft == current_draft", draft_idx)
-    save_idx = src.find("s.save(touch_updated_at=False, skip_index=True)", draft_idx)
+    save_idx = src.find('s.save_metadata({"composer_draft": next_draft})', draft_idx)
 
     assert draft_idx != -1, "draft route should snapshot current composer_draft"
     assert unchanged_idx != -1, "draft route should no-op unchanged normalized payloads"
     assert save_idx != -1, "draft route should still save changed drafts"
-    assert unchanged_idx < save_idx, "unchanged guard must run before full session save"
+    assert unchanged_idx < save_idx, "unchanged guard must run before the metadata save"
     assert 'payload["unchanged"] = True' in src

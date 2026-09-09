@@ -110,6 +110,9 @@ def test_delete_worktree_session_reports_retained_worktree_without_cleanup(tmp_p
 
 
 def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, monkeypatch):
+    """A state.db delete failure is a durable residual phase (task 011), not
+    an ok:true payload flag: the route 500s while residuals remain, still
+    drains/tombstones the sidecar, and a healthy retry returns 200."""
     session_dir = _isolate_session_store(tmp_path, monkeypatch)
     sid = "dbfaildelete1"
     session = Session(
@@ -120,8 +123,21 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
     session.save()
     (session_dir / f"{sid}.json.bak").write_text("backup", encoding="utf-8")
     captured = _capture_post(monkeypatch, {"session_id": sid})
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400, extra_headers=None: captured.update(
+            error=msg, status=status
+        )
+        or True,
+    )
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
     monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    # The state_db actuator short-circuits when no state.db exists; point it
+    # at a real file so the failing delete_cli_session is actually exercised.
+    state_db = tmp_path / "state.db"
+    state_db.touch()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: state_db)
 
     def fail_delete(value):
         raise RuntimeError("state.db locked")
@@ -138,11 +154,25 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
 
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
 
+    # Fail-closed: residuals (sidecar_bak, state_db) mean a retryable 500,
+    # never a false ok:true. The sidecar itself drained, so the tombstone
+    # is recorded and the transcript is gone.
+    assert captured["status"] == 500
+    assert "cleanup incomplete" in captured["error"]
+    assert not (session_dir / f"{sid}.json").exists()
+    assert (session_dir / f"{sid}.json.bak").exists()
+    assert sid in models._load_webui_deleted_session_tombstone()
+
+    # Retry once healthy: every act is absent-tolerant, so the re-POST
+    # resumes at the remaining phases and returns 200.
+    monkeypatch.setattr(models, "delete_cli_session", lambda value: True)
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    captured.clear()
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
     assert captured["status"] == 200
     assert captured["payload"]["ok"] is True
-    assert captured["payload"]["state_db_cleanup_failed"] is True
-    assert not (session_dir / f"{sid}.json").exists()
-    assert sid in models._load_webui_deleted_session_tombstone()
+    assert captured["payload"]["state_db_cleanup_failed"] is False
+    assert not (session_dir / f"{sid}.json.bak").exists()
 
 
 def test_delete_messaging_session_reopens_read_only_without_deleted_webui_tombstone(

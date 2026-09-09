@@ -1,0 +1,1461 @@
+"""SQLite-backed SessionDB for Hermes WebUI sessions.
+
+Drop-in replacement for api.webui_session_db.WebUIJsonSessionDB.
+Uses only the Python stdlib (sqlite3) so it works inside the WebUI container.
+
+Schema decisions:
+- One row per session in ``sessions`` for metadata and hot fields.
+- ``messages``, ``tool_calls``, and ``context_messages`` are stored as
+  normalized rows with a JSON blob payload. This preserves the WebUI's
+  evolving message shape without requiring schema churn, while keeping
+  immutable history out of the hot write path.
+- ``anchor_activity_scenes`` is a separate key/value table.
+- ``composer_draft`` is stored as a small JSON blob on the sessions row;
+  updating it does not touch the message/tool history.
+- WAL mode enables concurrent readers while a write is in progress.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import os
+import sqlite3
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any, Sequence
+
+# Keep JSON blobs compact.
+_json_dump = lambda obj: json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
+
+# Top-level scalar-ish fields that live on the sessions table.
+# Anything not listed here (messages, tool_calls, etc.) goes in a child table
+# or is stored as a JSON blob.
+_SESSION_SCALAR_FIELDS: tuple[str, ...] = (
+    "title",
+    "workspace",
+    "model",
+    "model_provider",
+    "model_explicit_pick_signature",
+    "created_at",
+    "updated_at",
+    "pinned",
+    "archived",
+    "project_id",
+    "profile",
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "personality",
+    "active_stream_id",
+    "pending_user_message",
+    "pending_started_at",
+    "pending_user_source",
+    "compression_anchor_visible_idx",
+    "compression_anchor_summary",
+    "pre_compression_snapshot",
+    "context_engine",
+    "compression_anchor_engine",
+    "compression_anchor_mode",
+    "context_length",
+    "threshold_tokens",
+    "last_prompt_tokens",
+    "post_compression_context_tokens_estimate",
+    "recommended_recovery_action",
+    "compression_recovery_source_session_id",
+    "compression_recovery_action",
+    "truncation_watermark",
+    "truncation_boundary",
+    "gateway_routing",
+    "llm_title_generated",
+    "manual_title",
+    "clear_generation",
+    "parent_session_id",
+    "worktree_path",
+    "worktree_branch",
+    "worktree_repo_root",
+    "worktree_created_at",
+    "is_cli_session",
+    "source_tag",
+    "raw_source",
+    "session_source",
+    "source_label",
+    "read_only",
+    "message_count",
+    "share_token",
+    "share_created_at",
+    "created_workspace",
+    "intentional_shrink_generation",
+    # Runtime identity fields (messaging/gateway-originated sessions).
+    "user_id",
+    "chat_id",
+    "session_key",
+    "platform",
+    # JSON blob fields
+    "compression_anchor_message_key",
+    "compression_anchor_details",
+    "context_engine_state",
+    "compression_recovery",
+    "gateway_routing_history",
+    "anchor_scene_index",
+    "pending_attachments",
+    "enabled_toolsets",
+    "process_wakeup_pause",
+    "composer_draft",
+)
+
+# Fields stored as JSON text in the sessions table.
+_SESSION_JSON_FIELDS: set[str] = {
+    "compression_anchor_message_key",
+    "compression_anchor_details",
+    "context_engine_state",
+    "compression_recovery",
+    "gateway_routing_history",
+    "anchor_scene_index",
+    "pending_attachments",
+    "enabled_toolsets",
+    "process_wakeup_pause",
+    "composer_draft",
+}
+
+# Boolean fields stored as INTEGER 0/1 in SQLite.
+_SESSION_BOOL_FIELDS: set[str] = {
+    "pinned",
+    "archived",
+    "pre_compression_snapshot",
+    "llm_title_generated",
+    "manual_title",
+    "is_cli_session",
+    "read_only",
+}
+
+# Fields that are always emitted in metadata/session output even when None.
+_ALWAYS_PRESENT_FIELDS: set[str] = {
+    "session_id",
+    "title",
+    "workspace",
+    "model",
+    "model_provider",
+    "created_at",
+    "updated_at",
+    "pinned",
+    "archived",
+    "messages",
+    "tool_calls",
+    "context_messages",
+    "anchor_activity_scenes",
+}
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    title TEXT,
+    workspace TEXT,
+    model TEXT,
+    model_provider TEXT,
+    model_explicit_pick_signature TEXT,
+    created_at REAL,
+    updated_at REAL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT,
+    profile TEXT,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    estimated_cost REAL DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    personality TEXT,
+    active_stream_id TEXT,
+    pending_user_message TEXT,
+    pending_started_at REAL,
+    pending_user_source TEXT,
+    pending_attachments TEXT,
+    compression_anchor_visible_idx INTEGER,
+    compression_anchor_message_key TEXT,
+    compression_anchor_summary TEXT,
+    pre_compression_snapshot INTEGER DEFAULT 0,
+    context_engine TEXT,
+    compression_anchor_engine TEXT,
+    compression_anchor_mode TEXT,
+    compression_anchor_details TEXT,
+    context_engine_state TEXT,
+    context_length INTEGER,
+    threshold_tokens INTEGER,
+    last_prompt_tokens INTEGER,
+    post_compression_context_tokens_estimate INTEGER,
+    compression_recovery TEXT,
+    recommended_recovery_action TEXT,
+    compression_recovery_source_session_id TEXT,
+    compression_recovery_action TEXT,
+    truncation_watermark REAL,
+    truncation_boundary REAL,
+    gateway_routing TEXT,
+    gateway_routing_history TEXT,
+    llm_title_generated INTEGER DEFAULT 0,
+    manual_title INTEGER DEFAULT 0,
+    clear_generation TEXT,
+    parent_session_id TEXT,
+    worktree_path TEXT,
+    worktree_branch TEXT,
+    worktree_repo_root TEXT,
+    worktree_created_at REAL,
+    is_cli_session INTEGER DEFAULT 0,
+    source_tag TEXT,
+    raw_source TEXT,
+    session_source TEXT,
+    source_label TEXT,
+    read_only INTEGER DEFAULT 0,
+    enabled_toolsets TEXT,
+    composer_draft TEXT,
+    process_wakeup_pause TEXT,
+    share_token TEXT,
+    share_created_at REAL,
+    message_count INTEGER DEFAULT 0,
+    anchor_scene_index TEXT,
+    anchor_scene_index_hash TEXT,
+    anchor_activity_scenes_json TEXT,
+    created_workspace TEXT,
+    intentional_shrink_generation TEXT,
+    user_id TEXT,
+    chat_id TEXT,
+    session_key TEXT,
+    platform TEXT,
+    extra_json TEXT,
+    generation INTEGER NOT NULL DEFAULT 0,
+    null_fields_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    message_json TEXT NOT NULL,
+    UNIQUE(session_id, idx)
+);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    tool_call_json TEXT NOT NULL,
+    UNIQUE(session_id, idx)
+);
+
+CREATE TABLE IF NOT EXISTS context_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    message_json TEXT NOT NULL,
+    UNIQUE(session_id, idx)
+);
+
+CREATE TABLE IF NOT EXISTS anchor_scenes (
+    scene_hash TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    scene_json TEXT NOT NULL,
+    PRIMARY KEY (session_id, scene_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, idx);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, idx);
+CREATE INDEX IF NOT EXISTS idx_context_messages_session ON context_messages(session_id, idx);
+
+-- Per-SID incarnation authority (schema v5). Deliberately NON-cascading:
+-- no FK to sessions, no ON DELETE CASCADE. This row survives delete_session()
+-- and is the durable record that a SID once existed, so a stale writer
+-- holding a pre-delete generation cannot resurrect the transcript by
+-- re-inserting at generation 1.
+--   incarnation: last issued incarnation for the SID (bumps only on a
+--                leased recreate, never on delete).
+--   retired:     1 when no live sessions row exists for the SID.
+--   retired_generation: last live generation at delete (0 if never written).
+CREATE TABLE IF NOT EXISTS session_incarnations (
+    session_id TEXT PRIMARY KEY,
+    incarnation INTEGER NOT NULL,
+    retired INTEGER NOT NULL DEFAULT 0,
+    retired_generation INTEGER NOT NULL DEFAULT 0
+);
+
+-- Placeholder for the cleanup-lease protocol (created in the v5 bump so the
+-- version moves exactly once; behavior lands separately).
+CREATE TABLE IF NOT EXISTS cleanup_leases (
+    session_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    error TEXT,
+    updated_at REAL NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1
+);
+
+-- Durable residual-cleanup phases (schema v6). Deliberately a SEPARATE table
+-- from cleanup_leases: leases mean "the authoritative store delete FAILED"
+-- and are cleared on lifecycle_delete success; phase rows mean "the delete
+-- SUCCEEDED, these residual artifacts remain" — they are recorded in the
+-- same transaction as the authoritative delete and cleared per phase as the
+-- executor drains them. Keyed by (session_id, phase). attempts counts failed
+-- executor runs (the row is recorded at delete time with attempts=0, before
+-- any cleanup attempt has run).
+CREATE TABLE IF NOT EXISTS cleanup_phases (
+    session_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    error TEXT,
+    updated_at REAL NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (session_id, phase)
+);
+"""
+
+
+_SCHEMA_VERSION = 6
+
+_META_SQL = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+"""
+
+# Columns added in schema v2 (name -> ALTER TABLE DDL). CREATE TABLE carries
+# them for fresh databases; these run for pre-v2 databases.
+_SESSIONS_V2_COLUMNS: dict[str, str] = {
+    "created_workspace": "created_workspace TEXT",
+    "intentional_shrink_generation": "intentional_shrink_generation TEXT",
+    "user_id": "user_id TEXT",
+    "chat_id": "chat_id TEXT",
+    "session_key": "session_key TEXT",
+    "platform": "platform TEXT",
+    "extra_json": "extra_json TEXT",
+    "generation": "generation INTEGER NOT NULL DEFAULT 0",
+    "null_fields_json": "null_fields_json TEXT",
+}
+
+
+def _migration_crash_check(stage: str) -> None:
+    """Crash-point test hook for migration staging.
+
+    Mirrors scripts/migrate_sessions_to_sqlite.py's hook, exposed from the
+    store so tests can reach the in-constructor stages (``schema`` /
+    ``markers``) without driving the script as a subprocess. Exits 42 when
+    HERMES_MIGRATE_CRASH_AFTER names ``stage``.
+    """
+    if os.environ.get("HERMES_MIGRATE_CRASH_AFTER") == stage:
+        print(f"CRASH-INJECTED after {stage}")
+        sys.exit(42)
+
+
+class WebUISqliteSessionDB:
+    """SQLite-backed WebUI session store.
+
+    Mirrors the public surface of ``api.webui_session_db.WebUIJsonSessionDB``
+    so it can be swapped in without changing route code.
+    """
+
+    backend = "sqlite"
+    supports_generation = True
+    supports_revision_counter = True
+    persists_without_sidecar = True
+
+    def __init__(
+        self,
+        session_dir: Path | str | None = None,
+        db_name: str = "sessions.db",
+        *,
+        created_by: str = "app",
+    ):
+        self._session_dir = Path(session_dir).expanduser().resolve() if session_dir else None
+        self._db_name = db_name
+        self._created_by = created_by
+        self._local = threading.local()
+        # Per-store failure state: sids whose row failed to read and whose
+        # sidecar became authoritative. Each mark entry is a dict:
+        # {"composer_draft": sidecar draft at mark time, "baseline_meta":
+        # deep-copied post-construction payload projection snapshot,
+        # "baseline_generation": int | None,
+        # "baseline_incarnation": int | None} (see api.models Session.load).
+        self.unreadable_sids: dict[str, dict] = {}
+        self._ensure_schema()
+
+    @property
+    def session_dir(self) -> Path:
+        if self._session_dir is not None:
+            return self._session_dir
+        # When running inside the WebUI container, this would import api.models.
+        return Path.home() / ".hermes" / "webui-mvp" / "sessions"
+
+    @property
+    def db_path(self) -> Path:
+        return self.session_dir / self._db_name
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            # WAL mode: readers do not block the writer, and vice versa.
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA foreign_keys=ON;")
+            self._local.conn = conn
+        return conn
+
+    def _ensure_schema(self) -> None:
+        # Determine whether this process created the database file BEFORE
+        # opening the connection (connect creates the file). The stamp rule
+        # below needs to distinguish "we just created it" from "it
+        # pre-existed" (empty or populated) to stay fail-closed.
+        created_here = not self.db_path.exists()
+        conn = self._conn()
+        if self._created_by == "migration":
+            # Two commits so a constructor crash NEVER leaves a database the
+            # app could later stamp 'app' and activate:
+            #   Commit A: tables only — a crash here leaves an UNMARKED
+            #     database, which is_active() denies (fail closed).
+            #   Commit B: the cutover markers (created_by=migration,
+            #     migration_complete=0) — a crash after this leaves a
+            #     marked-incomplete database, also denied.
+            conn.executescript(SCHEMA_SQL)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            for col, ddl in _SESSIONS_V2_COLUMNS.items():
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE sessions ADD COLUMN {ddl}")
+            conn.executescript(_META_SQL)
+            conn.commit()
+            _migration_crash_check("schema")
+            if conn.execute("SELECT 1 FROM meta WHERE key = 'created_by'").fetchone() is None:
+                # A database the migration tooling opens is incomplete until
+                # the script publishes it, even if this process dies before
+                # writing a single row.
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('created_by', ?)",
+                    ("migration",),
+                )
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES ('migration_complete', ?)",
+                    ("0",),
+                )
+                conn.commit()
+            _migration_crash_check("markers")
+        else:
+            conn.executescript(SCHEMA_SQL)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            for col, ddl in _SESSIONS_V2_COLUMNS.items():
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE sessions ADD COLUMN {ddl}")
+            conn.executescript(_META_SQL)
+            # Durable cutover marker, fail-closed: only a database this
+            # process created is stamped 'app'; a pre-existing database with
+            # rows predates markers ('legacy'); a pre-existing EMPTY database
+            # is of unknown origin (e.g. an interrupted staged migration
+            # leftover) and is deliberately left UNMARKED — is_active()
+            # already denies it, and stamping it 'app' would activate an
+            # empty store over live JSON sidecars.
+            if conn.execute("SELECT 1 FROM meta WHERE key = 'created_by'").fetchone() is None:
+                if created_here:
+                    conn.execute(
+                        "INSERT INTO meta (key, value) VALUES ('created_by', 'app')"
+                    )
+                else:
+                    has_rows = (
+                        conn.execute("SELECT 1 FROM sessions LIMIT 1").fetchone()
+                        is not None
+                    )
+                    if has_rows:
+                        conn.execute(
+                            "INSERT INTO meta (key, value) VALUES ('created_by', 'legacy')"
+                        )
+            conn.commit()
+        # v5 backfill: pre-existing rows predate the incarnation authority;
+        # seed each live SID at incarnation 1, not retired.
+        conn.execute(
+            "INSERT OR IGNORE INTO session_incarnations "
+            "(session_id, incarnation, retired, retired_generation) "
+            "SELECT session_id, 1, 0, 0 FROM sessions"
+        )
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        conn.commit()
+
+    def close(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+
+    def _bump_revision(self, conn: sqlite3.Connection) -> None:
+        """Advance the store revision. Must run inside a write transaction so
+        the counter moves atomically with the change it describes."""
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('revision', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)"
+        )
+
+    def get_revision(self) -> int:
+        """Monotonic change counter for cache invalidation. A read error
+        returns a never-repeating value so caches fail open rather than stale."""
+        try:
+            row = self._conn().execute(
+                "SELECT value FROM meta WHERE key = 'revision'"
+            ).fetchone()
+            return int(row["value"]) if row is not None else 0
+        except Exception:
+            return int(time.time_ns())
+
+    def is_active(self) -> bool:
+        """Durable cutover check, fail-closed.
+
+        Authority requires readable, recognizable markers: an app-created or
+        legacy (pre-marker) database is active; a migration database is only
+        active once migration_complete=1. Unreadable, missing, or unknown
+        markers deny authority.
+        """
+        try:
+            rows = self._conn().execute("SELECT key, value FROM meta").fetchall()
+            meta = {row["key"]: row["value"] for row in rows}
+        except Exception:
+            return False
+        created_by = meta.get("created_by")
+        if created_by == "migration":
+            return meta.get("migration_complete") == "1"
+        if created_by in ("app", "legacy"):
+            return True
+        return False
+
+    def set_meta(self, key: str, value: str) -> None:
+        conn = self._conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def get_meta(self, key: str) -> str | None:
+        try:
+            row = self._conn().execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row is not None else None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Read paths
+    # ------------------------------------------------------------------
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        cur = self._conn().execute(
+            "SELECT * FROM sessions ORDER BY pinned DESC, updated_at DESC, created_at DESC"
+        )
+        for row in cur.fetchall():
+            rows.append(self._row_to_metadata(dict(row)))
+        return rows
+
+    def read_session(self, sid: str) -> dict[str, Any] | None:
+        if not _is_safe_session_id(sid):
+            return None
+        # One PK-indexed LEFT JOIN against the incarnation authority so the
+        # loaded content and its (generation, incarnation) writer token are a
+        # single atomic read. LEFT (not INNER): a missing authority row must
+        # never hide a session from reads — it yields incarnation=None and
+        # every write path then fails closed.
+        row = self._conn().execute(
+            "SELECT s.*, i.incarnation AS incarnation "
+            "FROM sessions s "
+            "LEFT JOIN session_incarnations i ON i.session_id = s.session_id "
+            "WHERE s.session_id = ?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return None
+        session = self._row_to_session(dict(row))
+        session["messages"] = self._read_messages(sid)
+        session["tool_calls"] = self._read_tool_calls(sid)
+        session["context_messages"] = self._read_context_messages(sid)
+        return session
+
+    def session_exists(self, sid: str) -> bool:
+        if not _is_safe_session_id(sid):
+            return False
+        row = self._conn().execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?", (sid,)
+        ).fetchone()
+        return row is not None
+
+    def read_metadata_only(self, sid: str) -> dict[str, Any] | None:
+        """Load only metadata fields; do not touch message/tool tables."""
+        if not _is_safe_session_id(sid):
+            return None
+        row = self._conn().execute(
+            "SELECT s.*, i.incarnation AS incarnation "
+            "FROM sessions s "
+            "LEFT JOIN session_incarnations i ON i.session_id = s.session_id "
+            "WHERE s.session_id = ?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_metadata(dict(row), include_computed=False)
+
+    def _read_messages(self, sid: str) -> list[dict[str, Any]]:
+        cur = self._conn().execute(
+            "SELECT message_json FROM messages WHERE session_id = ? ORDER BY idx", (sid,)
+        )
+        return [json.loads(row["message_json"]) for row in cur.fetchall()]
+
+    def _read_tool_calls(self, sid: str) -> list[dict[str, Any]]:
+        cur = self._conn().execute(
+            "SELECT tool_call_json FROM tool_calls WHERE session_id = ? ORDER BY idx", (sid,)
+        )
+        return [json.loads(row["tool_call_json"]) for row in cur.fetchall()]
+
+    def _read_context_messages(self, sid: str) -> list[dict[str, Any]]:
+        cur = self._conn().execute(
+            "SELECT message_json FROM context_messages WHERE session_id = ? ORDER BY idx", (sid,)
+        )
+        return [json.loads(row["message_json"]) for row in cur.fetchall()]
+
+    def _read_anchor_scenes(self, sid: str) -> dict[str, Any]:
+        cur = self._conn().execute(
+            "SELECT scene_hash, scene_json FROM anchor_scenes WHERE session_id = ?", (sid,)
+        )
+        return {row["scene_hash"]: json.loads(row["scene_json"]) for row in cur.fetchall()}
+
+    # ------------------------------------------------------------------
+    # Write paths
+    # ------------------------------------------------------------------
+
+    def write_session(
+        self,
+        session: dict[str, Any],
+        *,
+        expected_generation: int | None = None,
+        expected_incarnation: int | None = None,
+        force: bool = False,
+        fresh_incarnation: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(session, dict):
+            raise TypeError("session must be a dict")
+        sid = session.get("session_id")
+        if not _is_safe_session_id(sid):
+            raise ValueError(f"Unsafe session_id {sid!r}")
+
+        payload = copy.deepcopy(session)
+        messages = payload.pop("messages", [])
+        tool_calls = payload.pop("tool_calls", [])
+        context_messages = payload.pop("context_messages", [])
+        # Keep anchor_activity_scenes in payload so _write_session_row can store
+        # the exact JSON blob for round-trip fidelity.
+        # Only set message_count if the payload is missing it entirely.
+        if "message_count" not in payload:
+            payload["message_count"] = len(messages)
+
+        conn = self._conn()
+        with conn:
+            self._bump_revision(conn)
+            self._write_session_row(
+                conn, sid, payload,
+                expected_generation=expected_generation,
+                expected_incarnation=expected_incarnation,
+                force=force,
+                fresh_incarnation=fresh_incarnation,
+            )
+            self._write_messages(conn, sid, messages)
+            self._write_tool_calls(conn, sid, tool_calls)
+            self._write_context_messages(conn, sid, context_messages)
+            self._write_anchor_scenes(conn, sid, payload.get("anchor_activity_scenes", {}))
+        return self.read_session(sid) or {}
+
+    _METADATA_UNSAFE_FIELDS = frozenset(
+        {"session_id", "messages", "tool_calls", "message_count", "generation"}
+    )
+
+    def _apply_metadata_fields(
+        self, conn: sqlite3.Connection, sid: str, fields: dict[str, Any]
+    ) -> tuple[list[str], list[Any]]:
+        """Build (set_parts, values) for a targeted metadata UPDATE.
+
+        Handles _SESSION_JSON_FIELDS/_SESSION_SCALAR_FIELDS classification,
+        extra_json merge, null_fields_json maintenance, and explicit
+        updated_at. Does NOT append the sid placeholder or the generation
+        bump — callers own the version fence and the WHERE clause.
+        """
+        set_parts: list[str] = []
+        values: list[Any] = []
+        extras: dict[str, Any] = {}
+        for k, v in fields.items():
+            if k in _SESSION_JSON_FIELDS:
+                set_parts.append(f"{k} = ?")
+                values.append(None if v is None else _json_dump(v))
+            elif k in _SESSION_SCALAR_FIELDS:
+                set_parts.append(f"{k} = ?")
+                values.append(v)
+            else:
+                # Unknown/forward-compatible keys ride in extra_json.
+                extras[k] = v
+        if extras:
+            row = conn.execute(
+                "SELECT extra_json FROM sessions WHERE session_id = ?", (sid,)
+            ).fetchone()
+            current: dict[str, Any] = {}
+            if row is not None and row["extra_json"]:
+                try:
+                    parsed = json.loads(row["extra_json"])
+                    if isinstance(parsed, dict):
+                        current = parsed
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            current.update(extras)
+            set_parts.append("extra_json = ?")
+            values.append(_json_dump(current))
+        # Maintain null key-presence across targeted updates.
+        nrow = conn.execute(
+            "SELECT null_fields_json FROM sessions WHERE session_id = ?", (sid,)
+        ).fetchone()
+        null_fields: list[str] = []
+        if nrow is not None and nrow["null_fields_json"]:
+            try:
+                parsed = json.loads(nrow["null_fields_json"])
+                if isinstance(parsed, list):
+                    null_fields = [x for x in parsed if isinstance(x, str)]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        for k, v in fields.items():
+            if v is None:
+                if k not in null_fields:
+                    null_fields.append(k)
+            elif k in null_fields:
+                null_fields.remove(k)
+        set_parts.append("null_fields_json = ?")
+        values.append(_json_dump(null_fields) if null_fields else None)
+        # Only bump updated_at when the caller explicitly provides it.
+        # Draft autosave calls save_metadata() without updated_at so that
+        # typing does not reorder the session in the sidebar or trigger
+        # activity-poll reloads.
+        if "updated_at" in fields:
+            set_parts.append("updated_at = ?")
+            values.append(fields["updated_at"])
+        return set_parts, values
+
+    def update_metadata(
+        self,
+        sid: str,
+        fields: dict[str, Any],
+        *,
+        expected_generation: int | None = None,
+        expected_incarnation: int | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(fields, dict):
+            raise TypeError("fields must be a dict")
+        unsafe = set(fields) & self._METADATA_UNSAFE_FIELDS
+        if unsafe:
+            raise ValueError(f"Unsafe session metadata fields: {', '.join(sorted(unsafe))}")
+
+        conn = self._conn()
+        with conn:
+            # The metadata write is a versioned writer: both halves of the
+            # (generation, incarnation) token are required and validated in
+            # the same transaction that applies the fields. Field validation
+            # above stays token-free (TypeError/ValueError before any SQL).
+            row = conn.execute(
+                "SELECT s.generation AS generation, i.incarnation AS incarnation, "
+                "i.retired AS retired "
+                "FROM sessions s "
+                "LEFT JOIN session_incarnations i ON i.session_id = s.session_id "
+                "WHERE s.session_id = ?",
+                (sid,),
+            ).fetchone()
+            if row is None:
+                raise DeletedSessionWriteError(
+                    f"Refusing metadata write for session {sid!r}: no live row "
+                    f"(deleted or never persisted)"
+                )
+            current_generation = int(row["generation"] or 0)
+            persisted_incarnation = (
+                int(row["incarnation"]) if row["incarnation"] is not None else None
+            )
+            if expected_generation is None or expected_incarnation is None:
+                raise StaleSessionWriteError(
+                    f"Refusing metadata write for session {sid!r}: unversioned "
+                    f"metadata write refused: load the durable version first"
+                )
+            if persisted_incarnation is None or int(row["retired"] or 0):
+                raise StaleSessionWriteError(
+                    f"Refusing metadata write for session {sid!r}: incarnation "
+                    f"authority is missing or retired (failing closed)"
+                )
+            if int(expected_generation) != current_generation:
+                raise StaleSessionWriteError(
+                    f"Refusing metadata write for session {sid!r}: expected "
+                    f"generation {expected_generation!r} != persisted "
+                    f"{current_generation!r} (stale writer; reload)"
+                )
+            if int(expected_incarnation) != persisted_incarnation:
+                raise StaleSessionWriteError(
+                    f"Refusing metadata write for session {sid!r}: expected "
+                    f"incarnation {expected_incarnation!r} != persisted "
+                    f"{persisted_incarnation!r}; the session was deleted and "
+                    f"recreated — reload"
+                )
+            self._bump_revision(conn)
+            set_parts, values = self._apply_metadata_fields(conn, sid, fields)
+            # Metadata-only writers move the same version fence as full
+            # writes, so a concurrent full-save CAS can never silently roll
+            # a metadata write back. The guard enforces the fence in the
+            # statement itself (a fresh statement snapshot must not be able
+            # to see a newer row than the probe above).
+            set_parts.append("generation = generation + 1")
+            values.extend([sid, int(expected_generation), int(expected_incarnation)])
+            cur = conn.execute(
+                f"UPDATE sessions SET {', '.join(set_parts)} "
+                "WHERE session_id = ? AND generation = ? "
+                "AND EXISTS (SELECT 1 FROM session_incarnations i "
+                "WHERE i.session_id = sessions.session_id "
+                "AND i.incarnation = ? AND i.retired = 0)",
+                values,
+            )
+            if cur.rowcount != 1:
+                probe = conn.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ?", (sid,)
+                ).fetchone()
+                if probe is None:
+                    raise DeletedSessionWriteError(
+                        f"Refusing metadata write for session {sid!r}: the row "
+                        f"disappeared under the write (deleted)"
+                    )
+                raise StaleSessionWriteError(
+                    f"Refusing metadata write for session {sid!r}: "
+                    f"generation/incarnation moved under the write; reload"
+                )
+        return self._metadata_row(sid)
+
+    def read_row_version(self, sid: str) -> dict[str, int] | None:
+        """Durable (generation, incarnation) of the live row (contract).
+
+        One indexed JOIN against the incarnation authority; read-only.
+        Returns None for an absent or retired row.
+        """
+        if not _is_safe_session_id(sid):
+            return None
+        row = self._conn().execute(
+            "SELECT s.generation AS generation, i.incarnation AS incarnation, "
+            "i.retired AS retired "
+            "FROM sessions s JOIN session_incarnations i "
+            "ON i.session_id = s.session_id "
+            "WHERE s.session_id = ?",
+            (sid,),
+        ).fetchone()
+        if row is None or int(row["retired"]):
+            return None
+        return {
+            "generation": int(row["generation"] or 0),
+            "incarnation": int(row["incarnation"]),
+        }
+
+    def reconcile_marked_write(
+        self,
+        sid: str,
+        *,
+        expected_generation: int,
+        expected_incarnation: int,
+        fields: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Atomically overlay proven-dirty metadata onto a recovered row whose
+        durable version still matches the fallback-load baseline. Fail closed
+        (None, nothing written) on any generation/incarnation mismatch."""
+        if not _is_safe_session_id(sid):
+            return None
+        if not isinstance(fields, dict):
+            raise TypeError("fields must be a dict")
+        unsafe = set(fields) & self._METADATA_UNSAFE_FIELDS
+        if unsafe:
+            raise ValueError(f"Unsafe session metadata fields: {', '.join(sorted(unsafe))}")
+
+        conn = self._conn()
+        with conn:
+            row = conn.execute(
+                "SELECT generation FROM sessions WHERE session_id = ?", (sid,)
+            ).fetchone()
+            authority = conn.execute(
+                "SELECT incarnation, retired FROM session_incarnations "
+                "WHERE session_id = ?",
+                (sid,),
+            ).fetchone()
+            if (
+                row is None
+                or authority is None
+                or int(authority["retired"])
+                or int(authority["incarnation"]) != int(expected_incarnation)
+                or int(row["generation"] or 0) != int(expected_generation)
+            ):
+                return None  # fail closed; nothing written
+            self._bump_revision(conn)
+            set_parts, values = self._apply_metadata_fields(conn, sid, fields)
+            set_parts.append("generation = generation + 1")
+            values.extend([sid, int(expected_generation), int(expected_incarnation)])
+            cur = conn.execute(
+                f"UPDATE sessions SET {', '.join(set_parts)} "
+                "WHERE session_id = ? AND generation = ? "
+                "AND EXISTS (SELECT 1 FROM session_incarnations i "
+                "WHERE i.session_id = sessions.session_id "
+                "AND i.incarnation = ? AND i.retired = 0)",
+                values,
+            )
+            if cur.rowcount != 1:
+                return None  # CAS belt-and-braces inside the txn
+        return self.read_session(sid)
+
+    def delete_session(self, sid: str, *, _txn: sqlite3.Connection | None = None) -> bool:
+        """Remove a session and all its rows. Returns True if a row existed.
+
+        Required by /api/session/delete: migrated sessions have no JSON
+        sidecar, so unlinking the sidecar alone leaves the SQLite rows
+        behind — and a full session-index rebuild would then resurrect the
+        deleted session in the sidebar (and keep the transcript on disk).
+
+        ``_txn`` is the internal caller-owned transaction used by
+        ``lifecycle_delete`` so the delete and its residual-phase rows
+        commit atomically; public callers never pass it.
+        """
+        if not _is_safe_session_id(sid):
+            return False
+        if _txn is not None:
+            return self._delete_session_in_txn(_txn, sid)
+        conn = self._conn()
+        with conn:
+            return self._delete_session_in_txn(conn, sid)
+
+    def _delete_session_in_txn(self, conn: sqlite3.Connection, sid: str) -> bool:
+        """The authoritative delete body; the CALLER owns the transaction.
+
+        Split out so ``lifecycle_delete(pending_phases=...)`` can delete the
+        rows and record the residual-cleanup phases in ONE transaction — no
+        crash window between "store deleted" and "residuals durably
+        observable".
+        """
+        self._bump_revision(conn)
+        row = conn.execute(
+            "SELECT generation FROM sessions WHERE session_id = ?", (sid,)
+        ).fetchone()
+        old_generation = int(row["generation"] or 0) if row is not None else 0
+        cur = conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+        conn.execute("DELETE FROM tool_calls WHERE session_id = ?", (sid,))
+        conn.execute("DELETE FROM context_messages WHERE session_id = ?", (sid,))
+        conn.execute("DELETE FROM anchor_scenes WHERE session_id = ?", (sid,))
+        if cur.rowcount > 0:
+            # Retire the SID in the incarnation authority (which survives
+            # the delete) so a stale pre-delete writer cannot resurrect the
+            # transcript. The incarnation counter does NOT move on
+            # delete — only a leased recreate advances it.
+            conn.execute(
+                "INSERT INTO session_incarnations "
+                "(session_id, incarnation, retired, retired_generation) "
+                "VALUES (?, 1, 1, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "retired = 1, retired_generation = excluded.retired_generation",
+                (sid, old_generation),
+            )
+        return cur.rowcount > 0
+
+    def lifecycle_delete(
+        self,
+        sid: str,
+        *,
+        owner: str,
+        pending_phases: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Delete with durable retry ownership (SessionStore contract).
+
+        Success clears any cleanup lease for ``sid`` in the same store;
+        failure records a lease keyed by ``sid`` so the retry owner
+        survives a crash. Never touches the JSON sidecar — that
+        representation is not store-owned.
+
+        ``pending_phases``: residual-cleanup phase names recorded IN THE
+        SAME transaction as the authoritative delete (upserted into
+        ``cleanup_phases``; ON CONFLICT preserves ``attempts`` and refreshes
+        owner/updated_at), so a crash cannot leave residuals unobservable.
+        Default None means delete + lease handling only (unchanged
+        behavior). Leases and phases never coexist for a sid: a lease means
+        the delete failed, phases mean it succeeded with residuals
+        remaining.
+        """
+        conn = self._conn()
+        try:
+            if pending_phases:
+                with conn:
+                    # Route through the public delete_session seam (the
+                    # delete failure-injection point) with the caller-owned
+                    # transaction, so rows + phase rows commit atomically.
+                    existed = self.delete_session(sid, _txn=conn)
+                    conn.execute("DELETE FROM cleanup_leases WHERE session_id = ?", (sid,))
+                    now = time.time()
+                    for phase in pending_phases:
+                        conn.execute(
+                            "INSERT INTO cleanup_phases "
+                            "(session_id, phase, owner, error, updated_at, attempts) "
+                            "VALUES (?, ?, ?, NULL, ?, 0) "
+                            "ON CONFLICT(session_id, phase) DO UPDATE SET "
+                            "owner = excluded.owner, updated_at = excluded.updated_at",
+                            (sid, phase, owner, now),
+                        )
+            else:
+                existed = self.delete_session(sid)
+                with conn:
+                    conn.execute("DELETE FROM cleanup_leases WHERE session_id = ?", (sid,))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            with conn:
+                conn.execute(
+                    "INSERT INTO cleanup_leases "
+                    "(session_id, owner, error, updated_at, attempts) "
+                    "VALUES (?, ?, ?, ?, 1) "
+                    "ON CONFLICT(session_id) DO UPDATE SET "
+                    "owner = excluded.owner, error = excluded.error, "
+                    "updated_at = excluded.updated_at, "
+                    "attempts = attempts + 1",
+                    (sid, owner, error, time.time()),
+                )
+            try:
+                existed = self.session_exists(sid)
+            except Exception:
+                existed = False
+            return {"ok": False, "error": error, "existed": existed}
+        return {"ok": True, "existed": bool(existed)}
+
+    def finish_cleanup_phase(
+        self, sid: str, phase: str, *, ok: bool, error: str | None = None
+    ) -> None:
+        """Record one residual-cleanup attempt: ok clears the row; failure
+        updates error/updated_at and bumps attempts."""
+        conn = self._conn()
+        with conn:
+            if ok:
+                conn.execute(
+                    "DELETE FROM cleanup_phases WHERE session_id = ? AND phase = ?",
+                    (sid, phase),
+                )
+            else:
+                conn.execute(
+                    "UPDATE cleanup_phases SET error = ?, updated_at = ?, "
+                    "attempts = attempts + 1 "
+                    "WHERE session_id = ? AND phase = ?",
+                    (error, time.time(), sid, phase),
+                )
+
+    def list_cleanup_phases(self, sid: str | None = None) -> list[dict[str, Any]]:
+        """Remaining residual-cleanup phase rows (for ``sid``, or every row
+        for a janitor sweep), ordered by session_id, phase."""
+        conn = self._conn()
+        if sid is None:
+            rows = conn.execute(
+                "SELECT session_id, phase, owner, error, updated_at, attempts "
+                "FROM cleanup_phases ORDER BY session_id, phase"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT session_id, phase, owner, error, updated_at, attempts "
+                "FROM cleanup_phases WHERE session_id = ? "
+                "ORDER BY session_id, phase",
+                (sid,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_cleanup_leases(self, owner: str | None = None) -> list[dict[str, Any]]:
+        """Durable retry leases recorded by failed ``lifecycle_delete`` calls."""
+        conn = self._conn()
+        if owner is None:
+            rows = conn.execute(
+                "SELECT session_id, owner, error, updated_at, attempts "
+                "FROM cleanup_leases ORDER BY updated_at"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT session_id, owner, error, updated_at, attempts "
+                "FROM cleanup_leases WHERE owner = ? ORDER BY updated_at",
+                (owner,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def archive(
+        self,
+        sid: str,
+        archived: bool = True,
+        *,
+        expected_generation: int | None = None,
+        expected_incarnation: int | None = None,
+    ) -> dict[str, Any]:
+        # Pass-through: strictness is inherited from update_metadata, so any
+        # caller must be a versioned writer carrying both token halves.
+        return self.update_metadata(
+            sid,
+            {"archived": bool(archived)},
+            expected_generation=expected_generation,
+            expected_incarnation=expected_incarnation,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _write_session_row(
+        self,
+        conn: sqlite3.Connection,
+        sid: str,
+        payload: dict[str, Any],
+        *,
+        expected_generation: int | None = None,
+        expected_incarnation: int | None = None,
+        force: bool = False,
+        fresh_incarnation: bool = False,
+    ) -> None:
+        cols = ["session_id"]
+        vals: list[Any] = [sid]
+        for field in _SESSION_SCALAR_FIELDS:
+            if field == "anchor_scene_index_hash":
+                continue
+            cols.append(field)
+            v = payload.get(field)
+            if v is None and field in _SESSION_BOOL_FIELDS:
+                vals.append(0)
+            elif v is None:
+                vals.append(None)
+            elif field in _SESSION_JSON_FIELDS:
+                vals.append(_json_dump(v))
+            elif field in _SESSION_BOOL_FIELDS:
+                vals.append(1 if v else 0)
+            else:
+                vals.append(v)
+        cols.append("anchor_scene_index_hash")
+        idx = payload.get("anchor_scene_index")
+        vals.append(_json_dump(idx) if isinstance(idx, dict) else None)
+        cols.append("anchor_activity_scenes_json")
+        scenes = payload.get("anchor_activity_scenes")
+        vals.append(_json_dump(scenes) if scenes is not None else None)
+        # Forward-compatible preservation: top-level session keys without a
+        # dedicated column ride in extra_json so round-trips stay lossless
+        # for fields added after this schema version.
+        consumed = set(_SESSION_SCALAR_FIELDS) | {
+            "session_id",
+            "anchor_activity_scenes",
+            # Store-owned fence values ride the authority/column, never the
+            # forward-compat bag — a stale bag copy would launder an old
+            # token into reads when the authority JOIN misses.
+            "generation",
+            "incarnation",
+        }
+        extra = {k: v for k, v in payload.items() if k not in consumed}
+        cols.append("extra_json")
+        vals.append(_json_dump(extra) if extra else None)
+        # Key-presence contract: an explicitly-None top-level key must read
+        # back as a present None (the JSON backend preserves this natively).
+        null_fields = sorted(k for k, v in payload.items() if v is None)
+        cols.append("null_fields_json")
+        vals.append(_json_dump(null_fields) if null_fields else None)
+
+        # Stale-writer fence: the writer token is the (incarnation,
+        # generation) pair — a durable per-session generation compared and
+        # bumped atomically, backed by the per-SID incarnation authority so
+        # a delete + same-SID recreate (which restarts the generation at 1)
+        # is still discriminated. updated_at cannot fence real stale Session
+        # objects — save() stamps time.time() before writing — so writers
+        # must carry the token their object was loaded with.
+        # Live row:
+        #   - force: deliberate heal/import — bump and overwrite (never
+        #     consults the authority).
+        #   - expected_generation == row generation AND
+        #     expected_incarnation == authority incarnation (present,
+        #     non-retired): bump and overwrite.
+        #   - anything else (stale, lineage-unknown, or a pre-delete token
+        #     at an equal generation across a recreate): refuse loudly.
+        # Absent row (force NEVER inserts; fresh_incarnation is the only
+        # lease, reserved for an explicit recreate API; expected_incarnation
+        # is ignored there — generation lineage + the retired authority
+        # already discriminate):
+        #   - no authority + expected_generation None: first create
+        #     (authority (sid, 1, 0, 0) + row generation 1).
+        #   - no authority + expected_generation set: DeletedSessionWriteError.
+        #   - authority retired + expected_generation set:
+        #     DeletedSessionWriteError (stale writer after delete).
+        #   - authority retired + no lineage + no lease:
+        #     RetiredSessionWriteError (explicit recreate requires the lease).
+        #   - authority retired + fresh_incarnation: lease — incarnation+1,
+        #     retired=0, row generation 1.
+        #   - authority not retired but row absent (orphan): fail closed.
+        row = conn.execute(
+            "SELECT s.generation AS generation, i.incarnation AS incarnation, "
+            "i.retired AS retired "
+            "FROM sessions s "
+            "LEFT JOIN session_incarnations i ON i.session_id = s.session_id "
+            "WHERE s.session_id = ?",
+            (sid,),
+        ).fetchone()
+        current_generation = int(row["generation"] or 0) if row is not None else None
+        cas_guard = False
+        if current_generation is not None:
+            if force:
+                new_generation = current_generation + 1
+            elif expected_generation is None or int(expected_generation) != current_generation:
+                raise StaleSessionWriteError(
+                    f"Refusing to overwrite session {sid!r}: expected generation "
+                    f"{expected_generation!r} != persisted {current_generation!r} "
+                    f"(stale writer or unloaded lineage; use force only for "
+                    f"deliberate heals)"
+                )
+            else:
+                persisted_incarnation = (
+                    int(row["incarnation"]) if row["incarnation"] is not None else None
+                )
+                if (
+                    expected_incarnation is None
+                    or persisted_incarnation is None
+                    or int(row["retired"] or 0)
+                    or int(expected_incarnation) != persisted_incarnation
+                ):
+                    raise StaleSessionWriteError(
+                        f"Refusing to overwrite session {sid!r}: expected "
+                        f"incarnation {expected_incarnation!r} != persisted "
+                        f"{persisted_incarnation!r}; the session was deleted "
+                        f"and recreated — reload"
+                    )
+                new_generation = current_generation + 1
+                cas_guard = True
+        else:
+            authority = conn.execute(
+                "SELECT incarnation, retired FROM session_incarnations "
+                "WHERE session_id = ?",
+                (sid,),
+            ).fetchone()
+            if authority is None:
+                if expected_generation is not None:
+                    raise DeletedSessionWriteError(
+                        f"Refusing to write session {sid!r}: writer carries "
+                        f"generation {expected_generation!r} but no session was "
+                        f"ever persisted under this id (deleted or never existed)"
+                    )
+                # First create: issue incarnation 1 for the SID.
+                conn.execute(
+                    "INSERT INTO session_incarnations "
+                    "(session_id, incarnation, retired, retired_generation) "
+                    "VALUES (?, 1, 0, 0)",
+                    (sid,),
+                )
+                new_generation = 1
+            elif not int(authority["retired"]):
+                raise StaleSessionWriteError(
+                    f"Refusing to write session {sid!r}: incarnation authority "
+                    f"says the session is live but the row is absent "
+                    f"(orphaned authority; failing closed)"
+                )
+            elif expected_generation is not None:
+                raise DeletedSessionWriteError(
+                    f"Refusing to write session {sid!r}: writer carries "
+                    f"generation {expected_generation!r} from before the "
+                    f"session was deleted (stale writer after delete)"
+                )
+            elif not fresh_incarnation:
+                raise RetiredSessionWriteError(
+                    f"Refusing to recreate session {sid!r}: the id is retired "
+                    f"(deleted); only an explicit recreate with "
+                    f"fresh_incarnation=True may lease a new incarnation"
+                )
+            else:
+                # Leased recreate: a new incarnation of the SID starts at
+                # generation 1. A leftover sidecar of the old incarnation is
+                # stale — only cleanup/delete unlinks it, never recreate.
+                conn.execute(
+                    "UPDATE session_incarnations "
+                    "SET incarnation = incarnation + 1, retired = 0 "
+                    "WHERE session_id = ?",
+                    (sid,),
+                )
+                new_generation = 1
+
+        cols.append("generation")
+        vals.append(new_generation)
+
+        placeholders = ", ".join("?" for _ in cols)
+        upsert_sql = (
+            f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "
+            "ON CONFLICT(session_id) DO UPDATE SET "
+            + ", ".join(f"{c}=excluded.{c}" for c in cols)
+        )
+        if cas_guard:
+            # Enforce the fence in the statement itself, not only in the
+            # probe above: a backend whose statements see a fresh snapshot
+            # (Postgres READ COMMITTED) must still refuse a row that moved
+            # between the SELECT and this upsert. On SQLite the window is
+            # already closed (the write transaction is open before the
+            # probe), so this is one shared proof obligation.
+            cur = conn.execute(
+                upsert_sql
+                + " WHERE sessions.generation = ? "
+                  "AND EXISTS (SELECT 1 FROM session_incarnations i "
+                  "WHERE i.session_id = sessions.session_id "
+                  "AND i.incarnation = ? AND i.retired = 0)",
+                vals + [int(expected_generation), int(expected_incarnation)],
+            )
+            if cur.rowcount != 1:
+                probe = conn.execute(
+                    "SELECT s.generation AS generation, "
+                    "i.incarnation AS incarnation "
+                    "FROM sessions s "
+                    "LEFT JOIN session_incarnations i "
+                    "ON i.session_id = s.session_id "
+                    "WHERE s.session_id = ?",
+                    (sid,),
+                ).fetchone()
+                raise StaleSessionWriteError(
+                    f"Refusing to overwrite session {sid!r}: "
+                    f"generation/incarnation moved under the write "
+                    f"(persisted: {dict(probe) if probe is not None else None!r}); "
+                    f"reload and retry"
+                )
+        else:
+            conn.execute(upsert_sql, vals)
+
+    def _write_messages(self, conn: sqlite3.Connection, sid: str, messages: list[Any]) -> None:
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+        for idx, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
+            conn.execute(
+                "INSERT INTO messages (session_id, idx, message_json) VALUES (?, ?, ?)",
+                (sid, idx, _json_dump(msg)),
+            )
+
+    def _write_tool_calls(self, conn: sqlite3.Connection, sid: str, tool_calls: list[Any]) -> None:
+        conn.execute("DELETE FROM tool_calls WHERE session_id = ?", (sid,))
+        for idx, tc in enumerate(tool_calls):
+            if not isinstance(tc, dict):
+                continue
+            conn.execute(
+                "INSERT INTO tool_calls (session_id, idx, tool_call_json) VALUES (?, ?, ?)",
+                (sid, idx, _json_dump(tc)),
+            )
+
+    def _write_context_messages(self, conn: sqlite3.Connection, sid: str, context_messages: list[Any]) -> None:
+        conn.execute("DELETE FROM context_messages WHERE session_id = ?", (sid,))
+        for idx, msg in enumerate(context_messages):
+            if not isinstance(msg, dict):
+                continue
+            conn.execute(
+                "INSERT INTO context_messages (session_id, idx, message_json) VALUES (?, ?, ?)",
+                (sid, idx, _json_dump(msg)),
+            )
+
+    def _write_anchor_scenes(self, conn: sqlite3.Connection, sid: str, scenes: Any) -> None:
+        conn.execute("DELETE FROM anchor_scenes WHERE session_id = ?", (sid,))
+        if not isinstance(scenes, dict):
+            return
+        for hsh, scene in scenes.items():
+            conn.execute(
+                "INSERT INTO anchor_scenes (scene_hash, session_id, scene_json) VALUES (?, ?, ?)",
+                (hsh, sid, _json_dump(scene)),
+            )
+
+    def _row_to_metadata(self, d: dict[str, Any], *, include_computed: bool = True) -> dict[str, Any]:
+        row: dict[str, Any] = {"session_id": d["session_id"]}
+        for field in _SESSION_SCALAR_FIELDS:
+            if field == "anchor_scene_index_hash":
+                continue
+            v = d.get(field)
+            # Only emit fields that were actually stored, plus a few
+            # universal ones. This keeps round-trips tight for older JSON
+            # files that omitted many optional keys.
+            if v is None and field not in _ALWAYS_PRESENT_FIELDS:
+                continue
+            if field in _SESSION_JSON_FIELDS and isinstance(v, str):
+                v = json.loads(v)
+            elif field in _SESSION_BOOL_FIELDS and v is not None:
+                v = bool(v)
+            row[field] = v
+        if include_computed:
+            row["last_message_at"] = d.get("updated_at") or d.get("created_at")
+        extra_json = d.get("extra_json")
+        if extra_json:
+            try:
+                extra = json.loads(extra_json)
+            except (json.JSONDecodeError, TypeError):
+                extra = None
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    row.setdefault(k, v)
+        null_fields_json = d.get("null_fields_json")
+        if null_fields_json:
+            try:
+                null_fields = json.loads(null_fields_json)
+            except (json.JSONDecodeError, TypeError):
+                null_fields = None
+            if isinstance(null_fields, list):
+                for k in null_fields:
+                    if isinstance(k, str):
+                        row[k] = None
+        if d.get("generation") is not None:
+            row["generation"] = d["generation"]
+        if d.get("incarnation") is not None:
+            row["incarnation"] = d["incarnation"]
+        return row
+
+    def _metadata_row(self, sid: str) -> dict[str, Any]:
+        row = self._conn().execute(
+            "SELECT s.*, i.incarnation AS incarnation "
+            "FROM sessions s "
+            "LEFT JOIN session_incarnations i ON i.session_id = s.session_id "
+            "WHERE s.session_id = ?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(sid)
+        return self._row_to_metadata(dict(row))
+
+    def _row_to_session(self, d: dict[str, Any]) -> dict[str, Any]:
+        session = self._row_to_metadata(d, include_computed=False)
+        scenes_json = d.get("anchor_activity_scenes_json")
+        if scenes_json is not None:
+            session["anchor_activity_scenes"] = json.loads(scenes_json)
+        return session
+
+
+class StaleSessionWriteError(RuntimeError):
+    """A full-session write tried to overwrite a newer persisted generation."""
+
+
+class DeletedSessionWriteError(StaleSessionWriteError):
+    """A writer carrying pre-delete lineage tried to write a deleted session."""
+
+
+class RetiredSessionWriteError(StaleSessionWriteError):
+    """A write tried to recreate a retired (deleted) session id without a
+    fresh-incarnation lease."""
+
+
+def _is_safe_session_id(sid: Any) -> bool:
+    if not isinstance(sid, str):
+        return False
+    if not sid:
+        return False
+    if sid.startswith(".") or "/" in sid or "\\" in sid:
+        return False
+    return bool(sid)
+
+
+# Convenience drop-in module-level helpers.
+def make_store(session_dir: Path | str | None = None) -> WebUISqliteSessionDB:
+    return WebUISqliteSessionDB(session_dir=session_dir)
+
+
+if __name__ == "__main__":
+    sd = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+    db = WebUISqliteSessionDB(session_dir=sd)
+    print("SQLite session store ready at", db.db_path)
+    print("Sessions:", len(db.list_sessions()))

@@ -237,11 +237,16 @@ def test_get_session_for_file_ops_recovery_save_failure_fails_closed(
         lambda _sid, metadata_only=False: metadata_session,
     )
     monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
+    # The workspace CAS is store-owned; simulate the store write failing.
+    from api.webui_session_db import WebUIJsonSessionDB
+
+    _failing_store = WebUIJsonSessionDB(session_dir=session_dir)
     monkeypatch.setattr(
-        models_module,
-        "_safe_replace",
-        lambda *_args: (_ for _ in ()).throw(OSError("disk full")),
+        _failing_store,
+        "update_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
+    monkeypatch.setattr(models_module, "get_session_store", lambda: _failing_store)
     monkeypatch.setattr(models_module, "get_last_workspace", lambda: str(fallback))
     monkeypatch.setattr(profiles_module, "_profiles_match", lambda *_args: True)
     monkeypatch.setattr(profiles_module, "get_active_profile_name", lambda: "default")
@@ -431,16 +436,22 @@ def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     )
     replace_entered = threading.Event()
     allow_replace = threading.Event()
-    original_replace = models_module._safe_replace
+    from api.webui_session_db import WebUIJsonSessionDB
 
-    def paused_replace(source, target):
+    original_atomic_write = WebUIJsonSessionDB._atomic_write
+
+    def paused_atomic_write(path, data):
         replace_entered.set()
         assert allow_replace.wait(timeout=5)
-        original_replace(source, target)
+        original_atomic_write(path, data)
 
     monkeypatch.setattr(models_module, "SESSION_DIR", session_dir)
     monkeypatch.setattr(routes_module, "SESSION_DIR", session_dir)
-    monkeypatch.setattr(models_module, "_safe_replace", paused_replace)
+    # The workspace CAS is store-owned; pause inside the store's atomic write
+    # (which runs under the per-session mutation lock) to force the race.
+    monkeypatch.setattr(
+        WebUIJsonSessionDB, "_atomic_write", staticmethod(paused_atomic_write)
+    )
     monkeypatch.setattr(models_module, "_write_session_index", lambda **_kwargs: None)
     monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes_module, "get_session", lambda *_args, **_kwargs: session)

@@ -8551,10 +8551,19 @@ def _is_pre_compression_snapshot_id(session_id: str) -> bool:
         return False
     try:
         path = SESSION_DIR / f"{sid}.json"
-        if not path.exists():
-            return False
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return bool(data.get("pre_compression_snapshot"))
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return bool(data.get("pre_compression_snapshot"))
+        # Migrated sessions have no sidecar; check the active store so
+        # compression continuation rows keep their sidebar lineage grouping.
+        from api.models import get_session_store
+
+        store = get_session_store()
+        if getattr(store, "persists_without_sidecar", False):
+            meta = store.read_metadata_only(sid)
+            if meta is not None:
+                return bool(meta.get("pre_compression_snapshot"))
+        return False
     except Exception:
         return False
 
@@ -15791,13 +15800,16 @@ def handle_post(handler, parsed) -> bool:
                 unchanged = True
                 saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
                 # Draft persistence is not conversation activity. Touching updated_at
                 # here makes the active-session external-refresh poll force-reload the
                 # current chat every few seconds while the user is typing, and that
                 # delayed reload can restore an older draft over newer local input.
+                # NOTE: no pre-set of s.composer_draft — save_metadata() applies the
+                # in-memory update itself after the write succeeds. Pre-setting here
+                # would leave the cached Session ahead of disk on a failed write,
+                # and the unchanged fast path above would then skip the retry.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                s.save_metadata({"composer_draft": next_draft})
                 _draft_mark("after_save")
                 saved_draft = s.composer_draft
         _draft_mark("released_lock")
@@ -15927,61 +15939,57 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
+            # Fail-closed at the store boundary: when the active store holds
+            # this session, the authoritative record must be deleted FIRST.
+            # Reporting success after a failed delete would leave the
+            # transcript in place while the index/sidecar/tombstone state
+            # claims it is gone — so any store error aborts the delete with
+            # a 500 before any of that state is touched.
+            from api.models import delete_session_record
+
+            # Record the residual-cleanup phases IN THE SAME transaction as
+            # the authoritative delete, so a crash cannot leave residuals
+            # unobservable (durable on SQL stores; the JSON store runs the
+            # same set ledger-less below).
+            residual_phases = _residual_phase_set(sid, is_messaging=is_messaging_session)
             try:
-                p.unlink(missing_ok=True)
+                delete_session_record(sid, owner="delete_route", pending_phases=residual_phases)
             except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
-            try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
-                p.with_suffix('.json.bak').unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
-            if sidecar_deleted and not is_messaging_session:
-                try:
-                    _record_webui_deleted_session_tombstone(sid)
-                except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                logger.warning(
+                    "Failed to delete session %s from store; refusing to report success",
+                    sid,
+                    exc_info=True,
+                )
+                return bad(handler, "Failed to delete session; please retry", 500)
+            with LOCK:
+                SESSIONS.pop(sid, None)
         finally:
             session_lock.release()
         # Evict outside the mutation lock: lifecycle commit may perform provider
         # I/O and must not hold a per-session Session lock.
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
-        try:
-            from api.upload import _session_attachment_dir
-
-            shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
-        except Exception:
-            logger.debug("Failed to clean attachment dir for deleted session %s", sid)
-        # Remove the turn-journal shards and the run-journal directory so a
-        # deleted conversation is not recoverable from disk. The session JSON +
-        # state.db rows are cleared above, but these journals retain the user's
-        # messages (turn journal) and the full request/response payloads (run
-        # journal) in plaintext. (#3802)
-        try:
-            from api.turn_journal import delete_turn_journal
-
-            delete_turn_journal(sid)
-        except Exception:
-            logger.debug("Failed to delete turn journal for deleted session %s", sid)
-        try:
-            from api.run_journal import delete_run_journal
-
-            delete_run_journal(sid)
-        except Exception:
-            logger.debug("Failed to delete run journal for deleted session %s", sid)
+        # Durable phased cleanup: sidecar, .json.bak, index prune, attachment
+        # dir, turn journal and run journal (#3802: the journals retain the
+        # user's messages and the full request/response payloads in
+        # plaintext), and the CLI state.db rows (never for messaging
+        # sessions). Each phase runs act+verify; a failure stays durably
+        # recorded (SQL stores) so a retry resumes at exactly what remains.
+        remaining_phases = _run_residual_phases(sid)
+        # The tombstone is an anti-resurrection marker whose absence
+        # self-heals on index rebuild; keep it best-effort, conditioned on
+        # the sidecar phase having drained (a retained sidecar must stay
+        # recoverable).
+        if "sidecar" not in remaining_phases and not is_messaging_session:
+            try:
+                _record_webui_deleted_session_tombstone(sid)
+            except Exception:
+                logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
         # Prune the completion-dedup entry too. The reaper sweeps it once the
@@ -15998,18 +16006,21 @@ def handle_post(handler, parsed) -> bool:
             close_terminal(sid)
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
+        if remaining_phases:
+            # The authoritative record is gone but residuals remain. The JS
+            # callers already handle non-2xx (the single-delete path rolls
+            # back the optimistic removal; batch wraps Promise.all in
+            # try/catch), and the durable phase rows drive the retry.
+            return bad(
+                handler,
+                "Session deleted but cleanup incomplete; retry "
+                f"(remaining: {', '.join(remaining_phases)})",
+                500,
+            )
+        # Kept for payload-shape compatibility: state_db cleanup is a gated
+        # durable phase now, so an ok:true response always means it drained.
+        state_db_cleanup_failed = False
         return j(
             handler,
             {
@@ -16084,7 +16095,12 @@ def handle_post(handler, parsed) -> bool:
             s.save()
             persisted_clear = False
             try:
-                persisted = json.loads(s.path.read_text(encoding="utf-8"))
+                # Verify through the canonical store: migrated sessions have
+                # no sidecar to read back, so s.path would fail the
+                # verification with a warning even though the clear persisted.
+                from api.models import get_session_store
+
+                persisted = get_session_store().read_session(sid) or {}
                 persisted_clear = (
                     persisted.get("messages") == []
                     and persisted.get("context_messages") == []
@@ -18025,9 +18041,12 @@ def _handle_list_dir(handler, parsed):
         return bad(handler, "session_id is required")
     webui_session = None
     try:
-        s = get_session(sid)
-        webui_session = s
+        # Metadata-only load: /api/list only needs the workspace path. Loading
+        # the full transcript (e.g. a 23 MB session) adds hundreds of ms to
+        # every directory listing for no benefit.
+        s = get_session(sid, metadata_only=True)
         workspace = s.workspace
+        webui_session = s
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory
         try:
@@ -18052,6 +18071,9 @@ def _handle_list_dir(handler, parsed):
                 get_last_workspace,
             )
             if recovered:
+                # Recovery is rare; load the full session object only when we
+                # actually need to persist a workspace binding change.
+                webui_session = get_session(sid)
                 persisted = persist_recovered_workspace_binding(
                     webui_session,
                     workspace,
@@ -22230,11 +22252,277 @@ def _handle_memory_read(handler, parsed=None):
 # ── POST route helpers ────────────────────────────────────────────────────────
 
 
+# ── Durable phased deletion (residual cleanup lifecycle) ─────────────────────
+#
+# Deleting a session is a phased lifecycle transaction:
+#
+#   S0 live ──lifecycle_delete(sid, owner, pending_phases)──▶ S1 draining ──▶ S2 drained
+#
+# The store delete and the residual-phase rows commit in ONE transaction, so
+# there is no crash window between "store deleted" and "residuals durably
+# observable". The executor below runs act+verify for each remaining phase;
+# SQL backends persist per-phase outcomes (cleanup_phases) so a later run — a
+# user re-clicking delete, a cleanup sweep, the janitor pre-pass — resumes at
+# exactly the remaining rows. The JSON backend has no durable ledger (the
+# capability boundary drawn for cleanup leases): the executor still runs the
+# same act+verify set computed fresh, so truthfulness is uniform even though
+# durability is SQL-only.
+#
+# Deliberately NOT durable phases (each self-heals or is process-local):
+# SESSIONS.pop and _evict_session_agent (in-memory caches),
+# forget_bg_task_completion_dedup (in-memory, reaper-swept), close_terminal
+# (process-scoped), and the deleted-session tombstone (an anti-resurrection
+# marker whose absence self-heals on index rebuild — kept best-effort and
+# conditioned on the sidecar phase having drained).
+
+_RESIDUAL_PHASE_ORDER = (
+    "sidecar",
+    "sidecar_bak",
+    "index_prune",
+    "attachments",
+    "turn_journal",
+    "run_journal",
+    "state_db",
+)
+
+
+def _residual_phase_set(sid: str, *, is_messaging: bool) -> list[str]:
+    """The canonical ordered residual-cleanup phase set for a deleted session.
+
+    ``state_db`` is included only for non-messaging sessions: a WebUI delete
+    must never erase external messaging channel memory.
+    """
+    return [
+        phase
+        for phase in _RESIDUAL_PHASE_ORDER
+        if not (is_messaging and phase == "state_db")
+    ]
+
+
+def _phase_act_sidecar(sid: str):
+    (SESSION_DIR / f"{sid}.json").unlink(missing_ok=True)
+
+
+def _phase_verify_sidecar(sid: str, _result) -> bool:
+    return not (SESSION_DIR / f"{sid}.json").exists()
+
+
+def _phase_act_sidecar_bak(sid: str):
+    (SESSION_DIR / f"{sid}.json.bak").unlink(missing_ok=True)
+
+
+def _phase_verify_sidecar_bak(sid: str, _result) -> bool:
+    return not (SESSION_DIR / f"{sid}.json.bak").exists()
+
+
+def _phase_act_index_prune(sid: str):
+    from api.models import prune_session_from_index
+
+    prune_session_from_index(sid)
+
+
+def _phase_verify_index_prune(sid: str, _result) -> bool:
+    from api.models import SESSION_INDEX_FILE as _index_file
+
+    if not _index_file.exists():
+        return True
+    try:
+        entries = json.loads(_index_file.read_bytes())
+    except Exception:
+        return False
+    if not isinstance(entries, list):
+        return False
+    return not any(
+        isinstance(e, dict) and e.get("session_id") == sid for e in entries
+    )
+
+
+def _phase_act_attachments(sid: str):
+    from api.upload import _session_attachment_dir
+
+    target = _session_attachment_dir(sid)
+    if target.exists():
+        shutil.rmtree(target)  # no ignore_errors: a failure must stay visible
+
+
+def _phase_verify_attachments(sid: str, _result) -> bool:
+    from api.upload import _session_attachment_dir
+
+    return not _session_attachment_dir(sid).exists()
+
+
+def _phase_act_turn_journal(sid: str):
+    from api.turn_journal import delete_turn_journal
+
+    delete_turn_journal(sid)
+
+
+def _phase_verify_turn_journal(sid: str, _result) -> bool:
+    from api.turn_journal import TURN_JOURNAL_DIR_NAME, _default_session_dir
+
+    journal_dir = _default_session_dir() / TURN_JOURNAL_DIR_NAME
+    if not journal_dir.exists():
+        return True
+    if (journal_dir / f"{sid}.jsonl").exists():
+        return False
+    return not any(journal_dir.glob(f"{sid}~*.jsonl"))
+
+
+def _phase_act_run_journal(sid: str):
+    from api.run_journal import delete_run_journal
+
+    delete_run_journal(sid)
+
+
+def _phase_verify_run_journal(sid: str, _result) -> bool:
+    from api.run_journal import RUN_JOURNAL_DIR_NAME, _default_session_dir
+
+    return not (_default_session_dir() / RUN_JOURNAL_DIR_NAME / sid).exists()
+
+
+def _phase_act_state_db(sid: str):
+    """Delete the hermes state.db rows; True when the requested state is
+    absent after cleanup (delete_cli_session's documented contract — the
+    success signal here IS its return value). An absent state.db means the
+    requested state is absent by construction (delete_cli_session returns
+    False for a missing db even though nothing needs doing), so
+    short-circuit it as success."""
+    from api.models import _active_state_db_path, delete_cli_session
+
+    db_path = _active_state_db_path()
+    if not db_path or not Path(db_path).exists():
+        return True
+    return bool(delete_cli_session(sid))
+
+
+def _phase_verify_state_db(sid: str, act_result) -> bool:
+    return bool(act_result)
+
+
+_PHASE_ACTUATORS = {
+    "sidecar": (_phase_act_sidecar, _phase_verify_sidecar),
+    "sidecar_bak": (_phase_act_sidecar_bak, _phase_verify_sidecar_bak),
+    "index_prune": (_phase_act_index_prune, _phase_verify_index_prune),
+    "attachments": (_phase_act_attachments, _phase_verify_attachments),
+    "turn_journal": (_phase_act_turn_journal, _phase_verify_turn_journal),
+    "run_journal": (_phase_act_run_journal, _phase_verify_run_journal),
+    "state_db": (_phase_act_state_db, _phase_verify_state_db),
+}
+
+
+def _run_residual_phases(sid: str, phases: list[str] | None = None) -> list[str]:
+    """Run act+verify for each remaining residual-cleanup phase of ``sid``.
+
+    Durable stores (``supports_generation``) read the remaining rows from the
+    cleanup_phases ledger and persist each outcome — the ledger recorded at
+    delete time is the truth. The JSON store has no durable home for the
+    ledger (the same capability boundary as cleanup leases), so it runs
+    ``phases`` ledger-less — the caller's intended set, defaulting to the
+    full canonical residual set (the /api/session/delete inventory). Every
+    act is absent-tolerant, so re-entry (user re-click, cleanup re-run,
+    janitor sweep) re-attempts only what remains and can never double-count.
+    Returns the names of the phases STILL remaining; non-empty means the
+    caller must surface a retryable failure instead of a false success.
+    """
+    try:
+        from api.models import get_session_store
+
+        store = get_session_store()
+    except Exception:
+        store = None
+    durable = store is not None and getattr(store, "supports_generation", False)
+    if durable:
+        try:
+            phases = [row["phase"] for row in store.list_cleanup_phases(sid)]
+        except Exception:
+            logger.warning(
+                "Failed to read cleanup phase ledger for %s", sid, exc_info=True
+            )
+            # Fail closed: report the full intended set as remaining so the
+            # caller surfaces a retryable failure, never a false success.
+            return phases or _residual_phase_set(
+                sid, is_messaging=_is_messaging_session_id(sid)
+            )
+    elif phases is None:
+        phases = _residual_phase_set(sid, is_messaging=_is_messaging_session_id(sid))
+    remaining = []
+    for phase in phases:
+        actuators = _PHASE_ACTUATORS.get(phase)
+        if actuators is None:
+            logger.debug("Unknown cleanup phase %s for %s; leaving row", phase, sid)
+            remaining.append(phase)
+            continue
+        act, verify = actuators
+        error = None
+        ok = False
+        try:
+            act_result = act(sid)
+            # Verify-after-act: never trust return codes alone
+            # (delete_run_journal returns False on an already-absent dir,
+            # which is success here).
+            ok = bool(verify(sid, act_result))
+            if not ok:
+                error = "verify failed after act"
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        if durable:
+            try:
+                store.finish_cleanup_phase(sid, phase, ok=ok, error=error)
+            except Exception:
+                logger.debug(
+                    "Failed to record cleanup phase %s outcome for %s",
+                    phase,
+                    sid,
+                    exc_info=True,
+                )
+        if not ok:
+            remaining.append(phase)
+    return remaining
+
+
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
+    failed = []
     phase1_removed_ids = set()
 
-    # Phase 1: Clean orphan session files (existing behavior).
+    try:
+        from api.models import get_session_store
+
+        _store = get_session_store()
+    except Exception:
+        logger.debug("Store unavailable during sessions cleanup", exc_info=True)
+        _store = None
+
+    residuals: dict[str, list[str]] = {}
+
+    # Pre-pass janitor: drain residual-cleanup phase rows left behind by
+    # earlier deletes that crashed or partially failed AFTER the
+    # authoritative store delete committed (crash-safe resume — the rows
+    # are durable). Their store delete already counted in a prior run, so
+    # sids that still cannot drain go into `failed`, never `cleaned`.
+    if _store is not None and getattr(_store, "supports_generation", False):
+        try:
+            _janitor_sids = sorted(
+                {
+                    str(_row.get("session_id") or "")
+                    for _row in _store.list_cleanup_phases()
+                }
+            )
+        except Exception:
+            logger.debug("Cleanup phase ledger unavailable", exc_info=True)
+            _janitor_sids = []
+        for _sid in [_s for _s in _janitor_sids if _s]:
+            _remaining = _run_residual_phases(_sid)
+            if _remaining:
+                residuals[_sid] = _remaining
+                failed.append(_sid)
+
+    # Phase 1: collect candidate sids (JSON sidecars + SQL-backed rows) and
+    # evaluate the Untitled/zero-message predicate. Collection is
+    # side-effect free — NO unlinks, NO cache pops — so a failed
+    # authoritative delete below leaves every representation (SQL row AND
+    # sidecar) in place for the retry owner recorded in the cleanup lease.
+    candidates = set()
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
             continue
@@ -22245,13 +22533,74 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             else:
                 should_delete = s and s.title == "Untitled" and len(s.messages) == 0
             if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+                candidates.add(p.stem)
         except Exception:
-            logger.debug("Failed to clean up session file %s", p)
+            logger.debug("Failed to evaluate session file %s for cleanup", p)
+
+    # SQL-backed sessions (no sidecar) — same predicates via the canonical
+    # store so DB-only zero-message sessions are cleaned too.
+    if _store is not None and _store.supports_generation:
+        try:
+            for _meta in _store.list_sessions():
+                _sid = str(_meta.get("session_id") or "").strip()
+                if not _sid or _sid in candidates:
+                    continue
+                try:
+                    s = Session.load(_sid)
+                    if zero_only:
+                        should_delete = s and len(s.messages) == 0
+                    else:
+                        should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                    if should_delete:
+                        candidates.add(_sid)
+                except Exception:
+                    logger.debug("Failed to evaluate SQL-backed session %s for cleanup", _sid)
+        except Exception:
+            logger.debug("Store listing unavailable during sessions cleanup", exc_info=True)
+
+    # Phase 1 delete: the store owns the authoritative record. The sidecar
+    # unlink and cache pop happen ONLY after an ok result, so a dual-rep
+    # session never loses its sidecar before a failed SQL delete. On
+    # failure everything is retained and the sid is reported in `failed`.
+    for _sid in sorted(candidates):
+        if _sid in failed:
+            continue  # the janitor pre-pass already owns this sid's retry
+        if _store is None:
+            failed.append(_sid)
+            continue
+        try:
+            # Mirror exactly what this handler unlinked inline before: the
+            # sidecar and its .bak (index/ghost repair stays in Phase 2/3).
+            _result = _store.lifecycle_delete(
+                _sid,
+                owner="sessions_cleanup",
+                pending_phases=["sidecar", "sidecar_bak"],
+            )
+        except Exception as _exc:
+            _result = {"ok": False, "error": f"{type(_exc).__name__}: {_exc}"}
+        if _result.get("ok"):
+            with LOCK:
+                SESSIONS.pop(_sid, None)
+            _remaining = _run_residual_phases(_sid, phases=["sidecar", "sidecar_bak"])
+            if _remaining:
+                # The store delete committed but residuals remain: do NOT
+                # count this sid as cleaned — the durable phase rows carry
+                # the retry, and the janitor resumes them on the next run.
+                logger.warning(
+                    "Cleanup residuals remain for %s: %s", _sid, _remaining
+                )
+                residuals[_sid] = _remaining
+                failed.append(_sid)
+            else:
+                cleaned += 1
+                phase1_removed_ids.add(_sid)
+        else:
+            logger.warning(
+                "Cleanup delete failed for %s; retained for retry (%s)",
+                _sid,
+                _result.get("error"),
+            )
+            failed.append(_sid)
 
     phase1_touched = bool(cleaned)
     phase2_rewrote_index = False
@@ -22281,6 +22630,20 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                         for p in SESSION_DIR.glob("*.json")
                         if not p.name.startswith("_")
                     }
+                    # SQL-backed sessions have no sidecar; their index rows
+                    # are live, not ghosts.
+                    try:
+                        from api.models import get_session_store
+
+                        _store = get_session_store()
+                        if _store.supports_generation:
+                            live_ids |= {
+                                str(m.get("session_id"))
+                                for m in _store.list_sessions()
+                                if m.get("session_id")
+                            }
+                    except Exception:
+                        logger.debug("Store unavailable during ghost sweep", exc_info=True)
                     with LOCK:
                         in_memory_ids = set(SESSIONS.keys())
 
@@ -22330,7 +22693,15 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
 
-    return j(handler, {"ok": True, "cleaned": cleaned})
+    return j(
+        handler,
+        {
+            "ok": not failed,
+            "cleaned": cleaned,
+            "failed": failed,
+            "residuals": residuals,
+        },
+    )
 
 
 def _handle_btw(handler, body):
@@ -22474,13 +22845,30 @@ def _handle_background(handler, body):
                 complete_background(parent_sid, task_id, _answer or "(no answer produced)")
             except Exception:
                 complete_background(parent_sid, task_id, "(background task failed)")
-            # Best-effort cleanup of the hidden bg session file so it doesn't
-            # clutter the sidebar or SESSION_DIR. The index is pruned on the
-            # next rebuild via _index_entry_exists().
+            # Fail-retained cleanup: the authoritative store row must go
+            # FIRST. If it cannot, keep the whole record (including any
+            # sidecar) so a later sweep retries — never report a cleanup
+            # that silently leaks the row while the index prune assumes
+            # success.
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                from api.models import delete_session_record
+
+                delete_session_record(bg_sid, owner="background", pending_phases=["sidecar"])
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to delete bg session %s from store; retaining for retry",
+                    bg_sid,
+                    exc_info=True,
+                )
+            else:
+                # Mirrors exactly the sidecar unlink this path used to do;
+                # a failure leaves a durable phase row for the janitor.
+                try:
+                    _run_residual_phases(bg_sid, phases=["sidecar"])
+                except Exception:
+                    logger.debug(
+                        "Residual cleanup failed for bg session %s", bg_sid, exc_info=True
+                    )
         except Exception:
             try:
                 complete_background(parent_sid, task_id, "(background task failed)")

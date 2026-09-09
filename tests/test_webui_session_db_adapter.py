@@ -77,9 +77,23 @@ def test_metadata_update_rejects_unsafe_fields(session_dir):
     with pytest.raises(ValueError):
         db.update_metadata(payload["session_id"], {"messages": []})
     with pytest.raises(ValueError):
-        db.update_metadata(payload["session_id"], {"unknown_field": "unsafe"})
+        db.update_metadata(payload["session_id"], {"session_id": "other"})
+    with pytest.raises(ValueError):
+        db.update_metadata(payload["session_id"], {"message_count": 0})
 
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_metadata_update_accepts_unknown_fields(session_dir):
+    """One metadata policy: unknown top-level keys persist (SQL extra_json parity)."""
+    payload, path = _write_json_session(session_dir)
+    db = WebUIJsonSessionDB()
+
+    db.update_metadata(payload["session_id"], {"unknown_field": "safe"})
+    reloaded = json.loads(path.read_text(encoding="utf-8"))
+
+    assert reloaded["unknown_field"] == "safe"
+    assert reloaded["messages"] == payload["messages"]
 
 
 def test_metadata_update_refuses_metadata_only_stub(session_dir):
