@@ -51,6 +51,28 @@ def _node_json(script, *args):
     return json.loads(result.stdout)
 
 
+def _i18n_vm_script(body):
+    return (
+        "const vm = require('vm');\n"
+        "const fs = require('fs');\n"
+        f"const source = fs.readFileSync({json.dumps(str(REPO / 'static' / 'i18n.js'))}, 'utf8');\n"
+        "const storage = new Map();\n"
+        "const context = {\n"
+        "  console,\n"
+        "  localStorage: {\n"
+        "    getItem: key => storage.get(key) ?? null,\n"
+        "    setItem: (key, value) => storage.set(key, value),\n"
+        "  },\n"
+        "  document: {documentElement: {lang: ''}, querySelectorAll: () => []},\n"
+        "};\n"
+        "vm.createContext(context);\n"
+        "vm.runInContext(source, context);\n"
+        "vm.runInContext(\"globalThis.__i18n = {locales: Object.keys(LOCALES), t, setLocale};\", context);\n"
+        f"vm.runInContext({json.dumps(f'globalThis.__result = ({body});')}, context);\n"
+        "process.stdout.write(JSON.stringify(context.__result));"
+    )
+
+
 _MISSING = object()
 
 
@@ -276,14 +298,46 @@ openArtifactPath('/workspace/missing.md').then(()=>process.stdout.write(JSON.str
     assert "open" not in calls
 
 
-def test_artifact_boundary_keys_exist_in_all_locale_blocks():
-    blocks = list(re.finditer(r"^  (?:'[^']+'|[A-Za-z-]+): \{", I18N_JS, re.MULTILINE))
+def test_artifact_boundary_keys_are_english_fallback_owned_and_runtime_covered():
+    blocks = list(re.finditer(r"^  ('[^']+'|[A-Za-z][A-Za-z0-9-]*): \{$", I18N_JS, re.MULTILINE))
     assert len(blocks) == 15
-    for index, match in enumerate(blocks):
-        end = blocks[index + 1].start() if index + 1 < len(blocks) else I18N_JS.index("\n};", match.start())
-        block = I18N_JS[match.start() : end]
-        for key in ("workspace_artifact_outside_workspace", "workspace_artifact_unsupported"):
-            assert len(re.findall(rf"\b{key}:", block)) == 1
+    end = I18N_JS.index("\n};", blocks[-1].start())
+    locale_blocks = {
+        match.group(1).strip("'"): I18N_JS[
+            match.start() : (blocks[index + 1].start() if index + 1 < len(blocks) else end)
+        ]
+        for index, match in enumerate(blocks)
+    }
+    keys = ("workspace_artifact_outside_workspace", "workspace_artifact_unsupported")
+    for key in keys:
+        assert len(re.findall(rf"^    {key}:\s*", locale_blocks["en"], re.MULTILINE)) == 1
+        for locale, block in locale_blocks.items():
+            if locale != "en":
+                assert not re.search(rf"^    {key}:\s*", block, re.MULTILINE), locale
+
+    out = _node_json(_i18n_vm_script(
+        "(() => {\n"
+        "  const keys = ['workspace_artifact_outside_workspace', 'workspace_artifact_unsupported'];\n"
+        "  __i18n.setLocale('en');\n"
+        "  const english = keys.map(key => __i18n.t(key));\n"
+        "  const fallbacks = {};\n"
+        "  for (const locale of __i18n.locales.filter(locale => locale !== 'en')) {\n"
+        "    __i18n.setLocale(locale);\n"
+        "    fallbacks[locale] = keys.map(key => __i18n.t(key));\n"
+        "  }\n"
+        "  __i18n.setLocale('en');\n"
+        "  return {locales: __i18n.locales, english, fallbacks, unknown: __i18n.t('workspace_artifact_missing_control')};\n"
+        "})()"
+    ))
+    expected_locales = ["en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "cs", "tr", "pl", "vi"]
+    assert out["locales"] == expected_locales
+    assert out["english"] == [
+        "Outside the active workspace",
+        "This artifact path cannot be opened from the workspace",
+    ]
+    assert out["unknown"] == "workspace_artifact_missing_control"
+    assert set(out["fallbacks"]) == set(expected_locales[1:])
+    assert all(values == out["english"] for values in out["fallbacks"].values())
 
 
 def test_collection_render_and_open_route_through_classifier():

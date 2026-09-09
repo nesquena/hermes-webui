@@ -8,6 +8,8 @@ REPO = Path(__file__).resolve().parent.parent
 # profile_concept_* keys were filled in for #7579 and are no longer exempted.
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     "workspace_artifact_source_session",
+    "workspace_artifact_outside_workspace",
+    "workspace_artifact_unsupported",
 }
 
 
