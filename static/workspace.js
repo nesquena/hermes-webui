@@ -449,7 +449,7 @@ function _sanitizeArtifactPath(path){
 function _normalizeExplicitArtifactPath(path){
   if(path === null || path === undefined) return '';
   const raw = String(path).trim();
-  if(!raw || raw.length > 240 || raw.includes('://') || raw.includes('\0')) return '';
+  if(!raw || raw.includes('://') || raw.includes('\0')) return '';
   if(raw.startsWith('~')) return '';
   return raw.replace(/\\/g,'/');
 }
