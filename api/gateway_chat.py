@@ -113,7 +113,16 @@ def gateway_run_id_pending(stream_id: str) -> bool:
         return str((_STREAM_RUN_LIFECYCLE.get(stream_id) or {}).get("phase") or "").strip().lower() == "pending"
 
 
-def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str | None]:
+def _wait_for_gateway_run_id_state(stream_id: str, timeout: float) -> tuple[bool, str | None, str]:
+    """Bounded lifecycle wait that also captures the terminal phase.
+
+    Same contract as ``wait_for_gateway_run_id`` but returns a third element:
+    the lifecycle phase observed at resolution time (``""`` when unknown).
+    Callers that must distinguish WHY no id exists (e.g. the legacy
+    ``fallback`` transport) need this snapshot taken under the condition
+    lock, before the waiter's retirement bookkeeping can pop the state.
+    """
+    resolved_phase = ""
     deadline = time.monotonic() + max(0.0, float(timeout))
     with _STREAM_RUN_STARTING_CONDITION:
         state = _STREAM_RUN_LIFECYCLE.get(stream_id)
@@ -123,21 +132,23 @@ def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str |
             while True:
                 state = _STREAM_RUN_LIFECYCLE.get(stream_id)
                 phase = str((state or {}).get("phase") or "").strip().lower()
+                if phase:
+                    resolved_phase = phase
                 if phase == "fallback":
-                    return False, None
+                    return False, None, resolved_phase
                 if phase == "failed":
-                    return True, None
+                    return True, None, resolved_phase
                 run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
                 if phase == "ready":
                     stored_run_id = str((state or {}).get("run_id") or "").strip()
-                    return True, run_id or stored_run_id or None
+                    return True, run_id or stored_run_id or None, resolved_phase
                 if run_id:
-                    return True, run_id
+                    return True, run_id, resolved_phase
                 if not state:
-                    return False, None
+                    return False, None, resolved_phase
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return True, None
+                    return True, None, resolved_phase
                 _STREAM_RUN_STARTING_CONDITION.wait(timeout=remaining)
         finally:
             state = _STREAM_RUN_LIFECYCLE.get(stream_id)
@@ -146,6 +157,11 @@ def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str |
                 state["waiters"] = waiters
                 if _retire_gateway_run_starting_if_done(stream_id):
                     _STREAM_RUN_STARTING_CONDITION.notify_all()
+
+
+def wait_for_gateway_run_id(stream_id: str, timeout: float) -> tuple[bool, str | None]:
+    structured, run_id, _phase = _wait_for_gateway_run_id_state(stream_id, timeout)
+    return structured, run_id
 
 
 def gateway_steer_run(stream_id: str, text: str):
@@ -166,18 +182,25 @@ def gateway_steer_run(stream_id: str, text: str):
 
     Outcomes:
       - No usable run id after lifecycle resolution (pending timeout,
-        failed/fallback phase, or absent state): ``gateway_steer_no_run_id``,
+        failed phase, or absent state): ``gateway_steer_no_run_id``,
         no HTTP call is made.
+      - Legacy chat-completions transport (lifecycle resolved to the
+        ``fallback`` phase): ``gateway_steer_queued`` — the runs API cannot
+        relay live guidance there, so the text degrades to the next-turn
+        queue exactly like the 404/405/410 compatibility path instead of
+        forcing a manual retry. No HTTP call is made.
       - HTTP 404/405/410: ``gateway_steer_queued`` — the endpoint is missing
         or the run is gone; the browser may queue the text for a later turn.
         This does not cancel the active run and does not claim the server
         queued anything.
       - HTTP 409: ``gateway_steer_not_accepting``.
       - Other HTTP statuses: ``gateway_steer_http_<status>``.
-      - Resolution/request exceptions: ``gateway_steer_error``.
+      - Resolution/request exceptions, or an accepted-response validation
+        failure (followed redirect / non-2xx terminal response the opener did
+        not raise for): ``gateway_steer_error``.
     """
     try:
-        _structured_gateway, run_id = wait_for_gateway_run_id(
+        _structured_gateway, run_id, resolved_phase = _wait_for_gateway_run_id_state(
             str(stream_id or ""), GATEWAY_RUN_ID_WAIT_TIMEOUT
         )
         run_id = str(run_id or "").strip()
@@ -185,10 +208,27 @@ def gateway_steer_run(stream_id: str, text: str):
         logger.debug("Gateway run-id resolution failed for stream %s", stream_id, exc_info=True)
         return False, "gateway_steer_error"
     if not run_id:
+        # Codex r2 transport finding (legacy fallback reason): a lifecycle
+        # that resolved to the fallback phase is the legacy chat-completions
+        # transport — it has no run-id to relay to, so live steer is
+        # impossible for the whole turn. Degrade to the queue convention
+        # (same as 404/405/410) so the guidance is preserved for the next
+        # turn instead of bouncing the user into draft/retry. The phase comes
+        # from the wait itself (snapshotted under the lifecycle condition), so
+        # the decision cannot race the waiter's retirement bookkeeping.
+        if resolved_phase == "fallback":
+            return False, "gateway_steer_queued"
         return False, "gateway_steer_no_run_id"
     try:
+        # Codex r2 transport finding (configured base-URL authority): resolve
+        # the base URL from the SAME config authority the run was created
+        # with (get_config() honors the webui_gateway_base_url config key,
+        # not just the env var) — otherwise a config-file-configured gateway
+        # would be steered at the env/default one.
+        from api.config import get_config
+
         url = (
-            f"{_gateway_base_url().rstrip('/')}/v1/runs/"
+            f"{_gateway_base_url(get_config()).rstrip('/')}/v1/runs/"
             f"{urllib.parse.quote(run_id, safe='')}/steer"
         )
         req = urllib.request.Request(
@@ -200,8 +240,17 @@ def gateway_steer_run(stream_id: str, text: str):
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        # Codex r2 transport finding (redirect/accepted-response validation):
+        # refuse redirects and validate the terminal response exactly like
+        # stop_gateway_run — a followed redirect landing on a 200 page is not
+        # proof of delivery, and must not be reported as accepted.
+        opener = urllib.request.build_opener(_GatewayNoRedirect)
+        with opener.open(req, timeout=15) as resp:
+            final_url = str(getattr(resp, "geturl", lambda: req.full_url)() or "")
+            status = int(getattr(resp, "status", getattr(resp, "code", 0)) or 0)
             resp.read()
+        if final_url != req.full_url or not (200 <= status < 300):
+            return False, "gateway_steer_error"
         return True, None
     except urllib.error.HTTPError as e:
         if e.code in {404, 405, 410}:
@@ -849,6 +898,23 @@ def _run_gateway_runs_api_streaming(
                     final_text = output
                     if stream_id in STREAM_PARTIAL_TEXT:
                         STREAM_PARTIAL_TEXT[stream_id] = output
+                # Gate must-fix 1 (#7440): the agent preserves unconsumed
+                # guidance in the terminal run.completed payload's
+                # pending_steer field. Translate it into the EXISTING
+                # pending_steer_leftover SSE event — the same contract as the
+                # in-process path's end-of-turn drain — so the frontend's
+                # existing listener/run-journal replay path queues it for the
+                # next turn instead of silently dropping accepted guidance.
+                # Emitted before the caller's terminal done/stream_end events;
+                # the journaling put_gateway_event gives reconnecting clients
+                # exact-once replay via the run-journal cursor. Suppressed on
+                # error completions and cancelled turns (local-path parity).
+                pending_steer_text = str(payload.get("pending_steer") or "").strip()
+                if pending_steer_text:
+                    put_gateway_event("pending_steer_leftover", {
+                        "session_id": session_id,
+                        "text": pending_steer_text,
+                    })
                 usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
                 sse_event = "message"
                 continue
@@ -876,6 +942,17 @@ def _run_gateway_runs_api_streaming(
     return final_text, usage
 
 
+class _GatewayNoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects so gateway control POSTs land on their exact route.
+
+    Silently following a redirect (e.g. to an auth/login page that answers
+    200) would misreport an undelivered steer/stop request as accepted.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def stop_gateway_run(run_id: str) -> bool:
     """Request gateway interruption and report whether it was acknowledged."""
     run_id = str(run_id or "").strip()
@@ -895,12 +972,8 @@ def stop_gateway_run(run_id: str) -> bool:
         headers=headers,
         method="POST",
     )
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            return None
-
     try:
-        opener = urllib.request.build_opener(_NoRedirect)
+        opener = urllib.request.build_opener(_GatewayNoRedirect)
         with opener.open(req, timeout=10) as response:
             final_url = str(getattr(response, "geturl", lambda: req.full_url)() or "")
             status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)

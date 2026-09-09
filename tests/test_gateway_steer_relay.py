@@ -6,7 +6,10 @@ retirement). All HTTP is faked at ``urllib.request.urlopen``; the gateway
 base URL and API key are pinned to deterministic fake values. No real
 gateway, config, credentials, sockets, or sleeps-for-synchronization are
 used: cross-thread sequencing observes the real lifecycle waiter count under
-the real condition with a bounded deadline.
+the real condition with a bounded deadline. HTTP is faked at the
+``urllib.request.build_opener`` seam (the redirect-refusing opener
+``gateway_steer_run`` opens through); the redirect row uses a real loopback
+HTTP server so the no-follow behavior itself is exercised.
 """
 from __future__ import annotations
 
@@ -54,11 +57,23 @@ def _gateway_run_state_isolation():
 
 
 class _FakeSteerResponse:
-    """Context-managed success response that records read/close."""
+    """Context-managed success response that records read/close.
 
-    def __init__(self):
+    Models the validated response surface ``gateway_steer_run`` inspects
+    after opening: ``geturl()`` (final URL after any redirect handling) and
+    ``status``/``code`` (terminal HTTP status).
+    """
+
+    def __init__(self, req, *, status: int = 200, final_url: str | None = None):
+        self._req = req
+        self.status = status
+        self.code = status
+        self._final_url = final_url
         self.read_called = False
         self.closed = False
+
+    def geturl(self):
+        return self._final_url if self._final_url is not None else self._req.full_url
 
     def read(self, _limit=None):
         self.read_called = True
@@ -74,10 +89,13 @@ class _FakeSteerResponse:
 
 @pytest.fixture()
 def steer_relay(monkeypatch):
-    """Pin gateway config to fakes and record every urlopen attempt.
+    """Pin gateway config to fakes and record every opener open attempt.
 
-    Returns a namespace with ``calls`` (``{"req", "timeout"}`` dicts) and
-    ``responses`` (the fake response objects handed out, in order).
+    ``gateway_steer_run`` opens through ``urllib.request.build_opener``
+    (redirect-refusing opener, same as ``stop_gateway_run``), so the fake is
+    installed at the ``build_opener`` seam. Returns a namespace with
+    ``calls`` (``{"req", "timeout"}`` dicts) and ``responses`` (the fake
+    response objects handed out, in order).
     """
     from api import gateway_chat
 
@@ -89,13 +107,17 @@ def steer_relay(monkeypatch):
     calls: list[dict] = []
     responses: list[_FakeSteerResponse] = []
 
-    def fake_urlopen(req, *, timeout=None):
-        resp = _FakeSteerResponse()
+    def fake_open(req, *, timeout=None):
+        resp = _FakeSteerResponse(req)
         calls.append({"req": req, "timeout": timeout})
         responses.append(resp)
         return resp
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *handlers, **kwargs: SimpleNamespace(open=fake_open),
+    )
     return SimpleNamespace(calls=calls, responses=responses)
 
 
@@ -132,6 +154,16 @@ def _header(req, name: str):
         if key.lower() == lowered:
             return value
     return None
+
+
+def _install_fake_opener(monkeypatch, open_fn):
+    """Install ``open_fn`` at the ``build_opener`` seam ``gateway_steer_run``
+    opens through (redirect-refusing opener, same as ``stop_gateway_run``)."""
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *handlers, **kwargs: SimpleNamespace(open=open_fn),
+    )
 
 
 def _start_steer_thread(results: dict, key: str, stream_id: str, text: str) -> threading.Thread:
@@ -271,7 +303,7 @@ def test_gateway_steer_http_reason_mapping(steer_relay, monkeypatch, code):
         error_streams.append(fp)
         raise urllib.error.HTTPError(req.full_url, code, f"HTTP {code}", {}, fp)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_fake_opener(monkeypatch, fake_urlopen)
     try:
         result = gateway_chat.gateway_steer_run(stream_id, "steer me")
         assert result == (False, _expected_http_reason(code))
@@ -304,7 +336,7 @@ def test_gateway_steer_exception_reason_mapping(steer_relay, monkeypatch, exc_fa
     def fake_urlopen(req, *, timeout=None):
         raise exc_factory()
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    _install_fake_opener(monkeypatch, fake_urlopen)
     result = gateway_chat.gateway_steer_run(stream_id, "steer me")
     assert result == (False, "gateway_steer_error")
 
@@ -325,9 +357,7 @@ def test_gateway_steer_response_read_failure_is_error(steer_relay, monkeypatch):
         def __exit__(self, *args):
             return None
 
-    monkeypatch.setattr(
-        urllib.request, "urlopen", lambda req, *, timeout=None: _ReadFailResponse()
-    )
+    _install_fake_opener(monkeypatch, lambda req, *, timeout=None: _ReadFailResponse())
     result = gateway_chat.gateway_steer_run(stream_id, "steer me")
     assert result == (False, "gateway_steer_error")
 
@@ -345,6 +375,136 @@ def test_gateway_steer_base_url_resolution_failure_is_error(steer_relay, monkeyp
     result = gateway_chat.gateway_steer_run(stream_id, "steer me")
     assert result == (False, "gateway_steer_error")
     assert steer_relay.calls == []  # resolution failed before any HTTP attempt
+
+
+# ---------------------------------------------------------------------------
+# Codex r2 transport findings: config authority, redirect refusal,
+# accepted-response validation
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_steer_base_url_uses_config_file_authority(monkeypatch):
+    """The steer POST must resolve its base URL from the SAME config
+    authority the run was created with: get_config() honors the
+    ``webui_gateway_base_url`` config key, not just the env var."""
+    from api import config, gateway_chat
+
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {"webui_gateway_base_url": "http://config-authority.test"},
+    )
+    stream_id = "stream-steer-config-authority"
+    gateway_chat._STREAM_RUN_IDS[stream_id] = "run-cfg"
+
+    calls: list[dict] = []
+
+    def fake_open(req, *, timeout=None):
+        calls.append({"req": req, "timeout": timeout})
+        return _FakeSteerResponse(req)
+
+    _install_fake_opener(monkeypatch, fake_open)
+    try:
+        assert gateway_chat.gateway_steer_run(stream_id, "steer me") == (True, None)
+        assert len(calls) == 1
+        assert calls[0]["req"].full_url == (
+            "http://config-authority.test/v1/runs/run-cfg/steer"
+        )
+    finally:
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+
+
+def test_gateway_steer_redirect_not_followed(monkeypatch):
+    """A redirecting steer endpoint must NOT be followed: urllib's default
+    opener would follow the 302 to a 200 landing page and misreport the
+    undelivered POST as accepted. The real no-redirect opener surfaces the
+    3xx as an HTTPError, mapped to the http_<code> family."""
+    import http.server
+    import socketserver
+
+    from api import gateway_chat
+
+    class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path.endswith("/steer"):
+                self.send_response(302)
+                self.send_header("Location", "/landing")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), _RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(
+            gateway_chat, "_gateway_base_url", lambda *a, **k: f"http://127.0.0.1:{server.server_address[1]}"
+        )
+        stream_id = "stream-steer-redirect"
+        gateway_chat._STREAM_RUN_IDS[stream_id] = "run-redir"
+        assert gateway_chat.gateway_steer_run(stream_id, "steer me") == (
+            False,
+            "gateway_steer_http_302",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        gateway_chat._STREAM_RUN_IDS.pop("stream-steer-redirect", None)
+
+
+def test_gateway_steer_rejects_followed_redirect_landing(monkeypatch):
+    """If a response somehow arrives from a different final URL (a followed
+    redirect landing on a 200 page), delivery is unproven and must NOT be
+    reported as accepted."""
+    from api import gateway_chat
+
+    stream_id = "stream-steer-followed-landing"
+    gateway_chat._STREAM_RUN_IDS[stream_id] = "run-landing"
+
+    def fake_open(req, *, timeout=None):
+        return _FakeSteerResponse(req, status=200, final_url="http://gateway.test/login")
+
+    _install_fake_opener(monkeypatch, fake_open)
+    try:
+        assert gateway_chat.gateway_steer_run(stream_id, "steer me") == (
+            False,
+            "gateway_steer_error",
+        )
+    finally:
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+
+
+def test_gateway_steer_rejects_unraised_non_2xx_terminal(monkeypatch):
+    """A non-2xx terminal response the opener did not raise for (exotic
+    handler) is still a delivery failure, never an accepted steer."""
+    from api import gateway_chat
+
+    stream_id = "stream-steer-unraised-500"
+    gateway_chat._STREAM_RUN_IDS[stream_id] = "run-unraised"
+
+    def fake_open(req, *, timeout=None):
+        return _FakeSteerResponse(req, status=500)
+
+    _install_fake_opener(monkeypatch, fake_open)
+    try:
+        assert gateway_chat.gateway_steer_run(stream_id, "steer me") == (
+            False,
+            "gateway_steer_error",
+        )
+    finally:
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -406,12 +566,16 @@ def test_gateway_steer_pending_timeout(steer_relay, monkeypatch):
     ["failed", "fallback", "ready_empty_id", "fallback_legacy_map_id"],
 )
 def test_gateway_steer_terminal_lifecycle_without_id(steer_relay, mode):
-    """Terminal/no-id lifecycle states are explicit no-id outcomes with no
-    HTTP attempt. The fallback-with-legacy-id row pins phase-before-id
-    precedence: even if a legacy approval event populates an id, a known
-    ``fallback`` phase must not relay."""
+    """Terminal/no-id lifecycle states are explicit outcomes with no HTTP
+    attempt. Codex r2 (legacy fallback reason): a known ``fallback`` phase is
+    the legacy chat-completions transport — live relay is impossible for the
+    whole turn, so it degrades to the queue convention instead of no-run-id.
+    The fallback-with-legacy-id row pins phase-before-id precedence: even if
+    a legacy approval event populates an id, a known ``fallback`` phase must
+    not relay."""
     from api import gateway_chat
 
+    expected = "gateway_steer_queued" if "fallback" in mode else "gateway_steer_no_run_id"
     stream_id = f"stream-steer-terminal-{mode}"
     gateway_chat._mark_gateway_run_starting(stream_id)
     if mode == "failed":
@@ -428,7 +592,7 @@ def test_gateway_steer_terminal_lifecycle_without_id(steer_relay, mode):
         started = time.monotonic()
         result = gateway_chat.gateway_steer_run(stream_id, "too late")
         elapsed = time.monotonic() - started
-        assert result == (False, "gateway_steer_no_run_id")
+        assert result == (False, expected)
         assert elapsed < 1.0  # failed/fallback must not wait out the 5s budget
         assert steer_relay.calls == []
         assert _waiter_count(stream_id) == 0
@@ -456,7 +620,8 @@ def test_gateway_steer_waiter_retires_owner_done_state(steer_relay, terminal):
         gateway_chat._clear_gateway_run_starting(stream_id)  # owner done; waiter alive
         thread.join(timeout=5)
         assert not thread.is_alive()
-        assert results["steer"] == (False, "gateway_steer_no_run_id")
+        expected = "gateway_steer_queued" if terminal == "fallback" else "gateway_steer_no_run_id"
+        assert results["steer"] == (False, expected)
         assert steer_relay.calls == []
         # The exiting waiter was the last reference: state retired.
         assert stream_id not in gateway_chat._STREAM_RUN_LIFECYCLE

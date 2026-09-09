@@ -173,8 +173,18 @@ Automated coverage:
 - `tests/test_gateway_steer_relay.py` — direct steer relay coverage: exact
   request URL/body and run-id quoting, the bounded startup wait (pending then
   ready, pending timeout, terminal/no-id states), HTTP 404/405/410 queue mapping
-  versus 409 / other-HTTP / exception draft-failure mapping, waiter cleanup,
-  and stream-scoped routing with multiple active runs.
+  versus 409 / other-HTTP / exception draft-failure mapping, the legacy
+  `fallback` phase queue degradation (phase-before-id precedence, no waiter
+  race), config-file base-URL authority, redirect refusal (real loopback 302)
+  and accepted-response validation (followed-redirect landing / unraised
+  non-2xx are never accepted), waiter cleanup, and stream-scoped routing with
+  multiple active runs.
+- `tests/test_gateway_pending_steer_relay.py` — terminal `run.completed`
+  `pending_steer` translation into the existing `pending_steer_leftover`
+  event (session id + text, before terminal completion; suppressed on error
+  completions and cancelled turns), plus exact-once reconnect replay through
+  the real run-journal reader and cursor semantics (`read_run_events`
+  `after_seq` windows — the exact call the SSE replay path makes).
 - `tests/test_gateway_workspace_relay.py` — workspace containment matrix
   (realpath, exact root, sibling-prefix / traversal / symlink rejection, empty
   input) and per-session `workspace` inclusion or omission in the actual
@@ -187,7 +197,8 @@ Automated coverage:
   `tests/test_gateway_approval_legacy_path.py`.
 
 ```bash
-./scripts/test.sh -q tests/test_gateway_steer_relay.py tests/test_gateway_workspace_relay.py \
+./scripts/test.sh -q tests/test_gateway_steer_relay.py tests/test_gateway_pending_steer_relay.py \
+  tests/test_gateway_workspace_relay.py \
   tests/test_real_steer.py tests/test_issue4749_steer_reason_and_recovery.py \
   tests/test_1062_busy_input_modes.py tests/test_5145_steer_default.py \
   tests/test_gateway_approval_runs_api.py tests/test_webui_gateway_chat_backend.py \
@@ -203,7 +214,11 @@ and a fake gateway or mocked relay — never a real user's sessions):
 | Run id pending, published within five seconds | Steer waits, then relays exactly once to the published id |
 | Run id pending past the wait budget | Steer reports unavailable; draft kept for retry; no HTTP request |
 | Steer answered 404, 405, or 410 | Text queued exactly once for the owning session's next turn; run not cancelled |
+| Steer on the legacy chat-completions transport (no runs API) | Text queued exactly once for the next turn; run not cancelled; no failure UI |
 | Steer answered 409, auth failure, 500, or network error | Draft and attached files restored with a translated recovery message; no automatic queue |
+| Steer endpoint redirects (302 to a 200 page) | Delivery reported as failed (draft/retry), never as accepted; redirect not followed |
+| Gateway configured via `webui_gateway_base_url` config key | Steer POST targets the configured gateway, not the env/default one |
+| Accepted steer not consumed before the run completes | `pending_steer_leftover` queued exactly once for the next turn (reconnect replays it at most once per cursor) |
 | Session switch with pending files after a failure | Guidance and files stay with the original owning session; the new session's files are untouched |
 | Session workspace at/below `/workspace` | `workspace` present in the `POST /v1/runs` body |
 | Session workspace outside `/workspace` (sibling, `..`, symlink) | `workspace` omitted; gateway default applies |
