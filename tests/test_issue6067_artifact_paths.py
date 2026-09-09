@@ -122,6 +122,7 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
     items = [{"path": case["path"], "source": case["source"]} for case in ARTIFACT_CASES]
     renderer = _function(WORKSPACE_JS, "renderSessionArtifacts")
     sanitizer = _function(WORKSPACE_JS, "_sanitizeArtifactPath")
+    explicit_normalizer = _function(WORKSPACE_JS, "_normalizeExplicitArtifactPath")
     classifier = _function(WORKSPACE_JS, "_classifyArtifactPath")
     ignore_re = re.search(r"const ARTIFACT_IGNORE_RE = .*?;", WORKSPACE_JS).group(0)
     css = STYLE_CSS.replace("</style>", "")
@@ -195,8 +196,9 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
           const openArtifactPath = path => opened.push(path);
           {ignore_re}
           {sanitizer}
-          {_function(WORKSPACE_JS, "_classifyArtifactCandidate")}
+          {explicit_normalizer}
           {classifier}
+          {_function(WORKSPACE_JS, "_classifyArtifactCandidate")}
           {renderer}
           renderSessionArtifacts();
         </script>
@@ -289,13 +291,14 @@ def test_display_only_rows_are_metadata_without_open_attributes():
         pytest.skip("playwright is unavailable; run manual local browser proof for issue #6067")
     renderer = _function(WORKSPACE_JS, "renderSessionArtifacts")
     sanitizer = _function(WORKSPACE_JS, "_sanitizeArtifactPath")
+    explicit_normalizer = _function(WORKSPACE_JS, "_normalizeExplicitArtifactPath")
     classifier = _function(WORKSPACE_JS, "_classifyArtifactPath")
     candidate = _function(WORKSPACE_JS, "_classifyArtifactCandidate")
     ignore_re = re.search(r"const ARTIFACT_IGNORE_RE = .*?;", WORKSPACE_JS).group(0)
     harness = f'''<div id="workspaceArtifacts"></div><span id="workspaceArtifactsCount"></span>
       <script>
       {ignore_re}
-      {sanitizer}{classifier}{candidate}
+      {sanitizer}{explicit_normalizer}{classifier}{candidate}
       const S={{session:{{workspace:'/workspace'}},artifacts:[]}};
       const $=id=>document.getElementById(id); const esc=s=>String(s); const t=k=>k;
       const collectSessionArtifacts=()=>[

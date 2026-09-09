@@ -33,6 +33,9 @@ def _extract_fn(name):
 
 
 def _common_js(*functions):
+    functions = list(functions)
+    if "_classifyArtifactPath" in functions and "_normalizeExplicitArtifactPath" not in functions:
+        functions.insert(0, "_normalizeExplicitArtifactPath")
     constants = re.findall(r"const (?:ARTIFACT_IGNORE_RE|ARTIFACT_MUTATION_TOOLS) = .*?;", WORKSPACE_JS)
     return "\n".join(constants) + "\n" + "\n".join(_extract_fn(name) for name in functions)
 
@@ -48,8 +51,14 @@ def _node_json(script, *args):
     return json.loads(result.stdout)
 
 
-def _classify(paths, workspace):
-    script = _common_js("_sanitizeArtifactPath", "_classifyArtifactPath") + "\nconst input=JSON.parse(process.argv[1]); const ws=JSON.parse(process.argv[2]); process.stdout.write(JSON.stringify(input.map(p=>_classifyArtifactPath(p, ws))));"
+_MISSING = object()
+
+
+def _classify(paths, workspace=_MISSING):
+    if workspace is _MISSING:
+        script = _common_js("_normalizeExplicitArtifactPath", "_classifyArtifactPath") + "\nconst input=JSON.parse(process.argv[1]); process.stdout.write(JSON.stringify(input.map(p=>_classifyArtifactPath(p, undefined))));"
+        return _node_json(script, paths)
+    script = _common_js("_normalizeExplicitArtifactPath", "_classifyArtifactPath") + "\nconst input=JSON.parse(process.argv[1]); const ws=JSON.parse(process.argv[2]); process.stdout.write(JSON.stringify(input.map(p=>_classifyArtifactPath(p, ws))));"
     return _node_json(script, paths, workspace)
 
 
@@ -81,6 +90,45 @@ def test_posix_containment_matrix():
     assert rows[5]["openPath"] == "relative.md"
 
 
+@pytest.mark.parametrize("workspace", ["", None, "   ", 17])
+def test_safe_relative_paths_do_not_require_workspace(workspace):
+    rows = _classify([
+        "reports/output.md", "./reports/output.md", r"reports\output.md", "README",
+    ], workspace)
+    assert [row["kind"] for row in rows] == ["workspace-relative"] * 4
+    assert [row["openPath"] for row in rows] == [
+        "reports/output.md", "reports/output.md", "reports/output.md", "README",
+    ]
+
+
+def test_safe_relative_paths_do_not_require_workspace_when_omitted():
+    rows = _classify(["reports/output.md", "README"])
+    assert [row["kind"] for row in rows] == ["workspace-relative", "workspace-relative"]
+    assert [row["openPath"] for row in rows] == ["reports/output.md", "README"]
+
+
+def test_explicit_root_names_and_ignored_directories_bypass_discovery_filters():
+    rows = _classify(["README", "LICENSE", "Makefile", "node_modules/file.js"], "")
+    assert [row["kind"] for row in rows] == ["workspace-relative"] * 4
+
+    script = _common_js(
+        "_sanitizeArtifactPath",
+        "_normalizeExplicitArtifactPath",
+        "_classifyArtifactPath",
+        "_classifyArtifactCandidate",
+        "_artifactCandidatesFromToolCall",
+        "_artifactCandidatesFromText",
+        "collectSessionArtifacts",
+    ) + r'''
+const S={session:{workspace:''},toolCalls:[
+  {name:'write_file',args:{path:'README'}},
+  {name:'write_file',args:{path:'node_modules/file.js'}},
+  {name:'write_file',args:{path:'reports/output.md'}}
+],messages:[]};
+process.stdout.write(JSON.stringify(collectSessionArtifacts().map(item=>item.path)));'''
+    assert _node_json(script) == ["reports/output.md"]
+
+
 def test_collection_dedupes_relative_and_workspace_absolute_aliases():
     script = _common_js(
         "_sanitizeArtifactPath",
@@ -109,6 +157,15 @@ def test_windows_containment_matrix():
     ]
     assert rows[0]["openPath"] == "src/report.pdf"
     assert rows[1]["openPath"] == "report.pdf"
+
+
+def test_explicit_root_filename_is_contained_with_a_known_workspace():
+    posix = _classify(["/workspace/README"], "/workspace")[0]
+    windows = _classify([r"D:\Proj\README"], r"D:\Proj")[0]
+    assert posix["kind"] == "workspace-contained"
+    assert posix["openPath"] == "README"
+    assert windows["kind"] == "workspace-contained"
+    assert windows["openPath"] == "README"
 
 
 def test_repeated_absolute_separators_keep_display_and_open_paths_distinct():
@@ -150,6 +207,46 @@ const calls=[]; const S={session:{workspace:'/workspace',session_id:'s'}}; const
 const switchWorkspacePanelTab=()=>calls.push('tab'); const api=async url=>calls.push(url); const setStatus=s=>calls.push(s); const openFile=()=>calls.push('open');
 openArtifactPath('/workspace-other/report.md').then(()=>process.stdout.write(JSON.stringify(calls)));'''
     assert _node_json(script) == ["workspace_artifact_outside_workspace"]
+
+
+@pytest.mark.parametrize("workspace", ["/workspace", "", None])
+def test_root_relative_open_lists_dot_then_opens_readme(workspace):
+    script = _common_js(
+        "_normalizeExplicitArtifactPath",
+        "_classifyArtifactPath",
+        "_workspacePathExists",
+        "openArtifactPath",
+    ) + f'''
+const calls=[]; const S={{session:{{workspace:{json.dumps(workspace)},session_id:'s'}}}}; const t=k=>k;
+const switchWorkspacePanelTab=tab=>calls.push({{tab}});
+const api=async url=>{{
+  calls.push({{api:url}});
+  const path=decodeURIComponent(url.match(/[?&]path=([^&]*)/)[1]);
+  return {{entries:path==='.'?[{{name:'README',path:'README'}}]:[]}};
+}};
+const setStatus=s=>calls.push({{status:s}}); const openFile=path=>calls.push({{open:path}});
+openArtifactPath('README').then(()=>process.stdout.write(JSON.stringify(calls)));'''
+    assert _node_json(script) == [
+        {"tab": "files"},
+        {"api": "/api/list?session_id=s&path=."},
+        {"open": "README"},
+    ]
+
+
+@pytest.mark.parametrize("path", ["/workspace/report.md", r"D:\\workspace\\report.md"])
+@pytest.mark.parametrize("workspace", ["", None])
+def test_absolute_open_without_workspace_fails_before_side_effects(path, workspace):
+    script = _common_js(
+        "_normalizeExplicitArtifactPath",
+        "_classifyArtifactPath",
+        "_workspacePathExists",
+        "openArtifactPath",
+    ) + f'''
+const calls=[]; const S={{session:{{workspace:{json.dumps(workspace)},session_id:'s'}}}}; const t=k=>k;
+const switchWorkspacePanelTab=()=>calls.push('tab'); const api=async url=>calls.push(url);
+const setStatus=s=>calls.push(s); const openFile=()=>calls.push('open');
+openArtifactPath({json.dumps(path)}).then(()=>process.stdout.write(JSON.stringify(calls)));'''
+    assert _node_json(script) == ["workspace_artifact_unsupported"]
 
 
 def test_inside_missing_artifact_preserves_failure_status():

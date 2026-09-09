@@ -160,7 +160,8 @@ def test_missing_artifact_path_stays_blocked(browser):
         page.close()
 
 
-def test_restore_settled_session_projects_through_production_path(browser):
+@pytest.mark.parametrize("workspace", ["", None])
+def test_restore_settled_session_projects_through_production_path(browser, workspace):
     page = _page(browser)
     try:
         restore_source = _function_source(MESSAGES_JS, "_restoreSettledSession").replace(
@@ -219,26 +220,58 @@ def test_restore_settled_session_projects_through_production_path(browser):
         )
         result = page.evaluate(
             """
-            async () => {
-              S.session = {session_id:'session-a', workspace:'/workspace'};
-              S.toolCalls = [{name:'write_file', args:{path:'/workspace/old.md'}, done:true}];
+            async workspace => {
+              S.session = {session_id:'session-a', workspace:''};
+              S.toolCalls = [{name:'write_file', args:{path:'reports/stale.md'}, done:true}];
               renderSessionArtifacts();
-              window.api = async () => ({session:{
-                session_id:'session-b', workspace:'/workspace', active_stream_id:null,
-                pending_user_message:null, messages:[], tool_calls:[
-                  {name:'write_file', args:{path:'/workspace/new.md'}, done:true}
-                ]
-              }});
+              window.__artifactApiCalls = [];
+              window.api = async url => {
+                window.__artifactApiCalls.push(url);
+                if(url.startsWith('/api/list?')) {
+                  const path = decodeURIComponent(url.match(/[?&]path=([^&]*)/)[1]);
+                  return {entries:path === 'reports' ? [{name:'output.md',path:'output.md'}] : []};
+                }
+                return {session:{
+                  session_id:'session-b', workspace, active_stream_id:null,
+                  pending_user_message:null, messages:[], tool_calls:[
+                    {name:'write_file', args:{path:'reports/output.md'}, done:true},
+                    {name:'write_file', args:{path:'/workspace/secret.md'}, done:true}
+                  ]
+                }};
+              };
+              window.__openedArtifact = null;
+              window.openFile = path => { window.__openedArtifact = path; };
               const status = await _restoreSettledSession({close:()=>{}}, {status:true});
+              const relative = document.querySelector('[data-artifact-path="reports/output.md"]');
+              const displayOnly = document.querySelectorAll('.workspace-artifact-item-display-only');
+              if(relative) relative.click();
+              await new Promise(resolve => setTimeout(resolve, 0));
               return {
                 status,
                 error: window.restoreError || null,
-                old: !!document.querySelector('[data-artifact-path="/workspace/old.md"]'),
-                fresh: !!document.querySelector('[data-artifact-path="/workspace/new.md"]')
+                stale: !!document.querySelector('[data-artifact-path="reports/stale.md"]'),
+                fresh: !!relative,
+                freshButton: !!(relative && relative.matches('button')),
+                absoluteDisplayOnly: displayOnly.length === 1,
+                opened: window.__openedArtifact,
+                api: window.__artifactApiCalls
               };
             }
-            """
+            """,
+            workspace,
         )
-        assert result == {"status": "restored", "error": None, "old": False, "fresh": True}
+        assert result == {
+            "status": "restored",
+            "error": None,
+            "stale": False,
+            "fresh": True,
+            "freshButton": True,
+            "absoluteDisplayOnly": True,
+            "opened": "reports/output.md",
+            "api": [
+                "/api/session?session_id=session-a",
+                "/api/list?session_id=session-b&path=reports",
+            ],
+        }
     finally:
         page.close()

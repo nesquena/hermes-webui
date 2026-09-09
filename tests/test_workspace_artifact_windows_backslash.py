@@ -52,6 +52,8 @@ def _run_artifact_open(path: str, workspace: str, entries_by_dir: dict) -> dict:
     with realistic data. Returns the recorded calls (openFile / setStatus).
     """
     open_artifact = _extract_function(WORKSPACE_JS, "openArtifactPath")
+    explicit_normalizer = _extract_function(WORKSPACE_JS, "_normalizeExplicitArtifactPath")
+    classifier = _extract_function(WORKSPACE_JS, "_classifyArtifactPath")
     path_exists = _extract_function(WORKSPACE_JS, "_workspacePathExists")
     entries_json = json.dumps(entries_by_dir)
     driver = f"""
@@ -69,6 +71,8 @@ async function api(url) {{
   return {{ entries: (ENTRIES_BY_DIR[dir] || []).map(name => ({{name, path: name}})) }};
 }}
 {path_exists}
+{explicit_normalizer}
+{classifier}
 {open_artifact}
 (async () => {{
   await openArtifactPath({json.dumps(path)});
