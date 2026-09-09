@@ -1315,8 +1315,49 @@ class TestAuxSchemaFirstTitleGeneration(unittest.TestCase):
         self.assertEqual(extra['response_format']['type'], 'json_schema')
         self.assertEqual(extra['response_format']['json_schema']['name'], 'session_title')
         self.assertEqual(extra['response_format']['json_schema']['schema']['required'], ['title'])
-        # Route is not reject-listed: the reasoning-disable rides along, like the CLI.
-        self.assertEqual(extra['reasoning'], {'enabled': False})
+        # The schema attempt is schema-ONLY — exactly the Agent title-generator
+        # request shape it mirrors (parity reference); the reasoning-disable is
+        # reserved for the compatibility fallback (#7417 re-gate).
+        self.assertNotIn('reasoning', extra)
+        self.assertEqual(captured['task'], 'title_generation')
+
+    def test_schema_only_route_rejecting_reasoning_succeeds_on_first_call(self):
+        """A strict route that accepts ``response_format`` but raises whenever
+        the nonstandard ``reasoning`` field is present must succeed on the
+        FIRST schema-only call — exactly one call, payload has
+        ``response_format`` and no ``reasoning`` (#7417 re-gate reproduction
+        of the maintainer's blocker)."""
+        from api.streaming import generate_title_raw_via_aux
+
+        calls = []
+
+        def fake_call_llm(**kwargs):
+            calls.append(kwargs)
+            extra = kwargs.get('extra_body') or {}
+            if 'reasoning' in extra:
+                raise ValueError('Unknown parameter: reasoning')
+            return {
+                'choices': [
+                    {
+                        'message': {'content': '{"title": "Schema Works"}'},
+                        'finish_reason': 'stop',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'custom', 'model': 'strict-gateway-model', 'base_url': 'https://strict.example.com/v1'}):
+            with self._patch_llm(fake_call_llm):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Strict gateway here',
+                    assistant_text='Strictly titled.',
+                )
+
+        self.assertEqual(result, 'Schema Works')
+        self.assertEqual(status, 'llm_aux')
+        self.assertEqual(len(calls), 1, "the schema-only attempt must not fail on a reasoning-rejecting route")
+        extra = calls[0].get('extra_body') or {}
+        self.assertIn('response_format', extra)
+        self.assertNotIn('reasoning', extra)
 
     def test_schema_first_unwraps_fenced_json(self):
         """Some gateways wrap structured output in a markdown code fence."""

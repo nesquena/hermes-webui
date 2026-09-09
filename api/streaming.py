@@ -4444,12 +4444,17 @@ def generate_title_raw_via_aux(
         reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
-    # The reasoning-disable rides along on the schema attempt too, exactly like
-    # the CLI (thinking disabled AND output constrained to the JSON object), so
-    # a reasoning-capable model can't burn the whole budget on hidden thinking
-    # before emitting the object (#2083).  Reject-listed routes (OpenAI/Azure,
-    # #4161) stay schema-only.
-    schema_extra.update(reasoning_extra)
+    # The two modes stay INDEPENDENT (#7417 re-gate): the schema attempt sends
+    # ONLY ``response_format`` — exactly the request shape of the Agent title
+    # generator this path mirrors (agent/title_generator.py). A route that
+    # accepts structured output but rejects the nonstandard ``reasoning``
+    # extension (strict OpenAI-compatible gateways) must not fail the schema
+    # attempt because the extension rode along; schema support would then be
+    # gated behind the old provider whitelist again, and the reasoning fallback
+    # would fail too on such routes. The reasoning-disable shape is reserved
+    # for the compatibility fallback below, still gated by
+    # ``_route_rejects_reasoning_extra()`` (#2083 concern is covered there:
+    # the fallback only runs when the route rejected/ignored the schema).
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
