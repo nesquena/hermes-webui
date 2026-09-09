@@ -859,6 +859,10 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.model_provider = model_provider
         terminal_session_persisted = False
         try:
+            # #6422 re-gate 2026-08-24: gateway terminal error settlement is an
+            # APPEND producer — establish append intent so a concurrent
+            # completion cannot be overwritten by this error row.
+            session._merge_concurrent_appends()
             session.save()
             terminal_session_persisted = True
         except Exception:
@@ -1384,6 +1388,11 @@ def _run_gateway_chat_streaming(
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()
                 return
+            # #6422 re-gate 2026-08-24: gateway success writeback is an APPEND
+            # producer (the completed turn's rows were appended above) —
+            # establish append intent so the CAS transaction reconciles any
+            # concurrent writer instead of overwriting it.
+            s._merge_concurrent_appends()
             s.save()
             if cancel_event.is_set():
                 _restore_cancelled_success_writeback()

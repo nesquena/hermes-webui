@@ -930,6 +930,13 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
         )
     session.truncation_watermark = _truncation_watermark_for(session.messages)
     session.truncation_boundary = session.truncation_watermark
+    # #6422: bump the authoritative monotonic truncate/clear generation so the
+    # cross-client merge can recognize THIS truncation (instead of inferring
+    # truncation from row counts, which would misclassify the streaming
+    # pre-turn checkpoint). save() stamps a value strictly greater than
+    # anything on disk.
+    session.truncate_generation = int(getattr(session, 'truncate_generation', None) or 0) + 1
+    session._truncation_pending = True
     return old_msg_count, old_ctx_count
 
 
@@ -986,6 +993,10 @@ def retry_last(session_id: str) -> dict[str, Any]:
             # Persist the original truncate cutoff so empty-sidecar recovery
             # can distinguish legitimate prefix from deleted suffix.
             s.truncation_boundary = s.truncation_watermark
+            # #6422: bump the monotonic truncate generation (see
+            # truncate_session_at_keep for rationale).
+            s.truncate_generation = int(getattr(s, 'truncate_generation', None) or 0) + 1
+            s._truncation_pending = True
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
@@ -1029,6 +1040,10 @@ def undo_last(session_id: str) -> dict[str, Any]:
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark
+            # #6422: bump the monotonic truncate generation (see
+            # truncate_session_at_keep for rationale).
+            s.truncate_generation = int(getattr(s, 'truncate_generation', None) or 0) + 1
+            s._truncation_pending = True
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:

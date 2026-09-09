@@ -85,6 +85,25 @@ def _msg_count(p: Path) -> int:
     return len(msgs) if isinstance(msgs, list) else -1
 
 
+def _sidecar_truncate_generation(p: Path) -> int:
+    """Return the monotonic ``truncate_generation`` of a session JSON file.
+
+    Returns -1 for any unreadable/non-session-shape file so a corrupt live
+    sidecar is never treated as an intentional truncation (recovery then
+    still recommends restoring the backup).
+    """
+    try:
+        data = json.loads(p.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return -1
+    if not isinstance(data, dict):
+        return -1
+    try:
+        return int(data.get('truncate_generation') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _rebuild_recovery_session_index(session_dir: Path) -> None:
     """Rebuild ``session_dir/_index.json`` from persisted sidecars only.
 
@@ -354,6 +373,23 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
         }
     bak_count = _msg_count(bak_path)
     if bak_count > live_count:
+        # #6422 re-gate: a backup that predates an intentional truncation
+        # carries a strictly LOWER ``truncate_generation`` than the live
+        # sidecar.  Restoring it would move the monotonic generation backward
+        # and resurrect rows the user deleted via /truncate, /retry, /undo, or
+        # /clear — forbid that regardless of message counts.  Message-count
+        # heuristics alone cannot tell an intentional shrink from #1558 data
+        # loss; the generation is the authoritative signal.
+        live_gen = _sidecar_truncate_generation(session_path)
+        bak_gen = _sidecar_truncate_generation(bak_path)
+        if live_gen > bak_gen:
+            return {
+                "session_id": session_path.stem,
+                "live_messages": live_count,
+                "bak_messages": bak_count,
+                "recommend": "no_action",
+                "newer_truncate_generation": True,
+            }
         if (
             _session_records_clear_sentinel(session_path, bak_path)
             or _live_supersedes_backup_by_clear_generation(session_path, bak_path)
@@ -403,24 +439,38 @@ def recover_session(session_path: Path) -> dict:
 
     Returns a status dict identical to ``inspect_session_recovery_status``
     plus a "restored" boolean.
+
+    #6422 re-gate: the whole read-decide-copy-replace runs under the SAME
+    per-session cross-process lock as ``Session.save()``, so a concurrent
+    writer can no longer interleave between the recommendation decision and
+    the atomic replace, and the backup's ``truncate_generation`` is
+    re-verified inside the lock — an intentional truncation (newer live
+    generation) is never rolled back by recovery or by any direct sidecar
+    replacer.
     """
-    status = inspect_session_recovery_status(session_path)
-    if status["recommend"] != "restore":
-        return {**status, "restored": False}
-    bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix('.json.recover.tmp')
-    try:
-        shutil.copyfile(bak_path, tmp_path)
-        tmp_path.replace(session_path)
-    except OSError as exc:
-        logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
+    # Lazy import to avoid a module-level cycle (api.models imports
+    # api.session_recovery lazily itself).
+    from api.models import _session_sidecar_cross_process_lock
+
+    sid = session_path.stem
+    with _session_sidecar_cross_process_lock(sid):
+        status = inspect_session_recovery_status(session_path)
+        if status["recommend"] != "restore":
+            return {**status, "restored": False}
+        bak_path = session_path.with_suffix('.json.bak')
+        # Stage the recovery via a tmp copy + atomic replace so a crash
+        # mid-restore cannot leave a half-written session.json.
+        tmp_path = session_path.with_suffix('.json.recover.tmp')
         try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return {**status, "restored": False, "error": str(exc)}
+            shutil.copyfile(bak_path, tmp_path)
+            tmp_path.replace(session_path)
+        except OSError as exc:
+            logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return {**status, "restored": False, "error": str(exc)}
     logger.warning(
         "recover_session: restored %s from .bak (live=%d → bak=%d messages). "
         "See #1558 for the data-loss class this guards against.",
