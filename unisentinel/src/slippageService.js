@@ -1,10 +1,12 @@
 const ethers = require('ethers');
 
 class SlippageService {
-  constructor({ alertService, provider = null, pairs = [], contractFactory = null } = {}) {
+  constructor(opts = {}) {
+    const { alertService, provider = null, pairs = [], contractFactory = null, multicallAddress = null } = opts;
     this.alertService = alertService;
     this.provider = provider;
     this.contractFactory = contractFactory;
+    this.multicallAddress = multicallAddress || (process.env.MULTICALL_ADDRESS || null);
 
     // allow external configuration of pairs (id, pairAddress, threshold)
     if (pairs && pairs.length > 0) {
@@ -41,6 +43,13 @@ class SlippageService {
       'function token0() view returns (address)',
       'function token1() view returns (address)'
     ];
+
+    // Multicall support (optional)
+    // multicallAddress may be passed in opts or via env
+    // (set already above from constructor opts)
+    this.multicallAbi = [
+      'function aggregate(tuple(address target, bytes callData)[] calls) view returns (uint256 blockNumber, bytes[] returnData)'
+    ];
   }
 
   computeSlippage(pair) {
@@ -51,15 +60,72 @@ class SlippageService {
   }
 
   async updateOnChainPrices() {
-    if (!this.provider) return;
+    // allow running even without a provider when a contractFactory is provided (useful for tests)
+    if (!this.provider && !this.contractFactory) return;
+
+    // If multicall is configured, batch v2 calls into one aggregate
+    const v2Pairs = this.pairs.filter(p => (!p.pairType || p.pairType === 'v2') && p.pairAddress);
+    if (this.multicallAddress && v2Pairs.length > 0) {
+      try {
+        console.log('SlippageService: attempting multicall aggregate for', v2Pairs.length, 'pairs');
+        const ifacePair = new ethers.Interface(this.pairAbi);
+        const ifaceMulti = new ethers.Interface(this.multicallAbi);
+        const calls = [];
+        // for each pair, request getReserves, token0, token1
+        for (const pair of v2Pairs) {
+          calls.push({ target: pair.pairAddress, callData: ifacePair.encodeFunctionData('getReserves', []) });
+          calls.push({ target: pair.pairAddress, callData: ifacePair.encodeFunctionData('token0', []) });
+          calls.push({ target: pair.pairAddress, callData: ifacePair.encodeFunctionData('token1', []) });
+        }
+        const multicallContract = this.contractFactory ? this.contractFactory(this.multicallAddress, this.multicallAbi, this.provider) : new ethers.Contract(this.multicallAddress, this.multicallAbi, this.provider);
+        const res = await multicallContract.aggregate(calls);
+        const returnData = res[1] || res.returnData || [];
+        // decode results in order
+        let idx = 0;
+        for (const pair of v2Pairs) {
+          try {
+            const reservesData = returnData[idx++];
+            const token0Data = returnData[idx++];
+            const token1Data = returnData[idx++];
+            let reserves;
+            try {
+              reserves = ifacePair.decodeFunctionResult('getReserves', reservesData);
+            } catch (dErr) {
+              // fallback: try low-level abi decode
+              try {
+                const abiCoder = new ethers.AbiCoder();
+                reserves = abiCoder.decode(['uint112','uint112','uint32'], reservesData);
+              } catch (e2) {
+                throw dErr;
+              }
+            }
+            // reserves is [reserve0, reserve1, ts]
+            const reserve0 = Number(reserves[0].toString());
+            const reserve1 = Number(reserves[1].toString());
+            if (reserve0 > 0) {
+              const price = reserve1 / reserve0;
+              pair.previousPrice = pair.currentPrice || price;
+              pair.currentPrice = price;
+              pair.status = 'updated';
+            }
+          } catch (inner) {
+            console.warn('SlippageService: multicall decode failed for', pair.id, inner && inner.message);
+          }
+        }
+        // done with multicall path
+        // continue to v3 handling below
+      } catch (e) {
+        console.warn('SlippageService: multicall aggregate failed', e && e.message);
+        // fall through to per-pair reads
+      }
+    }
+
+    // fallback per-pair reads for v2 (pairs not handled by multicall or when multicall failed)
     for (const pair of this.pairs.filter(p => !p.pairType || p.pairType === 'v2')) {
       if (!pair.pairAddress) continue;
       try {
         const contract = this.contractFactory ? this.contractFactory(pair.pairAddress, this.pairAbi, this.provider) : new ethers.Contract(pair.pairAddress, this.pairAbi, this.provider);
         const [reserve0, reserve1] = await contract.getReserves();
-        // determine token0/token1 order to compute price as token1 per token0
-        const token0 = await contract.token0();
-        const token1 = await contract.token1();
         // compute price: price of token0 in terms of token1 = reserve1 / reserve0
         const r0 = Number(reserve0.toString());
         const r1 = Number(reserve1.toString());
