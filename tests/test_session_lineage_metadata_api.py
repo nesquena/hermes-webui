@@ -285,6 +285,11 @@ def test_reset_projection_fails_closed_for_conflicting_or_invalid_metadata():
         'actual_message_count': 2,
         'started_at': 1,
     }
+    switch_parent = {
+        **parent,
+        'id': 'projection_switch_parent',
+        'end_reason': 'session_switch',
+    }
     base_child = {
         'source': 'wecom',
         'parent_session_id': parent['id'],
@@ -292,9 +297,16 @@ def test_reset_projection_fails_closed_for_conflicting_or_invalid_metadata():
         'actual_message_count': 2,
         'started_at': 2,
     }
+    switch_child = {
+        **base_child,
+        'id': 'projection_session_switch_reset',
+        'parent_session_id': switch_parent['id'],
+    }
     rows = [
         parent,
+        switch_parent,
         {**base_child, 'id': 'projection_legacy_reset'},
+        switch_child,
         {
             **base_child,
             'id': 'projection_delegate',
@@ -320,9 +332,20 @@ def test_reset_projection_fails_closed_for_conflicting_or_invalid_metadata():
 
     projected = {row['id']: row for row in agent_sessions._project_agent_session_rows(rows)}
 
-    for sid in ('projection_legacy_reset', 'projection_orphan_canonical_reset'):
+    for sid in (
+        'projection_legacy_reset',
+        'projection_session_switch_reset',
+        'projection_orphan_canonical_reset',
+    ):
         assert projected[sid].get('relationship_type') == 'reset_successor'
         assert projected[sid].get('_lineage_root_id') == sid
+        for key in (
+            'parent_title',
+            'parent_source',
+            '_parent_lineage_root_id',
+            '_parent_lineage_tip_id',
+        ):
+            assert key not in projected[sid]
     for sid in (
         'projection_delegate',
         'projection_mismatched_reset',

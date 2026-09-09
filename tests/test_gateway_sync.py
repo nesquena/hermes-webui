@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
 
@@ -1175,11 +1177,17 @@ def test_previous_messaging_setting_keeps_reset_history(monkeypatch):
     ]
 
 
-def test_sessions_route_keeps_reset_successor_top_level(cleanup_test_sessions):
+@pytest.mark.parametrize(
+    ('end_reason', 'canonical_marker'),
+    [('session_reset', True), ('session_switch', False)],
+)
+def test_sessions_route_keeps_reset_successor_top_level(
+    cleanup_test_sessions, end_reason, canonical_marker
+):
     """A reset child retains lineage without becoming a nested sidebar child."""
     conn = _ensure_state_db()
-    parent_sid = 'reset_lineage_parent_7178'
-    child_sid = 'reset_lineage_child_7178'
+    parent_sid = f'reset_lineage_parent_7178_{end_reason}'
+    child_sid = f'reset_lineage_child_7178_{end_reason}'
     now = time.time()
     cleanup_test_sessions.extend([parent_sid, child_sid])
     try:
@@ -1190,7 +1198,7 @@ def test_sessions_route_keeps_reset_successor_top_level(cleanup_test_sessions):
             title='Previous WeCom conversation',
             started_at=now - 20,
             ended_at=now - 10,
-            end_reason='session_reset',
+            end_reason=end_reason,
             session_key='same-messaging-identity',
             messages=2,
         )
@@ -1202,7 +1210,7 @@ def test_sessions_route_keeps_reset_successor_top_level(cleanup_test_sessions):
             started_at=now - 5,
             parent_session_id=parent_sid,
             session_key='same-messaging-identity',
-            model_config={'_reset_from': parent_sid},
+            model_config=({'_reset_from': parent_sid} if canonical_marker else None),
             messages=2,
         )
 

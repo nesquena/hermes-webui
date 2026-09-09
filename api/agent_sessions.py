@@ -60,6 +60,7 @@ _RESET_END_REASONS = frozenset({
     'daily',
     'suspended',
     'resume_pending_expired',
+    'session_switch',
 })
 
 SOURCE_LABELS = {

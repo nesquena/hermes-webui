@@ -360,6 +360,7 @@ var _allSessions = [
 ];
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isResetSuccessor'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sessionLineageContainsSession'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
@@ -369,6 +370,53 @@ console.log(JSON.stringify({{parent:_resolveSessionIdFromSidebarLineage('parent'
 """
     result = json.loads(_run_node(source))
     assert result == {"parent": "child", "child": "child", "other": "other"}
+
+
+def test_reset_successor_parent_link_is_not_navigation_alias():
+    """Reset ancestry must not alias the old parent while compression still resolves."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _allSessions = [
+  {{session_id:'reset-child', title:'Reset child', parent_session_id:'hidden-reset-parent', relationship_type:'reset_successor', _lineage_root_id:'reset-child', updated_at:150, last_message_at:150}},
+  {{session_id:'reset-root', title:'Compressed reset root', parent_session_id:'older-reset-parent', relationship_type:'reset_successor', _lineage_root_id:'reset-root', _compression_segment_count:1, updated_at:100, last_message_at:100}},
+  {{session_id:'reset-tip', title:'Compressed reset root', parent_session_id:'reset-root', _lineage_root_id:'reset-root', _compression_segment_count:2, updated_at:200, last_message_at:200}},
+  {{session_id:'ordinary-tip', title:'Ordinary compressed chat', parent_session_id:'ordinary-parent', _lineage_root_id:'ordinary-parent', _compression_segment_count:2, updated_at:180, last_message_at:180}},
+];
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isResetSuccessor'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionLineageContainsSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_resolveSessionIdFromSidebarLineage'));
+console.log(JSON.stringify({{
+  hiddenResetParent: _resolveSessionIdFromSidebarLineage('hidden-reset-parent'),
+  compressedResetRoot: _resolveSessionIdFromSidebarLineage('reset-root'),
+  directResetTip: _resolveSessionIdFromSidebarLineage('reset-tip'),
+  ordinaryCompressionParent: _resolveSessionIdFromSidebarLineage('ordinary-parent'),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "hiddenResetParent": "hidden-reset-parent",
+        "compressedResetRoot": "reset-tip",
+        "directResetTip": "reset-tip",
+        "ordinaryCompressionParent": "ordinary-tip",
+    }
 
 
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():

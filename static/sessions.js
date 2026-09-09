@@ -6836,7 +6836,7 @@ function _resolveSessionIdFromSidebarLineage(sid){
     );
     if(!lineageLike) continue;
     const key=_sidebarLineageKeyForRow(row);
-    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
+    if(key===sid||(!_isResetSuccessor(row)&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){
       candidates.push(row);
     }
   }
