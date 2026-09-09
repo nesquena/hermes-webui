@@ -9209,6 +9209,21 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+
+
+def peek_stream(stream_id):
+    """Lock-disciplined stream queue lookup.
+
+    Writers mutate STREAMS under STREAMS_LOCK (teardown in api/streaming.py,
+    the route layer's start/cancel paths); reads must take the same lock so a
+    read racing a teardown pop can never observe-and-use a queue the registry
+    has already released. Returns the queue or None — callers keep their
+    existing None-guard fallbacks.
+    """
+    with STREAMS_LOCK:
+        return STREAMS.get(stream_id)
+
+
 # stream_id -> session_id owner, populated synchronously before worker startup so
 # stream-id authorization does not depend on worker lifecycle registration.
 STREAM_SESSION_OWNERS: dict = {}

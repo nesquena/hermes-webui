@@ -2896,6 +2896,7 @@ from api.config import (
     register_session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
+    peek_stream,
     unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
@@ -18793,7 +18794,7 @@ def _handle_sse_stream(handler, parsed):
     # rather than silently skip journal events.
     resume_cursor = _chat_stream_resume_cursor(handler, qs, stream_id)
     resume_after_seq, resume_requested, resume_raw_cursor, runner_resume_cursor = resume_cursor
-    stream = STREAMS.get(stream_id)
+    stream = peek_stream(stream_id)
     if stream is None:
         # Runner-observe path: consume the ALREADY-RESOLVED cursor — do not
         # re-parse query params or re-read the header (Codex r2 #3 / r3). The
@@ -18936,7 +18937,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
     def attach_active_stream():
         stream_id = _active_run_stream_for_session(session_id)
-        stream = STREAMS.get(stream_id) if stream_id else None
+        stream = peek_stream(stream_id) if stream_id else None
         if stream is None:
             return None, None, None, stream_id
         if hasattr(stream, "subscribe_with_snapshot"):
