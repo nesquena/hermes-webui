@@ -551,8 +551,18 @@ def _read_state_db_missing_sidecar_rows(
                 if {'session_id', 'role', 'content'}.issubset(message_cols):
                     order = "timestamp, id" if 'timestamp' in message_cols and 'id' in message_cols else "rowid"
                     ts_expr = 'timestamp' if 'timestamp' in message_cols else 'NULL AS timestamp'
+                    # Preserve tool-call identity so the #6481 sanitizer can
+                    # correlate nameless legacy terminal rows against their
+                    # preceding assistant tool_call before this transcript is
+                    # re-persisted as a sidecar. Dropping these columns made
+                    # the recovered rows uncorrelatable (re-gate finding #3).
+                    identity_exprs = []
+                    for col in ('tool_call_id', 'tool_name', 'tool_calls'):
+                        if col in message_cols:
+                            identity_exprs.append(col)
+                    identity_sql = (', ' + ', '.join(identity_exprs)) if identity_exprs else ''
                     for msg in conn.execute(
-                        f"SELECT role, content, {ts_expr} FROM messages WHERE session_id = ? ORDER BY {order}",
+                        f"SELECT role, content, {ts_expr}{identity_sql} FROM messages WHERE session_id = ? ORDER BY {order}",
                         (sid,),
                     ).fetchall():
                         message = {
@@ -561,6 +571,20 @@ def _read_state_db_missing_sidecar_rows(
                         }
                         if msg['timestamp'] is not None:
                             message['timestamp'] = msg['timestamp']
+                        for col in identity_exprs:
+                            value = msg[col]
+                            if value in (None, ''):
+                                continue
+                            if col == 'tool_calls':
+                                from api.models import _json_loads_if_string
+                                value = _json_loads_if_string(value)
+                            message[col] = value
+                        if (
+                            message.get('role') == 'tool'
+                            and message.get('tool_name')
+                            and not message.get('name')
+                        ):
+                            message['name'] = message['tool_name']
                         message_rows.append(message)
                 if not message_rows and not include_empty:
                     continue
@@ -592,6 +616,21 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
     }
     started_at = row.get('started_at') or 0
     messages = row.get('messages') if isinstance(row.get('messages'), list) else []
+    # #6481: the recovered state.db transcript can carry fresh terminal
+    # ``verification_evidence`` (recorded by the Agent before WebUI regains
+    # control). Strip it from the FULL list before this payload is persisted
+    # as a sidecar — the full-list sanitize keeps the preceding assistant
+    # tool_call visible so nameless legacy terminal rows still correlate
+    # (the identity columns are now selected by the reader above).
+    try:
+        from api.verification_sanitizer import _strip_verification_from_messages
+        _strip_verification_from_messages(messages)
+    except Exception:
+        logger.debug(
+            "verification_evidence strip failed during state.db sidecar "
+            "materialization; phantom field may reach the recovered sidecar",
+            exc_info=True,
+        )
     last_ts = messages[-1].get('timestamp') if messages and isinstance(messages[-1], dict) else started_at
     workspace_value = row.get('workspace') or ''
     compression_recovery = row.get('compression_recovery')

@@ -3469,6 +3469,19 @@ def _apply_core_sync_or_error_marker(
             core = json.load(f)
         core_messages = core.get('messages', [])
         if core_messages:
+            # #6481: the Agent's core transcript can carry fresh terminal
+            # ``verification_evidence`` (recorded before WebUI regains control).
+            # Strip it before projecting core rows into the sidecar so the
+            # recovered transcript never persists or replays the phantom field.
+            try:
+                from api.streaming import _strip_verification_from_messages
+                _strip_verification_from_messages(core_messages)
+            except Exception:
+                logger.debug(
+                    "verification_evidence strip failed during core sync for %s",
+                    sid, exc_info=True,
+                )
+            _stream_id = stream_id_for_recheck or session.active_stream_id
             session.messages = core_messages
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
@@ -3909,6 +3922,20 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
             prefer_context=True,
             state_messages=state_messages,
         )
+        # #6481: state.db rows written by the Agent can carry fresh terminal
+        # ``verification_evidence`` (recorded before WebUI regains control).
+        # Strip it before re-persisting the reconciled transcript into the
+        # sidecar so the recovered rows never persist or replay the phantom
+        # field on subsequent turns.
+        try:
+            from api.streaming import _strip_verification_from_messages
+            _strip_verification_from_messages(merged_messages)
+            _strip_verification_from_messages(merged_context)
+        except Exception:
+            logger.debug(
+                "verification_evidence strip failed during sidecar sync for %s",
+                sid, exc_info=True,
+            )
 
         # Mutate + persist the freshly-loaded, locked object. Because we hold the
         # lock and reloaded under it, this save cannot clobber a concurrent

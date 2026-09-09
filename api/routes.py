@@ -9026,8 +9026,24 @@ def _limited_webui_messages_for_display_with_sidecar(
     else:
         sidecar_messages = list(sidecar_messages or [])
     state_db_messages = list(state_db_messages or [])
+    def _project_display(messages):
+        # #6481 display projection: never surface ``verification_evidence`` in a
+        # paginated session load. The merge returns references to the caller's
+        # message dicts, so sanitize shallow copies -- this is a read path and
+        # must not mutate the in-memory transcript it is projecting.
+        try:
+            from api.verification_sanitizer import _strip_verification_from_messages
+            display_messages = [dict(m) if isinstance(m, dict) else m for m in messages]
+            _strip_verification_from_messages(display_messages)
+            return display_messages
+        except Exception:
+            logger.debug(
+                "verification_evidence strip failed during limited display projection",
+                exc_info=True,
+            )
+            return messages
     if not state_db_messages:
-        return sidecar_messages
+        return _project_display(sidecar_messages)
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
     # newest (recovery / edited-in-place / missing-timestamp cases) is still
@@ -9080,7 +9096,7 @@ def _limited_webui_messages_for_display_with_sidecar(
             entry = _display_merge_cache.get(sid)
             if _display_merge_cache_entry_usable(entry, cache_key):
                 _display_merge_cache.move_to_end(sid, last=True)
-                return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+                return _project_display(entry["messages"])
     merged = merge_session_messages_append_only(
         sidecar_messages,
         state_db_messages,
@@ -9117,8 +9133,8 @@ def _limited_webui_messages_for_display_with_sidecar(
                 _display_merge_cache.popitem(last=False)
         # Same shallow-copy contract as the cache-hit path (and as the lineage
         # cache): callers may attach display metadata to the returned rows.
-        return [dict(m) if isinstance(m, dict) else m for m in merged]
-    return merged
+        return _project_display(merged)
+    return _project_display(merged)
 
 
 # perf: memoized sidecar↔state.db display merges for GET /api/session.
