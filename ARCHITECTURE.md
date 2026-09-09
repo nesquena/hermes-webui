@@ -236,6 +236,22 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Replay reconciliation authority
+
+The visible `messages` projection, provider-facing `context_messages`, and
+persisted session repair all use the same assistant replay pipeline. Adjacent
+non-empty assistants collapse only when their complete strict-JSON payload
+digests match; ids, timestamps, reasoning, annotations, attachments, and other
+provider metadata therefore remain authoritative. Empty, partial, and
+incomplete assistants use the narrower typed replay identities implemented by
+that pipeline. Incomparable payloads fail closed and remain in order.
+
+The active-turn boundary is an atomic `(current_turn_user_idx, turn_id)` pair
+owned by one completed agent attempt. A credential retry clears any pair from
+the failed attempt, then accepts either a complete pair from the new result or
+a complete pair from the new agent. Fields from separate attempts or sources
+must never be combined into deletion authority.
+
 #### Imported `state.db` sidebar projection
 
 `api.models.get_cli_sessions()` projects conversations from the active Hermes
