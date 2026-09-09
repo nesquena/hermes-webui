@@ -138,11 +138,19 @@ separate per-session UI preference store so replay and settlement do not carry
 historic display preferences as semantic facts.
 
 `HermesAssistantTurnAnchors.terminalStates` exposes the RFC terminal-state enum:
-`completed`, `cancelled`, `interrupted`, `no_response`,
+`completed`, `cancelled`, `interrupted`, `incomplete_final`, `no_response`,
 `tool_limit_reached`, `compression_exhausted`, `connection_lost`, `degraded`,
 and `error`. `normalizeAssistantTurnAnchorTerminalState()` maps current source
 aliases such as `done`, `cancel`, `apperror`, `interrupted-by-user`,
 `max_iterations`, and `lost_worker_bookkeeping` into that enum.
+
+Terminal reduction is monotonic: the first semantic terminal event owns the
+run and `stream_end` remains a transport event. A settled exact-turn assistant
+final may promote `incomplete_final`, `no_response`, or late error-like state to
+`completed`, which makes live/replay-first and settlement-first ordering
+converge without allowing a later `done` frame to erase an already-owned hard
+failure. Terminal events from a stale source close only that source and do not
+mutate the newer stream's `INFLIGHT`, transport, scene, or anchor registry.
 
 During the later `INFLIGHT` migration, the registry is the semantic owner for
 event identity, lifecycle, final answer reference, and activity events.

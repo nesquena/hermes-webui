@@ -331,6 +331,40 @@ def requeue_async_delegation_event(
         )
 
 
+def requeue_completion_event(
+    evt: Any,
+    completion_queue: Any,
+    *,
+    delay: float = 0.0,
+    stop_event: threading.Event | None = None,
+    durable: bool | None = None,
+) -> bool:
+    """Requeue any unresolved completion without treating it as consumed."""
+    if not isinstance(evt, dict) or completion_queue is None:
+        return False
+    if evt.get("type") == "async_delegation":
+        return requeue_async_delegation_event(
+            evt,
+            completion_queue,
+            delay=delay,
+            stop_event=stop_event,
+            durable=durable,
+        )
+    retry_delay = max(0.0, float(delay))
+    if retry_delay:
+        if stop_event is not None:
+            if stop_event.wait(retry_delay):
+                return False
+        else:
+            time.sleep(retry_delay)
+    try:
+        completion_queue.put(dict(evt))
+        return True
+    except Exception:
+        logger.warning("Failed to requeue unresolved completion event", exc_info=True)
+        return False
+
+
 def _cancel_async_delegation_claim_retry(_delegation_id: str) -> None:
     # Retry is a shared durable-store sweep, not a per-delegation timer. It must
     # remain armed because other pending records may rely on the same sweep.

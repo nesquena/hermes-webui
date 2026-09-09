@@ -7,8 +7,45 @@ from api.run_journal import (
     find_run_summary,
     latest_run_summary,
     read_run_events,
+    select_authoritative_terminal_event,
     stale_interrupted_event,
 )
+
+
+def _write_legacy_run_events(
+    root: Path, session_id: str, run_id: str, events: list[dict]
+) -> Path:
+    path = root / "_run_journal" / session_id / f"{run_id}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _legacy_terminal_event(
+    session_id: str,
+    run_id: str,
+    *,
+    seq: int,
+    event: str,
+    terminal_state: str,
+    payload: dict,
+) -> dict:
+    return {
+        "version": 1,
+        "event_id": f"{run_id}:{seq}",
+        "seq": seq,
+        "run_id": run_id,
+        "session_id": session_id,
+        "event": event,
+        "type": event,
+        "created_at": float(seq),
+        "terminal": True,
+        "terminal_state": terminal_state,
+        "payload": payload,
+    }
 
 
 def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
@@ -26,6 +63,105 @@ def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
 
     journal = read_run_events("session_1", "run_1", after_seq=1, session_dir=tmp_path)
     assert [event["event"] for event in journal["events"]] == ["done"]
+
+
+def test_stream_end_is_transport_only_and_first_semantic_terminal_wins(tmp_path):
+    writer = RunJournalWriter("session_terminal", "run_terminal", session_dir=tmp_path)
+    stream_end = writer.append_sse_event("stream_end", {})
+    failure = writer.append_sse_event(
+        "apperror",
+        {"type": "incomplete_final", "terminal_state": "incomplete_final"},
+    )
+    later_done = writer.append_sse_event("done", {"terminal_state": "completed"})
+
+    assert stream_end["terminal"] is False
+    assert stream_end["terminal_state"] is None
+    assert failure["terminal_state"] == "incomplete_final"
+    assert later_done["terminal_state"] == "completed"
+    selected = select_authoritative_terminal_event(
+        read_run_events(
+            "session_terminal", "run_terminal", session_dir=tmp_path
+        )["events"]
+    )
+    assert selected["event_id"] == failure["event_id"]
+    assert selected["terminal_state"] == "incomplete_final"
+
+
+def test_legacy_stream_end_flags_cannot_outrank_later_semantic_terminal(tmp_path):
+    session_id = "session_legacy_terminal"
+    run_id = "run_legacy_terminal"
+    transport = _legacy_terminal_event(
+        session_id,
+        run_id,
+        seq=1,
+        event="stream_end",
+        terminal_state="completed",
+        payload={"session_id": session_id},
+    )
+    failure = _legacy_terminal_event(
+        session_id,
+        run_id,
+        seq=2,
+        event="apperror",
+        terminal_state="incomplete_final",
+        payload={
+            "type": "incomplete_final",
+            "terminal_state": "incomplete_final",
+        },
+    )
+    _write_legacy_run_events(tmp_path, session_id, run_id, [transport, failure])
+
+    events = read_run_events(session_id, run_id, session_dir=tmp_path)["events"]
+    selected = select_authoritative_terminal_event(events)
+    summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+
+    assert selected is not None
+    assert selected["event"] == "apperror"
+    assert selected["terminal_state"] == "incomplete_final"
+    assert summary["terminal"] is True
+    assert summary["terminal_state"] == "incomplete_final"
+
+
+def test_legacy_stream_end_alone_uses_missing_terminal_recovery(tmp_path, monkeypatch):
+    session_id = "session_legacy_transport_only"
+    run_id = "run_legacy_transport_only"
+    transport = _legacy_terminal_event(
+        session_id,
+        run_id,
+        seq=1,
+        event="stream_end",
+        terminal_state="completed",
+        payload={"session_id": session_id},
+    )
+    _write_legacy_run_events(tmp_path, session_id, run_id, [transport])
+
+    summary = latest_run_summary(session_id, run_id, session_dir=tmp_path)
+
+    assert summary["terminal"] is False
+    assert summary["terminal_state"] == "running"
+    assert summary["last_event"] == "stream_end"
+
+    monkeypatch.setattr("api.run_journal._default_session_dir", lambda: tmp_path)
+    recovery = stale_interrupted_event(session_id, run_id)
+
+    assert recovery is not None
+    assert recovery["event"] == "apperror"
+    assert recovery["terminal_state"] == "lost-worker-bookkeeping"
+    assert recovery["payload"]["type"] == "interrupted"
+
+
+def test_durable_done_remains_authoritative_over_late_error(tmp_path):
+    writer = RunJournalWriter("session_done", "run_done", session_dir=tmp_path)
+    done = writer.append_sse_event("done", {"terminal_state": "completed"})
+    writer.append_sse_event("apperror", {"type": "provider_error"})
+
+    selected = select_authoritative_terminal_event(
+        read_run_events("session_done", "run_done", session_dir=tmp_path)[
+            "events"
+        ]
+    )
+    assert selected["event_id"] == done["event_id"]
+    assert selected["terminal_state"] == "completed"
 
 
 def test_run_journal_reads_bounded_replay_window(tmp_path):
@@ -184,7 +320,7 @@ def test_summary_cache_does_not_store_result_when_journal_changes_during_read(tm
     second = latest_run_summary("session_1", "run_1", session_dir=tmp_path)
 
     assert first["terminal_state"] == "completed"
-    assert second["terminal_state"] == "interrupted-by-user"
+    assert second["terminal_state"] == "completed"
 
 
 

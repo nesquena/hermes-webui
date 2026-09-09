@@ -163,7 +163,7 @@ def test_legacy_sse_loop_relays_approval_event():
     fix), the approval handler catches it and emits the event.
     """
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     events = []
     q = MagicMock()
@@ -213,7 +213,7 @@ def test_legacy_sse_loop_relays_approval_event():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-legacy-approval",
                     msg_text="do something risky",
                     model="test",
@@ -249,7 +249,7 @@ def test_legacy_approval_records_run_id_for_response_relay():
     """
     import io
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_chat_streaming
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_chat_streaming_core
 
     events = []
     # Capture _STREAM_RUN_IDS at the instant the approval event is emitted.
@@ -314,7 +314,7 @@ def test_legacy_approval_records_run_id_for_response_relay():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id="sess-legacy-runid",
                     msg_text="do something risky",
                     model="test",
@@ -387,7 +387,7 @@ def test_legacy_teardown_clears_stale_gateway_mirror_and_notifies_empty_state():
     from types import SimpleNamespace
     from api import route_approvals as ra
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     session_id = "sess-legacy-teardown-stale"
     stream_id = "sid-legacy-teardown-stale"
@@ -436,7 +436,7 @@ def test_legacy_teardown_clears_stale_gateway_mirror_and_notifies_empty_state():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id=session_id,
                     msg_text="do something risky",
                     model="test",
@@ -466,7 +466,7 @@ def test_legacy_teardown_retires_live_gateway_head_mirror():
     from types import SimpleNamespace
     from api import route_approvals as ra
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     session_id = "sess-legacy-teardown-live"
     stream_id = "sid-legacy-teardown-live"
@@ -511,7 +511,7 @@ def test_legacy_teardown_retires_live_gateway_head_mirror():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id=session_id,
                     msg_text="do something risky",
                     model="test",
@@ -539,7 +539,7 @@ def test_legacy_teardown_preserves_local_pending_entry():
     """Legacy gateway teardown must not remove non-gateway pending approvals."""
     from api import route_approvals as ra
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _run_gateway_chat_streaming
+    from api.gateway_chat import _run_gateway_chat_streaming_core
 
     session_id = "sess-legacy-teardown-local"
     stream_id = "sid-legacy-teardown-local"
@@ -591,7 +591,7 @@ def test_legacy_teardown_preserves_local_pending_entry():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id=session_id,
                     msg_text="do something risky",
                     model="test",
@@ -769,7 +769,7 @@ def test_legacy_approval_without_run_id_retires_locally():
     from api import routes as r
     from api import route_approvals as ra
     from api.config import STREAMS, STREAMS_LOCK
-    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_chat_streaming
+    from api.gateway_chat import _STREAM_RUN_IDS, _run_gateway_chat_streaming_core
 
     stream_id = "sid-legacy-no-run"
     session_id = "sess-legacy-no-run"
@@ -828,7 +828,7 @@ def test_legacy_approval_without_run_id_retires_locally():
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
                  patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
+                _run_gateway_chat_streaming_core(
                     session_id=session_id,
                     msg_text="do something risky",
                     model="test",

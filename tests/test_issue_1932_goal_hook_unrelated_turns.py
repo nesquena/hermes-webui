@@ -123,23 +123,23 @@ def test_start_chat_stream_accepts_goal_related():
 
 
 # ---------------------------------------------------------------------------
-# Test 8: _run_agent_streaming accepts and uses goal_related
+# Test 8: _run_agent_streaming_core accepts and uses goal_related
 # ---------------------------------------------------------------------------
 
-def test_run_agent_streaming_uses_goal_related():
-    """_run_agent_streaming must accept goal_related kwarg and use it to
+def test_run_agent_streaming_core_uses_goal_related():
+    """_run_agent_streaming_core must accept goal_related kwarg and use it to
     gate the goal evaluation hook."""
     from pathlib import Path
     streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
 
     # Function must accept goal_related parameter
-    func_def_idx = streaming_py.find("def _run_agent_streaming")
+    func_def_idx = streaming_py.find("def _run_agent_streaming_core")
     assert func_def_idx != -1
 
     # The function signature area (within ~200 chars) should contain goal_related
     sig_area = streaming_py[func_def_idx:func_def_idx + 500]
     assert "goal_related" in sig_area, (
-        "_run_agent_streaming must accept a goal_related parameter"
+        "_run_agent_streaming_core must accept a goal_related parameter"
     )
 
 

@@ -227,7 +227,7 @@ class TestCancelledTurnPersistenceGuards:
 
     def test_worker_cancel_events_do_not_embed_session_payload(self):
         src = _read("api/streaming.py")
-        worker_start = src.find("def _run_agent_streaming(")
+        worker_start = src.find("def _run_agent_streaming_core(")
         cancel_stream_start = src.find("def cancel_stream(", worker_start)
         assert worker_start != -1 and cancel_stream_start != -1, "streaming worker/cancel_stream not found"
         worker_block = src[worker_start:cancel_stream_start]

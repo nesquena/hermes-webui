@@ -92,10 +92,8 @@ def test_start_chat_stream_response_includes_provisional_title(tmp_path, monkeyp
     from api.models import Session
     import api.routes as routes
 
-    monkeypatch.setattr(Session, "save", lambda self, *a, **k: None)
     monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
     monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
-    monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: None)
 
     class ImmediateThread:
         def __init__(self, *args, **kwargs):
@@ -103,7 +101,7 @@ def test_start_chat_stream_response_includes_provisional_title(tmp_path, monkeyp
             self.kwargs = kwargs
 
         def start(self):
-            return None
+            self.kwargs["kwargs"]["admission"].admitted.set()
 
     monkeypatch.setattr(routes.threading, "Thread", ImmediateThread)
 
@@ -119,6 +117,12 @@ def test_start_chat_stream_response_includes_provisional_title(tmp_path, monkeyp
 
     try:
         routes.STREAMS.pop(response["stream_id"], None)
+        from api import config
+        from api.session_lineage import release_turn_admission
+
+        with config.ACTIVE_RUNS_LOCK:
+            admission = config.ACTIVE_RUNS[response["stream_id"]]["admission"]
+        release_turn_admission(admission)
     except Exception:
         pass
 

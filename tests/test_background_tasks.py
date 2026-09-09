@@ -131,13 +131,15 @@ class TestBackgroundCompletionHookWiring(unittest.TestCase):
         body = routes_src[idx:end if end > 0 else idx + 3000]
 
         self.assertIn("complete_background", body, (
-            "_handle_background worker must call complete_background() after "
-            "_run_agent_streaming returns — otherwise the tracker never "
+            "_handle_background completion observer must call complete_background() after "
+            "the admitted worker returns — otherwise the tracker never "
             "transitions the task to status='done' and /api/background/status "
             "returns nothing forever. See api/background.py:complete_background."
         ))
-        # Must extract the last assistant message content from the bg session
-        self.assertIn("_run_agent_streaming", body)
+        # The admitted wrapper owns core execution; this handler supplies the
+        # completion observer that extracts the final hidden-session answer.
+        self.assertIn("_start_hidden_admitted_turn", body)
+        self.assertIn("completion_observer=_observe_background_completion", body)
         self.assertIn("Session.load", body, (
             "_run_bg_and_notify must reload the bg session to extract the "
             "final assistant reply so complete_background gets an actual answer"

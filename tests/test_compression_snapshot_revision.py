@@ -836,7 +836,7 @@ def test_webui_run_passes_revision_from_original_snapshot_when_sqlite_changes_be
 
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
 
-    streaming._run_agent_streaming(
+    streaming._run_agent_streaming_core(
         session_id=sid,
         msg_text="new webui turn",
         model="test-model",
@@ -904,7 +904,7 @@ def test_webui_run_missing_explicit_profile_passes_no_foreign_revision(
 
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
 
-    streaming._run_agent_streaming(
+    streaming._run_agent_streaming_core(
         session_id=sid,
         msg_text="new webui turn",
         model="test-model",
@@ -985,7 +985,7 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
 
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
 
-    streaming._run_agent_streaming(
+    streaming._run_agent_streaming_core(
         session_id=sid,
         msg_text="new webui turn",
         model="test-model",
@@ -1207,7 +1207,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
         },
     )
 
-    streaming._run_agent_streaming(
+    streaming._run_agent_streaming_core(
         session_id=sid,
         msg_text="new webui turn",
         model="test-model",
@@ -1429,7 +1429,7 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
         },
     )
 
-    streaming._run_agent_streaming(
+    streaming._run_agent_streaming_core(
         session_id=sid,
         msg_text=prompt,
         model="test-model",

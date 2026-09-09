@@ -306,7 +306,7 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     monkeypatch.setattr(_streaming, "_apply_profile_home_context_to_streaming_model",
                         lambda model, provider_context, profile_home, has_profile: (model, provider_context, False))
 
-    _streaming._run_agent_streaming(
+    _streaming._run_agent_streaming_core(
         session_id=_session_id,
         msg_text="hi",
         model="gpt-4",
@@ -497,7 +497,7 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
         lambda model, provider_context, profile_home, has_profile: (model, provider_context, False),
     )
 
-    _streaming._run_agent_streaming(
+    _streaming._run_agent_streaming_core(
         session_id=_session_id,
         msg_text="hi",
         model="gpt-4",

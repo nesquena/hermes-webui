@@ -125,6 +125,7 @@ def _journal_gateway_terminal_save_failure(
     live_messages,
     partial_text="Current partial output.",
     terminal_error="gateway exploded",
+    terminal_state=None,
 ):
     """Compose the real gateway producer payload and append it through the real journal."""
     import api.gateway_chat as gateway_chat
@@ -161,6 +162,7 @@ def _journal_gateway_terminal_save_failure(
         live_session.model,
         live_session.model_provider,
         terminal_error,
+        terminal_state=terminal_state,
     )
     assert payload["terminal_session_persisted"] is False
 
@@ -964,27 +966,33 @@ class TestNonEmptyMessagesPendingCleared:
         models.SESSIONS.pop(sid, None)
 
         recovered = models.get_session(sid)
-        assert terminal_message["content"] not in [
-            message.get("content") for message in recovered.messages
-        ]
-        assert any(
-            message.get("type") == "interrupted"
-            for message in recovered.messages
-        )
+        recovered_contents = [message.get("content") for message in recovered.messages]
+        if malformed_field == "later_done_event_id":
+            assert terminal_message["content"] in recovered_contents
+            assert not any(
+                message.get("type") == "interrupted"
+                for message in recovered.messages
+            )
+        else:
+            assert terminal_message["content"] not in recovered_contents
+            assert any(
+                message.get("type") == "interrupted"
+                for message in recovered.messages
+            )
 
     @pytest.mark.parametrize(
         ("later_event_name", "expected_error"),
         [
-            ("apperror", "**Error:** later gateway failure"),
-            ("done", None),
-            ("cancel", None),
+            ("apperror", "**Error:** gateway exploded"),
+            ("done", "**Error:** gateway exploded"),
+            ("cancel", "**Error:** gateway exploded"),
             ("stream_end", "**Error:** gateway exploded"),
         ],
     )
-    def test_gateway_terminal_error_uses_authoritative_latest_terminal_event(
+    def test_gateway_terminal_error_uses_authoritative_first_semantic_terminal(
         self, hermes_home, monkeypatch, tmp_path, later_event_name, expected_error,
     ):
-        """Later terminal evidence supersedes an older error, except transport-only stream_end."""
+        """Once settled, later semantic or transport events cannot reverse the run."""
         sid = f"gateway_terminal_latest_{later_event_name}"
         stream_id = f"{sid}_stream"
         stale = _make_session(
@@ -1007,7 +1015,6 @@ class TestNonEmptyMessagesPendingCleared:
 
         writer = RunJournalWriter(sid, stream_id)
         later_payload = {"session_id": sid}
-        later_terminal = None
         if later_event_name == "apperror":
             later_payload = json.loads(json.dumps(payload))
             later_message = next(
@@ -1016,7 +1023,7 @@ class TestNonEmptyMessagesPendingCleared:
                 if message.get("_error") is True
             )
             later_message["content"] = expected_error
-            later_terminal = writer.append_sse_event("apperror", later_payload)
+            writer.append_sse_event("apperror", later_payload)
         else:
             writer.append_sse_event(later_event_name, later_payload)
         models.SESSIONS.pop(sid, None)
@@ -1032,12 +1039,43 @@ class TestNonEmptyMessagesPendingCleared:
             assert first_message["content"] not in recovered_error_contents
         else:
             assert recovered_error_contents == [expected_error]
-            expected_event_id = (
-                later_terminal["event_id"]
-                if later_terminal is not None
-                else first_terminal["event_id"]
-            )
+            expected_event_id = first_terminal["event_id"]
             assert recovered.messages[-1].get("_recovered_event_id") == expected_event_id
+
+    def test_incomplete_final_recovery_requires_observable_activity(
+        self, hermes_home, monkeypatch, tmp_path,
+    ):
+        def build(suffix, partial_text):
+            sid = f"gateway_incomplete_{suffix}"
+            stale = _make_session(
+                session_id=sid,
+                workspace=str(tmp_path),
+                messages=[],
+            )
+            stale.pending_user_message = "Current gateway request"
+            stale.pending_started_at = time.time() - 120
+            stale.active_stream_id = f"{sid}_stream"
+            stale.save()
+            _journal_gateway_terminal_save_failure(
+                monkeypatch,
+                stale,
+                live_messages=stale.messages,
+                partial_text=partial_text,
+                terminal_state="incomplete_final",
+            )
+            return stale
+
+        without_activity = build("empty", "")
+        with_activity = build("active", "partial activity")
+
+        assert models._recoverable_unsaved_gateway_terminal_error(
+            without_activity, without_activity.active_stream_id
+        ) is None
+        recovered = models._recoverable_unsaved_gateway_terminal_error(
+            with_activity, with_activity.active_stream_id
+        )
+        assert recovered is not None
+        assert recovered["message"]["_terminal_state"] == "incomplete_final"
 
     def test_late_gateway_terminal_journal_replaces_pending_retry_marker(
         self, hermes_home, monkeypatch, tmp_path,
@@ -1417,7 +1455,7 @@ class TestCheckpointOrdering:
         _run_agent_streaming: checkpoint stop appears before
         _last_resort_sync_from_core."""
         import inspect
-        source = inspect.getsource(streaming._run_agent_streaming)
+        source = inspect.getsource(streaming._run_agent_streaming_core)
 
         # Find the finally block
         finally_idx = source.rfind("finally:")

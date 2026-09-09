@@ -162,7 +162,7 @@ def test_streaming_sessiondb_uses_session_profile_state_db(tmp_path, monkeypatch
     streaming.STREAMS[fake_session.active_stream_id] = queue.Queue()
     old_home = os.environ.get("HERMES_HOME")
     try:
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="hello from zhangtingban",
             model="test-model",

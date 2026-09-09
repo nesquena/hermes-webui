@@ -197,10 +197,10 @@ def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeyp
 
     class FakeThread:
         def __init__(self, *args, **kwargs):
-            pass
+            self.worker_kwargs = kwargs["kwargs"]
 
         def start(self):
-            return None
+            self.worker_kwargs["admission"].admitted.set()
 
         def join(self, timeout=None):
             return None

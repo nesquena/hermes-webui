@@ -1,6 +1,9 @@
 import io
 import json
+import threading
 from pathlib import Path
+
+import pytest
 
 from api import models, routes
 from api.compression_recovery import (
@@ -44,9 +47,161 @@ def _isolate_sessions(monkeypatch, tmp_path):
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
     models.SESSIONS.clear()
     routes.SESSIONS.clear()
+    models._invalidate_persisted_session_ids_snapshot()
     return session_dir
+
+
+def test_persisted_session_ids_scan_cannot_republish_after_concurrent_save(monkeypatch, tmp_path):
+    session_dir = _isolate_sessions(monkeypatch, tmp_path)
+    source = Session(session_id="cache-source", title="source", messages=[])
+    source.save(skip_index=True)
+    frozen_dir_stat = session_dir.stat()
+    original_stat = Path.stat
+    original_glob = Path.glob
+    scan_captured = threading.Event()
+    release_scan = threading.Event()
+    blocked_once = False
+
+    def frozen_stat(path, *args, **kwargs):
+        if path == session_dir:
+            return frozen_dir_stat
+        return original_stat(path, *args, **kwargs)
+
+    def blocked_glob(path, pattern):
+        nonlocal blocked_once
+        captured = list(original_glob(path, pattern))
+        if path == session_dir and pattern == "*.json" and not blocked_once:
+            blocked_once = True
+            scan_captured.set()
+            assert release_scan.wait(timeout=5)
+        return iter(captured)
+
+    monkeypatch.setattr(Path, "stat", frozen_stat)
+    monkeypatch.setattr(Path, "glob", blocked_glob)
+    models._invalidate_persisted_session_ids_snapshot()
+
+    scans = []
+    scanner = threading.Thread(target=lambda: scans.append(models._persisted_session_ids_snapshot()))
+    scanner.start()
+    assert scan_captured.wait(timeout=5)
+
+    child = Session(session_id="cache-child", title="child", messages=[])
+    child_published = threading.Event()
+    original_replace = models._safe_replace
+    save_errors = []
+
+    def replace_and_signal(src, dst):
+        original_replace(src, dst)
+        if Path(dst) == child.path:
+            child_published.set()
+
+    monkeypatch.setattr(models, "_safe_replace", replace_and_signal)
+
+    def save_child():
+        try:
+            child.save(skip_index=True)
+        except Exception as exc:  # pragma: no cover - asserted below
+            save_errors.append(exc)
+
+    saver = threading.Thread(target=save_child)
+    saver.start()
+    assert child_published.wait(timeout=5)
+    assert child.path.exists()
+    release_scan.set()
+    scanner.join(timeout=5)
+    saver.join(timeout=5)
+
+    assert not scanner.is_alive()
+    assert not saver.is_alive()
+    assert save_errors == []
+    assert scans == [frozenset({source.session_id})]
+    assert models._persisted_session_ids_snapshot() == frozenset(
+        {source.session_id, child.session_id}
+    )
+
+
+def test_failed_session_replace_leaves_prior_persisted_id_snapshot_valid(monkeypatch, tmp_path):
+    _isolate_sessions(monkeypatch, tmp_path)
+    source = Session(session_id="cache-source", title="source", messages=[])
+    source.save(skip_index=True)
+    assert models._persisted_session_ids_snapshot() == frozenset({source.session_id})
+    prior_cache = models._PERSISTED_SESSION_IDS_CACHE
+
+    def fail_replace(_src, _dst):
+        raise OSError("synthetic replace failure")
+
+    monkeypatch.setattr(models, "_safe_replace", fail_replace)
+    with pytest.raises(OSError, match="synthetic replace failure"):
+        Session(session_id="cache-child", title="child", messages=[]).save(skip_index=True)
+
+    assert models._PERSISTED_SESSION_IDS_CACHE is prior_cache
+    assert models._persisted_session_ids_snapshot() == frozenset({source.session_id})
+
+
+def test_concurrent_persisted_id_readers_publish_one_snapshot(monkeypatch, tmp_path):
+    session_dir = _isolate_sessions(monkeypatch, tmp_path)
+    Session(session_id="cache-source", title="source", messages=[]).save(skip_index=True)
+    original_glob = Path.glob
+    first_scan_started = threading.Event()
+    second_scan_started = threading.Event()
+    release_first_scan = threading.Event()
+    scan_count = 0
+    scan_count_lock = threading.Lock()
+
+    def coordinated_glob(path, pattern):
+        nonlocal scan_count
+        captured = list(original_glob(path, pattern))
+        if path == session_dir and pattern == "*.json":
+            with scan_count_lock:
+                scan_count += 1
+                current_scan = scan_count
+            if current_scan == 1:
+                first_scan_started.set()
+                assert release_first_scan.wait(timeout=5)
+            else:
+                second_scan_started.set()
+        return iter(captured)
+
+    monkeypatch.setattr(Path, "glob", coordinated_glob)
+    models._invalidate_persisted_session_ids_snapshot()
+    snapshots = []
+    first = threading.Thread(target=lambda: snapshots.append(models._persisted_session_ids_snapshot()))
+    second = threading.Thread(target=lambda: snapshots.append(models._persisted_session_ids_snapshot()))
+    first.start()
+    assert first_scan_started.wait(timeout=5)
+    second.start()
+    second_scan_started.wait(timeout=0.25)
+    release_first_scan.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert snapshots == [frozenset({"cache-source"}), frozenset({"cache-source"})]
+    assert scan_count == 1
+
+
+def test_hidden_session_delete_invalidates_persisted_id_snapshot(monkeypatch, tmp_path):
+    session_dir = _isolate_sessions(monkeypatch, tmp_path)
+    hidden = Session(session_id="cache-hidden", title="hidden", messages=[])
+    hidden.save(skip_index=True)
+    models.SESSIONS[hidden.session_id] = hidden
+    routes.SESSIONS[hidden.session_id] = hidden
+    assert models._persisted_session_ids_snapshot() == frozenset({hidden.session_id})
+    frozen_dir_stat = session_dir.stat()
+    original_stat = Path.stat
+
+    def frozen_stat(path, *args, **kwargs):
+        if path == session_dir:
+            return frozen_dir_stat
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", frozen_stat)
+    routes._discard_hidden_session(hidden)
+
+    assert not hidden.path.exists()
+    assert models._persisted_session_ids_snapshot() == frozenset()
 
 
 def test_generic_continuation_intent_is_scoped_to_empty_continue_words():
@@ -274,6 +429,21 @@ def test_recovery_start_reuses_existing_focused_session(monkeypatch, tmp_path):
     session.save()
     models.SESSIONS[sid] = session
     routes.SESSIONS[sid] = session
+
+    # Deterministically reproduce the full-suite failure: the persisted-id
+    # snapshot is primed before a same-tick atomic sidecar create, while the
+    # directory mtime remains unchanged. The child must still become discoverable
+    # after the in-memory LRU is cleared.
+    assert models._persisted_session_ids_snapshot() == frozenset({sid})
+    session_dir_stat = session_dir.stat()
+    original_stat = Path.stat
+
+    def stat_with_stalled_directory_mtime(path, *args, **kwargs):
+        if path == session_dir:
+            return session_dir_stat
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_stalled_directory_mtime)
 
     first_handler = _JSONHandler()
     routes._handle_session_compression_recovery_start(first_handler, {"session_id": sid})

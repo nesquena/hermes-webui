@@ -15,10 +15,14 @@ Fix: thread `source` as an explicit parameter
 site, instead of relying on (broken) scope resolution. This test locks that the
 declaration takes the param and no bare-call site remains.
 """
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 MESSAGES_JS = (Path(__file__).resolve().parents[1] / "static" / "messages.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 def test_bailout_helper_takes_source_param():
@@ -54,3 +58,53 @@ def test_bailout_call_sites_pass_source():
         "terminal-event wiring changed, update this count, but every call must still "
         "pass source."
     )
+
+
+def test_stale_terminal_bailout_is_a_behavioral_noop_for_newer_owner():
+    assert NODE, "node is required for stale-stream behavior tests"
+    helper = _function_source("_bailOutOfTerminalEventsFromStaleStream")
+    script = f"""
+const activeSid='session-new';
+const streamId='stream-old';
+const INFLIGHT={{'session-new':{{streamId:'stream-new'}}}};
+const LIVE_STREAMS={{'session-new':{{streamId:'stream-new',source:{{id:'new'}}}}}};
+let cleanups=0;
+let closes=[];
+function _scheduleAnchorRegistryCleanup(){{ cleanups+=1; }}
+function _closeSource(source){{ closes.push(source.id); }}
+function _ownsActiveStreamOrBackground(){{ return false; }}
+{helper}
+const result=_bailOutOfTerminalEventsFromStaleStream({{id:'old'}});
+console.log(JSON.stringify({{
+  result,
+  cleanups,
+  closes,
+  inflight:INFLIGHT['session-new'],
+  live:LIVE_STREAMS['session-new'],
+}}));
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "result": True,
+        "cleanups": 0,
+        "closes": ["old"],
+        "inflight": {"streamId": "stream-new"},
+        "live": {"streamId": "stream-new", "source": {"id": "new"}},
+    }
+
+
+def _function_source(name: str) -> str:
+    start = MESSAGES_JS.index(f"function {name}")
+    brace = MESSAGES_JS.index("{", start)
+    depth = 0
+    for idx in range(brace, len(MESSAGES_JS)):
+        if MESSAGES_JS[idx] == "{":
+            depth += 1
+        elif MESSAGES_JS[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return MESSAGES_JS[start : idx + 1]
+    raise AssertionError(f"{name} did not close")

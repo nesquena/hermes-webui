@@ -445,7 +445,6 @@ def test_runner_owned_start_run_does_not_enter_local_stream_barrier(monkeypatch)
 def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gateway_owned):
     """The barrier and worker must share one immutable backend decision."""
     from api import routes
-    from api import turn_journal
     from api.config import unregister_stream_owner
 
     gateway_reads = []
@@ -468,13 +467,22 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
     def prepare(current, **kwargs):
         current.active_stream_id = kwargs["stream_id"]
         current.pending_started_at = 123.0
+        return routes.PreparedChatTurn(
+            session_id=current.session_id,
+            stream_id=kwargs["stream_id"],
+            turn_id="test-turn",
+            pending_started_at=123.0,
+            title=current.title,
+            admission=kwargs["admission"],
+        )
 
     class FakeThread:
         def __init__(self, *, target, args, kwargs, daemon):
             worker_targets.append(target)
+            self.admission = kwargs["admission"]
 
         def start(self):
-            return None
+            self.admission.admitted.set()
 
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", read_gateway)
     monkeypatch.setattr(routes, "get_config", lambda: {})
@@ -486,9 +494,13 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
     monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda _sid: None)
     monkeypatch.setattr(routes, "_is_hidden_empty_session", lambda _session: False)
     monkeypatch.setattr(routes, "_prepare_chat_start_session_for_stream", prepare)
+    monkeypatch.setattr(
+        routes,
+        "_append_prepared_chat_turn_journal",
+        lambda _session, prepared, **_kwargs: prepared,
+    )
     monkeypatch.setattr(routes, "set_last_workspace", lambda _workspace: None)
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
-    monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *_args, **_kwargs: {})
 
     response = routes._start_chat_stream_for_session(
         session,
@@ -504,13 +516,19 @@ def test_stream_admission_uses_one_gateway_ownership_snapshot(monkeypatch, gatew
         assert len(gateway_reads) == 1
         assert revision_checks == ([] if gateway_owned else [True])
         expected_worker = (
-            routes._run_gateway_chat_streaming
+            routes._run_admitted_gateway_chat_streaming
             if gateway_owned
-            else routes._run_agent_streaming
+            else routes._run_admitted_agent_streaming
         )
         assert worker_targets == [expected_worker]
     finally:
         stream_id = str(response.get("stream_id") or "")
+        from api import config
+        from api.session_lineage import release_turn_admission
+
+        with config.ACTIVE_RUNS_LOCK:
+            admission = (config.ACTIVE_RUNS.get(stream_id) or {}).get("admission")
+        release_turn_admission(admission)
         with routes.STREAMS_LOCK:
             routes.STREAMS.pop(stream_id, None)
         unregister_stream_owner(stream_id)

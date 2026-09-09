@@ -77,10 +77,24 @@ def install_fake_start_session_turn(monkeypatch, *, status: int = 200):
 
     holder = {"calls": [], "event": threading.Event()}
 
-    def _fake(session_id, message, *, source="process_wakeup"):
+    def _fake(
+        session_id,
+        message,
+        *,
+        source="process_wakeup",
+        completion_context=None,
+        completion_acceptance=None,
+    ):
         holder["calls"].append(
-            {"session_id": session_id, "message": message, "source": source}
+            {
+                "session_id": session_id,
+                "message": message,
+                "source": source,
+                "completion_context": completion_context,
+            }
         )
+        if 200 <= status < 300 and callable(completion_acceptance):
+            completion_acceptance()
         holder["event"].set()
         return {"stream_id": "fake-stream", "session_id": session_id, "_status": status}
 

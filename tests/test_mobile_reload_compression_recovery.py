@@ -59,13 +59,8 @@ def test_load_session_follows_backend_continuation_hint():
     assert "_setActiveSessionUrl(continuationSid)" not in load_session
 
 
-def test_continuation_lookup_is_profile_scoped(tmp_path, monkeypatch):
-    """#2980 hardening: a continuation in a DIFFERENT profile must NOT be resolved.
-
-    The snapshot is profile 'work'; a same-parent child in 'personal' must be
-    filtered out, while the same-profile child resolves. Guards against a
-    crafted/colliding foreign-profile sidecar leaking cross-profile.
-    """
+def test_continuation_lookup_fails_closed_on_foreign_profile_edge(tmp_path, monkeypatch):
+    """A foreign-profile child makes the candidate graph unprovable."""
     from api import routes, config
 
     class _S:
@@ -89,8 +84,17 @@ def test_continuation_lookup_is_profile_scoped(tmp_path, monkeypatch):
         fake[s.session_id] = s
     monkeypatch.setattr(routes, "SESSIONS", fake, raising=False)
 
+    _write_sidecar(tmp_path, "snap00000001", pre_compression_snapshot=True)
+    _write_sidecar(tmp_path, "cont00000001", parent_session_id="snap00000001")
+    _write_sidecar(
+        tmp_path,
+        "frgn00000001",
+        profile="personal",
+        parent_session_id="snap00000001",
+    )
+
     result = routes._pre_compression_continuation_session_id(snapshot)
-    assert result == "cont00000001", f"expected same-profile continuation, got {result!r}"
+    assert result is None
 
     # Sanity: if the ONLY child is foreign-profile, no continuation is returned.
     fake2 = collections.OrderedDict()
@@ -99,8 +103,8 @@ def test_continuation_lookup_is_profile_scoped(tmp_path, monkeypatch):
     assert routes._pre_compression_continuation_session_id(snapshot) is None
 
 
-def test_continuation_lookup_uses_index_without_scanning_sidecars(tmp_path, monkeypatch):
-    """Indexed continuation metadata should avoid an O(all sidecars) recovery scan."""
+def test_continuation_lookup_uses_durable_sidecars_not_index_projection(tmp_path, monkeypatch):
+    """The compatibility projection delegates to the durable lineage resolver."""
     from api import routes, config, models
 
     class _S:
@@ -114,7 +118,8 @@ def test_continuation_lookup_uses_index_without_scanning_sidecars(tmp_path, monk
 
     snapshot = _S("snapindex001", "work", snap=True)
     index_file = tmp_path / "_index.json"
-    (tmp_path / "childindex01.json").write_text("{}", encoding="utf-8")
+    _write_sidecar(tmp_path, "snapindex001", pre_compression_snapshot=True)
+    _write_sidecar(tmp_path, "childindex01", parent_session_id="snapindex001")
     for idx in range(50):
         (tmp_path / f"noise{idx:08d}.json").write_text("{}", encoding="utf-8")
     index_file.write_text(
@@ -164,7 +169,8 @@ def test_empty_indexed_continuation_lookup_falls_back_to_sidecars(tmp_path, monk
     snapshot = _S("snapempty001", "work", snap=True)
     index_file = tmp_path / "_index.json"
     index_file.write_text("[]", encoding="utf-8")
-    (tmp_path / "childempty01.json").write_text("{}", encoding="utf-8")
+    _write_sidecar(tmp_path, "snapempty001", pre_compression_snapshot=True)
+    _write_sidecar(tmp_path, "childempty01", parent_session_id="snapempty001")
 
     monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
     monkeypatch.setattr(routes, "SESSION_DIR", tmp_path, raising=False)
@@ -181,11 +187,11 @@ def test_empty_indexed_continuation_lookup_falls_back_to_sidecars(tmp_path, monk
     )
 
     assert routes._pre_compression_continuation_session_id(snapshot) == "childempty01"
-    assert loaded == ["childempty01"]
+    assert loaded == []
 
 
-def test_stale_index_with_existing_candidate_falls_back_to_newer_sidecar(tmp_path, monkeypatch):
-    """A complete-looking result is not trusted when another sidecar is absent from the index."""
+def test_stale_index_with_two_durable_children_fails_closed(tmp_path, monkeypatch):
+    """Timestamps cannot choose an owner from a forked durable graph."""
     from api import routes, config, models
 
     class _S:
@@ -199,6 +205,7 @@ def test_stale_index_with_existing_candidate_falls_back_to_newer_sidecar(tmp_pat
 
     snapshot = _S("snapstale001", "work", snap=True)
     index_file = tmp_path / "_index.json"
+    _write_sidecar(tmp_path, "snapstale001", pre_compression_snapshot=True)
     _write_sidecar(
         tmp_path,
         "oldstale001",
@@ -234,11 +241,11 @@ def test_stale_index_with_existing_candidate_falls_back_to_newer_sidecar(tmp_pat
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
 
-    assert routes._pre_compression_continuation_session_id(snapshot) == "newstale001"
+    assert routes._pre_compression_continuation_session_id(snapshot) is None
 
 
-def test_stale_index_multihop_falls_back_to_missing_descendant_sidecar(tmp_path, monkeypatch):
-    """An indexed snapshot ancestor must not hide a newer descendant omitted from the index."""
+def test_stale_index_multihop_fork_fails_closed(tmp_path, monkeypatch):
+    """A snapshot with two children is never resolved by recency."""
     from api import routes, config, models
 
     class _S:
@@ -252,6 +259,7 @@ def test_stale_index_multihop_falls_back_to_missing_descendant_sidecar(tmp_path,
 
     snapshot = _S("snapstale002", "work", snap=True)
     index_file = tmp_path / "_index.json"
+    _write_sidecar(tmp_path, "snapstale002", pre_compression_snapshot=True)
     _write_sidecar(
         tmp_path,
         "oldstale002",
@@ -303,7 +311,7 @@ def test_stale_index_multihop_falls_back_to_missing_descendant_sidecar(tmp_path,
     monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(routes, "SESSIONS", collections.OrderedDict(), raising=False)
 
-    assert routes._pre_compression_continuation_session_id(snapshot) == "newstale002"
+    assert routes._pre_compression_continuation_session_id(snapshot) is None
 
 
 def test_indexed_continuation_lookup_follows_snapshot_hops_without_scanning(tmp_path, monkeypatch):
@@ -321,8 +329,14 @@ def test_indexed_continuation_lookup_follows_snapshot_hops_without_scanning(tmp_
 
     snapshot = _S("snapindex003", "work", snap=True)
     index_file = tmp_path / "_index.json"
-    _write_sidecar(tmp_path, "midindex001")
-    _write_sidecar(tmp_path, "finalindex1")
+    _write_sidecar(tmp_path, "snapindex003", pre_compression_snapshot=True)
+    _write_sidecar(
+        tmp_path,
+        "midindex001",
+        parent_session_id="snapindex003",
+        pre_compression_snapshot=True,
+    )
+    _write_sidecar(tmp_path, "finalindex1", parent_session_id="midindex001")
     index_file.write_text(
         json.dumps(
             [

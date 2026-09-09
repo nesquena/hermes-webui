@@ -3,7 +3,7 @@
 These exercise the real `_drain_webui_process_notifications` against a fake
 process_registry, proving that:
   - a completion older than the cap is dropped (consumed, not requeued),
-  - a fresh completion is still delivered,
+  - a fresh completion is handed to the canonical owner without direct consume,
   - events without `completed_at` are never dropped (backward compat),
   - the env override (incl. disable via 0) is honored.
 """
@@ -82,14 +82,16 @@ def test_stale_completion_is_dropped_and_fresh_is_delivered(streaming, monkeypat
     # default cap = 6h
     monkeypatch.delenv("HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS", raising=False)
 
-    out = streaming._drain_webui_process_notifications("websess-1")
+    from api import background_process as bp
 
-    joined = "\n".join(out)
-    assert "fresh" in joined, "fresh completion should be delivered"
-    assert "stale" not in joined, "stale completion must be dropped"
-    # stale was consumed (won't come back), fresh consumed after delivery
+    handoffs = []
+    monkeypatch.setattr(bp, "_process_one", lambda evt: handoffs.append(evt))
+    assert streaming._drain_webui_process_notifications("websess-1") is None
+
+    assert handoffs == [fresh]
+    # Only stale terminal disposition settles source state in this fallback.
     assert "stale" in reg._completion_consumed
-    assert "fresh" in reg._completion_consumed
+    assert "fresh" not in reg._completion_consumed
     # nothing belonging to this session is left requeued
     assert reg.completion_queue.empty()
 
@@ -100,9 +102,13 @@ def test_event_without_completed_at_is_never_dropped(streaming, monkeypatch):
     reg._owner["legacy"] = "websess-1"
     monkeypatch.delenv("HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS", raising=False)
 
-    out = streaming._drain_webui_process_notifications("websess-1")
+    from api import background_process as bp
 
-    assert any("legacy" in n for n in out), "legacy event (no timestamp) must be delivered"
+    handoffs = []
+    monkeypatch.setattr(bp, "_process_one", lambda evt: handoffs.append(evt))
+    assert streaming._drain_webui_process_notifications("websess-1") is None
+    assert handoffs == [legacy]
+    assert "legacy" not in reg._completion_consumed
 
 
 def test_env_zero_disables_age_gate(streaming, monkeypatch):
@@ -112,9 +118,13 @@ def test_env_zero_disables_age_gate(streaming, monkeypatch):
     reg._owner["ancient"] = "websess-1"
     monkeypatch.setenv("HERMES_WEBUI_STALE_COMPLETION_MAX_AGE_SECONDS", "0")
 
-    out = streaming._drain_webui_process_notifications("websess-1")
+    from api import background_process as bp
 
-    assert any("ancient" in n for n in out), "age gate disabled -> even ancient delivered"
+    handoffs = []
+    monkeypatch.setattr(bp, "_process_one", lambda evt: handoffs.append(evt))
+    assert streaming._drain_webui_process_notifications("websess-1") is None
+    assert handoffs == [ancient]
+    assert "ancient" not in reg._completion_consumed
 
 
 def test_helper_reads_env_override(streaming, monkeypatch):

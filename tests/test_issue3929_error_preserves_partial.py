@@ -151,7 +151,7 @@ def test_silent_failure_preserves_partials(tmp_path):
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
         
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="What is python?",
             model="test-model",
@@ -210,7 +210,7 @@ def test_result_error_omits_turn_duration_for_missing_or_future_origin(tmp_path,
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
 
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="What is python?",
             model="test-model",
@@ -255,7 +255,7 @@ def test_exception_preserves_partials(tmp_path):
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
         
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="Exception test",
             model="test-model",
@@ -303,7 +303,7 @@ def test_exception_error_omits_turn_duration_for_missing_or_future_origin(tmp_pa
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
 
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="Exception test",
             model="test-model",
@@ -339,7 +339,7 @@ def test_empty_partials_do_not_create_spurious_messages(tmp_path):
          mock.patch("api.config.get_config", return_value={}), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
         
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=fake_session.session_id,
             msg_text="Empty test",
             model="test-model",

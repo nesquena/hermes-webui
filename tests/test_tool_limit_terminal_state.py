@@ -118,7 +118,7 @@ def _run_streaming_with_fake_agent(
                 "_attempt_credential_self_heal",
                 lambda *_args, **_kwargs: {"api_key": "retry-key", "provider": "openai"},
             )
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session_id,
             msg_text=msg_text,
             model="gpt-4o",

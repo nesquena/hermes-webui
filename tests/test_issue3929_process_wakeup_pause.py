@@ -193,7 +193,7 @@ def _run_failing_process_wakeup(session: Session, tmp_path, *, stream_id=None):
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_CredentialPoolEmptyAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -233,7 +233,7 @@ def _run_failing_process_wakeup_route(
              return_value=custom_connection,
          ), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model=route_model,
@@ -345,7 +345,7 @@ def test_cancelled_stale_process_wakeup_credential_failure_records_pause(tmp_pat
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_CancelledStaleCredentialPoolEmptyAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -905,7 +905,7 @@ def test_streaming_success_pause_clear_serializes_against_concurrent_suppression
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -993,7 +993,7 @@ def test_streaming_success_pause_clear_preserves_concurrent_session_update(tmp_p
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -1958,7 +1958,7 @@ def test_gateway_cancel_during_completion_save_restores_process_wakeup_pause(tmp
 
     monkeypatch.setattr(Session, "save", _save_and_cancel_after_success_clear)
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         session_id,
         "wake up",
         "claude-sonnet-test",
@@ -2043,7 +2043,7 @@ def test_gateway_late_cancel_preserves_completed_webui_turn(tmp_path, monkeypatc
 
     monkeypatch.setattr(Session, "save", _save_and_cancel_after_completed_webui_turn)
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         session_id,
         "hello",
         "claude-sonnet-test",
@@ -2149,7 +2149,7 @@ def test_gateway_late_cancel_preserves_existing_pause_for_webui_recovery(tmp_pat
 
     monkeypatch.setattr(Session, "save", _save_and_cancel_after_completed_recovery_turn)
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         session_id,
         "try recovery",
         "claude-sonnet-test",
@@ -2243,7 +2243,7 @@ def test_gateway_post_save_cancel_after_success_commit_emits_done(tmp_path, monk
 
     monkeypatch.setattr(streaming, "_session_payload_with_full_messages", _payload_and_cancel_after_success_commit)
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         session_id,
         "try recovery",
         "claude-sonnet-test",
@@ -2315,7 +2315,7 @@ def test_streaming_late_cancel_after_pause_clear_save_persists_restored_pause(tm
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -2380,7 +2380,7 @@ def test_streaming_post_save_cancel_after_success_commit_emits_done(tmp_path, mo
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -2432,7 +2432,7 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_SuccessfulAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",
@@ -2482,7 +2482,7 @@ def test_stale_credential_empty_process_wakeup_still_records_pause(tmp_path):
     with mock.patch.object(streaming, "_get_ai_agent", return_value=_StaleCredentialPoolEmptyAgent), \
          mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
          mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
-        streaming._run_agent_streaming(
+        streaming._run_agent_streaming_core(
             session_id=session.session_id,
             msg_text=session.pending_user_message,
             model="test-model",

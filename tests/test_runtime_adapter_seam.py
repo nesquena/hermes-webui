@@ -1,7 +1,12 @@
 import importlib
 import io
-import queue
-
+from api import config, models, routes as routes_module
+from api.models import Session
+from api.session_lineage import (
+    build_completion_delivery_context,
+    read_completion_delivery_receipt,
+)
+from api.turn_journal import read_turn_journal
 from tests.conftest import requires_agent_modules
 
 
@@ -813,3 +818,60 @@ def test_runner_runtime_adapter_controls_are_bounded_and_do_not_use_legacy_state
         assert result.accepted is False
         assert result.status == "unsupported"
         assert "not supported by this runner backend" in (result.safe_message or "")
+
+
+def test_runner_local_completion_refuses_before_any_local_mutation(monkeypatch, tmp_path):
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path, raising=False)
+    with config.LOCK:
+        config.SESSIONS.clear()
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS.clear()
+    session = Session(session_id="runner-completion", title="runner", profile="default")
+    session.save()
+    context = build_completion_delivery_context(
+        {
+            "type": "process_complete",
+            "process_id": "proc-runner",
+            "session_key": "ui:runner-completion",
+            "origin_ui_session_id": "runner-completion",
+            "origin_profile": "default",
+        },
+        "runner-completion",
+        session_dir=tmp_path,
+    )
+    sidecar_before = (tmp_path / "runner-completion.json").read_bytes()
+    runner_actions = []
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: True)
+    monkeypatch.setattr(
+        "api.runtime_adapter.build_runtime_adapter",
+        lambda *_a, **_k: runner_actions.append("start"),
+    )
+
+    response = routes_module._start_run(
+        session,
+        msg="runner result",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        normalized_model=False,
+        source="process_wakeup",
+        route="test",
+        completion_context=context,
+    )
+
+    assert response == {
+        "error": "runner-local does not support durable completion incorporation",
+        "type": "completion_runner_unsupported",
+        "retryable": True,
+        "_status": 503,
+    }
+    assert runner_actions == []
+    assert (tmp_path / "runner-completion.json").read_bytes() == sidecar_before
+    assert read_completion_delivery_receipt(context, session_dir=tmp_path) is None
+    assert not (tmp_path / "_completion_delivery_receipts.json").exists()
+    assert read_turn_journal("runner-completion", session_dir=tmp_path)["events"] == []
+    with config.ACTIVE_RUNS_LOCK:
+        assert config.ACTIVE_RUNS == {}

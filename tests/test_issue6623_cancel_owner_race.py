@@ -938,7 +938,7 @@ def test_issue6636_gateway_prestart_cancel_clears_writeback_owner(tmp_path, monk
     # worker takes its `q is None` early-return teardown path.
     config.STREAMS.pop(stream_id, None)
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         session_id,
         [],
         "test-model",

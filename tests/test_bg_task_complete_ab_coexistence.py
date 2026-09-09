@@ -1,22 +1,17 @@
-"""Integration tests: the merged upstream PR #2279 (next-turn drain, A) +
-our-original Option B SSE/server-side drain coexist without duplicating
-wakeups for the same background process_id.
+"""Integration tests for the two physical completion readers.
 
-These tests verify the shared dedupe contract via the REAL merged upstream
-key — process_registry._completion_consumed (checked by
-process_registry.is_completion_consumed()):
-- If B's drain fires first (proactive case), it marks the registry
-  consumed-marker so A's next-turn drain skips the same process_id.
-- If A's (real merged #2279) drain fires first (SSE-disconnected case), it
-  marks the same registry consumed-marker so B's drain early-returns.
+The background drain thread and current-turn queue fallback both converge on
+``background_process._process_one``. Source consumption belongs to the
+canonical incorporation callback, never to the physical streaming reader.
+Whichever reader arrives first owns one attempt; duplicates yield no second
+server-side turn.
 
 api.config.BG_TASK_COMPLETE_EVENTS_SEEN remains as B's own private
 secondary dedupe (duplicate enqueue within this module) but is NOT the
 cross-A/B contract — the real merged #2279 never writes it.
 
-The two paths run in *different* hot paths (background thread vs. agent turn
-start) but share process_registry._completion_consumed, so a wakeup can only
-happen once.
+The two paths run in different hot paths but share the canonical pre-
+incorporation and consumed state, so a wakeup can only happen once.
 """
 from __future__ import annotations
 
@@ -54,7 +49,7 @@ def _reset_cfg_state():
 
 
 def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
-    """B emits SSE for process_id=p1, then user types a new turn — A must skip p1."""
+    """Background incorporation first makes a later physical duplicate inert."""
     fake = _FakeProcessRegistry()
     fake.register("p1", "sess-1")
     _install_fake_registry(monkeypatch, fake)
@@ -63,6 +58,9 @@ def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
     from api import background_process as bp
     from api import streaming as st
     from api import config as _cfg
+    from tests._wakeup_helpers import install_fake_start_session_turn, wait_for_wakeup
+
+    holder = install_fake_start_session_turn(monkeypatch)
 
     # Map session_key -> WebUI session_id
     bp.register_process_session("sess-1", "sess-1")
@@ -77,30 +75,23 @@ def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
     }
     # B path: process the event
     bp._process_one(evt)
+    assert wait_for_wakeup(holder)
 
-    # B must have marked the (session, process) seen and registry-consumed
+    # B marks the registry consumed only after durable incorporation accepts it.
     assert "p1" in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN["sess-1"]
     assert fake.is_completion_consumed("p1")
 
-    # Now simulate A's next-turn drain. Put a *new* event onto the queue for the
-    # same process_id (e.g. a kill_process race). A must skip because B already
-    # delivered.
+    # Put a new event onto the physical queue for the same process id. The
+    # canonical consumed state makes the current-turn fallback inert.
     fake.completion_queue.put(evt)
-    notifications = st._drain_webui_process_notifications("sess-1")
-    assert notifications == [], "A must NOT re-fire when B already woke the agent for p1"
+    assert st._drain_webui_process_notifications("sess-1") is None
+    assert len(holder["calls"]) == 1, "the fallback must not re-fire consumed p1"
 
 
 def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
-    """A (the REAL merged upstream #2279 next-turn drain) drains and wakes the
-    agent; later B's queue read of the same id is a no-op because the SHARED
-    upstream dedupe key (process_registry._completion_consumed) already
-    contains it.
-
-    Re-pointed for the rebase: the real merged #2279 drain dedupes ONLY via
-    process_registry.is_completion_consumed() — it does NOT populate
-    api.config.BG_TASK_COMPLETE_EVENTS_SEEN (that set is ours-original and
-    private to api.background_process). So the cross-A/B contract is the
-    registry consumed-marker, not BG_TASK_COMPLETE_EVENTS_SEEN.
+    """The current-turn fallback hands the event to canonical ``_process_one``.
+    Incorporation then writes diagnostic seen state and source consumption;
+    a later physical duplicate cannot start a second turn.
     """
     fake = _FakeProcessRegistry()
     fake.register("p2", "sess-2")
@@ -110,6 +101,9 @@ def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
     from api import background_process as bp
     from api import streaming as st
     from api import config as _cfg
+    from tests._wakeup_helpers import install_fake_start_session_turn, wait_for_wakeup
+
+    holder = install_fake_start_session_turn(monkeypatch)
 
     bp.register_process_session("sess-2", "sess-2")
 
@@ -121,30 +115,20 @@ def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
         "exit_code": 0,
         "output": "hi",
     }
-    # A path: queue carried over from a closed-tab session, drain at next turn
+    # Current-turn physical fallback: queue carried over from a closed tab.
     fake.completion_queue.put(evt)
-    notifications = st._drain_webui_process_notifications("sess-2")
-    assert len(notifications) == 1
-    assert "Background process p2 completed" in notifications[0]
+    assert st._drain_webui_process_notifications("sess-2") is None
+    assert wait_for_wakeup(holder)
+    assert len(holder["calls"]) == 1
 
-    # The REAL merged #2279 A-drain marks the SHARED upstream dedupe key
-    # (registry consumed-marker) — NOT our private BG_TASK_COMPLETE_EVENTS_SEEN.
+    # The canonical incorporation callback owns all settlement.
     assert fake.is_completion_consumed("p2")
-    assert "sess-2" not in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN, (
-        "real upstream #2279 A-drain must NOT populate our private "
-        "BG_TASK_COMPLETE_EVENTS_SEEN set"
-    )
+    assert "p2" in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN["sess-2"]
 
-    # Now if B's drain thread sees another spurious event for the same id
-    # (duplicate enqueue), _process_one must early-return on the SHARED
-    # registry consumed-marker that A set — no double wakeup.
+    # A later background-reader duplicate cannot produce a second turn.
     bp._process_one(evt)  # second time
     assert fake.is_completion_consumed("p2")
-    # B early-returned on the shared key BEFORE reaching its own seen-set, so
-    # BG_TASK_COMPLETE_EVENTS_SEEN stays unpopulated for this session (proves
-    # the cross-A/B dedupe used the real upstream key, not ours).
-    assert "sess-2" not in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN
-    # And no duplicate wakeup marker was queued by the second B pass.
+    assert len(holder["calls"]) == 1
     assert "sess-2" not in _cfg.PENDING_BG_TASK_COMPLETIONS
 
 
@@ -215,7 +199,11 @@ def test_mark_registry_completion_consumed_fails_loud_on_rename(monkeypatch, cap
     from api import background_process as bp
 
     with caplog.at_level(logging.ERROR, logger="api.background_process"):
-        bp._mark_registry_completion_consumed("p-renamed")
+        with pytest.raises(
+            RuntimeError,
+            match="completion-consumed contract is unavailable",
+        ):
+            bp._mark_registry_completion_consumed("p-renamed")
 
     assert any(
         "coupling contract VIOLATED" in r.message and r.levelno >= logging.ERROR

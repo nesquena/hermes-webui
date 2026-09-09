@@ -706,7 +706,7 @@ def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_pat
             started_threads.append((args, kwargs))
 
         def start(self):
-            pass
+            started_threads[-1][1]["kwargs"]["admission"].admitted.set()
 
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
 

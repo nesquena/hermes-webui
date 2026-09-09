@@ -153,7 +153,7 @@ def test_visible_progress_token_reasoning_and_interim_are_deduped(cleanup_test_s
              mock.patch("api.config.get_config", return_value={}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
             streaming.STREAMS[fake_stream_id] = fake_queue
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id=fake_session.session_id,
                 msg_text="scan",
                 model="gpt-test",
@@ -317,7 +317,7 @@ def test_reasoning_then_interim_progress_marks_reasoning_echo(cleanup_test_sessi
              mock.patch("api.config.get_config", return_value={}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
             streaming.STREAMS[fake_stream_id] = fake_queue
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id=fake_session.session_id,
                 msg_text="scan",
                 model="gpt-test",
@@ -502,7 +502,7 @@ def test_final_answer_prefix_reasoning_echo_is_not_journaled_or_merged(cleanup_t
              mock.patch("api.config.get_config", return_value={}), \
              mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
             streaming.STREAMS[fake_stream_id] = fake_queue
-            streaming._run_agent_streaming(
+            streaming._run_agent_streaming_core(
                 session_id=fake_session.session_id,
                 msg_text="ship it",
                 model="gpt-test",

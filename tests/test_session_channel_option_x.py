@@ -635,7 +635,7 @@ def test_real_completion_event_shape_routes_to_session_channel():
 # api.routes.start_session_turn) with NO browser round-trip. The per-session
 # SSE channel is demoted to a pure live-view layer. These tests prove:
 #   1. closed-tab (no SSE subscriber at all) STILL starts a server-side turn
-#   2. active-turn defers (no double-start; PR #2279 next-turn drain handles it)
+#   2. active-turn defers (no double-start; teardown/idle lane handles it)
 #   3. one wakeup per process_id (dedupe)
 #   4. open tab still sees the live SSE frame (live-view unchanged)
 # ===========================================================================
@@ -704,8 +704,8 @@ def test_server_side_wakeup_when_idle_no_tab(monkeypatch):
 
 def test_server_side_wakeup_deferred_when_turn_active(monkeypatch):
     """A foreground turn is active (ACTIVE_RUNS has a row for the session) →
-    the drain must NOT start a second turn. The PENDING_BG_TASK_COMPLETIONS
-    marker is left for PR #2279's next-turn drain.
+    the drain must NOT start a second turn. The deferred map belongs to the
+    teardown/idle lane; PENDING_BG_TASK_COMPLETIONS is telemetry only.
     """
     from api import background_process as bp, config as cfg
 
@@ -736,7 +736,7 @@ def test_server_side_wakeup_deferred_when_turn_active(monkeypatch):
             "double-started a turn"
         )
         assert holder["calls"] == []
-        # Marker must remain so the next-turn drain delivers it.
+        # Marker remains as pending-state telemetry, not as a delivery owner.
         assert sid in cfg.PENDING_BG_TASK_COMPLETIONS
     finally:
         cfg.ACTIVE_RUNS.pop(stream_id, None)

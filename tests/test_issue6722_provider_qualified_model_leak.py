@@ -245,7 +245,7 @@ def _run_legacy_gateway_chat(tmp_path, monkeypatch, model):
     channel.subscribe()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
+    gateway_chat._run_gateway_chat_streaming_core(
         s.session_id, "hi", model, str(tmp_path), stream_id, []
     )
     return json.loads(captured["body"])
