@@ -17,13 +17,25 @@ async function loadAlerts() {
   data.alerts.slice(0, 5).forEach((alert) => {
     const item = document.createElement('li');
     item.className = 'alert-item';
-    item.innerHTML = `
-      <div>
-        <strong>${alert.message}</strong>
-        <div class="alert-meta">${alert.type} • ${new Date(alert.timestamp).toLocaleString()}</div>
-      </div>
-      <span class="level-pill level-${alert.level || 'info'}">${alert.level || 'info'}</span>
-    `;
+    // Build alert DOM safely using textContent to avoid stored XSS
+    const container = document.createElement('div');
+
+    const strong = document.createElement('strong');
+    strong.textContent = alert.message;
+    container.appendChild(strong);
+
+    const meta = document.createElement('div');
+    meta.className = 'alert-meta';
+    meta.textContent = `${alert.type} • ${new Date(alert.timestamp).toLocaleString()}`;
+    container.appendChild(meta);
+
+    const level = alert.level || 'info';
+    const pill = document.createElement('span');
+    pill.className = `level-pill level-${level}`;
+    pill.textContent = level;
+
+    item.appendChild(container);
+    item.appendChild(pill);
     list.appendChild(item);
   });
 }
