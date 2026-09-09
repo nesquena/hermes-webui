@@ -277,28 +277,36 @@ class TestIssue765FollowupHardening:
     an exception fires before the checkpoint thread is created.
     """
 
-    def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
-        """Two concurrent saves of the same session must not collide on one tmp path.
+    def test_same_session_concurrent_saves_are_serialized_with_distinct_temp_files(self, monkeypatch):
+        """Concurrent saves must publish complete, independent generations.
 
-        The key regression guard here is that each save call should reach os.replace()
-        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
-        threads would target the same path and the second replace would deterministically
-        fail once the first consume/remove happened.
+        Each save still owns a distinct temporary file, while the per-session
+        authority serializes replacement of the durable sidecar.
         """
         s = _make_session("same_sid")
         s.save(skip_index=True)  # seed the file on disk
 
         original_replace = models.os.replace
-        barrier = threading.Barrier(2)
         replace_sources = []
+        replace_active = 0
+        max_replace_active = 0
+        replace_state_lock = threading.Lock()
         errors = []
 
-        def _replace_with_barrier(src, dst):
-            replace_sources.append(str(src))
-            barrier.wait(timeout=5)
-            return original_replace(src, dst)
+        def _tracked_replace(src, dst):
+            nonlocal replace_active, max_replace_active
+            with replace_state_lock:
+                replace_sources.append(str(src))
+                replace_active += 1
+                max_replace_active = max(max_replace_active, replace_active)
+            try:
+                time.sleep(0.05)
+                return original_replace(src, dst)
+            finally:
+                with replace_state_lock:
+                    replace_active -= 1
 
-        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+        monkeypatch.setattr(models.os, "replace", _tracked_replace)
 
         def _save_worker():
             try:
@@ -319,6 +327,7 @@ class TestIssue765FollowupHardening:
             "Concurrent same-session saves must use distinct temp files even if Windows-safe "
             f"replace retries one of them; got {replace_sources}"
         )
+        assert max_replace_active == 1, "Same-session sidecar publication must be serialized"
         data = json.loads(s.path.read_text(encoding="utf-8"))
         assert data["session_id"] == "same_sid"
 
