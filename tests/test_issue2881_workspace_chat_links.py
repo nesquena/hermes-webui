@@ -154,7 +154,7 @@ def test_production_workspace_link_clicks_open_relative_artifacts(
         page = browser.new_page(viewport={"width": 1024, "height": 600}, device_scale_factor=2)
         try:
             page_errors = []
-            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            page.on("pageerror", lambda error, errors=page_errors: errors.append(str(error)))
             if renderer == "settled":
                 link = _render(driver_path, f"[Open artifact](workspace://{rel})")
             else:
