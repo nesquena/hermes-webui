@@ -114,7 +114,20 @@ LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
 
 # Historical ID-linked transcript hydration row.
 python tests/browser_historical_transcript_hydration.py
+
+# Gateway terminal steer-leftover row (#7440): accepted guidance that the
+# agent did not consume must survive a mid-run session switch, queue for the
+# OWNING session, and be delivered by the real queue drain as that session's
+# next gateway run.
+python tests/browser_gateway_steer_leftover.py
 ```
+
+The steer-leftover gate is red against a tree without the
+`run.completed` `pending_steer` translation (guidance silently lost), and
+green with it — it observes the browser's persisted per-session queue
+(`hermes-queue-<sid>`), the untouched second session's queue, and the drained
+follow-up `POST /v1/runs` request body captured by the localhost-only
+Gateway fixture.
 
 To certify that the gate catches its target failure, the test owns an opt-in
 mutation that drops the browser's Anchor-scene persistence request. This command
@@ -184,7 +197,12 @@ Automated coverage:
   event (session id + text, before terminal completion; suppressed on error
   completions and cancelled turns), plus exact-once reconnect replay through
   the real run-journal reader and cursor semantics (`read_run_events`
-  `after_seq` windows — the exact call the SSE replay path makes).
+  `after_seq` windows — the exact call the SSE replay path makes). The
+  listener-semantics lock (queue-for-owner across a view switch, no picker
+  model leak, view-scoped toast/anchor) executes the real listener source in
+  a Node VM; the application's real stream/switch/drain wiring for the same
+  behavior is proven end-to-end by `tests/browser_gateway_steer_leftover.py`
+  (see the browser gates section below).
 - `tests/test_gateway_workspace_relay.py` — workspace containment matrix
   (realpath, exact root, sibling-prefix / traversal / symlink rejection, empty
   input) and per-session `workspace` inclusion or omission in the actual

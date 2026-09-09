@@ -334,17 +334,19 @@ def _find_node() -> str:
 
 
 def test_leftover_listener_queues_for_owner_across_session_switch():
-    """Greptile P1 (head 8be288f5): an accepted-but-unconsumed steer whose
-    owning session is no longer the active view must still be queued FOR THE
-    OWNER — the queue is persisted per-session data, so dropping the event on
-    a view mismatch loses the guidance outright. Visible UI (anchor scene,
-    toast) stays limited to the owning session being the active view, and the
-    current picker's model state must not leak into another session's queue
-    entry (setBusy's drain restores the model from the queued item).
+    """Unit-level lock of the listener's owner-scoping semantics (greptile
+    P1/P2, #7440): queue the leftover for the OWNING session id even when
+    another session is viewed, keep toast/anchor limited to the owner being
+    the active view, and never leak the current picker's model state into
+    another session's queue entry (setBusy's drain restores the model from
+    the queued item).
 
     Executes the REAL listener source (sliced from static/messages.js) in a
-    Node VM against stubbed collaborators, for viewed / switched-away /
-    empty-text / missing-session-id scenarios."""
+    Node VM against stubbed collaborators. This is the fast contract lock;
+    the application's real stream/session-switch/queue-drain wiring for the
+    same behavior is proven end-to-end (real server, real Chromium, real
+    Gateway fixture) by tests/browser_gateway_steer_leftover.py, which is
+    red on a tree without the server-side pending_steer translation."""
     listener_stmt = _leftover_listener_statement()
     # Static guard first: the view-mismatch drop must be gone.
     assert "sid!==activeSid" not in listener_stmt, (
