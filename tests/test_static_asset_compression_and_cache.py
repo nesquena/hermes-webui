@@ -7,11 +7,11 @@ Pre-fix shape:
   static/index.html and static/sw.js carries `?v=__WEBUI_VERSION__`
   fingerprinting that already guarantees a fresh URL on redeploy.
 
-Fix: _serve_static now negotiates gzip when the client opts in, emits
-weak ETags for conditional GETs, and sends `max-age=31536000, immutable`
-when the request URL carries a `?v=…` fingerprint (`max-age=300`
-otherwise). Bytes + headers are cached in-process and invalidated on
-(size, mtime) change so a redeploy is picked up without a restart.
+Fix: _serve_static now negotiates gzip when the client opts in and emits
+byte-derived weak ETags for conditional GETs. Because this checkout is mutable
+in place and `?v=` is client-controlled, every static URL uses conservative
+revalidation. Bytes are read and hashed on each request so metadata-preserving
+replacements cannot reuse stale cache entries.
 
 These tests pin both halves — header policy AND the cache-invalidation
 contract — so future refactors of _serve_static cannot silently
@@ -19,6 +19,9 @@ re-introduce no-store or break the gzip/304 path.
 """
 
 import gzip
+import hashlib
+import os
+import threading
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -101,7 +104,7 @@ def test_plain_get_returns_raw_bytes_with_etag(isolated_static):
     assert h.header("Content-Type") == "application/javascript; charset=utf-8"
     assert h.header("Content-Encoding") is None  # no gzip without Accept-Encoding
     assert h.header("ETag") is not None and h.header("ETag").startswith('W/"')
-    assert h.header("Cache-Control") == "public, max-age=300"  # no fingerprint
+    assert h.header("Cache-Control") == "public, max-age=0, must-revalidate"
     assert bytes(h.body) == payload
 
 
@@ -118,29 +121,29 @@ def test_gzip_negotiated_when_client_accepts(isolated_static):
     assert int(h.header("Content-Length")) == len(h.body) < len(payload)
 
 
-def test_fingerprinted_url_gets_immutable_cache(isolated_static):
+def test_fingerprinted_url_still_revalidates(isolated_static):
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
 
     h = _serve(routes, "/static/ui.js", query="v=abc1234")
-    assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
+    assert h.header("Cache-Control") == "public, max-age=0, must-revalidate"
 
 
-def test_empty_fingerprint_value_gets_short_cache(isolated_static):
-    """Only a non-empty version token is an immutable-cache fingerprint."""
+def test_empty_fingerprint_value_gets_revalidation(isolated_static):
+    """Client-controlled query values never make mutable bytes immutable."""
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
 
     h = _serve(routes, "/static/ui.js", query="v=")
-    assert h.header("Cache-Control") == "public, max-age=300"
+    assert h.header("Cache-Control") == "public, max-age=0, must-revalidate"
 
 
-def test_unfingerprinted_url_gets_short_cache(isolated_static):
+def test_unfingerprinted_url_gets_revalidation(isolated_static):
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
 
     h = _serve(routes, "/static/ui.js")
-    assert h.header("Cache-Control") == "public, max-age=300"
+    assert h.header("Cache-Control") == "public, max-age=0, must-revalidate"
 
 
 def test_conditional_get_returns_304(isolated_static):
@@ -155,7 +158,7 @@ def test_conditional_get_returns_304(isolated_static):
                     request_headers={"If-None-Match": etag})
     assert second.status == 304
     assert second.header("ETag") == etag
-    assert second.header("Cache-Control") == "public, max-age=31536000, immutable"
+    assert second.header("Cache-Control") == "public, max-age=0, must-revalidate"
     assert second.header("Vary") == "Accept-Encoding"
     assert bytes(second.body) == b""
 
@@ -200,6 +203,113 @@ def test_etag_changes_for_same_size_edits_within_same_second(isolated_static):
     second_response = _serve(routes, "/static/ui.js")
     assert second_response.header("ETag") != etag_v1
     assert bytes(second_response.body) == b"b" * 2048
+
+
+def test_same_size_same_mtime_replacement_returns_new_bytes(isolated_static):
+    """A metadata-equal replacement cannot reuse the prior buffer or ETag."""
+    import os
+    from api import routes
+
+    (isolated_static / "nested").mkdir()
+    path = _make_static_file(isolated_static, "nested/ui.js", b"a" * 512)
+    stamp_ns = 1_900_000_000_123_456_789
+    os.utime(path, ns=(stamp_ns, stamp_ns))
+    first = _serve(routes, "/static/nested/ui.js")
+
+    path.write_bytes(b"b" * 512)
+    os.utime(path, ns=(stamp_ns, stamp_ns))
+    second = _serve(routes, "/static/nested/ui.js")
+
+    assert bytes(second.body) == b"b" * 512
+    assert second.header("ETag") != first.header("ETag")
+    stale = _serve(
+        routes,
+        "/static/nested/ui.js",
+        request_headers={"If-None-Match": first.header("ETag")},
+    )
+    assert stale.status == 200
+    assert bytes(stale.body) == b"b" * 512
+
+
+def test_update_after_identity_returns_current_revalidated_bytes(
+    isolated_static, monkeypatch
+):
+    """A stale revision cannot make an interleaved replacement immutable.
+
+    The shell inventory and a later static read are necessarily separate
+    filesystem operations in a mutable checkout. This coordinates an update
+    between them, after first populating the gzip cache with the old bytes,
+    and proves that the static response still describes the bytes it read.
+    """
+    from api import routes
+
+    index_path = isolated_static / "index.html"
+    index_path.write_text("__WEBUI_VERSION__", encoding="utf-8")
+    monkeypatch.setattr(api_config, "get_index_html_path", lambda: index_path)
+    monkeypatch.setattr(routes, "_INDEX_SHELL_CACHE", {})
+
+    path = _make_static_file(isolated_static, "ui.js", b"a" * 4096)
+    first = _serve(
+        routes,
+        "/static/ui.js",
+        request_headers={"Accept-Encoding": "gzip"},
+    )
+    old_etag = first.header("ETag")
+
+    real_token = routes._assets_cache_bust_token
+    identity_captured = threading.Event()
+    replacement_written = threading.Event()
+
+    def token_captured_before_replacement(static_root):
+        token = real_token(static_root)
+        identity_captured.set()
+        assert replacement_written.wait(timeout=2), "test update did not run"
+        return token
+
+    monkeypatch.setattr(
+        routes, "_assets_cache_bust_token", token_captured_before_replacement
+    )
+    rendered: dict[str, str] = {}
+
+    def render_shell():
+        rendered["base"] = routes._render_index_shell_base()
+
+    shell_thread = threading.Thread(target=render_shell)
+    shell_thread.start()
+    assert identity_captured.wait(timeout=2), "identity scan did not run"
+
+    stat = path.stat()
+    path.write_bytes(b"b" * 4096)
+    os.utime(path, (stat.st_atime, stat.st_mtime))
+    replacement_written.set()
+    shell_thread.join(timeout=2)
+    assert not shell_thread.is_alive()
+    stale_token = rendered["base"]
+
+    current = _serve(
+        routes,
+        "/static/ui.js",
+        query=f"v={stale_token}",
+        request_headers={"Accept-Encoding": "gzip"},
+    )
+    expected_digest = hashlib.sha256(b"b" * 4096).hexdigest()
+    assert current.status == 200
+    assert gzip.decompress(bytes(current.body)) == b"b" * 4096
+    assert current.header("ETag") == f'W/"{expected_digest}"'
+    assert current.header("Cache-Control") == "public, max-age=0, must-revalidate"
+    assert current.header("Vary") == "Accept-Encoding"
+
+    stale = _serve(
+        routes,
+        "/static/ui.js",
+        query=f"v={stale_token}",
+        request_headers={
+            "Accept-Encoding": "gzip",
+            "If-None-Match": old_etag,
+        },
+    )
+    assert stale.status == 200
+    assert gzip.decompress(bytes(stale.body)) == b"b" * 4096
 
 
 def test_image_is_not_gzipped(isolated_static):
