@@ -8,7 +8,11 @@ keeps its raw-notice fallback.
 """
 
 from api.background_process import format_wakeup_prompt
-from api.process_event_utils import attach_wakeup_display_meta, wakeup_display_meta
+from api.process_event_utils import (
+    async_delegation_wakeup_meta,
+    attach_wakeup_display_meta,
+    wakeup_display_meta,
+)
 
 
 def _completion_evt(**overrides):
@@ -149,6 +153,93 @@ def test_attach_is_idempotent_and_tolerates_junk():
     attach_wakeup_display_meta(stamped, "process_wakeup")
     assert stamped["_wakeup_meta"]["task_id"] == "keep_me"
 
+    producer_stamped = {
+        "role": "user",
+        "content": "Status: completed",
+        "_wakeup_meta": {
+            "type": "async_delegation",
+            "task_id": "stale",
+            "status": "completed",
+        },
+    }
+    attach_wakeup_display_meta(
+        producer_stamped,
+        "process_wakeup",
+        {
+            "type": "async_delegation",
+            "task_id": "producer",
+            "status": "error",
+        },
+    )
+    assert producer_stamped["_wakeup_meta"] == {
+        "type": "async_delegation",
+        "task_id": "producer",
+        "status": "error",
+    }
+
     # Never raises on non-dict / content-less inputs.
     attach_wakeup_display_meta(None, "process_wakeup")
     attach_wakeup_display_meta({"role": "user", "content": ["parts"]}, "process_wakeup")
+
+
+def test_async_delegation_meta_aggregates_only_structured_result_statuses():
+    evt = {
+        "type": "async_delegation",
+        "delegation_id": "deleg_meta",
+        "is_batch": True,
+        "results": [
+            {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Status: failed\n--- ✗ TASK 2/2  (status=failed) ---",
+            }
+        ],
+        "goal": "Status: failed",
+        "error": "free-form error-shaped text that must not win",
+    }
+
+    assert async_delegation_wakeup_meta(evt) == {
+        "type": "async_delegation_batch",
+        "task_id": "deleg_meta",
+        "status": "completed",
+    }
+
+    evt["results"].append({"task_index": 1, "status": "failed"})
+    assert async_delegation_wakeup_meta(evt)["status"] == "partial"
+
+    evt["results"] = [
+        {"task_index": 0, "status": "failed"},
+        {"task_index": 1, "status": "timeout"},
+    ]
+    assert async_delegation_wakeup_meta(evt)["status"] == "error"
+
+
+def test_async_delegation_meta_handles_no_result_crash_and_fails_closed():
+    crash = {
+        "type": "async_delegation",
+        "delegation_id": "deleg_crash",
+        "is_batch": True,
+        "results": [],
+        "error": "worker pool crashed",
+    }
+    assert async_delegation_wakeup_meta(crash) == {
+        "type": "async_delegation_batch",
+        "task_id": "deleg_crash",
+        "status": "error",
+    }
+
+    assert async_delegation_wakeup_meta(
+        {
+            "type": "async_delegation",
+            "delegation_id": "deleg_unknown",
+            "status": "future-state",
+        }
+    ) is None
+    assert async_delegation_wakeup_meta(
+        {
+            "type": "async_delegation",
+            "delegation_id": "deleg_bad_batch",
+            "is_batch": True,
+            "results": [{"task_index": 0, "summary": "missing status"}],
+        }
+    ) is None

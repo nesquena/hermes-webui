@@ -36,6 +36,7 @@ from api.config import (
 )
 from api.helpers import _redact_text, redact_session_data
 from api.models import clear_process_wakeup_pause, get_session, merge_session_messages_append_only
+from api.process_event_utils import stamp_message_source
 from api.run_journal import RunJournalWriter, bound_run_journal_snapshot_args
 
 logger = logging.getLogger(__name__)
@@ -834,6 +835,7 @@ def _settle_gateway_terminal_error(session_id, stream_id, workspace, model, mode
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        session.pending_user_wakeup_meta = None
         try:
             _snapshot_and_append_partial_on_error(session, stream_id)
         except Exception:
@@ -885,6 +887,7 @@ def _clear_gateway_pending_state(session: Any, stream_id: str) -> None:
     session.pending_attachments = None
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_user_wakeup_meta = None
     session.save()
 
 
@@ -1281,6 +1284,7 @@ def _run_gateway_chat_streaming(
             # role/content ordering instead of turn order.
             assistant_ts = now + 0.000001
             pending_source = getattr(s, "pending_user_source", None) or "webui"
+            pending_wakeup_meta = getattr(s, "pending_user_wakeup_meta", None)
             from api.streaming import _active_turn_authority, _materialize_active_turn_user
 
             active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
@@ -1292,6 +1296,11 @@ def _run_gateway_chat_streaming(
             user_msg["timestamp"] = float(
                 active_turn_identity.get("timestamp") or now
             )
+            if pending_wakeup_meta is not None:
+                # Producer-supplied metadata always wins over whatever the
+                # identity-threading path derived, preserving the trust-boundary
+                # contract independent of the active-turn plumbing.
+                stamp_message_source(user_msg, pending_source, pending_wakeup_meta)
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
@@ -1342,6 +1351,7 @@ def _run_gateway_chat_streaming(
                     s.context_messages,
                     str(msg_text or ""),
                     source=pending_source,
+                    wakeup_meta=pending_wakeup_meta,
                 )
             except Exception:
                 logger.debug("Failed to merge gateway display transcript", exc_info=True)
@@ -1359,6 +1369,7 @@ def _run_gateway_chat_streaming(
             s.pending_attachments = None
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_user_wakeup_meta = None
             s.workspace = str(workspace)
             s.model = model
             s.model_provider = model_provider

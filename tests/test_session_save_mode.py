@@ -91,6 +91,44 @@ def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_
     assert on_disk["pending_user_message"] == "hello eager"
 
 
+@pytest.mark.parametrize("mode", ["deferred", "eager"])
+def test_process_wakeup_chat_start_preserves_raw_body_and_structured_meta(
+    _isolate_state, monkeypatch, mode
+):
+    monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": mode}})
+    s = new_session(workspace=str(_isolate_state.parent))
+    raw_body = "[ASYNC DELEGATION COMPLETE — deleg_raw]\nopaque result\n\n  "
+    wakeup_meta = {
+        "type": "async_delegation",
+        "task_id": "deleg_raw",
+        "status": "completed",
+    }
+
+    routes._prepare_chat_start_session_for_stream(
+        s,
+        msg=raw_body,
+        attachments=[],
+        workspace=str(_isolate_state.parent),
+        model=s.model,
+        model_provider=s.model_provider,
+        stream_id=f"stream_{mode}_wakeup",
+        started_at=789.0,
+        source="process_wakeup",
+        wakeup_meta=wakeup_meta,
+    )
+
+    on_disk = json.loads(s.path.read_text(encoding="utf-8"))
+    assert on_disk["pending_user_message"] == raw_body
+    assert on_disk["pending_user_source"] == "process_wakeup"
+    assert on_disk["pending_user_wakeup_meta"] == wakeup_meta
+    if mode == "eager":
+        assert on_disk["messages"][-1]["content"] == raw_body
+        assert on_disk["messages"][-1]["_source"] == "process_wakeup"
+        assert on_disk["messages"][-1]["_wakeup_meta"] == wakeup_meta
+    else:
+        assert on_disk["messages"] == []
+
+
 def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(_isolate_state, monkeypatch):
     s = Session(session_id="eager_repair", messages=[{"role": "user", "content": "survive"}])
     s.pending_user_message = "survive"
@@ -187,6 +225,27 @@ def test_deferred_turn_is_materialized_when_agent_returns_assistant_only_delta()
         "assistant",
     ]
     assert [m["content"] for m in merged[-2:]] == ["latest prompt", "current answer"]
+
+
+def test_deferred_process_wakeup_merge_preserves_raw_body_and_structured_meta():
+    raw_body = "[ASYNC DELEGATION COMPLETE — deleg_merge]\nopaque result\n\n  "
+    wakeup_meta = {
+        "type": "async_delegation",
+        "task_id": "deleg_merge",
+        "status": "error",
+    }
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display=[],
+        previous_context=[],
+        result_messages=[{"role": "assistant", "content": "handled"}],
+        msg_text=raw_body,
+        source="process_wakeup",
+        wakeup_meta=wakeup_meta,
+    )
+
+    assert merged[0]["content"] == raw_body
+    assert merged[0]["_source"] == "process_wakeup"
+    assert merged[0]["_wakeup_meta"] == wakeup_meta
 
 
 def test_duplicate_assistant_delta_is_not_persisted_twice():

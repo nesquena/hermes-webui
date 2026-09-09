@@ -3110,6 +3110,7 @@ def _clear_stale_stream_state(session) -> bool:
                     original_stub.pending_started_at = None
                 if hasattr(original_stub, "pending_user_source"):
                     original_stub.pending_user_source = None
+                    original_stub.pending_user_wakeup_meta = None
             except Exception:
                 pass
             return False
@@ -3151,6 +3152,7 @@ def _clear_stale_stream_state(session) -> bool:
                             original_stub.pending_started_at = None
                         if hasattr(original_stub, "pending_user_source"):
                             original_stub.pending_user_source = None
+                            original_stub.pending_user_wakeup_meta = None
                     except Exception:
                         pass
                 return True
@@ -3166,6 +3168,7 @@ def _clear_stale_stream_state(session) -> bool:
             session.pending_started_at = None
         if hasattr(session, "pending_user_source"):
             session.pending_user_source = None
+            session.pending_user_wakeup_meta = None
         try:
             # Runtime cleanup is not user activity; do not bubble old sessions
             # to the top of the sidebar just because a stale stream flag was
@@ -3189,6 +3192,7 @@ def _clear_stale_stream_state(session) -> bool:
                 original_stub.pending_started_at = None
             if hasattr(original_stub, "pending_user_source"):
                 original_stub.pending_user_source = None
+                original_stub.pending_user_wakeup_meta = None
         except Exception:
             pass
     return True
@@ -13810,6 +13814,7 @@ def handle_get(handler, parsed) -> bool:
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
                 "pending_user_source": getattr(s, "pending_user_source", None),
+                "pending_user_wakeup_meta": getattr(s, "pending_user_wakeup_meta", None),
                 "context_length": _persisted_cl,
                 "threshold_tokens": _threshold_tokens,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
@@ -16074,6 +16079,7 @@ def handle_post(handler, parsed) -> bool:
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_user_wakeup_meta = None
             s.clear_generation = uuid.uuid4().hex if had_sidecar_messages else None
             # Reset the title via the rename helper so clearing a manually-named
             # session also clears manual_title/llm_title_generated — otherwise the
@@ -16095,6 +16101,7 @@ def handle_post(handler, parsed) -> bool:
                     and persisted.get("pending_attachments") == []
                     and persisted.get("pending_started_at") is None
                     and persisted.get("pending_user_source") is None
+                    and persisted.get("pending_user_wakeup_meta") is None
                     and persisted.get("clear_generation") == s.clear_generation
                 )
             except (OSError, json.JSONDecodeError, ValueError):
@@ -22492,7 +22499,14 @@ def _handle_background(handler, body):
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
-def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, started_at: float | None, source: str = "webui") -> None:
+def _checkpoint_user_message_for_eager_session_save(
+    s,
+    msg: str,
+    attachments,
+    started_at: float | None,
+    source: str = "webui",
+    wakeup_meta=None,
+) -> None:
     """Materialize the current user turn for eager first-turn persistence.
 
     The streaming thread still receives ``pending_user_message`` so existing
@@ -22501,22 +22515,41 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     """
     if not msg:
         return
+    from api.process_event_utils import normalize_wakeup_display_meta, stamp_message_source
+
+    normalized_wakeup_meta = normalize_wakeup_display_meta(wakeup_meta)
     existing = list(getattr(s, "messages", None) or [])
     if existing:
         latest = existing[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
             latest_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
-            if latest_text == msg_text:
+            latest_meta = normalize_wakeup_display_meta(latest.get("_wakeup_meta"))
+            latest_source = latest.get("_source") or "webui"
+            if normalized_wakeup_meta is not None:
+                if (
+                    str(latest.get("content") or "") == str(msg)
+                    and latest_source == (source or "webui")
+                    and latest_meta == normalized_wakeup_meta
+                ):
+                    return
+                if latest_text == msg_text and latest_source == (source or "webui"):
+                    latest["content"] = msg
+                    stamp_message_source(latest, source, normalized_wakeup_meta)
+                    if str(source or "").strip().lower() == "fork":
+                        latest["_fork_child_turn"] = s.session_id
+                    return
+            elif latest_text == msg_text:
                 if str(source or "").strip().lower() == "fork":
                     latest["_fork_child_turn"] = s.session_id
                 return
     user_msg = {"role": "user", "content": msg}
-    from api.process_event_utils import build_active_turn_token, stamp_message_source
+    from api.process_event_utils import build_active_turn_token
 
     stamp_message_source(
         user_msg,
         source,
+        normalized_wakeup_meta,
         active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
     )
     if str(source or "").strip().lower() == "fork":
@@ -22562,6 +22595,7 @@ def _prepare_chat_start_session_for_stream(
     stream_id: str,
     started_at: float | None = None,
     source: str = "webui",
+    wakeup_meta=None,
     retained_user=None,
     retained_context_user=_RETAINED_CONTEXT_USER_UNSET,
     defer_save: bool = False,
@@ -22590,6 +22624,9 @@ def _prepare_chat_start_session_for_stream(
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
     s.pending_user_source = effective_source
+    from api.process_event_utils import normalize_wakeup_display_meta
+
+    s.pending_user_wakeup_meta = normalize_wakeup_display_meta(wakeup_meta)
     if retained_user is not None:
         from api.process_event_utils import build_active_turn_token
 
@@ -22642,6 +22679,7 @@ def _prepare_chat_start_session_for_stream(
             attachments,
             s.pending_started_at,
             source=effective_source,
+            wakeup_meta=s.pending_user_wakeup_meta,
         )
     if not defer_save:
         s.save()
@@ -23064,6 +23102,7 @@ def _start_chat_stream_for_session(
     diag=None,
     goal_related: bool = False,
     source: str = "webui",
+    wakeup_meta=None,
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
@@ -23161,6 +23200,7 @@ def _start_chat_stream_for_session(
                     model_provider=model_provider,
                     stream_id=stream_id,
                     source=source,
+                    wakeup_meta=wakeup_meta,
                 )
                 break
         if needs_stale_cleanup:
@@ -23313,6 +23353,7 @@ def _start_run(
     normalized_model,
     source: str,
     route: str,
+    wakeup_meta=None,
     diag=None,
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
@@ -23336,6 +23377,7 @@ def _start_run(
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
     so both call sites can map it onto their own HTTP shape.
     """
+    from api.process_event_utils import normalize_wakeup_display_meta
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
         StartRunRequest,
@@ -23358,6 +23400,7 @@ def _start_run(
                 normalized_model=normalized_model,
                 diag=diag,
                 source=request.source or source,
+                wakeup_meta=(request.metadata or {}).get("wakeup_meta"),
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
@@ -23365,6 +23408,11 @@ def _start_run(
 
         def _legacy_adapter_factory():
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
+
+        request_metadata = {"route": route}
+        normalized_wakeup_meta = normalize_wakeup_display_meta(wakeup_meta)
+        if normalized_wakeup_meta is not None:
+            request_metadata["wakeup_meta"] = normalized_wakeup_meta
 
         try:
             adapter = build_runtime_adapter(
@@ -23383,7 +23431,7 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata=request_metadata,
                 )
             )
         except NotImplementedError as exc:
@@ -23400,6 +23448,7 @@ def _start_run(
         normalized_model=normalized_model,
         diag=diag,
         source=source,
+        wakeup_meta=wakeup_meta,
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
@@ -23462,6 +23511,7 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    wakeup_meta=None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -23493,20 +23543,27 @@ def start_session_turn(
     caller must leave the ``PENDING_BG_TASK_COMPLETIONS`` marker in place so the
     PR #2279 next-turn drain delivers the wakeup when the active turn ends.
     """
-    msg = str(message or "").strip()
+    msg = str(message or "")
     if _is_silent_control_message(msg):
         return {
             "status": "suppressed",
             "reason": "silent_control_message",
             "_status": 200,
         }
-    if not msg:
+    if not msg.strip():
         return {"error": "message is required", "_status": 400}
     stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
     if stale_response is not None:
         stale_response["_status"] = 409
         return stale_response
     turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
+    from api.process_event_utils import normalize_wakeup_display_meta
+
+    turn_wakeup_meta = (
+        normalize_wakeup_display_meta(wakeup_meta)
+        if turn_source == "process_wakeup"
+        else None
+    )
     try:
         s = get_session(session_id)
     except KeyError:
@@ -23659,6 +23716,7 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        wakeup_meta=turn_wakeup_meta,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -24597,6 +24655,7 @@ def _handle_chat_sync(handler, body):
             _restore_display_reasoning_metadata(_previous_messages, _result_messages),
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
+            wakeup_meta=getattr(s, "pending_user_wakeup_meta", None),
         )
         _compact_session_image_parts_for_persistence(s)
         # Only auto-generate title when still default; preserves user renames
@@ -27196,6 +27255,7 @@ def _handle_session_compress(handler, body):
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_user_wakeup_meta = None
             visible_after = visible_messages_for_anchor(s.messages, auto_compression=False)
             s.compression_anchor_visible_idx = max(0, len(visible_after) - 1) if visible_after else None
             s.compression_anchor_message_key = _anchor_message_key(visible_after[-1]) if visible_after else None

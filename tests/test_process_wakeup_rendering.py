@@ -78,6 +78,8 @@ eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
 eval(extractFunc('_messageIsRenderable'));
 eval(extractFunc('_getVisibleMessagesWithIdx'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
+eval(extractFunc('_pendingCurrentTailUserMessage'));
+eval(extractFunc('getPendingSessionMessage'));
 
 const wakeup = {
   role: 'user',
@@ -121,6 +123,17 @@ const markerWakeupContent = [
   '',
   '[Attached files: result.txt]',
 ].join(String.fromCharCode(10));
+const rawPending='[ASYNC DELEGATION COMPLETE — pending_raw]\nbody\n\n  ';
+const pendingMeta={type:'async_delegation',task_id:'pending_raw',status:'completed'};
+const pendingSession={
+  pending_user_message:rawPending,
+  pending_user_source:'process_wakeup',
+  pending_user_wakeup_meta:pendingMeta,
+  pending_started_at:123,
+};
+const pendingMessage=getPendingSessionMessage(pendingSession,[]);
+const existingPending={role:'user',content:rawPending.trim(),_source:'process_wakeup'};
+const dedupedPending=getPendingSessionMessage(pendingSession,[existingPending]);
 
 process.stdout.write(JSON.stringify({
   visible: visible.map(e => ({rawIdx: e.rawIdx, role: e.m.role, source: e.m._source || '', text: String(e.m.content).slice(0, 32)})),
@@ -129,6 +142,9 @@ process.stdout.write(JSON.stringify({
   virtualHeight,
   attachmentOnlyRenderable: _messageIsRenderable(attachmentOnlyWakeup),
   strippedWakeupDisplay: _stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(markerWakeupContent)),
+  pendingMessage,
+  dedupedPending,
+  reconciledPending:existingPending,
 }));
 """
 
@@ -176,6 +192,22 @@ def test_attachment_only_process_wakeup_is_visible_and_display_markers_are_strip
     assert result["strippedWakeupDisplay"] == "Visible wakeup text"
 
 
+
+def test_pending_process_wakeup_preserves_raw_body_and_structured_meta():
+    result = _run_driver()
+    pending = result["pendingMessage"]
+
+    assert pending["content"] == "[ASYNC DELEGATION COMPLETE — pending_raw]\nbody\n\n  "
+    assert pending["_source"] == "process_wakeup"
+    assert pending["_wakeup_meta"] == {
+        "type": "async_delegation",
+        "task_id": "pending_raw",
+        "status": "completed",
+    }
+    assert result["dedupedPending"] is None
+    assert result["reconciledPending"]["content"] == pending["content"]
+    assert result["reconciledPending"]["_wakeup_meta"] == pending["_wakeup_meta"]
+
 def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     ui = UI_JS_PATH.read_text(encoding="utf-8")
     marker = "const isProcessWakeup="
@@ -197,6 +229,10 @@ def test_process_wakeup_uses_compact_status_row_not_normal_user_bubble():
     assert "${filesHtml}" in process_branch
     assert "t('process_wakeup_label')" in process_branch
     assert "Background wakeup" not in process_branch
+    assert "const processText=String(rowDisplayContent||'');" in process_branch
+    assert "const processText=String(rowDisplayContent||'').trim();" not in process_branch
+    assert "processText.trim()?`<pre" in process_branch
+    assert "${esc(processText)}</pre>" in process_branch
     assert "const rowDisplayContent=displayContent;" in ui
     assert "const rowDisplayContent=isProcessWakeup?content:displayContent;" not in ui
 

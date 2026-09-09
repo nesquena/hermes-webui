@@ -128,3 +128,51 @@ def test_start_session_turn_routes_through_adapter_when_enabled(
     assert resp["_status"] == 200
     assert resp["stream_id"] == "stream-via-adapter"
     assert invoked == {"adapter": 1, "start_run": 1}
+
+
+def test_start_session_turn_adapter_round_trips_explicit_wakeup_meta(
+    _stub_routes, monkeypatch
+):
+    """Trusted async wakeup metadata must survive the adapter request seam."""
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
+
+    from api import runtime_adapter as ra_mod
+
+    wakeup_meta = {
+        "type": "async_delegation_batch",
+        "task_id": "deleg_adapter",
+        "status": "partial",
+    }
+    invoked = {"adapter": 0, "start_run": 0}
+
+    class _SpyAdapter:
+        def start_run(self, request):
+            invoked["start_run"] += 1
+            assert request.session_id == "sess-test"
+            assert request.message == "wakeup msg"
+            assert request.source == "process_wakeup"
+            assert request.metadata == {
+                "route": "start_session_turn",
+                "wakeup_meta": wakeup_meta,
+            }
+            return ra_mod.RunStartResult(
+                run_id="run-test",
+                stream_id="stream-via-adapter",
+                session_id=request.session_id,
+                payload={"_status": 200, "stream_id": "stream-via-adapter"},
+            )
+
+    def _fake_build(**kw):
+        invoked["adapter"] += 1
+        return _SpyAdapter()
+
+    monkeypatch.setattr(ra_mod, "build_runtime_adapter", _fake_build)
+
+    resp = _stub_routes.start_session_turn(
+        "sess-test",
+        "wakeup msg",
+        wakeup_meta=wakeup_meta,
+    )
+    assert resp["_status"] == 200
+    assert resp["stream_id"] == "stream-via-adapter"
+    assert invoked == {"adapter": 1, "start_run": 1}

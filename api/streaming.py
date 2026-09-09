@@ -79,6 +79,7 @@ from api.process_event_utils import (
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    normalize_wakeup_display_meta,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     schedule_async_delegation_claim_retry,
@@ -1725,6 +1726,13 @@ def _active_turn_authority(session, stream_id, msg_text):
         'checkpoint': checkpoint,
         'current_turn_user_idx': None,
         'turn_id': '',
+        # Producer-owned async-delegation wakeup metadata for this pending turn
+        # (see api/process_event_utils.py:attach_wakeup_display_meta). Carried
+        # alongside the rest of the identity so any path that materializes the
+        # current user turn from this authority (eager or deferred, local or
+        # gateway-backed) can restamp the trust-boundary metadata instead of
+        # silently falling back to legacy body-text inference.
+        'wakeup_meta': getattr(session, 'pending_user_wakeup_meta', None),
     }
 
 
@@ -1908,6 +1916,7 @@ def _materialize_active_turn_user(identity, msg_text, source):
         stamp_message_source(
             message,
             identity.get('source') or source or 'webui',
+            identity.get('wakeup_meta'),
             active_turn_token=identity.get('token'),
         )
         if str(identity.get('source') or source or '').strip().lower() == 'fork':
@@ -2059,6 +2068,7 @@ def _settle_result_messages(
     msg_text,
     source,
     active_turn_identity,
+    wakeup_meta=None,
 ):
     (
         result_messages,
@@ -2111,6 +2121,7 @@ def _settle_result_messages(
         _restore_display_reasoning_metadata(previous_messages, result_messages),
         msg_text,
         source=source,
+        wakeup_meta=wakeup_meta,
         verification_nudge_provenance=verification_nudge_provenance,
     )
     _annotate_media_snapshots_for_settled_messages(session.messages)
@@ -2276,6 +2287,7 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_user_wakeup_meta = None
     if not _session_has_cancel_marker(session):
         agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
@@ -2295,6 +2307,7 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_attachments = []
     session.pending_started_at = None
     session.pending_user_source = None
+    session.pending_user_wakeup_meta = None
     try:
         import pathlib
         pathlib.Path(session.path).unlink(missing_ok=True)
@@ -5076,11 +5089,15 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             saved_pending_attachments = list(getattr(s, 'pending_attachments', []) or [])
             saved_pending_started_at = getattr(s, 'pending_started_at', None)
             saved_pending_user_source = getattr(s, 'pending_user_source', None)
+            saved_pending_user_wakeup_meta = getattr(
+                s, 'pending_user_wakeup_meta', None
+            )
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
             s.pending_user_source = None
+            s.pending_user_wakeup_meta = None
             try:
                 # skip_index=False so the snapshot appears in _index.json with
                 # the pre_compression_snapshot marker. The sidebar projection
@@ -5100,6 +5117,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
+                s.pending_user_wakeup_meta = saved_pending_user_wakeup_meta
             return
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
@@ -5121,6 +5139,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             snapshot.pending_attachments = []
             snapshot.pending_started_at = None
             snapshot.pending_user_source = None
+            snapshot.pending_user_wakeup_meta = None
             snapshot.save(touch_updated_at=False, skip_index=False)
             logger.info(
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
@@ -6909,6 +6928,7 @@ def _merge_display_messages_after_agent_result(
     result_messages,
     msg_text,
     source: str = "webui",
+    wakeup_meta=None,
     verification_nudge_provenance=None,
 ):
     """Keep UI transcript durable while allowing model context to compact.
@@ -7178,6 +7198,14 @@ def _merge_display_messages_after_agent_result(
             or _active_turn_has_checkpoint(previous_context, _active_turn_identity)
         )
     )
+    normalized_wakeup_meta = normalize_wakeup_display_meta(wakeup_meta)
+    if normalized_wakeup_meta is not None and current_user_already_checkpointed:
+        # Reconcile the durable boundary row with the producer-owned body and
+        # metadata before deduping the provider echo for this same turn.
+        checkpoint = copy.deepcopy(merged[-1])
+        checkpoint['content'] = msg_text
+        stamp_message_source(checkpoint, source, normalized_wakeup_meta)
+        merged[-1] = checkpoint
     if (
         current_user_key is not None
         and not current_user_in_candidates
@@ -7197,6 +7225,11 @@ def _merge_display_messages_after_agent_result(
         current_user_msg = _materialize_active_turn_user(
             _active_turn_identity, msg_text, source
         )
+        if normalized_wakeup_meta is not None:
+            # Producer-supplied metadata always wins over whatever the identity
+            # threading path derived (or failed to derive), preserving the
+            # trust-boundary contract independent of the active-turn plumbing.
+            stamp_message_source(current_user_msg, source, normalized_wakeup_meta)
         insert_at = 0
         while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
             insert_at += 1
@@ -7257,7 +7290,7 @@ def _merge_display_messages_after_agent_result(
         ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
-            stamp_message_source(display_msg, source)
+            stamp_message_source(display_msg, source, wakeup_meta)
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -7324,6 +7357,7 @@ def _turn_transcript_lacks_final_assistant_answer(
     previous_display,
     msg_text,
     source: str = "webui",
+    wakeup_meta=None,
     drop_replayed_assistant: bool = False,
     active_turn_identity=None,
 ) -> bool:
@@ -7351,8 +7385,7 @@ def _turn_transcript_lacks_final_assistant_answer(
             'role': 'user',
             'content': msg_text,
         }
-        if source and source != 'webui':
-            pending_user['_source'] = source
+        stamp_message_source(pending_user, source, wakeup_meta)
         merged_messages.append(pending_user)
         current_user_idx = len(merged_messages) - 1
 
@@ -7389,6 +7422,7 @@ def _merged_transcript_lacks_final_assistant_answer(
     result_messages,
     msg_text,
     source: str = "webui",
+    wakeup_meta=None,
     drop_replayed_assistant: bool = False,
     active_turn_identity=None,
 ) -> bool:
@@ -7406,6 +7440,7 @@ def _merged_transcript_lacks_final_assistant_answer(
         _restore_reasoning_metadata(previous_display, result_messages),
         msg_text,
         source=source,
+        wakeup_meta=wakeup_meta,
         verification_nudge_provenance={
             'verification_nudge_seen': _verification_nudge_seen,
             'active_turn_identity': active_turn_identity,
@@ -7416,6 +7451,7 @@ def _merged_transcript_lacks_final_assistant_answer(
         previous_display,
         msg_text,
         source=source,
+        wakeup_meta=wakeup_meta,
         drop_replayed_assistant=drop_replayed_assistant,
         active_turn_identity=active_turn_identity,
     )
@@ -7961,6 +7997,9 @@ def _materialize_pending_user_turn_before_error(
     if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
         recovered_ts = int(pending_started_at)
     pending_source = getattr(session, 'pending_user_source', None) or 'webui'
+    pending_wakeup_meta = normalize_wakeup_display_meta(
+        getattr(session, 'pending_user_wakeup_meta', None)
+    )
     pending_attachments = list(getattr(session, 'pending_attachments', None) or [])
 
     # A returned Agent result is settled into ``session.messages`` before its
@@ -8011,12 +8050,30 @@ def _materialize_pending_user_turn_before_error(
             existing_ts = int(existing.get('timestamp'))
         except (TypeError, ValueError):
             return False
-        return (
-            _normalize_user_text(_message_text(existing.get('content'))) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
+        checkpoint_fields_match = (
+            existing_ts == recovered_ts
             and existing_source == pending_source
             and list(existing.get('attachments') or []) == pending_attachments
         )
+        if not checkpoint_fields_match:
+            return False
+        existing_text = _message_text(existing.get('content'))
+        if pending_wakeup_meta is None:
+            return _normalize_user_text(existing_text) == _normalize_user_text(
+                pending_text
+            )
+        if str(existing.get('content') or '') == pending_text and (
+            normalize_wakeup_display_meta(existing.get('_wakeup_meta'))
+            == pending_wakeup_meta
+        ):
+            return True
+        if _normalize_user_text(existing_text) != _normalize_user_text(
+            pending_text
+        ):
+            return False
+        existing['content'] = pending_text
+        stamp_message_source(existing, pending_source, pending_wakeup_meta)
+        return True
 
     if is_exact_checkpoint(getattr(session, 'messages', None)):
         return False
@@ -8028,7 +8085,7 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(recovered, pending_source, pending_wakeup_meta)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -9278,6 +9335,7 @@ def _run_agent_streaming(
     _turn_session_identity_tokens = None
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
+    _turn_pending_wakeup_meta = None
     _streaming_hermes_home_override_ctx = (None, None, False)
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
@@ -9302,6 +9360,7 @@ def _run_agent_streaming(
         _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
+        _turn_pending_wakeup_meta = getattr(s, 'pending_user_wakeup_meta', None)
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -11042,6 +11101,7 @@ def _run_agent_streaming(
                         msg_text,
                         _turn_pending_source,
                         _active_turn_identity,
+                        wakeup_meta=_turn_pending_wakeup_meta,
                     )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -11221,7 +11281,8 @@ def _run_agent_streaming(
                     _previous_owner_context_messages,
                     _all_result_messages,
                     msg_text,
-                    source=getattr(s, 'pending_user_source', None) or 'webui',
+                    source=_turn_pending_source,
+                    wakeup_meta=_turn_pending_wakeup_meta,
                     drop_replayed_assistant=_drop_replayed_assistant,
                     active_turn_identity=_active_turn_identity,
                 )
@@ -11430,6 +11491,7 @@ def _run_agent_streaming(
                                     msg_text,
                                     _turn_pending_source,
                                     _active_turn_identity,
+                                    wakeup_meta=_turn_pending_wakeup_meta,
                                 )
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -11518,6 +11580,7 @@ def _run_agent_streaming(
                         s.pending_attachments = []
                         s.pending_started_at = None
                         s.pending_user_source = None
+                        s.pending_user_wakeup_meta = None
                         try:
                             _snapshot_and_append_partial_on_error(
                                 s,
@@ -11720,6 +11783,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_user_wakeup_meta = None
                 # Tag the matching user message with attachment filenames for display on reload
                 # Only tag a user message whose content relates to this turn's text
                 # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -12714,6 +12778,7 @@ def _run_agent_streaming(
                                         msg_text,
                                         _turn_pending_source,
                                         _active_turn_identity,
+                                        wakeup_meta=_turn_pending_wakeup_meta,
                                     )
                                     # Terminal self-heal success must finalize the
                                     # turn exactly once: clear the pending markers
@@ -12730,6 +12795,7 @@ def _run_agent_streaming(
                                     s.pending_attachments = []
                                     s.pending_started_at = None
                                     s.pending_user_source = None
+                                    s.pending_user_wakeup_meta = None
                                     s.save()
                                     _done_session_payload = redact_session_data(
                                         _session_payload_with_full_messages(
@@ -12845,6 +12911,7 @@ def _run_agent_streaming(
                 s.pending_attachments = []
                 s.pending_started_at = None
                 s.pending_user_source = None
+                s.pending_user_wakeup_meta = None
                 try:
                     _snapshot_and_append_partial_on_error(
                         s,
@@ -13402,6 +13469,9 @@ def cancel_stream(stream_id: str) -> bool:
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
                     _pending_source = getattr(_cs, 'pending_user_source', None)
+                    _pending_wakeup_meta = getattr(
+                        _cs, 'pending_user_wakeup_meta', None
+                    )
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
@@ -13435,7 +13505,11 @@ def cancel_stream(stream_id: str) -> bool:
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                _pending_wakeup_meta,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
@@ -13449,6 +13523,7 @@ def cancel_stream(stream_id: str) -> bool:
                 _cs.pending_attachments = []
                 _cs.pending_started_at = None
                 _cs.pending_user_source = None
+                _cs.pending_user_wakeup_meta = None
                 # Persist any partial assistant text that was streamed before cancel (#893).
                 # Preserving partial content means the user sees what the agent had
                 # produced rather than losing it entirely.  The marker is _partial=True
