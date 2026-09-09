@@ -37,7 +37,7 @@ def main():
                             context.add_init_script(INIT)
                             page = context.new_page()
                             errors = []
-                            page.on('pageerror', lambda e: errors.append(str(e)))
+                            page.on('pageerror', lambda e, errs=errors: errs.append(str(e)))
                             snapshot = fixture(100)
                             session = dict(session_id='fixture', title='Energy regression', model='',
                                            workspace=temp, messages=[], message_count=0, tool_calls=[],
