@@ -1889,15 +1889,17 @@ function cancelCronForm(){
   _clearCronDetail();
 }
 
-function _cronModelBareName(model, provider) {
+function _modelBareNameForProvider(model, provider) {
   // Strip @provider: prefix from a model value when provider is stored separately.
-  // The model dropdown may contain values like "@custom:9router:chat" (from
-  // _apply_provider_prefix) but cron jobs store model and provider separately,
-  // so the model should be just "chat".
   if (model && provider && model.startsWith('@' + provider + ':')) {
     return model.slice(('@' + provider + ':').length);
   }
   return model;
+}
+
+function _cronModelBareName(model, provider) {
+  // Cron jobs store model and provider separately, just like auxiliary slots.
+  return _modelBareNameForProvider(model, provider);
 }
 
 async function saveCronForm(){
@@ -12326,17 +12328,25 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  const emptyOpt=document.createElement('option');
  emptyOpt.value='';emptyOpt.textContent=t('settings_aux_model_auto')||'auto (use provider default)';
  sel.appendChild(emptyOpt);
+ const canonicalCurrent=_modelBareNameForProvider(currentModel,provider)||'';
  if(!provider||provider==='auto'){
-  sel.value=currentModel||'';
-  return;
+  sel.value=canonicalCurrent;
+  return canonicalCurrent;
  }
  // Find matching provider in cached list
  const pData=providers.find(p=>p.slug===provider);
+ const modelValues=new Set();
  if(pData&&pData.models){
-  for(const mId of pData.models){
+  for(const modelEntry of pData.models){
+   const routeId=typeof modelEntry==='string'?modelEntry:String(modelEntry?.id||'');
+   const mId=_modelBareNameForProvider(routeId,provider)||'';
+   if(!mId||modelValues.has(mId)) continue;
+   modelValues.add(mId);
+   const routeLabel=typeof modelEntry==='string'?'':String(modelEntry?.label||'');
+   const modelLabel=_modelBareNameForProvider(routeLabel,provider)||mId;
    const opt=document.createElement('option');
-   opt.value=mId;opt.textContent=mId;
-   if(mId===currentModel) opt.selected=true;
+   opt.value=mId;opt.textContent=modelLabel;
+   if(mId===canonicalCurrent) opt.selected=true;
    sel.appendChild(opt);
   }
  }
@@ -12345,12 +12355,13 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
  sel.appendChild(customOpt);
  // If currentModel not in list and not empty, add it as a custom option
- if(currentModel&&!pData?.models?.includes(currentModel)){
+ if(canonicalCurrent&&!modelValues.has(canonicalCurrent)){
   const existingOpt=document.createElement('option');
-  existingOpt.value=currentModel;existingOpt.textContent=currentModel+' (configured)';
+  existingOpt.value=canonicalCurrent;existingOpt.textContent=canonicalCurrent+' (configured)';
   existingOpt.selected=true;
   sel.insertBefore(existingOpt,customOpt);
  }
+ return canonicalCurrent;
 }
 
 function _onAuxProviderChange(taskKey,providers){
@@ -12368,13 +12379,16 @@ async function _onAuxModelChange(taskKey){
  if(modelSel.value==='__custom__'){
   const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
   if(customModel&&customModel.trim()){
+   const provider=$('aux-prov-'+taskKey)?.value||'';
+   const enteredModel=customModel.trim();
+   const canonicalModel=_modelBareNameForProvider(enteredModel,provider)||enteredModel;
    // Insert custom model option before the __custom__ option
    const opt=document.createElement('option');
-   opt.value=customModel.trim();opt.textContent=customModel.trim();
+   opt.value=canonicalModel;opt.textContent=canonicalModel;
    // Remove __custom__ selection
    const customIdx=[...modelSel.options].findIndex(o=>o.value==='__custom__');
    if(customIdx>=0) modelSel.insertBefore(opt,modelSel.options[customIdx]);
-   modelSel.value=customModel.trim();
+   modelSel.value=canonicalModel;
   }else{
    modelSel.value='';
   }
@@ -12581,7 +12595,7 @@ async function _loadAuxiliaryModels(){
   _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
    slug:g.provider_id||g.provider,
    name:g.provider,
-   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
+   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>({id:m.id,label:m.label||m.id})),
   }));
   if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
    _mainAdvancedConfig=auxData.main||{};
@@ -12596,6 +12610,7 @@ async function _loadAuxiliaryModels(){
   _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
 
   container.innerHTML='';
+  let needsCanonicalSave=false;
   for(const task of _auxTasks){
    const cfg=taskMap[task.task]||{provider:'auto',model:''};
    const row=document.createElement('div');
@@ -12619,7 +12634,8 @@ async function _loadAuxiliaryModels(){
    const modelSel=document.createElement('select');
    modelSel.id='aux-model-'+task.task;
    modelSel.style.cssText=_auxSelectStyle();
-   _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   const canonicalModel=_buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   if(canonicalModel!==cfg.model) needsCanonicalSave=true;
    modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
    row.appendChild(modelSel);
 
@@ -12636,9 +12652,9 @@ async function _loadAuxiliaryModels(){
 
    container.appendChild(row);
   }
-  // Hide apply button (no changes yet)
+  // Matching legacy @provider:model values can be repaired with one explicit Apply.
   const applyBtn=$('btnApplyAuxModels');
-  if(applyBtn) applyBtn.style.display='none';
+  if(applyBtn) applyBtn.style.display=needsCanonicalSave?'':'none';
 
   // Reset button
   const resetBtn=$('btnResetAuxModels');
