@@ -95,6 +95,48 @@ function defineClassName(node) {
   });
 }
 
+function _selMatch(node, simple) {
+  simple = String(simple || '').trim();
+  if (!simple) return false;
+  const comps = simple.match(/\.([\w-]+)|\[([^\]]+)\]|^([a-zA-Z][\w-]*)$/g) || [];
+  if (!comps.length) return false;
+  for (const part of comps) {
+    if (part[0] === '.') {
+      if (!(node.classList && node.classList.contains(part.slice(1)))) return false;
+    } else if (part[0] === '[') {
+      const m = part.slice(1, -1).match(/^([\w-]+)="([^"]*)"$/);
+      if (!m) return false;
+      const key = m[1].startsWith('data-') ? m[1].slice(5) : m[1];
+      const want = m[2].replace(/\\(.)/g, '$1');
+      const got = node.dataset ? node.dataset[key] : undefined;
+      if (String(got === undefined || got === null ? '' : got) !== want) return false;
+    } else {
+      if (node.tagName !== part.toUpperCase()) return false;
+    }
+  }
+  return true;
+}
+
+function _qsa(root, selector) {
+  const parts = String(selector || '').trim().split(/\s+/).filter(Boolean);
+  const out = [];
+  if (!parts.length) return out;
+  const last = parts[parts.length - 1];
+  const stack = [...(root.children || [])];
+  while (stack.length) {
+    const n = stack.shift();
+    if (n.children && n.children.length) stack.push(...n.children);
+    if (!_selMatch(n, last)) continue;
+    if (parts.length === 1) { out.push(n); continue; }
+    let p = n.parentElement;
+    while (p && p !== root) {
+      if (_selMatch(p, parts[0])) { out.push(n); break; }
+      p = p.parentElement;
+    }
+  }
+  return out;
+}
+
 function makeNode(tag) {
   const node = {
     tagName: String(tag || '').toUpperCase(),
@@ -109,18 +151,61 @@ function makeNode(tag) {
     _listeners: {},
     _innerHTML: '',
     appendChild(child) {
+      if (child.parentElement) {
+        const oldIdx = child.parentElement.children.indexOf(child);
+        if (oldIdx >= 0) child.parentElement.children.splice(oldIdx, 1);
+        const oldSel = child.parentElement.tagName === 'SELECT'
+          ? child.parentElement
+          : child.parentElement._ownerSelect;
+        if (oldSel && oldSel.options) {
+          const oi = oldSel.options.indexOf(child);
+          if (oi >= 0) oldSel.options.splice(oi, 1);
+        }
+      }
       child.parentElement = this;
+      child.parentNode = this;
       this.children.push(child);
       if (this.tagName === 'OPTGROUP' && this._ownerSelect && child.tagName === 'OPTION') {
         this._ownerSelect.options.push(child);
       }
       return child;
     },
+    insertBefore(newChild, refChild) {
+      newChild.parentElement = this;
+      const idx = refChild ? this.children.indexOf(refChild) : -1;
+      if (idx >= 0) this.children.splice(idx, 0, newChild);
+      else this.children.push(newChild);
+      return newChild;
+    },
+    remove() {
+      if (this.parentElement) {
+        const idx = this.parentElement.children.indexOf(this);
+        if (idx >= 0) this.parentElement.children.splice(idx, 1);
+      }
+    },
     addEventListener(type, handler) { this._listeners[type] = handler; },
-    querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
+    querySelector(selector) {
+      if (this._qs && this._qs[selector]) return this._qs[selector];
+      return _qsa(this, selector)[0] || null;
+    },
+    querySelectorAll(selector) { return _qsa(this, selector); },
+    getAttribute(name) {
+      if (name.startsWith('data-')) {
+        return this.dataset ? this.dataset[name.slice(5)] : undefined;
+      }
+      return this[name];
+    },
     setAttribute(name, value) { this[name] = value; },
     focus() { this._focused = true; },
   };
+  Object.defineProperty(node, 'previousElementSibling', {
+    get() {
+      if (!this.parentElement) return null;
+      const idx = this.parentElement.children.indexOf(this);
+      return idx > 0 ? this.parentElement.children[idx - 1] : null;
+    },
+  });
+  Object.defineProperty(node, 'offsetTop', { value: 0 });
   node.classList = makeClassList();
   defineClassName(node);
   Object.defineProperty(node, 'innerHTML', {
@@ -154,6 +239,7 @@ function makeOption(value, label, parent, providerId) {
   opt.value = value;
   opt.textContent = label || value;
   opt.parentElement = parent || null;
+  opt.parentNode = parent || null;
   // Real catalog stamping (#7241/#7400): provider-qualified option ids get the
   // bare model + owning provider derived by the same helper the population
   // loop and _appendOverflowOptionsToGroup use.
@@ -165,19 +251,33 @@ function makeOption(value, label, parent, providerId) {
   return opt;
 }
 
-function makeSelect(groups, selectedValue) {
-  const sel = { id: 'modelSelect', children: [], options: [], selectedOptions: [], value: selectedValue || '' };
+function makeSelect(groups, selectedValue, rootOption) {
+  const sel = {
+    id: 'modelSelect', tagName: 'SELECT', children: [], options: [], selectedOptions: [],
+    value: selectedValue || '',
+    querySelectorAll() { return this.options.slice(); },
+  };
   for (const group of groups || []) {
     const og = makeNode('optgroup');
     og.label = group.provider || '';
     og.dataset.provider = group.provider_id || '';
     og._ownerSelect = sel;
+    og.parentElement = sel;
+    og.parentNode = sel;
     if (group.extra_models) og.dataset.extraModels = JSON.stringify(group.extra_models);
     for (const model of group.models || []) {
       og.appendChild(makeOption(model.id, model.label || model.id, og, group.provider_id));
     }
     sel.children.push(og);
     sel.options.push(...og.children);
+  }
+  // The real-sequence root injection (#7400 re-gate): an overflow model that
+  // was picked via search lives at the <select> ROOT (populated by
+  // _ensureModelOptionInDropdown), not inside its provider's optgroup.
+  if (rootOption && rootOption.id) {
+    const ro = makeOption(rootOption.id, rootOption.label || rootOption.id, sel, rootOption.provider || '');
+    sel.children.push(ro);
+    sel.options.push(ro);
   }
   const selOpt = sel.options.find(o => String(o.value || '') === String(selectedValue || ''));
   if (selOpt) sel.selectedOptions = [selOpt];
@@ -209,6 +309,9 @@ function findInTree(dd, pred) {
   }
   return null;
 }
+
+const CSS = { escape: s => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '\\$&') };
+const requestAnimationFrame = fn => { fn(); return 0; };
 
 const payload = JSON.parse(process.argv[3]);
 const dropdown = makeNode('div');
@@ -253,7 +356,7 @@ for (const name of [
 
 // Build the select AFTER the real helpers are eval'd — makeOption's metadata
 // stamping calls _qualifiedCatalogOptionMeta.
-const modelSelect = makeSelect(payload.groups, payload.selectedValue);
+const modelSelect = makeSelect(payload.groups, payload.selectedValue, payload.rootOption);
 
 renderModelDropdown();
 const initial = snapshot(dropdown);
@@ -278,10 +381,10 @@ def driver_path(tmp_path_factory):
     return str(p)
 
 
-def _run(driver_path, groups, selected_value):
+def _run(driver_path, groups, selected_value, root_option=None):
     result = subprocess.run(
         [NODE, driver_path, str(REPO / "static" / "ui.js"),
-         json.dumps({"groups": groups, "selectedValue": selected_value})],
+         json.dumps({"groups": groups, "selectedValue": selected_value, "rootOption": root_option})],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
@@ -377,9 +480,13 @@ def test_bare_selected_row_still_matches(driver_path):
     assert QUALIFIED_CUSTOM not in active_ids, active_ids
 
 
-def test_qualified_row_overflows_are_canonicalized(driver_path):
-    """Provider-qualified overflow rows (extra_models of a capped custom group)
-    revealed via the show-all expander must also match by canonical identity."""
+def test_selected_root_injected_overflow_show_all_keeps_single_active(driver_path):
+    """REAL sequence (#7400 re-gate): an overflow model picked via search is
+    injected at the <select> ROOT (its own active row + Selected badge), while
+    the provider optgroup still advertises it as overflow. Clicking the
+    group's Show-all expander must MOVE the option into the optgroup and keep
+    exactly ONE active row and ONE Selected badge — the in-place reveal must
+    not build a second active row while the stale root row stays rendered."""
     groups = [
         {
             "provider": "Custom Omni",
@@ -393,16 +500,34 @@ def test_qualified_row_overflows_are_canonicalized(driver_path):
             "models": [{"id": BARE_MODEL, "label": BARE_MODEL}],
         },
     ]
-    out = _run(driver_path, groups, QUALIFIED_CUSTOM)
-
-    snap = out["afterExpand"] or out["initial"]
-    active = _active_rows(snap)
-    # The qualified overflow row must be the single active one after reveal.
-    assert len(active) == 1, (
-        "the provider-qualified overflow row must become the active row after "
-        f"show-all reveal; got {[a['className'] for a in active]}"
+    out = _run(
+        driver_path,
+        groups,
+        QUALIFIED_CUSTOM,
+        root_option={"id": QUALIFIED_CUSTOM, "label": BARE_MODEL, "provider": "custom:omni"},
     )
-    assert "model-opt-badge--selected" in active[0]["html"]
-    active_ids = _row_model_ids(active)
-    assert QUALIFIED_CUSTOM in active_ids, active_ids
-    assert BARE_MODEL not in active_ids, active_ids
+
+    assert out["initial"] is not None and out["afterExpand"] is not None, (
+        "the root-injected selected option must render its row AND the group "
+        "must advertise a Show-all expander to click"
+    )
+    for label, snap in (("before", out["initial"]), ("after", out["afterExpand"])):
+        active = _active_rows(snap)
+        assert len(active) == 1, (
+            f"{label} Show-all reveal must keep exactly ONE active row — the "
+            f"root-injected option must not duplicate inside the group; "
+            f"got {[a['className'] for a in active]}"
+        )
+        assert "model-opt-badge--selected" in active[0]["html"] and "Selected" in active[0]["html"], (
+            f"{label}: the single active row must carry the Selected badge"
+        )
+        ids = _row_model_ids(snap)
+        # The qualified id must appear exactly once across ALL rendered rows —
+        # no orphan root row left behind next to the group row.
+        assert ids.count(QUALIFIED_CUSTOM) == 1, (
+            f"{label}: qualified row must render exactly once; ids={ids}"
+        )
+    active_after = _row_model_ids(_active_rows(out["afterExpand"]))
+    assert BARE_MODEL not in active_after, (
+        "the bare row of the other provider must stay inactive after the reveal"
+    )

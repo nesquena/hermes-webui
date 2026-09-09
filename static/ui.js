@@ -4517,6 +4517,25 @@ function renderModelDropdown(){
     // and returns 0 (while still clearing dataset.extraModels) when every overflow
     // model already existed as an option. Bailing on a 0 return would leave those
     // already-present-but-hidden rows unrevealed and the expander dead (#bug3).
+    // Detect BEFORE the append whether any overflow option already lives
+    // OUTSIDE this optgroup. That happens when the selected overflow model was
+    // injected at the <select> ROOT by _ensureModelOptionInDropdown (search
+    // picked a model that was overflow-hidden inside its own provider group):
+    // the dropdown then renders that root option as its own active row with a
+    // Selected badge. The append below MOVES the option into the optgroup, but
+    // the in-place reveal would still build a SECOND active row inside the
+    // group while the stale root row (and its _modelData entry) stays
+    // rendered — two `.model-opt.active` rows and two Selected badges until a
+    // later full re-render (#7400 re-gate). Take the full re-render in that
+    // case: it re-reads the <select>, renders the moved option exactly once
+    // (in its provider group) and drops the orphan root row.
+    let _movedFromRoot=false;
+    try{
+      if(og.parentNode&&typeof og.parentNode.querySelectorAll==='function'){
+        const _rootOptions=Array.from(og.parentNode.querySelectorAll('option')).filter(o=>o&&o.parentNode!==og);
+        _movedFromRoot=extraModels.some(m=>m&&m.id&&_rootOptions.some(o=>String(o.value||'')===String(m.id)));
+      }
+    }catch(_){ /* minimal DOM — fall through to the existing guards */ }
     _appendOverflowOptionsToGroup(og,extraModels);
     // Full re-render fallback — the proven path. Used when the in-place reveal
     // can't run (minimal/headless DOM without CSS.escape/rAF/insertBefore, or any
@@ -4528,6 +4547,7 @@ function renderModelDropdown(){
       const ns=dd.querySelector('.model-search-input');
       if(ns){ ns.value=_term; (ns._listeners&&ns._listeners.input)?ns._listeners.input():ns.dispatchEvent(new Event('input')); }
     };
+    if(_movedFromRoot){ _fullReRender(); return; }
     // IN-PLACE reveal: build the newly-revealed rows and insert them directly into
     // the existing group wrapper (before the "Show more" expander), then remove
     // the expander. No full re-render — so the group stays open, every other
