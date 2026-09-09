@@ -669,11 +669,20 @@ def test_handoff_summary_codex_output_cap_matches_provider_compatibility(
             request_kwargs.append(kwargs)
             return object()
 
-        def _normalize_codex_response(self, response):
-            return types.SimpleNamespace(content="- You should complete the remaining review."), "stop"
+        def _get_transport(self, mode=None):
+            # hermes-agent v0.21 contract: normalization goes through the
+            # provider transport (CodexTransport.normalize_response returns
+            # NormalizedResponse with .content); the old
+            # AIAgent._normalize_codex_response method no longer exists.
+            assert mode == "codex_responses"
+            return _CodexTransport()
 
         def release_clients(self):
             return None
+
+    class _CodexTransport:
+        def normalize_response(self, response, **kwargs):
+            return types.SimpleNamespace(content="- You should complete the remaining review.")
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = _CodexAgent

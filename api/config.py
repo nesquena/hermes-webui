@@ -2247,6 +2247,29 @@ def _model_matches_picker_selection(
     return not selected_provider or not candidate_provider or selected_provider == candidate_provider
 
 
+def _openrouter_model_display_name(model_id: str) -> str:
+    """Return the OpenRouter display name (e.g. ``Ox Alpha``) for *model_id*.
+
+    Reads only the local shared metadata disk cache written by hermes-agent
+    (``cache/openrouter_model_metadata.json``) — never touches the network.
+    Falls back to the raw id when the model is unknown or the cache is
+    unavailable, so picker rows are always populated (#7228).
+    """
+    if not model_id:
+        return model_id
+    try:
+        from agent.model_metadata import _load_model_metadata_disk_cache
+
+        cache = _load_model_metadata_disk_cache() or {}
+    except Exception:
+        return model_id
+    entry = cache.get(model_id)
+    if not isinstance(entry, dict):
+        return model_id
+    name = str(entry.get("name") or "").strip()
+    return name or model_id
+
+
 def _split_picker_overflow_models(
     ordered_models: list[dict],
     *,
@@ -3311,8 +3334,35 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
 
     # For non-OpenRouter slash IDs without an explicit configured provider,
     # keep the ID intact so existing custom/proxy base_url routing and
-    # portal-provider handling remain in charge.
+    # portal-provider handling remain in charge — UNLESS the session provider
+    # is a known routable provider that differs from the profile default.
+    # Dropping the hint there lets the default provider's base_url win and
+    # 404s (e.g. a Nous portal row `upstage/solar-pro4:free` under an
+    # xai-oauth default gets sent to api.x.ai — #7333). Emit the explicit
+    # hint for known static/portal providers and named custom providers
+    # (including `custom:<slug>` stored as the session provider), and keep
+    # the bare ID only for unknown/ambiguous provider slugs (negative
+    # control) so custom/proxy base_url routing stays in charge.
     if "/" in model:
+        if provider in _PROVIDER_MODELS or provider in _PROVIDER_DISPLAY:
+            return f"@{provider}:{model}"
+        # A named custom provider is only routable when the slug resolves to a
+        # real, unique custom_providers[] entry. `custom:missing` (stale
+        # session provider, no config entry) must NOT be minted into an
+        # @custom:missing:... route — resolve_model_provider() would take the
+        # named-provider lane and find no matching endpoint. `_unique_custom_provider_entry`
+        # returns None for unknown slugs and raises AmbiguousCustomProviderError
+        # for collisions, matching the point-of-return guard used by
+        # resolve_model_provider. (#7356 maintainer review)
+        if provider.startswith("custom:"):
+            custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else []
+            if (
+                _unique_custom_provider_entry(
+                    custom_providers, _custom_provider_slug_key(provider)
+                )
+                is not None
+            ):
+                return f"@{provider}:{model}"
         return model
 
     return f"@{provider}:{model}"
@@ -7790,7 +7840,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         for mid, _desc in live_curated:
                             if mid and mid not in seen_ids:
                                 seen_ids.add(mid)
-                                raw_models.append({"id": mid, "label": mid})
+                                # Ship the friendly display name (e.g. "Ox Alpha")
+                                # from the local OpenRouter metadata cache instead
+                                # of the raw id, so the picker search matches what
+                                # users see in Hermes Desktop (#7228).
+                                raw_models.append(
+                                    {"id": mid, "label": _openrouter_model_display_name(mid)}
+                                )
                     except Exception:
                         logger.warning("Failed to load OpenRouter curated catalog from hermes_cli")
 
