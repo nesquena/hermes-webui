@@ -150,13 +150,54 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
-def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
+def _read_jsonl(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
+    return_truncated: bool = False,
+) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], bool]:
     events: list[dict] = []
     malformed: list[dict] = []
+    truncated = False
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        if max_bytes is None and max_rows is None:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        else:
+            byte_limit = None if max_bytes is None else max(0, int(max_bytes))
+            row_limit = None if max_rows is None else max(0, int(max_rows))
+            if row_limit == 0 or byte_limit == 0:
+                result = (events, malformed, True) if return_truncated else (events, malformed)
+                return result
+            bounded_lines: list[str] = []
+            consumed_bytes = 0
+            with path.open("rb") as fh:
+                while row_limit is None or len(bounded_lines) < row_limit:
+                    remaining = None if byte_limit is None else byte_limit - consumed_bytes
+                    if remaining is not None and remaining <= 0:
+                        break
+                    raw_line = fh.readline() if remaining is None else fh.readline(remaining + 1)
+                    if not raw_line:
+                        break
+                    if remaining is not None and len(raw_line) > remaining:
+                        # Never parse a partial JSONL row.  A bounded reader is
+                        # a security boundary, not a best-effort decoder for
+                        # attacker-controlled fragments.
+                        truncated = True
+                        break
+                    consumed_bytes += len(raw_line)
+                    bounded_lines.append(raw_line.decode("utf-8", "replace").rstrip("\r\n"))
+                if row_limit is not None and len(bounded_lines) >= row_limit:
+                    truncated = bool(fh.read(1))
+            if byte_limit is not None:
+                try:
+                    truncated = truncated or path.stat().st_size > byte_limit
+                except OSError:
+                    pass
+            lines = bounded_lines
     except FileNotFoundError:
-        return events, malformed
+        result = (events, malformed, False) if return_truncated else (events, malformed)
+        return result
     for line_no, raw in enumerate(lines, start=1):
         if not raw.strip():
             continue
@@ -169,7 +210,7 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
             events.append(parsed)
         else:
             malformed.append({"line": line_no, "raw": raw})
-    return events, malformed
+    return (events, malformed, truncated) if return_truncated else (events, malformed)
 
 
 def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
@@ -469,9 +510,20 @@ def read_run_events(
     after_seq: int | None = None,
     max_seq: int | None = None,
     session_dir: Path | None = None,
+    max_bytes: int | None = None,
+    max_rows: int | None = None,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
-    events, malformed = _read_jsonl(path)
+    if max_bytes is None and max_rows is None:
+        events, malformed = _read_jsonl(path)
+        truncated = False
+    else:
+        events, malformed, truncated = _read_jsonl(
+            path,
+            max_bytes=max_bytes,
+            max_rows=max_rows,
+            return_truncated=True,
+        )
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
     if max_seq is not None:
@@ -481,6 +533,7 @@ def read_run_events(
         "run_id": str(run_id),
         "events": events,
         "malformed": malformed,
+        "truncated": truncated,
     }
 
 

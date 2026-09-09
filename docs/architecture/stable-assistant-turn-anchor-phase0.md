@@ -345,6 +345,23 @@ Phase 0 classifies current sources before changing render behavior:
 Future phases may add sources, but every source must choose one of these classes
 or explicitly mark itself `excluded`.
 
+The streaming producer emits a separate `artifact_reference` event after a
+canonical `write_file` or `patch` result proves that a mutation landed. The
+event contains only a normalized workspace-relative path, artifact kind, source
+tool, and tool-call id when available; raw tool arguments and result bodies do
+not cross that boundary. Failed, incomplete, read-only, workspace-escaping,
+cache/dependency/VCS paths, and root-level build output paths are excluded. The
+browser attaches the event to the active Anchor without adding a Worklog row or
+repainting the live scene.
+
+Browser scenes are projections, not artifact authority. Persistence retains a
+browser artifact only when its server-owned event identity and descriptor exactly
+match settlement or run-journal evidence for the same session, run, and stream.
+Run-journal event IDs are matched when available; the server-owned positive event
+sequence remains authoritative if journal ID creation failed.
+Reload hydration drops artifact rows from records without explicit server
+artifact authority or with invalid owner/path evidence.
+
 ## Dedupe Invariant
 
 Anchor event dedupe is intentionally independent of visible text and timestamps.
