@@ -29,3 +29,11 @@ jobs:
         run: npm test
       - name: Lint
         run: npm run lint || true
+      - name: Audit dependencies (npm audit)
+        run: |
+          echo "Running npm audit (non-failing for CI)";
+          npm audit --audit-level=moderate || true
+      - name: Build Docker image (CI smoke build)
+        run: |
+          echo "Building Docker image for unisentinel";
+          docker build -t unisentinel:ci -f unisentinel/Dockerfile unisentinel || true

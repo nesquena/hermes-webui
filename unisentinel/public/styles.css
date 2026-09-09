@@ -40,6 +40,27 @@ body {
   margin-bottom: 30px;
 }
 
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: auto;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.skip-link:focus {
+  position: static;
+  width: auto;
+  height: auto;
+  left: 18px;
+  top: 18px;
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
 .brand-mark {
   width: 42px;
   height: 42px;

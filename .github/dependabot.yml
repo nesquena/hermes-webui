@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/unisentinel"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # ignore updates that are major unless auto-approval configured
+    ignore:
+      - dependency-type: "all"
+        update-types: ["version-update:semver-major"]

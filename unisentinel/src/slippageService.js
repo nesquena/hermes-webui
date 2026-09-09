@@ -63,6 +63,10 @@ class SlippageService {
     // allow running even without a provider when a contractFactory is provided (useful for tests)
     if (!this.provider && !this.contractFactory) return;
 
+    // reset per-scan counters
+    if (!this.metrics) this.metrics = { multicallCalls: 0, multicallFailures: 0, singleCalls: 0, pairsScanned: 0 };
+    this.metrics.pairsScanned += this.pairs.length;
+
     // If multicall is configured, batch v2 calls into one aggregate
     const v2Pairs = this.pairs.filter(p => (!p.pairType || p.pairType === 'v2') && p.pairAddress);
     if (this.multicallAddress && v2Pairs.length > 0) {
@@ -78,6 +82,7 @@ class SlippageService {
           calls.push({ target: pair.pairAddress, callData: ifacePair.encodeFunctionData('token1', []) });
         }
         const multicallContract = this.contractFactory ? this.contractFactory(this.multicallAddress, this.multicallAbi, this.provider) : new ethers.Contract(this.multicallAddress, this.multicallAbi, this.provider);
+        this.metrics.multicallCalls += 1;
         const res = await multicallContract.aggregate(calls);
         const returnData = res[1] || res.returnData || [];
         // decode results in order
@@ -115,6 +120,7 @@ class SlippageService {
         // done with multicall path
         // continue to v3 handling below
       } catch (e) {
+        this.metrics.multicallFailures += 1;
         console.warn('SlippageService: multicall aggregate failed', e && e.message);
         // fall through to per-pair reads
       }
@@ -126,6 +132,7 @@ class SlippageService {
       try {
         const contract = this.contractFactory ? this.contractFactory(pair.pairAddress, this.pairAbi, this.provider) : new ethers.Contract(pair.pairAddress, this.pairAbi, this.provider);
         const [reserve0, reserve1] = await contract.getReserves();
+        this.metrics.singleCalls += 1;
         // compute price: price of token0 in terms of token1 = reserve1 / reserve0
         const r0 = Number(reserve0.toString());
         const r1 = Number(reserve1.toString());
@@ -165,6 +172,9 @@ class SlippageService {
     return this.pairs;
   }
 
+  getMetrics() {
+    return this.metrics || { multicallCalls: 0, multicallFailures: 0, singleCalls: 0, pairsScanned: 0 };
+  }
   listPairs() {
     return this.pairs.map((pair) => ({
       ...pair,

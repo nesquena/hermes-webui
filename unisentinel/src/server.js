@@ -11,6 +11,10 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 async function main() {
+  if (global.__unisentinel_server_started) {
+    // already started in this process (idempotent require() across tests)
+    return global.__unisentinel_server_app;
+  }
   // create DB (file or sqlite depending on env)
   const db = createDb();
   const alerts = new AlertService({ db, webhookUrl: process.env.WEBHOOK_URL });
@@ -63,7 +67,7 @@ function parsePairsEnv(envStr) {
   const SlippageService = require('./slippageService');
 
   governance = new GovernanceService({ provider, alertService: alerts, governorAddress: process.env.GOVERNOR_ADDRESS || null });
-  slippage = new SlippageService({ alertService: alerts, provider, pairs: configuredPairs });
+  slippage = new SlippageService({ alertService: alerts, provider, pairs: configuredPairs, multicallAddress: process.env.MULTICALL_ADDRESS || null });
 
   // On each new block, refresh lightweight monitors and create heartbeat alerts
   web3.on('block', async (bn) => {
@@ -168,6 +172,30 @@ app.get('/api/pairs/:id', (req, res) => {
   const pair = slippage.getPairById(req.params.id);
   if (!pair) return res.status(404).json({ error: 'pair not found' });
   res.json({ pair });
+});
+
+// Prometheus-style metrics endpoint (simple in-memory counters)
+app.get('/metrics', async (req, res) => {
+  const lines = [];
+  try {
+    const sMetrics = slippage ? slippage.getMetrics() : { multicallCalls: 0, multicallFailures: 0, singleCalls: 0, pairsScanned: 0 };
+    lines.push('# HELP unisentinel_slippage_multicall_calls Number of multicall aggregate attempts');
+    lines.push('# TYPE unisentinel_slippage_multicall_calls counter');
+    lines.push(`unisentinel_slippage_multicall_calls ${sMetrics.multicallCalls}`);
+    lines.push('# HELP unisentinel_slippage_multicall_failures Number of multicall failures');
+    lines.push('# TYPE unisentinel_slippage_multicall_failures counter');
+    lines.push(`unisentinel_slippage_multicall_failures ${sMetrics.multicallFailures}`);
+    lines.push('# HELP unisentinel_slippage_single_calls Number of single per-pair RPC calls');
+    lines.push('# TYPE unisentinel_slippage_single_calls counter');
+    lines.push(`unisentinel_slippage_single_calls ${sMetrics.singleCalls}`);
+    lines.push('# HELP unisentinel_slippage_pairs_scanned Pairs scanned in recent cycles');
+    lines.push('# TYPE unisentinel_slippage_pairs_scanned gauge');
+    lines.push(`unisentinel_slippage_pairs_scanned ${sMetrics.pairsScanned}`);
+    res.set('Content-Type', 'text/plain');
+    res.send(lines.join('\n'));
+  } catch (e) {
+    res.status(500).send('error');
+  }
 });
 
 // Add a new monitored pair

@@ -17,13 +17,14 @@
           </div>
         </div>
 
-        <nav>
-          <button class="nav active">Overview</button>
-          <button class="nav">Governance</button>
-          <button class="nav">Slippage</button>
-          <button class="nav">Contracts</button>
-          <button class="nav">Alerts</button>
-        </nav>
+        <nav aria-label="Main navigation">
+            <a class="skip-link" href="#main-content">Skip to main content</a>
+            <button class="nav active" role="tab" aria-selected="true" aria-controls="overview-panel">Overview</button>
+            <button class="nav" role="tab" aria-selected="false" aria-controls="governance-panel">Governance</button>
+            <button class="nav" role="tab" aria-selected="false" aria-controls="slippage-panel">Slippage</button>
+            <button class="nav" role="tab" aria-selected="false" aria-controls="contracts-panel">Contracts</button>
+            <button class="nav" role="tab" aria-selected="false" aria-controls="alerts-panel">Alerts</button>
+          </nav>
       </aside>
 
       <main class="main-panel">

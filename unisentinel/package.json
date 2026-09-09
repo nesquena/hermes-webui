@@ -7,10 +7,11 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "mocha --recursive test --exit",
-    "lint": "eslint . || true"
+    "lint": "eslint . || true",
+    "audit": "npm audit --audit-level=moderate"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "express": "^4.18.2",

@@ -4,12 +4,13 @@ FROM node:18-alpine
 WORKDIR /usr/src/app
 
 # Install dependencies
-COPY package.json package-lock.json* ./
-RUN npm install --production || true
+COPY package*.json ./
+RUN npm ci --only=production || npm install --only=production
 
-# Bundle app source
+# Bundle app
 COPY . .
 
 EXPOSE 3000
 
-CMD [ "npm", "start" ]
+ENV NODE_ENV=production
+CMD ["node", "src/server.js"]
