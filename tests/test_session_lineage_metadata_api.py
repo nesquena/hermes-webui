@@ -261,8 +261,9 @@ def test_all_sessions_keeps_reset_successor_top_level_with_durable_lineage(_isol
         child = {row['session_id']: row for row in all_sessions()}[child_sid]
 
         assert child.get('parent_session_id') == parent_sid
+        assert child.get('relationship_type') == 'reset_successor'
+        assert child.get('_lineage_root_id') == child_sid
         for key in (
-            'relationship_type',
             'parent_title',
             'parent_source',
             '_parent_lineage_root_id',
@@ -319,14 +320,16 @@ def test_reset_projection_fails_closed_for_conflicting_or_invalid_metadata():
 
     projected = {row['id']: row for row in agent_sessions._project_agent_session_rows(rows)}
 
-    assert 'relationship_type' not in projected['projection_legacy_reset']
-    assert 'relationship_type' not in projected['projection_orphan_canonical_reset']
+    for sid in ('projection_legacy_reset', 'projection_orphan_canonical_reset'):
+        assert projected[sid].get('relationship_type') == 'reset_successor'
+        assert projected[sid].get('_lineage_root_id') == sid
     for sid in (
         'projection_delegate',
         'projection_mismatched_reset',
         'projection_invalid_config',
     ):
         assert projected[sid].get('relationship_type') == 'child_session'
+        assert '_lineage_root_id' not in projected[sid]
 
 
 

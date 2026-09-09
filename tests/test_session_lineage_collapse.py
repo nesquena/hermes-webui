@@ -111,15 +111,19 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+eval(extractFunc('_isResetSuccessor'));
 eval(extractFunc('_showsForkOrBranchIndicator'));
 console.log(JSON.stringify({{
-  reset: _showsForkOrBranchIndicator({{session_id:'reset', parent_session_id:'parent', session_source:'messaging'}}),
+  reset: _showsForkOrBranchIndicator({{session_id:'reset', parent_session_id:'parent', session_source:'messaging', relationship_type:'reset_successor'}}),
   fork: _showsForkOrBranchIndicator({{session_id:'fork', parent_session_id:'parent', session_source:'fork'}}),
+  legacyFork: _showsForkOrBranchIndicator({{session_id:'legacy-fork', parent_session_id:'parent', session_source:'webui'}}),
   child: _showsForkOrBranchIndicator({{session_id:'child', parent_session_id:'parent', relationship_type:'child_session'}}),
+  unmarkedParent: _showsForkOrBranchIndicator({{session_id:'unknown', parent_session_id:'parent', session_source:'messaging'}}),
+  topLevel: _showsForkOrBranchIndicator({{session_id:'top', session_source:'webui'}}),
 }}));
 """
     result = json.loads(_run_node(source))
-    assert result == {"reset": False, "fork": True, "child": True}
+    assert result == {"reset": False, "fork": True, "legacyFork": True, "child": True, "unmarkedParent": True, "topLevel": False}
     assert "if(_showsForkOrBranchIndicator(s)){" in js
 
 

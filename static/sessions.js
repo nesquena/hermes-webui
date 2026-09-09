@@ -6764,8 +6764,12 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _isResetSuccessor(s){
+  return !!(s&&s.relationship_type==='reset_successor');
+}
+
 function _showsForkOrBranchIndicator(s){
-  return !!(s&&s.parent_session_id&&(s.session_source==='fork'||s.relationship_type==='child_session'));
+  return !!(s&&s.parent_session_id&&!_isResetSuccessor(s));
 }
 
 function _isForkWithResolvableParent(s, sessionIdsInList){
@@ -8170,8 +8174,9 @@ function renderSessionListFromCache(){
       titleRow.appendChild(wtInd);
     }
     // Reset successors retain parent_session_id as durable lineage but are
-    // independent top-level conversations. Only real forks/children get the
-    // fork indicator and its "Forked from" tooltip (#7178).
+    // independent top-level conversations. Suppress the historical parent-linked
+    // branch indicator only for a positively classified reset successor so legacy
+    // /branch rows without modern fork metadata keep their provenance (#7178).
     if(_showsForkOrBranchIndicator(s)){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';

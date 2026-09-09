@@ -63,7 +63,8 @@ correct visible session target, not moving execution ownership.
 
 A messaging conversation created after a user-visible reset is a separate
 top-level conversation, even when Hermes Agent retains `parent_session_id` as
-durable reset lineage. Sidebar projection must preserve that identifier without
+durable reset lineage. Sidebar projection must preserve that identifier and mark
+the exception explicitly as `relationship_type='reset_successor'` without
 emitting child-session metadata for a reset successor. Compression
 continuations remain one visible conversation, while explicit branch and
 delegate sessions remain nested children. The canonical reset marker is

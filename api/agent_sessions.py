@@ -445,6 +445,8 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         children_by_parent.setdefault(parent_id, []).append(row)
         parent = rows_by_id.get(parent_id)
         if _is_user_visible_reset_successor(parent, row):
+            row['relationship_type'] = 'reset_successor'
+            row['_lineage_root_id'] = row['id']
             continue
         if _is_continuation_session(parent, row):
             continuation_child_ids.add(row['id'])
@@ -1301,6 +1303,8 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             entry = metadata.setdefault(sid, {})
             entry['parent_session_id'] = parent_id
             if is_reset_successor:
+                entry['relationship_type'] = 'reset_successor'
+                entry['_lineage_root_id'] = sid
                 continue
             if not _is_continuation_session(parent_row, row):
                 entry['relationship_type'] = 'child_session'

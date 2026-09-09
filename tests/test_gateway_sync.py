@@ -1218,8 +1218,9 @@ def test_sessions_route_keeps_reset_successor_top_level(cleanup_test_sessions):
         assert child_sid in rows
         child = rows[child_sid]
         assert child.get('parent_session_id') == parent_sid
+        assert child.get('relationship_type') == 'reset_successor'
+        assert child.get('_lineage_root_id') == child_sid
         for key in (
-            'relationship_type',
             'parent_title',
             'parent_source',
             '_parent_lineage_root_id',
