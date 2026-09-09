@@ -97,7 +97,11 @@ The setup step groups providers by how much information they usually need.
 | Specialized | Gemini, DeepSeek, Xiaomi MiMo, Z.AI / GLM, NVIDIA NIM, Mistral, xAI | Provider API key and default model. |
 
 For API-key providers, the wizard writes the key to the active Hermes `.env`
-file and writes the default model/provider to `config.yaml`.
+file and writes the default model/provider to `config.yaml`. Those two files are
+committed as one profile-scoped transaction: a failed write restores both files
+instead of reporting a partially applied setup as successful. The wizard accepts
+only provider IDs in its displayed catalog; unknown or terminal-only provider
+aliases are rejected rather than silently completing onboarding.
 
 For local providers, the API key field can be blank when the server is keyless.
 Most LM Studio, Ollama, vLLM, llama-server, and TabbyAPI installs run this way.

@@ -97,6 +97,40 @@ def test_live_models_cache_is_profile_scoped(monkeypatch):
     assert again_payload == research_payload
 
 
+def test_profile_resolution_failure_bypasses_cache_read_and_store(monkeypatch):
+    import api.profiles as profiles
+    import api.routes as routes
+
+    mode = ["cached"]
+    calls = []
+
+    def provider_model_ids(provider):
+        calls.append(mode[0])
+        return [f"{provider}/{mode[0]}-{len(calls)}"]
+
+    _install_provider_model_ids(monkeypatch, provider_model_ids)
+    _patch_live_models_basics(monkeypatch, routes)
+    parsed = urlparse("/api/models/live?provider=openai")
+
+    cached = routes._handle_live_models(object(), parsed)
+    assert cached["models"][0]["id"] == "openai/cached-1"
+    assert ("default", "openai") in routes._LIVE_MODELS_CACHE
+
+    mode[0] = "uncached"
+    monkeypatch.setattr(
+        profiles,
+        "get_active_profile_name",
+        lambda: (_ for _ in ()).throw(RuntimeError("profile unavailable")),
+    )
+    first = routes._handle_live_models(object(), parsed)
+    second = routes._handle_live_models(object(), parsed)
+
+    assert first["models"][0]["id"] == "openai/uncached-2"
+    assert second["models"][0]["id"] == "openai/uncached-3"
+    assert calls == ["cached", "uncached", "uncached"]
+    assert set(routes._LIVE_MODELS_CACHE) == {("default", "openai")}
+
+
 def test_live_models_cache_returns_deep_copies(monkeypatch):
     import api.routes as routes
 

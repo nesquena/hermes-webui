@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -21,11 +22,7 @@ from unittest import mock
 import pytest
 
 # Skip tests that call apply_onboarding_setup → _save_yaml_config when PyYAML is missing
-try:
-    import yaml as _yaml
-    _HAS_YAML = True
-except ImportError:
-    _HAS_YAML = False
+_HAS_YAML = importlib.util.find_spec("yaml") is not None
 _needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it")
 
 # ---------------------------------------------------------------------------
@@ -37,8 +34,6 @@ def _make_status(
     *, tmp_path: pathlib.Path, config_exists: bool, chat_ready: bool, onboarding_done: bool = False
 ):
     """Call get_onboarding_status() with a controlled filesystem + settings."""
-    import importlib
-
     # Import fresh copies each call so module-level state doesn't bleed across
     import api.onboarding as mod
 
@@ -258,6 +253,68 @@ class TestApplyOnboardingSetupGuard:
                 assert result.get("error") != "config_exists"
         finally:
             fake_config_path.unlink(missing_ok=True)
+
+
+class TestOnboardingTransactions:
+    @_needs_yaml
+    def test_malformed_existing_config_fails_closed_without_file_changes(
+        self, tmp_path, monkeypatch
+    ):
+        import api.onboarding as mod
+
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        config_path.write_text("model: [unterminated\n", encoding="utf-8")
+        env_path.write_text("IMPORTED_KEY=keep\n", encoding="utf-8")
+        before_config = config_path.read_bytes()
+        before_env = env_path.read_bytes()
+        monkeypatch.setattr(mod, "_get_active_hermes_home", lambda: tmp_path)
+
+        with pytest.raises(ValueError):
+            mod.apply_onboarding_setup(
+                {
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "api_key": "sk-or-transaction-test",
+                    "confirm_overwrite": True,
+                }
+            )
+        assert config_path.read_bytes() == before_config
+        assert env_path.read_bytes() == before_env
+
+    @_needs_yaml
+    def test_yaml_failure_rolls_back_env_and_config_exactly(
+        self, tmp_path, monkeypatch
+    ):
+        import api.onboarding as mod
+
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        config_path.write_text(
+            "model:\n  provider: anthropic\n  default: claude-old\n",
+            encoding="utf-8",
+        )
+        env_path.write_text("IMPORTED_KEY=keep\n", encoding="utf-8")
+        before_config = config_path.read_bytes()
+        before_env = env_path.read_bytes()
+        monkeypatch.setattr(mod, "_get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(
+            mod,
+            "_save_yaml_config",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("boom")),
+        )
+
+        with pytest.raises(RuntimeError, match="committed safely"):
+            mod.apply_onboarding_setup(
+                {
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "api_key": "sk-or-new-secret",
+                    "confirm_overwrite": True,
+                }
+            )
+        assert config_path.read_bytes() == before_config
+        assert env_path.read_bytes() == before_env
 
 
 # ---------------------------------------------------------------------------

@@ -156,9 +156,12 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 >
 > Two options if you run an external endpoint:
 >
-> 1. **Use its models as a chat provider** (supported today): add it in
->    **Settings → Providers** as a custom OpenAI-compatible provider with
->    `base_url = http://127.0.0.1:8642/v1` and your bearer token.
+> 1. **Use its models as a chat provider** (supported today): open
+>    **Settings → Providers → Add custom model**, enter the endpoint, protocol,
+>    and write-only credential, then use **Fetch models** to load the endpoint's
+>    model list and select one (manual model IDs remain available as a fallback).
+>    Use **Test model** to perform a real minimal inference before making it the default. Existing
+>    custom providers can be edited or deleted there without running `hermes model`.
 > 2. **Route chat through a Hermes Gateway API server** (supported today via
 >    `HERMES_WEBUI_CHAT_BACKEND=gateway`): see [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md).
 >    Full agent-loop delegation is not yet shipped; tracked in [#1925](https://github.com/nesquena/hermes-webui/issues/1925).

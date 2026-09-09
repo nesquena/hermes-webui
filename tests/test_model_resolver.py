@@ -1663,6 +1663,8 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     import json as _json
     import api.config as _cfg
 
+    _cfg.invalidate_models_cache()
+    monkeypatch.setattr(_cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0)
     old_cfg = dict(_cfg.cfg)
     _cfg.cfg['model'] = {
         'provider': 'custom',
@@ -1681,21 +1683,26 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     captured = {}
 
     class _Resp:
-        def read(self):
+        status = 200
+
+        def read(self, _size=-1):
             return _json.dumps({'data': [{'id': 'gpt-5.2', 'name': 'GPT-5.2'}]}).encode('utf-8')
         def __enter__(self):
             return self
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    def _fake_urlopen(req, timeout=10):
-        url = getattr(req, 'full_url', '')
-        if 'example.test' in url:
-            captured['auth'] = req.get_header('Authorization')
-            captured['ua'] = req.get_header('User-agent')
-        return _Resp()
+    class _Opener:
+        def open(self, req, timeout=10):
+            url = getattr(req, 'full_url', '')
+            if 'example.test' in url:
+                captured['auth'] = req.get_header('Authorization')
+                captured['ua'] = req.get_header('User-agent')
+            return _Resp()
 
-    monkeypatch.setattr('urllib.request.urlopen', _fake_urlopen)
+    from api import provider_endpoint_probe
+
+    monkeypatch.setattr(provider_endpoint_probe, 'DEFAULT_OPENER', _Opener())
     monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: [])
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
     monkeypatch.delenv('HERMES_API_KEY', raising=False)
@@ -1708,9 +1715,10 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     finally:
         _cfg.cfg.clear()
         _cfg.cfg.update(old_cfg)
+        _cfg.invalidate_models_cache()
 
     assert captured['auth'] == 'Bearer sk-test-model-key'
-    assert captured['ua'] == 'OpenAI/Python 1.0'
+    assert captured['ua'] == 'Hermes-WebUI/1.0'
     groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
     assert 'Custom' in groups
     # Model ID may be prefixed with @provider: due to cross-provider dedup (#1228)

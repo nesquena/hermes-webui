@@ -745,7 +745,10 @@ class TestAuxiliaryModelsBackend:
         assert "download_timeout: 9" in text
         assert "max_concurrency: 2" in text
         assert "reasoning_effort: none" in text
-        assert "DUMMY_KEY_DO_NOT_PRINT" in text
+        assert "DUMMY_KEY_DO_NOT_PRINT" not in text
+        assert "${HERMES_WEBUI_MAIN_MODEL_API_KEY}" in text
+        env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert "HERMES_WEBUI_MAIN_MODEL_API_KEY=DUMMY_KEY_DO_NOT_PRINT" in env_text
 
     def test_set_hermes_default_model_persists_explicit_provider_override(self, monkeypatch, tmp_path):
         from api import config
@@ -812,7 +815,13 @@ class TestAuxiliaryModelsBackend:
         assert "download_timeout: 9" in text
         assert "max_concurrency: 2" in text
         assert "reasoning_effort: none" in text
-        assert "DUMMY_KEY_DO_NOT_PRINT" in text
+        assert "DUMMY_KEY_DO_NOT_PRINT" not in text
+        assert "${HERMES_WEBUI_AUX_VISION_5944AE84_API_KEY}" in text
+        env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert (
+            "HERMES_WEBUI_AUX_VISION_5944AE84_API_KEY=DUMMY_KEY_DO_NOT_PRINT"
+            in env_text
+        )
 
     def test_set_auxiliary_model_explicit_advanced_base_url_wins_over_custom_resolution(self, monkeypatch, tmp_path):
         """Custom-provider auto-resolution must not clobber an explicit gear base_url."""
@@ -914,6 +923,255 @@ class TestAuxiliaryModelsBackend:
             assert "extra_body must be a JSON object" in str(exc)
         else:
             raise AssertionError("set_auxiliary_model accepted non-object extra_body")
+
+    def test_main_literal_api_key_migrates_to_owned_env_reference(
+        self, monkeypatch, tmp_path
+    ):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-5.5\n  api_key: legacy-secret\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(
+            config, "resolve_model_provider", lambda model: (model, "openai", None)
+        )
+
+        config.set_hermes_default_model("gpt-5.5")
+
+        yaml_text = config_path.read_text(encoding="utf-8")
+        assert "legacy-secret" not in yaml_text
+        assert "${HERMES_WEBUI_MAIN_MODEL_API_KEY}" in yaml_text
+        assert "HERMES_WEBUI_MAIN_MODEL_API_KEY=legacy-secret" in (
+            tmp_path / ".env"
+        ).read_text(encoding="utf-8")
+
+    def test_auxiliary_literal_api_key_migrates_to_stable_owned_env_reference(
+        self, monkeypatch, tmp_path
+    ):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "auxiliary:\n  vision:\n    provider: openai\n    model: gpt-5.5\n    api_key: legacy-vision-secret\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        config.set_auxiliary_model("vision", "openai", "gpt-5.5")
+
+        yaml_text = config_path.read_text(encoding="utf-8")
+        assert "legacy-vision-secret" not in yaml_text
+        assert "${HERMES_WEBUI_AUX_VISION_5944AE84_API_KEY}" in yaml_text
+        assert (
+            "HERMES_WEBUI_AUX_VISION_5944AE84_API_KEY=legacy-vision-secret"
+            in (tmp_path / ".env").read_text(encoding="utf-8")
+        )
+
+    def test_main_imported_env_reference_is_preserved(self, monkeypatch, tmp_path):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-5.5\n  api_key: ${IMPORTED_MODEL_KEY}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(
+            config, "resolve_model_provider", lambda model: (model, "openai", None)
+        )
+
+        config.set_hermes_default_model("gpt-5.5")
+
+        assert "${IMPORTED_MODEL_KEY}" in config_path.read_text(encoding="utf-8")
+        assert not (tmp_path / ".env").exists()
+
+    def test_main_clear_removes_only_owned_env_entry(self, monkeypatch, tmp_path):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-5.5\n  api_key: ${HERMES_WEBUI_MAIN_MODEL_API_KEY}\n",
+            encoding="utf-8",
+        )
+        env_path.write_text(
+            "IMPORTED_MODEL_KEY=keep\nHERMES_WEBUI_MAIN_MODEL_API_KEY=remove-me\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(
+            config, "resolve_model_provider", lambda model: (model, "openai", None)
+        )
+
+        config.set_hermes_default_model(
+            "gpt-5.5", advanced={"api_key_clear": True}
+        )
+
+        assert "api_key" not in config_path.read_text(encoding="utf-8")
+        env_text = env_path.read_text(encoding="utf-8")
+        assert "IMPORTED_MODEL_KEY=keep" in env_text
+        assert "HERMES_WEBUI_MAIN_MODEL_API_KEY" not in env_text
+
+    def test_main_secret_transaction_rolls_back_exact_files_on_yaml_failure(
+        self, monkeypatch, tmp_path
+    ):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-old\n",
+            encoding="utf-8",
+        )
+        env_path.write_text("IMPORTED_KEY=keep\n", encoding="utf-8")
+        before_config = config_path.read_bytes()
+        before_env = env_path.read_bytes()
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(
+            config, "resolve_model_provider", lambda model: (model, "openai", None)
+        )
+        monkeypatch.setattr(
+            config,
+            "_save_yaml_config_file",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("boom")),
+        )
+
+        try:
+            config.set_hermes_default_model(
+                "gpt-new", advanced={"api_key": "new-secret-value"}
+            )
+        except RuntimeError as exc:
+            assert "transactionally" in str(exc)
+        else:
+            raise AssertionError("transaction failure was reported as success")
+        assert config_path.read_bytes() == before_config
+        assert env_path.read_bytes() == before_env
+
+    def test_post_publication_yaml_error_keeps_matching_env_and_yaml(
+        self, monkeypatch, tmp_path
+    ):
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-old\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(
+            config, "resolve_model_provider", lambda model: (model, "openai", None)
+        )
+        real_save = config._save_yaml_config_file
+
+        def publish_then_fail(path, data):
+            real_save(path, data)
+            raise OSError("directory fsync failed after replace")
+
+        monkeypatch.setattr(config, "_save_yaml_config_file", publish_then_fail)
+        with pytest.raises(RuntimeError, match="transactionally"):
+            config.set_hermes_default_model(
+                "gpt-new", advanced={"api_key": "published-secret-value"}
+            )
+        yaml_text = config_path.read_text(encoding="utf-8")
+        env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert "default: gpt-new" in yaml_text
+        assert "${HERMES_WEBUI_MAIN_MODEL_API_KEY}" in yaml_text
+        assert (
+            "HERMES_WEBUI_MAIN_MODEL_API_KEY=published-secret-value" in env_text
+        )
+
+    def test_named_profile_save_response_uses_named_model_override(
+        self, monkeypatch, tmp_path
+    ):
+        from api import config, profiles
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: configured-old\n",
+            encoding="utf-8",
+        )
+        (tmp_path / ".env").write_text(
+            "HERMES_MODEL=named-profile-override\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HERMES_MODEL", "unrelated-process-override")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
+        monkeypatch.setattr(
+            config, "resolve_model_provider", lambda model: (model, "openai", None)
+        )
+
+        result = config.set_hermes_default_model("configured-new")
+
+        assert result["configured_model"] == "configured-new"
+        assert result["effective_model"] == "named-profile-override"
+        assert result["model_override_source"] == "HERMES_MODEL"
+
+    def test_config_conflict_does_not_clobber_external_edit(
+        self, monkeypatch, tmp_path
+    ):
+        from api import config, providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-old\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(
+            config, "resolve_model_provider", lambda model: (model, "openai", None)
+        )
+        real_write_env = providers._write_env_file
+
+        def write_env_then_external_config_edit(path, updates):
+            real_write_env(path, updates)
+            config_path.write_text(
+                "model:\n  provider: anthropic\n  default: external-edit\n",
+                encoding="utf-8",
+            )
+
+        monkeypatch.setattr(providers, "_write_env_file", write_env_then_external_config_edit)
+        with pytest.raises(RuntimeError, match="transactionally"):
+            config.set_hermes_default_model(
+                "gpt-new", advanced={"api_key": "new-secret-value"}
+            )
+        assert "external-edit" in config_path.read_text(encoding="utf-8")
+        env_text = (tmp_path / ".env").read_text(encoding="utf-8") if (tmp_path / ".env").exists() else ""
+        assert "new-secret-value" not in env_text
+
+    def test_effective_model_details_use_profile_scoped_override_precedence(
+        self, monkeypatch
+    ):
+        from api import config
+
+        values = {
+            "HERMES_MODEL": "profile-hermes",
+            "OPENAI_MODEL": "profile-openai",
+            "LLM_MODEL": "profile-llm",
+        }
+        monkeypatch.setattr(
+            config, "_thread_local_env_value", lambda name: values.get(name, "")
+        )
+        details = config.get_effective_default_model_details(
+            {"model": {"default": "configured-model"}}
+        )
+        assert details == {
+            "configured_model": "configured-model",
+            "effective_model": "profile-hermes",
+            "model_override_source": "HERMES_MODEL",
+        }
 
     def test_model_set_route_returns_400_for_unknown_auxiliary_task(self, monkeypatch):
         """The route should surface invalid auxiliary task names as a client error."""

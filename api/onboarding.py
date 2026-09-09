@@ -245,16 +245,21 @@ def _load_yaml_config(config_path: Path) -> dict:
         return {}
 
 
-def _save_yaml_config(config_path: Path, config: dict) -> None:
+def _serialize_yaml_config(config: dict) -> bytes:
     try:
         import yaml as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+    return _yaml.safe_dump(
+        config, sort_keys=False, allow_unicode=True
+    ).encode("utf-8")
 
+
+def _save_yaml_config(config_path: Path, config: dict) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(
         config_path,
-        _yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+        _serialize_yaml_config(config).decode("utf-8"),
         encoding="utf-8",
     )
 
@@ -355,13 +360,13 @@ def _probe_failure_is_dns(exc, hostname: str | None) -> bool:
     return _hostname_uses_reserved_dns_tld(hostname)
 
 
-def probe_provider_endpoint(
+def _legacy_probe_provider_endpoint(
     provider: str,
     base_url: str,
     api_key: str | None = None,
     timeout: float = PROBE_TIMEOUT_SECONDS,
 ) -> dict:
-    """Probe `<base_url>/models` for a self-hosted OpenAI-compatible provider.
+    """Deprecated local implementation; the public API delegates to the shared fetcher.
 
     Used by the onboarding wizard to validate the user's configured base URL
     before persisting (#1499).  Distinguishes failure modes so the frontend
@@ -406,6 +411,18 @@ def probe_provider_endpoint(
         }
     if not parsed.hostname:
         return {"ok": False, "error": "invalid_url", "detail": "base_url has no host"}
+    if parsed.username or parsed.password:
+        return {
+            "ok": False,
+            "error": "invalid_url",
+            "detail": "base_url must not contain embedded credentials",
+        }
+    if parsed.query or parsed.fragment:
+        return {
+            "ok": False,
+            "error": "invalid_url",
+            "detail": "base_url must not contain a query string or fragment",
+        }
 
     # Build the probe URL.  OpenAI-compatible servers expose /v1/models or
     # /models.  Most users supply a base URL ending in /v1, so we just append
@@ -419,7 +436,11 @@ def probe_provider_endpoint(
         "User-Agent": "hermes-webui-onboarding-probe",
     }
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        if str(provider or "").strip().lower() == "anthropic":
+            headers["x-api-key"] = api_key
+            headers["anthropic-version"] = "2023-06-01"
+        else:
+            headers["Authorization"] = f"Bearer {api_key}"
 
     req = urllib.request.Request(probe_url, headers=headers, method="GET")
 
@@ -442,16 +463,12 @@ def probe_provider_endpoint(
             )
             return {"ok": False, "error": code, "detail": detail, "status": exc.code}
         code = "http_4xx" if 400 <= exc.code < 500 else "http_5xx"
-        # Try to surface a useful detail (LM Studio sometimes returns text/plain).
-        try:
-            err_body = exc.read(2048).decode("utf-8", errors="replace").strip()
-        except Exception:
-            err_body = ""
-        detail = f"HTTP {exc.code}"
-        if err_body:
-            err_first = err_body.splitlines()[0][:200]
-            detail = f"{detail}: {err_first}"
-        return {"ok": False, "error": code, "detail": detail, "status": exc.code}
+        return {
+            "ok": False,
+            "error": code,
+            "detail": f"HTTP {exc.code}",
+            "status": exc.code,
+        }
     except urllib.error.URLError as exc:
         # Distinguish DNS / connect-refused / timeout / generic.
         reason = exc.reason
@@ -470,7 +487,8 @@ def probe_provider_endpoint(
                 "error": "connect_refused",
                 "detail": f"connection refused at {parsed.hostname}:{port_hint}",
             }
-        return {"ok": False, "error": "unreachable", "detail": str(reason)[:200]}
+        logger.debug("Provider probe connection failure", exc_info=True)
+        return {"ok": False, "error": "unreachable", "detail": "connection failed"}
     except (TimeoutError, socket.timeout):
         return {"ok": False, "error": "timeout", "detail": f"connection timed out after {timeout:g}s"}
     except Exception as exc:  # pragma: no cover — defensive net
@@ -481,7 +499,11 @@ def probe_provider_endpoint(
                 "detail": f"could not resolve host '{parsed.hostname}'",
             }
         logger.debug("probe_provider_endpoint unexpected error", exc_info=True)
-        return {"ok": False, "error": "unreachable", "detail": str(exc)[:200]}
+        return {
+            "ok": False,
+            "error": "unreachable",
+            "detail": "unexpected probe failure",
+        }
 
     # If the response was huge, refuse to parse.  256 KB cap is generous;
     # anything bigger is likely the user pointed us at the wrong service.
@@ -524,6 +546,25 @@ def probe_provider_endpoint(
             models.append({"id": entry.strip(), "label": entry.strip()})
 
     return {"ok": True, "models": models, "status": status}
+
+
+# Keep the public onboarding API stable while delegating transport policy to the
+# lightweight shared fetcher used by Settings and /api/models/live.
+def probe_provider_endpoint(
+    provider: str,
+    base_url: str,
+    api_key: str | None = None,
+    timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> dict:
+    from api.provider_endpoint_probe import probe_models_endpoint
+
+    return probe_models_endpoint(
+        provider,
+        base_url,
+        api_key,
+        timeout=timeout,
+        opener=_PROBE_OPENER,
+    )
 
 
 def _extract_current_provider(cfg: dict) -> str:
@@ -573,7 +614,14 @@ def _provider_api_key_present(
 
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
-        return True
+        from api.config import _resolve_provider_alias
+
+        active_provider = _resolve_provider_alias(
+            str(model_cfg.get("provider") or "").strip().lower()
+        )
+        requested_provider = _resolve_provider_alias(provider)
+        if active_provider == requested_provider:
+            return True
 
     # ``cfg.get("providers", {})`` only returns the default when the key is
     # absent; an explicit ``providers:`` (null) in config.yaml yields ``None``.
@@ -951,6 +999,21 @@ def get_onboarding_status() -> dict:
 
 
 def apply_onboarding_setup(body: dict) -> dict:
+    from api.provider_transactions import active_profile_transaction
+
+    with active_profile_transaction(_get_active_hermes_home) as profile_home:
+        early_result = _persist_onboarding_setup(body, profile_home)
+    if early_result is not None:
+        return early_result
+    from api.profiles import profile_env_for_active_request_readonly
+
+    with profile_env_for_active_request_readonly("onboarding commit"):
+        reload_config()
+        invalidate_models_cache()
+        return get_onboarding_status()
+
+
+def _persist_onboarding_setup(body: dict, profile_home: Path) -> dict | None:
     # Hard guard: if the operator set SKIP_ONBOARDING, the wizard should never
     # have appeared.  Even if the frontend somehow calls this endpoint anyway
     # (e.g. a stale JS bundle or a curious user), we must not overwrite the
@@ -959,19 +1022,17 @@ def apply_onboarding_setup(body: dict) -> dict:
     skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
     if skip_env in {"1", "true", "yes"}:
         save_settings({"onboarding_completed": True})
-        return get_onboarding_status()
+        return
 
     provider = str(body.get("provider") or "").strip().lower()
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     base_url = _normalize_base_url(str(body.get("base_url") or ""))
+    if "\n" in api_key or "\r" in api_key:
+        raise ValueError("API key must not contain newline characters.")
 
     if provider not in _SUPPORTED_PROVIDER_SETUPS:
-        # Unsupported providers (openai-codex, copilot, nous, etc.) are already
-        # configured via the CLI. Just mark onboarding as complete and let the
-        # user through — the agent is already set up, no further setup needed.
-        save_settings({"onboarding_completed": True})
-        return get_onboarding_status()
+        raise ValueError(f"unsupported onboarding provider: {provider or '(empty)'}")
     if not model:
         raise ValueError("model is required")
 
@@ -983,7 +1044,7 @@ def apply_onboarding_setup(body: dict) -> dict:
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("base_url must start with http:// or https://")
 
-    config_path = _get_config_path()
+    config_path = profile_home / "config.yaml"
     # Guard: if config.yaml already exists and the caller did not explicitly
     # acknowledge the overwrite, refuse to proceed.  The frontend must pass
     # confirm_overwrite=True after showing the user a confirmation step.
@@ -997,8 +1058,10 @@ def apply_onboarding_setup(body: dict) -> dict:
             "requires_confirm": True,
         }
 
-    cfg = _load_yaml_config(config_path)
-    env_path = _get_active_hermes_home() / ".env"
+    from api.provider_transactions import load_yaml_mapping_strict
+
+    cfg = load_yaml_mapping_strict(config_path)
+    env_path = profile_home / ".env"
     env_values = _load_env_file(env_path)
 
     if not api_key and not _provider_api_key_present(provider, cfg, env_values):
@@ -1028,41 +1091,72 @@ def apply_onboarding_setup(body: dict) -> dict:
         model_cfg.pop("base_url", None)
 
     cfg["model"] = model_cfg
-    _save_yaml_config(config_path, cfg)
+    from api.provider_transactions import (
+        assert_profile_home,
+        restore_file_if_unchanged,
+        snapshot_file,
+    )
 
-    if api_key:
-        _write_env_file(env_path, {provider_meta["env_var"]: api_key})
-
-    # Reload the hermes_cli provider/config cache so the next streaming call
-    # picks up the new key without requiring a server restart.
+    config_snapshot = snapshot_file(config_path)
+    env_snapshot = snapshot_file(env_path)
+    intended_config_bytes = _serialize_yaml_config(cfg)
+    env_published = None
+    save_attempted = False
     try:
-        from api.profiles import _reload_dotenv
-        _reload_dotenv(_get_active_hermes_home())
+        assert_profile_home(profile_home, _get_active_hermes_home)
+        if api_key:
+            _write_env_file(env_path, {provider_meta["env_var"]: api_key})
+            env_published = snapshot_file(env_path)
+        if snapshot_file(config_path) != config_snapshot:
+            raise RuntimeError("config.yaml changed during onboarding setup")
+        save_attempted = True
+        _save_yaml_config(config_path, cfg)
     except Exception:
-        logger.debug("Failed to reload dotenv")
-
-    # Belt-and-braces: set directly on os.environ AFTER _reload_dotenv so the
-    # value survives even if _reload_dotenv cleared it (e.g. when _write_env_file
-    # wrote to disk but the profile isolation tracking hasn't seen it yet).
-    if api_key:
-        os.environ[provider_meta["env_var"]] = api_key
-
-    try:
-        # hermes_cli may cache config at import time; ask it to reload if possible.
-        from hermes_cli.config import reload as _cli_reload
-        _cli_reload()
-    except Exception:
-        logger.debug("Failed to reload hermes_cli config")
-
-    reload_config()
-    return get_onboarding_status()
+        if env_published is not None:
+            try:
+                current_config = snapshot_file(config_path)
+                config_published = (
+                    current_config.existed
+                    and current_config.data == intended_config_bytes
+                )
+                rollback_env = not config_published and (
+                    not save_attempted or current_config == config_snapshot
+                )
+                if rollback_env and not restore_file_if_unchanged(
+                    env_path, env_published, env_snapshot
+                ):
+                    logger.error(
+                        "Skipped onboarding env rollback because .env changed concurrently"
+                    )
+                elif not rollback_env:
+                    logger.error(
+                        "Kept onboarding env update because config publication could not be safely reversed"
+                    )
+            except Exception:
+                logger.exception("Failed to evaluate onboarding rollback")
+        raise RuntimeError("Onboarding setup could not be committed safely.") from None
 
 
 def apply_self_hosted_provider_setup(body: dict) -> dict:
+    from api.provider_transactions import active_profile_transaction
+
+    with active_profile_transaction(_get_active_hermes_home) as profile_home:
+        result = _persist_self_hosted_provider_setup(body, profile_home)
+    from api.profiles import profile_env_for_active_request_readonly
+
+    with profile_env_for_active_request_readonly("self-hosted provider commit"):
+        reload_config()
+        invalidate_models_cache()
+    return result
+
+
+def _persist_self_hosted_provider_setup(body: dict, profile_home: Path) -> dict:
     provider = str(body.get("provider") or "").strip().lower()
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     base_url = _normalize_base_url(str(body.get("base_url") or ""))
+    if "\n" in api_key or "\r" in api_key:
+        raise ValueError("API key must not contain newline characters.")
     activate = body.get("activate")
     do_activate = activate is None or bool(activate)
 
@@ -1079,8 +1173,10 @@ def apply_self_hosted_provider_setup(body: dict) -> dict:
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("base_url must start with http:// or https://")
 
-    config_path = _get_config_path()
-    cfg = _load_yaml_config(config_path)
+    config_path = profile_home / "config.yaml"
+    from api.provider_transactions import load_yaml_mapping_strict
+
+    cfg = load_yaml_mapping_strict(config_path)
     providers_cfg = cfg.setdefault("providers", {})
     if not isinstance(providers_cfg, dict):
         providers_cfg = {}
@@ -1106,26 +1202,53 @@ def apply_self_hosted_provider_setup(body: dict) -> dict:
         cfg["model"] = model_cfg
     elif "model" in cfg:
         cfg["model"] = original_model_cfg
-    _save_yaml_config(config_path, cfg)
 
-    if api_key and env_var:
-        _write_env_file(_get_active_hermes_home() / ".env", {env_var: api_key})
-        os.environ[env_var] = api_key
+    from api.provider_transactions import (
+        assert_profile_home,
+        restore_file_if_unchanged,
+        snapshot_file,
+    )
 
+    env_path = profile_home / ".env"
+    config_snapshot = snapshot_file(config_path)
+    env_snapshot = snapshot_file(env_path)
+    intended_config_bytes = _serialize_yaml_config(cfg)
+    env_published = None
+    save_attempted = False
     try:
-        from api.profiles import _reload_dotenv
-        _reload_dotenv(_get_active_hermes_home())
+        assert_profile_home(profile_home, _get_active_hermes_home)
+        if api_key and env_var:
+            _write_env_file(env_path, {env_var: api_key})
+            env_published = snapshot_file(env_path)
+        if snapshot_file(config_path) != config_snapshot:
+            raise RuntimeError("config.yaml changed during self-hosted setup")
+        save_attempted = True
+        _save_yaml_config(config_path, cfg)
     except Exception:
-        logger.debug("Failed to reload dotenv")
+        if env_published is not None:
+            try:
+                current_config = snapshot_file(config_path)
+                config_published = (
+                    current_config.existed
+                    and current_config.data == intended_config_bytes
+                )
+                rollback_env = not config_published and (
+                    not save_attempted or current_config == config_snapshot
+                )
+                if rollback_env and not restore_file_if_unchanged(
+                    env_path, env_published, env_snapshot
+                ):
+                    logger.error(
+                        "Skipped self-hosted env rollback because .env changed concurrently"
+                    )
+                elif not rollback_env:
+                    logger.error(
+                        "Kept self-hosted env update because config publication could not be safely reversed"
+                    )
+            except Exception:
+                logger.exception("Failed to evaluate self-hosted rollback")
+        raise RuntimeError("Self-hosted provider setup could not be committed safely.") from None
 
-    try:
-        # hermes_cli may cache config at import time; ask it to reload if possible.
-        from hermes_cli.config import reload as _cli_reload
-        _cli_reload()
-    except Exception:
-        logger.debug("Failed to reload hermes_cli config")
-
-    invalidate_models_cache()
     result = {"ok": True, "provider": provider, "base_url": base_url}
     if do_activate:
         result["model"] = model_cfg.get("default")

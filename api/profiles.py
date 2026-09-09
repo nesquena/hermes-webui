@@ -1070,15 +1070,25 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
         return names
 
     custom_providers = payload.get("custom_providers") if isinstance(payload, dict) else None
-    if not isinstance(custom_providers, list):
-        return names
-    for custom_provider in custom_providers:
-        if not isinstance(custom_provider, dict):
-            continue
-        key_env = str(custom_provider.get("key_env") or "").strip()
+    provider_entries: list[dict] = []
+    if isinstance(custom_providers, list):
+        provider_entries.extend(
+            entry for entry in custom_providers if isinstance(entry, dict)
+        )
+    modern_providers = payload.get("providers") if isinstance(payload, dict) else None
+    if isinstance(modern_providers, dict):
+        provider_entries.extend(
+            entry for entry in modern_providers.values() if isinstance(entry, dict)
+        )
+    for provider_entry in provider_entries:
+        key_env = str(
+            provider_entry.get("key_env")
+            or provider_entry.get("api_key_env")
+            or ""
+        ).strip()
         if key_env:
             names.add(key_env)
-        api_key = str(custom_provider.get("api_key") or "").strip()
+        api_key = str(provider_entry.get("api_key") or "").strip()
         match = re.fullmatch(r"\$\{([^}]+)\}", api_key)
         if match:
             env_name = str(match.group(1) or "").strip()
@@ -1356,16 +1366,13 @@ def profile_env_for_active_request_readonly(
     agent-side auth-store reads stay on the active profile without mutating
     process-global ``os.environ``.
 
-    No-ops for the default/root profile, which is the common single-profile
-    deployment case.
+    The default/root profile is scoped too, so credentials written to its `.env`
+    become visible on the next request without mutating process-wide os.environ.
     """
-    profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
-        yield
-        return
+    profile = (get_active_profile_name() or "default").strip() or "default"
     try:
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
-        profile_home_path = Path(get_hermes_home_for_profile(profile))
+        profile_home_path = Path(get_active_hermes_home())
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
     except Exception:
@@ -1456,9 +1463,12 @@ def profile_env_for_active_request(
     credentials directly from process env or ``get_hermes_home()``. Those paths
     stay on the mirrored scope until they are fully audited.
     """
-    profile = (get_active_profile_name() or "").strip()
-    if not profile or _is_root_profile(profile):
-        yield
+    profile = (get_active_profile_name() or "default").strip() or "default"
+    if _is_root_profile(profile):
+        with profile_env_for_active_request_readonly(
+            purpose, logger_override=logger_override
+        ):
+            yield
         return
     with profile_env_for_background_worker(
         profile, purpose, logger_override=logger_override

@@ -58,27 +58,19 @@ class TestMD5SecurityFix(unittest.TestCase):
 class TestUrlSchemeValidation(unittest.TestCase):
     """B310: urllib.request.urlopen must not be called with arbitrary schemes."""
 
-    def test_config_scheme_validation_present(self):
-        """config.py must validate URL scheme before urlopen (B310 fix)."""
-        self.assertIn(
-            "parsed_url.scheme",
-            CONFIG_PY,
-            "config.py: URL scheme validation missing (B310)",
-        )
-        # Must check against allowed schemes
-        self.assertRegex(
-            CONFIG_PY,
-            r'parsed_url\.scheme\s+not\s+in\s+\(',
-            "config.py: scheme check must use 'not in (...)' pattern",
-        )
+    def test_config_uses_shared_hardened_models_fetcher(self):
+        """config.py must not duplicate a redirect-following models fetch."""
+        self.assertIn("probe_models_endpoint", CONFIG_PY)
+        self.assertIn("shared bounded, no-redirect models fetcher", CONFIG_PY)
 
-    def test_config_urlopen_has_nosec(self):
-        """The urlopen call in config.py must have a # nosec B310 comment."""
-        self.assertIn(
-            "nosec B310",
-            CONFIG_PY,
-            "config.py: urlopen must have # nosec B310 after scheme validation",
+    def test_shared_fetcher_owns_url_validation(self):
+        """URL validation and transport policy live in onboarding's shared probe."""
+        probe_py = (REPO_ROOT / "api" / "provider_endpoint_probe.py").read_text(
+            encoding="utf-8"
         )
+        self.assertIn("base_url must not contain embedded credentials", probe_py)
+        self.assertIn("NoRedirectHandler", probe_py)
+        self.assertIn("MAX_RESPONSE_BYTES", probe_py)
 
     def test_bootstrap_scheme_validation_present(self):
         """bootstrap.py wait_for_health must validate URL scheme before urlopen."""

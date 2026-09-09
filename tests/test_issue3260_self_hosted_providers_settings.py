@@ -273,7 +273,7 @@ def test_apply_self_hosted_provider_setup_omits_env_write_for_empty_optional_key
     assert calls == ["invalidate"]
 
 
-def test_apply_self_hosted_provider_setup_writes_only_target_provider_key_and_skips_reload_config(
+def test_apply_self_hosted_provider_setup_writes_only_target_provider_key_then_reloads(
     isolated_self_hosted_env,
     monkeypatch,
 ):
@@ -293,7 +293,7 @@ def test_apply_self_hosted_provider_setup_writes_only_target_provider_key_and_sk
     assert "LM_API_KEY=lm-key-12345678" in env_text
     assert "OLLAMA_API_KEY" not in env_text
     assert invalidate_calls == ["invalidate"]
-    assert reload_calls == []
+    assert reload_calls == ["reload"]
 
 
 def test_post_self_hosted_provider_rejects_invalid_provider(isolated_self_hosted_env):

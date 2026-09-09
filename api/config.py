@@ -774,16 +774,22 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
-def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+def _serialize_yaml_config_file(config_data: dict) -> bytes:
     try:
         import yaml as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+    text = _yaml.safe_dump(
+        _config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True
+    )
+    return text.encode("utf-8")
 
+
+def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     _paths._atomic_write_text(
         config_path,
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
+        _serialize_yaml_config_file(config_data).decode("utf-8"),
         encoding="utf-8",
     )
     # Invalidate the memoized parse for this path so the next read re-parses the
@@ -2639,6 +2645,49 @@ def _get_provider_cfg(provider_id) -> dict:
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
+def _configured_modern_custom_group(
+    provider_id: str,
+    raw_provider_key: str,
+    active_provider: str | None,
+) -> dict | None:
+    """Build one picker group from a WebUI-managed providers mapping entry."""
+    if not provider_id.startswith("custom:"):
+        return None
+    provider_cfg = _get_provider_cfg(raw_provider_key)
+    if provider_cfg.get("enabled") is False:
+        return None
+
+    models = _configured_model_options(provider_cfg.get("models"))
+    default_model = str(
+        provider_cfg.get("default_model") or provider_cfg.get("model") or ""
+    ).strip()
+    if default_model and not any(
+        model.get("id") == default_model for model in models
+    ):
+        models.insert(0, {"id": default_model, "label": default_model})
+    if not models:
+        return None
+
+    if active_provider != provider_id:
+        for model in models:
+            model_id = str(model.get("id") or "").strip()
+            if model_id and not model_id.startswith("@"):
+                # Prefix slash-qualified ids too: the custom endpoint owns the
+                # full id and a built-in provider must not steal it.
+                model["id"] = f"@{provider_id}:{model_id}"
+
+    display_name = str(provider_cfg.get("name") or "").strip()
+    if not display_name:
+        display_name = _effective_provider_display_name(
+            provider_id, _PROVIDER_DISPLAY
+        )
+    return {
+        "provider": display_name,
+        "provider_id": provider_id,
+        "models": models,
+    }
+
+
 class AmbiguousCustomProviderError(ValueError):
     """Raised when two+ custom_providers[] entries normalize to the same slug.
 
@@ -3381,25 +3430,34 @@ def canonical_model_provider_lane(model_id: str, model_provider: str | None = No
     return str(resolved_model or "").strip(), resolved_provider
 
 
-def get_effective_default_model(config_data: dict | None = None) -> str:
-    """Resolve the effective Hermes default model from config, then env overrides."""
+def get_effective_default_model_details(config_data: dict | None = None) -> dict[str, str | None]:
+    """Return persisted and effective models using profile-scoped env precedence."""
     active_cfg = config_data if config_data is not None else cfg
-    default_model = DEFAULT_MODEL
-
+    configured_model = DEFAULT_MODEL
     model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, str):
-        default_model = model_cfg.strip()
+        configured_model = model_cfg.strip() or DEFAULT_MODEL
     elif isinstance(model_cfg, dict):
-        cfg_default = str(model_cfg.get("default") or "").strip()
-        if cfg_default:
-            default_model = cfg_default
+        configured_model = str(model_cfg.get("default") or "").strip() or DEFAULT_MODEL
 
-    env_model = (
-        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
-    )
-    if env_model:
-        default_model = env_model.strip()
-    return default_model
+    effective_model = configured_model
+    override_source = None
+    for env_name in ("HERMES_MODEL", "OPENAI_MODEL", "LLM_MODEL"):
+        value = _thread_local_env_value(env_name).strip()
+        if value:
+            effective_model = value
+            override_source = env_name
+            break
+    return {
+        "configured_model": configured_model,
+        "effective_model": effective_model,
+        "model_override_source": override_source,
+    }
+
+
+def get_effective_default_model(config_data: dict | None = None) -> str:
+    """Resolve the effective Hermes default model from config, then env overrides."""
+    return str(get_effective_default_model_details(config_data)["effective_model"] or "")
 
 
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
@@ -4820,85 +4878,161 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
             model_cfg["service_tier"] = "priority"
         else:
             raise ValueError("service_tier must be one of: default, priority")
-    if advanced.get("api_key_clear"):
+
+
+def _advanced_model_secret_env_name(scope: str, task: str = "") -> str:
+    if scope == "main":
+        return "HERMES_WEBUI_MAIN_MODEL_API_KEY"
+    raw = re.sub(r"[^A-Z0-9]+", "_", str(task or "").upper()).strip("_") or "TASK"
+    digest = hashlib.sha256(str(task or "").encode("utf-8")).hexdigest()[:8].upper()
+    return f"HERMES_WEBUI_AUX_{raw[:32]}_{digest}_API_KEY"
+
+
+def _plan_advanced_model_secret(
+    model_cfg: dict, advanced: dict | None, *, scope: str, task: str = ""
+) -> dict[str, str | None]:
+    """Move one write-only model secret to .env and retain only ${ENV} in YAML."""
+    if advanced is not None and not isinstance(advanced, dict):
+        raise ValueError("advanced model options must be an object")
+    advanced = advanced or {}
+    submitted = str(advanced.get("api_key") or "").strip()
+    clear = bool(advanced.get("api_key_clear"))
+    if submitted and clear:
+        raise ValueError("api_key and api_key_clear cannot be used together")
+
+    env_name = _advanced_model_secret_env_name(scope, task)
+    owned_reference = f"${{{env_name}}}"
+    existing = str(model_cfg.get("api_key") or "").strip()
+    updates: dict[str, str | None] = {}
+
+    if clear:
         model_cfg.pop("api_key", None)
-    api_key = str(advanced.get("api_key") or "").strip()
-    if api_key:
-        model_cfg["api_key"] = api_key
+        if existing == owned_reference:
+            updates[env_name] = None
+    elif submitted:
+        model_cfg["api_key"] = owned_reference
+        updates[env_name] = submitted
+    elif existing and not (existing.startswith("${") and existing.endswith("}")):
+        model_cfg["api_key"] = owned_reference
+        updates[env_name] = existing
+    return updates
 
 
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
-    """Persist the Hermes default model in config.yaml and reload runtime config."""
+    """Persist the default model and write-only credential as one Profile transaction."""
     selected_model = str(model_id or "").strip()
     if not selected_model:
         raise ValueError("model is required")
 
-    config_path = _get_config_path()
-    # Hold _cfg_lock only around the read-modify-write of the YAML file.
-    # reload_config() acquires _cfg_lock internally (it's not reentrant) so
-    # it must be called AFTER releasing the lock to avoid deadlock.
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        model_cfg = config_data.get("model", {})
-        if not isinstance(model_cfg, dict):
-            model_cfg = {}
+    from api.provider_transactions import (
+        active_profile_transaction,
+        assert_profile_home,
+        load_yaml_mapping_strict,
+        restore_file_if_unchanged,
+        snapshot_file,
+    )
+    from api.providers import _write_env_file
 
-        previous_provider = str(model_cfg.get("provider") or "").strip()
-        requested_provider = str(provider or "").strip()
-        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-            selected_model
-        )
-        # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
-        # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
-        # not understand — if we wrote `@nous:anthropic/claude-opus-4.6` to
-        # config.yaml, a user who ran `hermes` in the terminal right after
-        # saving via WebUI would have the agent send that literal string to the
-        # Nous API, which would reject it (Nous expects `anthropic/claude-opus-4.6`,
-        # not the prefixed form). The Settings picker handles the resulting
-        # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
-        # matcher — see `static/panels.js` (#895).
-        persisted_model = str(resolved_model or selected_model).strip()
-        persisted_provider = str(requested_provider or resolved_provider or previous_provider or "").strip()
-        provider_override_won = bool(requested_provider and requested_provider != str(resolved_provider or "").strip())
-        # Never persist the bogus ``local`` value — see #1384. The auto-detect
-        # block in ``_build_available_models_uncached`` was rewriting unknown
-        # loopback hosts to ``provider: "local"``, which is not registered and
-        # broke compression/vision mid-conversation. Route through ``custom``
-        # so the agent's auxiliary client uses the ``no-key-required`` path.
-        if persisted_provider.lower() == "local":
-            persisted_provider = "custom"
+    try:
+        with active_profile_transaction(lambda: _get_config_path().parent) as profile_home:
+            config_path = profile_home / "config.yaml"
+            env_path = profile_home / ".env"
+            config_snapshot = snapshot_file(config_path)
+            env_snapshot = snapshot_file(env_path)
+            config_data = load_yaml_mapping_strict(config_path)
+            model_cfg = config_data.get("model", {})
+            if not isinstance(model_cfg, dict):
+                model_cfg = {}
 
-        model_cfg["default"] = persisted_model
-        if persisted_provider:
-            model_cfg["provider"] = persisted_provider
+            previous_provider = str(model_cfg.get("provider") or "").strip()
+            requested_provider = str(provider or "").strip()
+            resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                selected_model
+            )
+            persisted_model = str(resolved_model or selected_model).strip()
+            persisted_provider = str(
+                requested_provider or resolved_provider or previous_provider or ""
+            ).strip()
+            provider_override_won = bool(
+                requested_provider
+                and requested_provider != str(resolved_provider or "").strip()
+            )
+            if persisted_provider.lower() == "local":
+                persisted_provider = "custom"
 
-        if resolved_base_url and not provider_override_won:
-            model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
-        elif persisted_provider != previous_provider:
-            if persisted_provider == "openai":
-                model_cfg["base_url"] = "https://api.openai.com/v1"
-            else:
-                # Provider changed and we have no resolved URL for the new one.
-                # Drop the previous provider's base_url so New Chat doesn't route
-                # to the old endpoint — this MUST also cover custom:* providers
-                # (a different custom provider has a different URL); leaving the
-                # stale base_url sent requests to the wrong host (#4728).
-                model_cfg.pop("base_url", None)
+            model_cfg["default"] = persisted_model
+            if persisted_provider:
+                model_cfg["provider"] = persisted_provider
+            if resolved_base_url and not provider_override_won:
+                model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+            elif persisted_provider != previous_provider:
+                if persisted_provider == "openai":
+                    model_cfg["base_url"] = "https://api.openai.com/v1"
+                else:
+                    model_cfg.pop("base_url", None)
 
-        _apply_advanced_model_options(model_cfg, advanced)
-        if not _main_model_supports_service_tier(persisted_model, persisted_provider):
-            model_cfg.pop("service_tier", None)
+            _apply_advanced_model_options(model_cfg, advanced)
+            env_updates = _plan_advanced_model_secret(
+                model_cfg, advanced, scope="main"
+            )
+            if not _main_model_supports_service_tier(persisted_model, persisted_provider):
+                model_cfg.pop("service_tier", None)
+            config_data["model"] = model_cfg
+            intended_config_bytes = _serialize_yaml_config_file(config_data)
 
-        config_data["model"] = model_cfg
-        _save_yaml_config_file(config_path, config_data)
-    # Reload outside the lock — reload_config() acquires _cfg_lock itself.
-    reload_config()
-    # Invalidate the TTL cache so the next /api/models call returns fresh data
-    # with the new default model. Do NOT call get_available_models() here —
-    # it triggers a live provider fetch (up to 8s) that blocks the HTTP response
-    # to the browser, causing a visible freeze on every Settings save (#895).
+            env_published = None
+            save_attempted = False
+            try:
+                assert_profile_home(profile_home, lambda: _get_config_path().parent)
+                if env_updates:
+                    _write_env_file(env_path, env_updates)
+                    env_published = snapshot_file(env_path)
+                with _cfg_lock:
+                    if snapshot_file(config_path) != config_snapshot:
+                        raise RuntimeError("config.yaml changed during default-model update")
+                    save_attempted = True
+                    _save_yaml_config_file(config_path, config_data)
+            except Exception:
+                if env_published is not None:
+                    try:
+                        current_config = snapshot_file(config_path)
+                        config_published = (
+                            current_config.existed
+                            and current_config.data == intended_config_bytes
+                        )
+                        rollback_env = not config_published and (
+                            not save_attempted or current_config == config_snapshot
+                        )
+                        if rollback_env and not restore_file_if_unchanged(
+                            env_path, env_published, env_snapshot
+                        ):
+                            logger.error(
+                                "Skipped default-model env rollback because .env changed concurrently"
+                            )
+                        elif not rollback_env:
+                            logger.error(
+                                "Kept default-model env update because config publication could not be safely reversed"
+                            )
+                    except Exception:
+                        logger.exception("Failed to evaluate default-model rollback")
+                raise
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("Failed to save the default model transactionally.") from exc
+
+    from api.profiles import profile_env_for_active_request_readonly
+
+    with profile_env_for_active_request_readonly("default-model commit"):
+        reload_config()
+        details = get_effective_default_model_details(config_data)
     invalidate_models_cache()
-    return {"ok": True, "model": persisted_model, "provider": persisted_provider or None}
+    return {
+        "ok": True,
+        "model": persisted_model,
+        "provider": persisted_provider or None,
+        **details,
+    }
 
 
 # ── Auxiliary model configuration ──────────────────────────────────────────
@@ -4984,12 +5118,14 @@ def get_auxiliary_models() -> dict:
     main_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
 
     tasks = _iter_auxiliary_task_rows()
+    effective = get_effective_default_model_details(cfg)
 
     return {
         "tasks": tasks,
         "main": {
             "provider": main_provider,
             "model": main_model,
+            **effective,
             "supports_fast_tier": _main_model_supports_service_tier(main_model, main_provider),
             "service_tier": _public_main_service_tier(model_cfg),
             **_public_advanced_model_options(model_cfg),
@@ -5014,101 +5150,152 @@ def _coerce_optional_positive_int(value, field: str):
 
 
 def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | None = None) -> dict:
-    """Persist an auxiliary model assignment in config.yaml.
+    """Persist one auxiliary assignment and its write-only secret transactionally."""
+    if task != "__reset__" and task not in AUX_TASK_SLOTS:
+        raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
 
-    Special case: task='__reset__' clears all auxiliary slots.
-    ``advanced`` may update per-slot fields surfaced behind the WebUI gear menu.
-    Sensitive api_key values are write-only: get_auxiliary_models() only reports
-    whether one is set.
-    """
-    config_path = _get_config_path()
-    with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
-        if task != "__reset__" and task not in AUX_TASK_SLOTS:
-            raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
-        if task == "__reset__":
-            # Per-slot reset: set each slot to auto, preserving extra fields
-            # (timeout, extra_body, api_key, base_url, download_timeout, etc.)
+    from api.provider_transactions import (
+        active_profile_transaction,
+        assert_profile_home,
+        load_yaml_mapping_strict,
+        restore_file_if_unchanged,
+        snapshot_file,
+    )
+    from api.providers import _write_env_file
+
+    try:
+        with active_profile_transaction(lambda: _get_config_path().parent) as profile_home:
+            config_path = profile_home / "config.yaml"
+            env_path = profile_home / ".env"
+            config_snapshot = snapshot_file(config_path)
+            env_snapshot = snapshot_file(env_path)
+            config_data = load_yaml_mapping_strict(config_path)
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
                 aux_cfg = {}
-            for retired_slot in RETIRED_AUX_TASK_SLOTS:
-                aux_cfg.pop(retired_slot, None)
-            for slot in AUX_TASK_SLOTS:
-                slot_cfg = aux_cfg.get(slot, {})
+            env_updates: dict[str, str | None] = {}
+
+            if task == "__reset__":
+                for retired_slot in RETIRED_AUX_TASK_SLOTS:
+                    aux_cfg.pop(retired_slot, None)
+                for slot in AUX_TASK_SLOTS:
+                    slot_cfg = aux_cfg.get(slot, {})
+                    if not isinstance(slot_cfg, dict):
+                        slot_cfg = {}
+                    slot_cfg["provider"] = "auto"
+                    slot_cfg["model"] = ""
+                    aux_cfg[slot] = slot_cfg
+            else:
+                slot_cfg = aux_cfg.get(task, {})
                 if not isinstance(slot_cfg, dict):
                     slot_cfg = {}
-                slot_cfg["provider"] = "auto"
-                slot_cfg["model"] = ""
-                aux_cfg[slot] = slot_cfg
-            config_data["auxiliary"] = aux_cfg
-        else:
-            aux_cfg = config_data.get("auxiliary", {})
-            if not isinstance(aux_cfg, dict):
-                aux_cfg = {}
-            slot_cfg = aux_cfg.get(task, {})
-            if not isinstance(slot_cfg, dict):
-                slot_cfg = {}
-            slot_cfg["provider"] = provider or "auto"
-            slot_cfg["model"] = model or ""
-            if provider and (provider.startswith("custom:") or provider == "custom"):
-                # Resolve the auxiliary slot's base_url against the SELECTED
-                # provider, not the active main provider. A bare
-                # resolve_model_provider(model) ignores `provider` and routes the
-                # model through whatever main provider is active — so when the
-                # selected auxiliary provider (custom:A) and the active main
-                # provider (custom:B) both list the same model id, the slot was
-                # persisted with provider=custom:A but base_url=B's endpoint
-                # (overlapping-id misroute, sibling of the resolve_model_provider
-                # fix). For a named custom:<slug> selection, look up that
-                # provider's OWN custom_providers[] entry directly. Note we do
-                # NOT route through model_with_provider_context here: the
-                # @custom:<slug>:model form resolves base_url to None (the
-                # @provider path doesn't carry a custom entry's base_url), which
-                # would drop the base_url entirely. Fall back to the bare resolve
-                # only for the unnamed `custom` case, which has no own entry.
-                resolved_base_url = None
-                if provider.startswith("custom:"):
-                    # Resolve the selected provider's base_url from the
-                    # config_data already loaded under _cfg_lock above. Do NOT
-                    # call resolve_custom_provider_connection() / get_config()
-                    # here: they re-acquire the non-reentrant _cfg_lock we
-                    # already hold, self-deadlocking whenever the cache is stale
-                    # or the profile path changed. Use the shared uniqueness
-                    # helper on the in-scope dict so this slug-only save fails
-                    # closed on a collision (raises AmbiguousCustomProviderError)
-                    # exactly like every other path — otherwise the ambiguity
-                    # would be swallowed and the wrong endpoint persisted.
-                    _cp_match = _unique_custom_provider_entry(
-                        config_data.get("custom_providers", []),
-                        _custom_provider_slug_key(provider),
-                    )
-                    if _cp_match is not None:
-                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
-                if not resolved_base_url:
-                    # Best-effort fallback for the unnamed `custom` case (no own
-                    # entry). Keep it non-fatal for unexpected errors, but let a
-                    # genuine ambiguity propagate so the save fails closed.
-                    try:
-                        _, _, resolved_base_url = resolve_model_provider(model)
-                    except AmbiguousCustomProviderError:
-                        raise
-                    except Exception:
-                        resolved_base_url = None
-                if resolved_base_url:
-                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
-            if advanced is not None:
+                slot_cfg["provider"] = provider or "auto"
+                slot_cfg["model"] = model or ""
+                if provider and (provider.startswith("custom:") or provider == "custom"):
+                    # Resolve the auxiliary slot's base_url against the SELECTED
+                    # provider, not the active main provider. A bare
+                    # resolve_model_provider(model) ignores `provider` and routes the
+                    # model through whatever main provider is active — so when the
+                    # selected auxiliary provider (custom:A) and the active main
+                    # provider (custom:B) both list the same model id, the slot was
+                    # persisted with provider=custom:A but base_url=B's endpoint
+                    # (overlapping-id misroute, sibling of the resolve_model_provider
+                    # fix). For a named custom:<slug> selection, look up that
+                    # provider's OWN custom_providers[] entry directly. Note we do
+                    # NOT route through model_with_provider_context here: the
+                    # @custom:<slug>:model form resolves base_url to None (the
+                    # @provider path doesn't carry a custom entry's base_url), which
+                    # would drop the base_url entirely. Fall back to the bare resolve
+                    # only for the unnamed `custom` case, which has no own entry.
+                    resolved_base_url = None
+                    if provider.startswith("custom:"):
+                        # Resolve the selected provider's base_url from the
+                        # config_data already loaded under the Profile transaction.
+                        # Do NOT call resolve_custom_provider_connection() / get_config()
+                        # here: they can re-enter config loading with a different
+                        # snapshot whenever the cache is stale or the Profile path
+                        # changed. Use the shared uniqueness
+                        # helper on the in-scope dict so this slug-only save fails
+                        # closed on a collision (raises AmbiguousCustomProviderError)
+                        # exactly like every other path — otherwise the ambiguity
+                        # would be swallowed and the wrong endpoint persisted.
+                        _cp_match = _unique_custom_provider_entry(
+                            config_data.get("custom_providers", []),
+                            _custom_provider_slug_key(provider),
+                        )
+                        if _cp_match is not None:
+                            resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                    if not resolved_base_url:
+                        # Best-effort fallback for the unnamed `custom` case (no own
+                        # entry). Keep it non-fatal for unexpected errors, but let a
+                        # genuine ambiguity propagate so the save fails closed.
+                        try:
+                            _, _, resolved_base_url = resolve_model_provider(model)
+                        except AmbiguousCustomProviderError:
+                            raise
+                        except Exception:
+                            resolved_base_url = None
+                    if resolved_base_url:
+                        slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)
+                    env_updates = _plan_advanced_model_secret(
+                        slot_cfg, advanced, scope="auxiliary", task=task
+                    )
                 except ValueError as exc:
-                    msg = str(exc).replace("advanced model options", "advanced auxiliary options")
+                    msg = str(exc).replace(
+                        "advanced model options", "advanced auxiliary options"
+                    )
                     raise ValueError(msg) from exc
-            aux_cfg[task] = slot_cfg
+                aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
+            intended_config_bytes = _serialize_yaml_config_file(config_data)
 
-        _save_yaml_config_file(config_path, config_data)
+            env_published = None
+            save_attempted = False
+            try:
+                assert_profile_home(profile_home, lambda: _get_config_path().parent)
+                if env_updates:
+                    _write_env_file(env_path, env_updates)
+                    env_published = snapshot_file(env_path)
+                with _cfg_lock:
+                    if snapshot_file(config_path) != config_snapshot:
+                        raise RuntimeError("config.yaml changed during auxiliary-model update")
+                    save_attempted = True
+                    _save_yaml_config_file(config_path, config_data)
+            except Exception:
+                if env_published is not None:
+                    try:
+                        current_config = snapshot_file(config_path)
+                        config_published = (
+                            current_config.existed
+                            and current_config.data == intended_config_bytes
+                        )
+                        rollback_env = not config_published and (
+                            not save_attempted or current_config == config_snapshot
+                        )
+                        if rollback_env and not restore_file_if_unchanged(
+                            env_path, env_published, env_snapshot
+                        ):
+                            logger.error(
+                                "Skipped auxiliary-model env rollback because .env changed concurrently"
+                            )
+                        elif not rollback_env:
+                            logger.error(
+                                "Kept auxiliary-model env update because config publication could not be safely reversed"
+                            )
+                    except Exception:
+                        logger.exception("Failed to evaluate auxiliary-model rollback")
+                raise
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("Failed to save the auxiliary model transactionally.") from exc
 
-    reload_config()
+    from api.profiles import profile_env_for_active_request_readonly
+
+    with profile_env_for_active_request_readonly("auxiliary-model commit"):
+        reload_config()
     return {"ok": True, "task": task, "provider": provider, "model": model}
 
 
@@ -5580,11 +5767,17 @@ def _static_models_catalog_without_live_probes() -> dict:
                 is_provider_config = isinstance(provider_cfg, dict)
                 if not (is_known_provider or is_provider_config):
                     continue
+                if (
+                    is_provider_config
+                    and canonical.startswith("custom:")
+                    and provider_cfg.get("enabled") is False
+                ):
+                    continue
                 canonical_to_raw_provider_key.setdefault(canonical, provider_key)
                 if isinstance(provider_cfg, dict):
                     has_local_signal = any(
                         str(provider_cfg.get(key) or "").strip()
-                        for key in ("api_key", "key_env", "base_url")
+                        for key in ("api", "api_key", "key_env", "base_url")
                     )
                     provider_models = provider_cfg.get("models")
                     for model_id in _configured_model_ids(provider_models):
@@ -5670,20 +5863,30 @@ def _static_models_catalog_without_live_probes() -> dict:
         groups: list[dict] = []
         for pid in sorted(detected_providers):
             if pid.startswith("custom:"):
-                custom_group = named_custom_groups.get(pid, {})
-                group_models = copy.deepcopy(custom_group.get("models", []))
-                if group_models or pid == active_provider:
-                    groups.append(
-                        {
-                            "provider": custom_group.get("name") or pid.replace("custom:", ""),
-                            "provider_id": pid,
-                            "models": _apply_provider_prefix(
-                                group_models,
-                                pid,
-                                active_provider,
-                            ),
-                        }
+                if pid in named_custom_groups:
+                    custom_group = named_custom_groups[pid]
+                    group_models = copy.deepcopy(custom_group.get("models", []))
+                    if group_models or pid == active_provider:
+                        groups.append(
+                            {
+                                "provider": custom_group.get("name")
+                                or pid.replace("custom:", ""),
+                                "provider_id": pid,
+                                "models": _apply_provider_prefix(
+                                    group_models,
+                                    pid,
+                                    active_provider,
+                                ),
+                            }
+                        )
+                elif pid in canonical_to_raw_provider_key:
+                    modern_group = _configured_modern_custom_group(
+                        pid,
+                        canonical_to_raw_provider_key[pid],
+                        active_provider,
                     )
+                    if modern_group is not None:
+                        groups.append(modern_group)
                 continue
 
             if pid == "custom":
@@ -7247,6 +7450,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     or _is_plugin_model_provider(_canonical)
                 )
                 _is_provider_config = isinstance(_provider_cfg, dict)
+                if (
+                    _is_provider_config
+                    and _canonical.startswith("custom:")
+                    and _provider_cfg.get("enabled") is False
+                ):
+                    continue
                 _has_provider_route = False
                 if _is_provider_config:
                     _has_provider_route = any(
@@ -7407,65 +7616,62 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
         ) -> tuple[list[dict], dict | None]:
-            base = str(base_url or "").strip()
+            """Use the shared bounded, no-redirect models fetcher."""
+            base = str(base_url or "").strip().rstrip("/")
             if not base:
                 return [], None
+            # Retained for call-site compatibility. Configured local/private
+            # endpoints are explicitly trusted by the authenticated operator.
+            _ = trusted_base_urls
             try:
-                import ipaddress
-                import urllib.error
-                import urllib.request
-                import socket
+                from api.provider_endpoint_probe import probe_models_endpoint
 
-                endpoint_url = _models_endpoint_for_base_url(base)
-                headers = {}
-                key = str(api_key or "").strip()
-                if key:
-                    headers["Authorization"] = f"Bearer {key}"
+                # Preserve this legacy path's endpoint contract: a base ending
+                # in /v1 maps to /v1/models; other roots map to /v1/models too.
+                probe_base = base if base.endswith("/v1") else f"{base}/v1"
+                result = probe_models_endpoint(
+                    provider,
+                    probe_base,
+                    str(api_key or "").strip() or None,
+                    timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
+                )
+                if result.get("ok"):
+                    payload = {"data": result.get("models") or []}
+                    return _extract_model_entries_from_payload(payload, provider), None
 
-                # User-configured custom provider endpoints are explicitly trusted,
-                # but keep the same private-IP guard for non-matching targets used by
-                # the legacy active model.base_url path.
-                _ssrf_trusted_hosts: set[str] = set()
-                for trusted in (base, *trusted_base_urls):
-                    _cp_parsed = urlparse(
-                        str(trusted) if "://" in str(trusted) else f"http://{trusted}"
-                    )
-                    if _cp_parsed.hostname:
-                        _ssrf_trusted_hosts.add(_cp_parsed.hostname.lower())
-
-                parsed_url = urlparse(endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}")
-                if parsed_url.scheme not in ("", "http", "https"):
-                    raise ValueError(f"Invalid URL scheme: {parsed_url.scheme}")
-                if parsed_url.hostname:
-                    try:
-                        resolved_ips = socket.getaddrinfo(parsed_url.hostname, None)
-                        for _, _, _, _, addr in resolved_ips:
-                            addr_obj = ipaddress.ip_address(addr[0])
-                            if addr_obj.is_private or addr_obj.is_loopback or addr_obj.is_link_local:
-                                host_l = (parsed_url.hostname or "").lower()
-                                is_known_local = any(
-                                    k in host_l
-                                    for k in ("ollama", "localhost", "127.0.0.1", "lmstudio", "lm-studio")
-                                ) or host_l in _ssrf_trusted_hosts
-                                if not is_known_local:
-                                    raise ValueError(f"SSRF: resolved hostname to private IP {addr[0]}")
-                    except socket.gaierror:
-                        pass
-
-                req = urllib.request.Request(endpoint_url, method="GET")
-                req.add_header("User-Agent", "OpenAI/Python 1.0")
-                for k, v in headers.items():
-                    req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
-                    data = json.loads(response.read().decode("utf-8"))
-                return _extract_model_entries_from_payload(data, provider), None
-            except urllib.error.HTTPError as exc:
-                error = _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
-                logger.debug("Custom endpoint models fetch failed for provider %s: %s", provider, error)
+                status_code = result.get("status")
+                provider_label = str(provider or "custom").replace("custom:", "")
+                if status_code in (401, 403):
+                    error = {
+                        "kind": "auth",
+                        "code": int(status_code),
+                        "message": f"Models endpoint returned {status_code} — check the API key for {provider_label}.",
+                    }
+                elif isinstance(status_code, int):
+                    error = {
+                        "kind": "http",
+                        "code": int(status_code),
+                        "message": f"Models endpoint returned {status_code} for {provider_label}; see logs.",
+                    }
+                else:
+                    error = {
+                        "kind": "network",
+                        "code": None,
+                        "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
+                    }
+                logger.debug(
+                    "Custom endpoint models fetch failed for provider %s: %s",
+                    provider,
+                    error,
+                )
                 return [], error
             except Exception as exc:
                 error = _custom_endpoint_error(provider, exc)
-                logger.debug("Custom endpoint unreachable or misconfigured for provider %s: %s", provider, error)
+                logger.debug(
+                    "Custom endpoint unreachable or misconfigured for provider %s: %s",
+                    provider,
+                    error,
+                )
                 return [], error
 
         # 4. Fetch models from custom endpoint if base_url is configured
@@ -7661,7 +7867,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             auto_detected_models.append({"id": _cp_model, "label": _cp_label})
                             detected_providers.add("custom")
 
-        _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
+        _modern_custom_slugs = {
+            provider_id
+            for provider_id in _canonical_to_raw_provider_key
+            if provider_id.startswith("custom:")
+        }
+        _has_custom_providers = (
+            isinstance(_custom_providers_cfg, list)
+            and len(_custom_providers_cfg) > 0
+        ) or bool(_modern_custom_slugs)
         if active_provider and active_provider != "custom" and not _has_custom_providers:
             detected_providers.discard("custom")
             for _slug in list(detected_providers):
@@ -7676,11 +7890,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
+        _authoritative_custom_slugs = _named_custom_slugs | _modern_custom_slugs
         _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
-                if _pid_norm.startswith("custom:") and _pid_norm not in _named_custom_slugs:
+                if (
+                    _pid_norm.startswith("custom:")
+                    and _pid_norm not in _authoritative_custom_slugs
+                ):
                     detected_providers.discard(_pid)
 
         # Filter providers if providers.only_configured is set
@@ -7812,6 +8030,22 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 pid,
                                 _nc_models,
                                 models_endpoint_error=_named_custom_errors.get(pid),
+                                apply_prefix=False,
+                            )
+                    elif pid in _canonical_to_raw_provider_key:
+                        # Settings → Providers stores new custom endpoints in the
+                        # modern providers mapping. They are just as authoritative
+                        # as legacy custom_providers entries.
+                        _modern_group = _configured_modern_custom_group(
+                            pid,
+                            _canonical_to_raw_provider_key[pid],
+                            active_provider,
+                        )
+                        if _modern_group is not None:
+                            _append_picker_group(
+                                _modern_group["provider"],
+                                pid,
+                                _modern_group["models"],
                                 apply_prefix=False,
                             )
                     continue

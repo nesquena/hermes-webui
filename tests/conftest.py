@@ -25,6 +25,8 @@ import sys
 import time
 import urllib.request
 import urllib.error
+from contextlib import contextmanager
+import threading
 import pytest
 
 if not (3, 11) <= sys.version_info[:2] <= (3, 13):
@@ -44,6 +46,46 @@ requires_fork = pytest.mark.skipif(
     "fork" not in multiprocessing.get_all_start_methods(),
     reason="requires multiprocessing fork",
 )
+
+
+@pytest.fixture(autouse=True)
+def _test_profile_mutation_locks(monkeypatch):
+    """Provide the Agent lock contract in unit-test runtimes that omit it."""
+    try:
+        import hermes_constants
+    except ModuleNotFoundError:
+        yield
+        return
+    if callable(getattr(hermes_constants, "profile_mutation_locks", None)):
+        yield
+        return
+
+    locks = {}
+    guard = threading.Lock()
+
+    @contextmanager
+    def profile_mutation_locks(keys):
+        ordered = sorted({str(key) for key in keys})
+        acquired = []
+        try:
+            for key in ordered:
+                with guard:
+                    lock = locks.setdefault(key, threading.RLock())
+                lock.acquire()
+                acquired.append(lock)
+            yield
+        finally:
+            for lock in reversed(acquired):
+                lock.release()
+
+    monkeypatch.setattr(
+        hermes_constants,
+        "profile_mutation_locks",
+        profile_mutation_locks,
+        raising=False,
+    )
+    yield
+
 
 # ── Repo root discovery ────────────────────────────────────────────────────
 # conftest.py lives at <repo>/tests/conftest.py

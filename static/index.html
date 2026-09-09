@@ -1159,6 +1159,7 @@
                 <div class="model-dropdown settings-model-dropdown" id="settingsModelDropdown"></div>
               </div>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
+              <div id="settingsModelOverrideWarning" class="settings-model-override-warning" role="status" aria-live="polite" hidden></div>
             </div>
             <div class="settings-field">
               <label data-i18n="settings_label_auxiliary_models">Auxiliary Models</label>
@@ -1473,11 +1474,12 @@
             <div id="settingsPreferencesAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
           </div>
           <div class="settings-pane" id="settingsPaneProviders">
-            <div class="settings-section-head">
+            <div class="settings-section-head providers-toolbar">
               <div>
                 <div class="settings-section-title" data-i18n="providers_section_title">Providers</div>
-                <div class="settings-section-meta" data-i18n="providers_section_meta">Manage API keys for AI providers. Changes take effect immediately.</div>
+                <div class="settings-section-meta" data-i18n="providers_section_meta">Manage API keys, custom endpoints, and models. Changes take effect immediately.</div>
               </div>
+              <button type="button" class="sm-btn providers-add-custom" id="providersAddCustomBtn" data-i18n="providers_custom_add">Add custom model</button>
             </div>
             <div id="providersList" style="display:flex;flex-direction:column;margin-top:4px">
               <!-- Populated dynamically by loadProvidersPanel() -->
