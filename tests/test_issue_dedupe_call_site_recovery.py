@@ -491,3 +491,228 @@ def test_untagged_tool_requires_valid_current_turn_assistant_anchor(hermes_home,
         f"anchor={anchor!r} must not match: an unprovable anchor must "
         "let the current turn's tool card append instead of swallowing it"
     )
+
+
+# ---------------------------------------------------------------------------
+# Re-gate 2026-09-08 (nesquena-hermes, round 5) — three findings + regressions:
+#   CORE:  callers truncated pending_started_at via int() before the ownership
+#          check, and the whole-second legacy allowance then matched an
+#          unrelated turn (500.0 vs 500.9); missing timestamps failed OPEN.
+#   SILENT 1: tool-only replay allocated an empty assistant anchor before the
+#          tool dedupe check, growing the transcript on a deduped replay.
+#   SILENT 2: after reopen the lazy retry could not revalidate the persisted
+#          tool anchor (pending identity cleared) and re-appended the card.
+# ---------------------------------------------------------------------------
+
+
+def test_whole_second_legacy_row_does_not_own_subsecond_current_turn(hermes_home):
+    """CORE: a tokenless historical row at a whole second (500.0) must not win
+    ownership of a sub-second current turn (500.9) — via the callers' int()
+    truncation plus the removed whole-second allowance."""
+    import json
+
+    sid = "regate_whole_second_prompt"
+    stream_id = "regate-whole-second-stream"
+    append_run_event(sid, stream_id, "token", {"text": "current answer"})
+
+    session = Session(
+        session_id=sid,
+        title="regate",
+        messages=[],
+    )
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 500.9
+    session.pending_user_source = None
+
+    core_path = hermes_home / "sessions" / f"session_{sid}.json"
+    core_path.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    # Historical row truncated to the same whole second.
+                    {"role": "user", "content": "run the check", "timestamp": 500},
+                    {"role": "assistant", "content": "old answer", "timestamp": 500},
+                ],
+                "tool_calls": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _apply_core_sync_or_error_marker(
+        session,
+        core_path,
+        stream_id_for_recheck=stream_id,
+        require_stream_dead=False,
+    )
+    assert result is True
+
+    user_rows = [
+        message
+        for message in session.messages
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    # The current prompt at 500.9 must be materialized — the truncated
+    # 500.0 historical row must not consume it (data-loss shape).
+    user_timestamps = [row.get("timestamp") for row in user_rows]
+    assert user_timestamps == [500, 500.9], (
+        f"the sub-second current prompt was lost to the whole-second legacy row "
+        f"(user timestamps={user_timestamps!r})"
+    )
+    assert session.pending_user_message is None
+
+
+def test_missing_timestamp_fails_closed_toward_appending():
+    """CORE: absent timestamps must NOT count as a match — a duplicate row is
+    recoverable, a lost user prompt is not."""
+    from api.models import _message_matches_pending_checkpoint
+
+    session = Session(
+        session_id="missing-ts-fail-closed",
+        title="test",
+        messages=[],
+        pending_user_message="run the check",
+        pending_started_at=500.9,
+        pending_attachments=[],
+        pending_user_source=None,
+        active_stream_id="current-stream",
+    )
+    candidate = {
+        "role": "user",
+        "content": "run the check",
+        # No timestamp at all.
+    }
+    assert not _message_matches_pending_checkpoint(
+        candidate,
+        session.pending_user_message,
+        session.pending_started_at,
+        session.pending_user_source,
+        session.pending_attachments,
+    ), "a timestamp-less row must fail closed toward appending"
+
+    # Same for the expected side: pending state without a timestamp.
+    session.pending_started_at = None
+    candidate["timestamp"] = 500.9
+    assert not _message_matches_pending_checkpoint(
+        candidate,
+        session.pending_user_message,
+        session.pending_started_at,
+        session.pending_user_source,
+        session.pending_attachments,
+    ), "an expected-side missing timestamp must fail closed toward appending"
+
+
+def test_non_finite_timestamp_is_rejected():
+    """CORE: NaN/inf must not compare equal to anything."""
+    import math
+
+    from api.models import _message_matches_pending_checkpoint
+
+    session = Session(
+        session_id="nonfinite-ts",
+        title="test",
+        messages=[],
+        pending_user_message="run the check",
+        pending_started_at=math.nan,
+        pending_attachments=[],
+        pending_user_source=None,
+        active_stream_id="current-stream",
+    )
+    candidate = {
+        "role": "user",
+        "content": "run the check",
+        "timestamp": math.inf,
+    }
+    assert not _message_matches_pending_checkpoint(
+        candidate,
+        session.pending_user_message,
+        session.pending_started_at,
+        session.pending_user_source,
+        session.pending_attachments,
+    )
+
+
+def test_tool_only_replay_dedupe_does_not_allocate_orphan_anchor(hermes_home):
+    """SILENT 1: a tool-only replay whose card already exists must not grow the
+    transcript by an empty assistant anchor (dedupe BEFORE allocating)."""
+    sid = "regate_tool_only_replay"
+    stream_id = "regate-tool-only-stream"
+
+    # First pass: tool-first journal recovery creates one anchor + one card.
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls -la"})
+    session = Session(
+        session_id=sid,
+        title="repro",
+        messages=[{"role": "user", "content": "go"}],
+    )
+    from api.models import _append_journaled_partial_output
+
+    assert _append_journaled_partial_output(session, stream_id, dedupe_existing=True) is True
+    messages_before = len(session.messages)
+    tools_before = len(session.tool_calls or [])
+
+    # Second pass (the lazy retry shape): same journal replayed after the card
+    # is already persisted. Before the fix the anchor was allocated BEFORE the
+    # dedupe check, growing messages 2 -> 3 while tool count stayed flat.
+    result = _append_journaled_partial_output(session, stream_id, dedupe_existing=True)
+
+    tools_after = len(session.tool_calls or [])
+    assert tools_after == tools_before == 1, "the deduped tool must not be re-appended"
+    if result is True:
+        assert len(session.messages) == messages_before, (
+            "SILENT: the tool-only replay allocated a new empty assistant anchor "
+            "even though the tool card was deduplicated "
+            f"(messages {messages_before} -> {len(session.messages)})"
+        )
+
+
+def test_lazy_retry_after_reopen_does_not_duplicate_persisted_tool(hermes_home):
+    """SILENT 2: after reopen, the lazy retry must revalidate the persisted
+    tool anchor instead of re-appending the card plus a fresh anchor."""
+    import api.models as models
+
+    sid = "regate_lazy_retry_reopen"
+    stream_id = "regate-lazy-retry-stream"
+
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls -la"})
+
+    # First repair: one tool-only recovery pass appends anchor + card, and the
+    # interrupted marker carries the pending-journal-recovery retry flag.
+    session = Session(
+        session_id=sid,
+        title="repro",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 111},
+        ],
+    )
+    session.pending_user_message = "run the check"
+    session.active_stream_id = stream_id
+    session.pending_attachments = []
+    session.pending_started_at = 111
+    session.pending_user_source = None
+    session.save()
+    result = _apply_core_sync_or_error_marker(
+        session,
+        hermes_home / "sessions" / f"session_{sid}.json",
+        stream_id_for_recheck=stream_id,
+    )
+    assert result is True
+    first_tools = len(session.tool_calls or [])
+    assert first_tools == 1, "first repair should recover exactly one tool card"
+    session.save()
+    models.SESSIONS.pop(sid, None)
+
+    # Reopen: pending identity was cleared by the first repair; the lazy retry
+    # re-runs recovery against the same dead stream.
+    reloaded = models.get_session(sid)
+    recovered_again = [
+        tc for tc in (reloaded.tool_calls or [])
+        if tc.get("_recovered_from_run_journal")
+        and tc.get("_recovered_stream_id") == stream_id
+    ]
+    assert len(recovered_again) == 1, (
+        f"SILENT: reopen + lazy retry duplicated the persisted tool card "
+        f"(journal-tagged cards for {stream_id}: {len(recovered_again)})"
+    )
