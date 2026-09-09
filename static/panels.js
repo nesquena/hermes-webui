@@ -6457,7 +6457,11 @@ async function switchToWorkspace(path,name){
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
-    S.session.workspace=path;
+    if(typeof _transitionActiveSessionWorkspaceOwner==='function'){
+      _transitionActiveSessionWorkspaceOwner(null,{workspaceRoot:path});
+    }else{
+      S.session={...S.session,workspace:path};
+    }
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -7164,7 +7168,11 @@ async function switchToProfile(name) {
             model: S.session.model,
             model_provider: S.session.model_provider||null,
           })});
-          S.session.workspace = data.default_workspace;
+          if(typeof _transitionActiveSessionWorkspaceOwner==='function'){
+            _transitionActiveSessionWorkspaceOwner(null,{workspaceRoot:data.default_workspace});
+          }else{
+            S.session={...S.session,workspace:data.default_workspace};
+          }
         } catch (_) {}
       }
     }

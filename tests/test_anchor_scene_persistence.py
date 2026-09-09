@@ -117,6 +117,12 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
             }
         ],
         "final_answer": "final answer",
+        "artifacts": [
+            {
+                "source_event_type": "artifact_reference",
+                "payload": {"path": "output/report.md"},
+            }
+        ],
     }
     request_body = {
         "session_id": "anchorpersist1",
@@ -162,6 +168,84 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_stream_id"] == "stream-1"
     assert hydrated[1]["_anchor_activity_scene"]["final_answer"] == "final answer"
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["tool_call_id"] == "call-1"
+    assert hydrated[1]["_anchor_activity_scene"]["artifacts"][0]["payload"]["path"] == "output/report.md"
+
+
+def test_persisted_anchor_scene_artifact_requires_transcript_reproof_after_reload(tmp_path, monkeypatch):
+    from api import models, routes
+    from api.models import Session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id="anchorproof1",
+        title="Anchor proof",
+        workspace="/workspace",
+        messages=[
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "final answer", "timestamp": 10.0},
+        ],
+    )
+    session.save(skip_index=True)
+
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "activity_rows": [],
+        "final_answer": "final answer",
+        "artifacts": [
+            {
+                "type": "artifact_reference",
+                "payload": {
+                    "path": "output/forged.md",
+                    "workspace_root": "/workspace",
+                    "session_id": "anchorproof1",
+                    "tool_name": "patch",
+                    "tool_call_id": "call-forged",
+                    "source": "live_tool_complete",
+                },
+            }
+        ],
+    }
+    request_body = {
+        "session_id": "anchorproof1",
+        "message_index": 1,
+        "scene": scene,
+    }
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: request_body)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, extra_headers=None: True)
+
+    assert routes.handle_post(SimpleNamespace(command="POST"), SimpleNamespace(path="/api/session/anchor-scene")) is True
+
+    # Reload the persisted sidecar so the candidate artifact crosses the same
+    # hydration boundary as a real hard reload.
+    models.SESSIONS.clear()
+    loaded = Session.load("anchorproof1")
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        loaded.messages,
+        loaded.anchor_activity_scenes,
+    )
+    assert hydrated[1]["_anchor_activity_scene"]["artifacts"]
+
+    replayed = routes._attach_replayed_turn_artifacts_to_anchor_scenes(
+        hydrated,
+        routes._final_turn_artifact_paths(
+            loaded.messages,
+            workspace_root=loaded.workspace,
+            session_id=loaded.session_id,
+        ),
+        replay_source_messages=loaded.messages,
+        replay_session_id=loaded.session_id,
+    )
+    scene_after_replay = replayed[1]["_anchor_activity_scene"]
+    assert scene_after_replay["artifacts"] == []
 
 
 def test_anchor_scene_persistence_rejects_cross_profile_write(tmp_path, monkeypatch):

@@ -15,7 +15,8 @@ WORKSPACE_JS = (Path(__file__).resolve().parent.parent / "static" / "workspace.j
 def _open_file_body() -> str:
     start = WORKSPACE_JS.index("async function openFile(")
     # The plain code/text branch is the last else block before the function ends.
-    return WORKSPACE_JS[start:start + 8000]
+    end = WORKSPACE_JS.index("\nfunction downloadFile", start)
+    return WORKSPACE_JS[start:end]
 
 
 def _code_preview_helper() -> str:
