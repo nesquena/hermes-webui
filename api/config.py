@@ -96,7 +96,7 @@ logger = logging.getLogger(__name__)
 # timeout even when one upstream is slow or unreachable. The models cache rebuild
 # path probes configured custom endpoints serially, so each provider needs a
 # short hard cap and graceful degradation.
-CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
+CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 30.0
 
 
 def _env_mb_bytes(name: str, default_mb: int) -> int:
