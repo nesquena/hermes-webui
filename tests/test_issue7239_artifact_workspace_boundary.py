@@ -129,6 +129,21 @@ process.stdout.write(JSON.stringify(collectSessionArtifacts().map(item=>item.pat
     assert _node_json(script) == ["reports/output.md"]
 
 
+def test_explicit_safety_rejects_unsafe_path_forms_and_keeps_long_names():
+    long_path = "a" * 246
+    rows = _classify([
+        "https://example.test/report.md", "//server/share/report.md",
+        "C:relative.md", "bad\x00name.md", long_path,
+    ], "")
+    assert [row["kind"] for row in rows[:4]] == ["unsupported"] * 4
+    assert rows[4] == {
+        "kind": "workspace-relative",
+        "displayPath": long_path,
+        "dedupeKey": long_path,
+        "openPath": long_path,
+    }
+
+
 def test_collection_dedupes_relative_and_workspace_absolute_aliases():
     script = _common_js(
         "_sanitizeArtifactPath",
