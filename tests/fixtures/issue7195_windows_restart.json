@@ -1,0 +1,13 @@
+{
+  "source": "https://github.com/nesquena/hermes-webui/issues/7195#issuecomment-5381720224",
+  "issue": "https://github.com/nesquena/hermes-webui/issues/7195",
+  "base": "3b9c632a1fa339abcfd457973dcf10810640e760",
+  "command": "python -m pytest tests/test_updates.py tests/test_update_checker.py tests/test_update_channels.py -q --tb=short -p no:cacheprovider",
+  "launch": {
+    "platform": "win32",
+    "frozen": false,
+    "argv_shape": ["C:\\Users\\david\\AppData\\Local\\hermes\\hermes-agent\\venv\\Lib\\site-packages\\pytest\\__main__.py", "tests/test_updates.py", "tests/test_update_checker.py", "tests/test_update_channels.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+    "restart_payload_before_fix": ["C:\\Users\\david\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe", "C:\\Users\\david\\AppData\\Local\\hermes\\hermes-agent\\venv\\Lib\\site-packages\\pytest\\__main__.py", "tests/test_updates.py", "tests/test_update_checker.py", "tests/test_update_channels.py", "-q", "--tb=short", "-p", "no:cacheprovider"],
+    "observed_symptom": "Each pytest generation starts another pytest generation and its server fixtures, producing recursive children and leaked processes."
+  }
+}

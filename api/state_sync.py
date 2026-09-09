@@ -205,9 +205,11 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     titles for WebUI sessions.  This function bridges that gap and is called
     from the background title update/refresh paths after a title is persisted.
 
-    Uses ``set_auto_title_if_empty`` so it will only populate a NULL title and
-    never overwrite a manual rename made via CLI/Gateway/TUI.  This means
-    title refreshes (where state.db already holds the initial auto-title) are
+    Uses ``set_auto_title`` (LLM provenance) so it will only populate a row that
+    is NULL or holds a lower-authority auto-title, and never overwrites a manual
+    rename made via CLI/Gateway/TUI (``set_auto_title`` returns ``False``,
+    untouched, when a higher-authority title holds the row).  This means title
+    refreshes (where state.db already holds the initial auto-title) are
     effectively no-ops at the state.db layer -- acceptable because the primary
     goal is ensuring ``hermes sessions list`` is not blank.
 
@@ -223,8 +225,15 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     try:
         # Ensure the session row exists (idempotent) so the UPDATE has a target.
         db.ensure_session(session_id=session_id, source='webui')
+        # hermes-agent's SessionDB.set_auto_title_if_empty was renamed to
+        # set_auto_title(session_id, title, *, source) in the state-module
+        # split (agent commit 53db597201, released v2026.9.7). set_auto_title
+        # preserves the same "only populate NULL / never clobber a manual
+        # rename" semantics (returns False, untouched, when a higher-authority
+        # title holds the row) and requires an explicit auto source.
+        _llm_source = getattr(db, "TITLE_SOURCE_LLM", "llm")
         try:
-            db.set_auto_title_if_empty(session_id, title)
+            db.set_auto_title(session_id, title, source=_llm_source)
         except ValueError:
             # state.db enforces uniqueness on sessions.title, so a byte-identical
             # auto-title generated for two sessions raises ValueError here. Derive
@@ -232,7 +241,7 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
             # retry instead of leaving the second row blank (#6964).
             alt = db.get_next_title_in_lineage(title)
             if alt and alt != title:
-                db.set_auto_title_if_empty(session_id, alt)
+                db.set_auto_title(session_id, alt, source=_llm_source)
     except Exception:
         logger.debug("Failed to sync session title to state.db for %s", session_id)
     finally:
