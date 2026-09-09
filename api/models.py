@@ -8222,18 +8222,38 @@ def _state_db_active_rows_digest(rows) -> str:
     return digest.hexdigest() if stamped else ''
 
 
+# hermes_state encodes list/dict message content (multimodal parts) as a
+# sentinel-prefixed JSON string because sqlite3 binds only scalars; see
+# hermes_state._CONTENT_JSON_PREFIX and _decode_content(). This module reads
+# that table with its own SQL, so it must apply the same decode. Without it an
+# image part's base64 data URI reaches the transcript as literal text -- a
+# single unbreakable ~65k-character run -- and WebKit computes min-content
+# width by scanning every line-break position, pinning a core for minutes.
+_STATE_DB_CONTENT_JSON_PREFIX = "\x00json:"
+
+
+def _decode_state_db_content(value):
+    """Reverse hermes_state's content encoding; non-sentinel values pass through."""
+    if isinstance(value, str) and value.startswith(_STATE_DB_CONTENT_JSON_PREFIX):
+        try:
+            return json.loads(value[len(_STATE_DB_CONTENT_JSON_PREFIX):])
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
 def _project_state_db_message(row, available, id_col, optional):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
     Shared by ``get_state_db_session_messages`` and the regeneration
     single-snapshot helper so the bounded tail can never drift from the
-    canonical reader: JSON-decode tool_calls/reasoning payloads, omit
+    canonical reader: JSON-decode content/tool_calls/reasoning payloads, omit
     empty fields, keep durable row id private (``_state_db_row_id`` only for
     real Agent api_content replays), and apply ``tool_name → name``.
     """
     msg = {
         'role': row['role'],
-        'content': row['content'],
+        'content': _decode_state_db_content(row['content']),
         'timestamp': row['timestamp'],
     }
     for col in optional:
