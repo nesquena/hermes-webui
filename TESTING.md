@@ -1978,7 +1978,7 @@ same `HERMES_HOME` (when applicable) and verify identical effect.
 
 - [ ] `/help` — dropdown lists 25+ commands; selecting `/help` posts an assistant message listing them.
 - [ ] `/new` (and alias `/reset`) — starts fresh session.
-- [ ] `/clear` — clears current transcript display (webui-only meaning, distinct from CLI's "clear screen").
+- [ ] `/clear` — durably empties the active WebUI session while preserving its session ID (and pin/project metadata). Reload immediately, then send a new message: the old transcript must not reappear.
 - [ ] `/title <name>` — renames active session, topbar + sidebar update; `/title` alone shows current title.
 - [ ] `/status` — assistant message shows session_id, model, workspace, message count.
 - [ ] `/usage` — assistant message shows token counts; the "show token usage" setting is unchanged (toggle still in Settings panel).
