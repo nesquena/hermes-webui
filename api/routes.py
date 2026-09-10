@@ -9174,6 +9174,76 @@ def _display_merge_cache_entry_usable(entry, cache_key) -> bool:
     return 0.0 <= age <= _DISPLAY_MERGE_STREAMING_TTL_SECONDS
 
 
+# perf(webui/session-load-latency): dedicated FULL-OPEN merge cache. The
+# msg_limit tail path has its own memoized merge (above); full transcript
+# opens (msg_limit=None) historically re-walked lineage + full state.db
+# merge on every open (~1.5-3.6s on multi-thousand-row sessions). Same
+# fail-closed contract as the other display caches, separate store: keys
+# are content-addressed (sidecar stat signature + lineage parent sigs +
+# state.db DB/WAL signature), so a serve-time hit can only return rows
+# identical to what a fresh load+merge would produce — any source change
+# changes the key and forces a recompute. No TTL: signatures, not clocks.
+# The limited-path cache cannot be shared because msg_limit reads a
+# bounded state.db scope (a strict subset of the full scope).
+_FULL_OPEN_MERGE_CACHE_MAX = 8
+_full_open_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
+_full_open_merge_cache_lock = threading.Lock()
+
+
+def _full_open_merge_cached_messages(session) -> list | None:
+    """Return the memoized FULL merged transcript, or None on any miss/uncertainty."""
+    try:
+        if _display_merge_session_is_active(session):
+            return None
+        sid = str(getattr(session, "session_id", "") or "")
+        if not sid:
+            return None
+        # Resolve the sidecar exactly like the merge path does (None would key
+        # on an empty sidecar and miss every time), then build the key WITHOUT
+        # loading state.db rows (signature UNSET -> DB stat signature).
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+        cache_key = _display_merge_cache_key(session, sidecar_messages, None)
+        if cache_key is None:
+            return None
+        with _full_open_merge_cache_lock:
+            entry = _full_open_merge_cache.get(sid)
+            if entry is not None and entry.get("key") == cache_key:
+                _full_open_merge_cache.move_to_end(sid, last=True)
+                return [
+                    dict(m) if isinstance(m, dict) else m
+                    for m in entry["messages"]
+                ]
+        return None
+    except Exception:
+        return None
+
+
+def _full_open_merge_cache_put(session, messages) -> None:
+    """Store a freshly merged FULL transcript. No-op unless every key
+    component is exactly resolvable and the session is still inactive."""
+    try:
+        if _display_merge_session_is_active(session):
+            return
+        sid = str(getattr(session, "session_id", "") or "")
+        if not sid or not messages:
+            return
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+        cache_key = _display_merge_cache_key(session, sidecar_messages, None)
+        if cache_key is None:
+            return
+        with _full_open_merge_cache_lock:
+            _full_open_merge_cache[sid] = {
+                "key": cache_key,
+                "messages": messages,
+                "stored_at": time.monotonic(),
+            }
+            _full_open_merge_cache.move_to_end(sid, last=True)
+            while len(_full_open_merge_cache) > _FULL_OPEN_MERGE_CACHE_MAX:
+                _full_open_merge_cache.popitem(last=False)
+    except Exception:
+        return
+
+
 def _display_merge_requires_lineage_provenance(session) -> bool:
     """Return whether this sidecar view depends on a stitched snapshot parent."""
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
@@ -9288,6 +9358,192 @@ def _display_merge_cache_key(
         getattr(session, "truncation_watermark", None),
         getattr(session, "truncation_boundary", None),
     )
+
+
+# perf(webui/session-load-latency): streaming twin of the display-merge cache
+# above. ACTIVE sessions (live active_stream_id / pending_user_message) are
+# gated out of _display_merge_cache by _display_merge_session_is_active, so
+# every browser/phone poll mid-turn pays the full state.db load + merge. This
+# cache serves the exact repeat-poll shape (same in-memory transcript, no
+# state.db write between polls) within a tight TTL instead. Same fail-closed
+# contract as the inactive cache: any unresolvable key component disables it.
+# Lineage-key logic mirrors _display_merge_cache_key (see that function; the
+# block is inlined rather than shared so the inactive path's signature/unset
+# plumbing stays untouched).
+_DISPLAY_STREAMING_MERGE_CACHE_MAX = 16
+_display_streaming_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
+_display_streaming_merge_cache_lock = threading.Lock()
+
+
+def _display_streaming_lineage_parent_sigs(session, self_sig):
+    """Return validated lineage parent signatures for this session, or None.
+
+    Validation is a copy of the parent-sig block in _display_merge_cache_key:
+    reuse the signatures recorded by the (already memoized) lineage stitch so a
+    write to any parent snapshot invalidates this cache too. Returns () for a
+    lineage without snapshot parents, and None (fail closed) when the recorded
+    entry is stale, incomplete, or raced by a concurrent refresh.
+    """
+    sid = str(getattr(session, "session_id", "") or "")
+    parent_sigs = ()
+    with _lineage_display_cache_lock:
+        lineage_entry = _lineage_display_cache.get(sid)
+    if lineage_entry is not None:
+        if (
+            lineage_entry.get("provenance_complete") is not True
+            or lineage_entry.get("self_sig") != self_sig
+        ):
+            _evict_lineage_display_cache_entry(sid, lineage_entry)
+            return None
+        parent_sigs = tuple(
+            (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
+            for path, sig in (lineage_entry.get("parent_sigs") or [])
+        )
+        for parent_path, parent_sig in parent_sigs:
+            if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
+                _evict_lineage_display_cache_entry(sid, lineage_entry)
+                return None
+        with _lineage_display_cache_lock:
+            if _lineage_display_cache.get(sid) is not lineage_entry:
+                return None
+    if not parent_sigs and _display_merge_requires_lineage_provenance(session):
+        return None
+    return parent_sigs
+
+
+def _display_streaming_merge_cache_key(session, *, msg_limit):
+    """Return a fail-closed validity key for the streaming merge cache, or None.
+
+    Keys on every input the append-only merge consumes for an ACTIVE session:
+    the self sidecar stat signature, validated lineage parent signatures, the
+    in-memory tail marker (row count + last row timestamp/id) that catches
+    unsaved streaming deltas, the target-session state.db revision, the
+    truncation fields, and the display window (msg_limit). None means "do not
+    cache": any component that cannot be resolved exactly disables the cache
+    for this request rather than risking a stale transcript.
+    """
+    from api.models import _sidecar_stat_signature
+
+    sid = str(getattr(session, "session_id", "") or "")
+    if not sid or not is_safe_session_id(sid):
+        return None
+    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
+    if self_sig is None:
+        return None
+    parent_sigs = _display_streaming_lineage_parent_sigs(session, self_sig)
+    if parent_sigs is None:
+        return None
+    messages = list(getattr(session, "messages", []) or [])
+    last_marker = (None, None)
+    if messages:
+        last = messages[-1]
+        if isinstance(last, dict):
+            last_marker = (last.get("timestamp"), last.get("id"))
+    state_fp = _state_db_session_signature(
+        sid, getattr(session, "profile", None) or None
+    )
+    if state_fp is None:
+        return None
+    return (
+        ("streaming-active",),
+        self_sig,
+        parent_sigs,
+        len(messages),
+        last_marker,
+        state_fp,
+        getattr(session, "truncation_watermark", None),
+        getattr(session, "truncation_boundary", None),
+        msg_limit,
+    )
+
+
+def store_streaming_merge_entry(session, *, msg_limit, messages) -> None:
+    """Cache a full merge output for an ACTIVE session under its streaming key.
+
+    No-op (fail closed) whenever the key cannot be built. Rows are shallow
+    copied on the way in — the same contract as the inactive store, since
+    callers may attach display metadata to the rows they were handed.
+    """
+    try:
+        cache_key = _display_streaming_merge_cache_key(session, msg_limit=msg_limit)
+    except Exception:
+        cache_key = None
+    if cache_key is None:
+        return
+    merged = [dict(m) if isinstance(m, dict) else m for m in messages]
+    sid = str(getattr(session, "session_id", "") or "")
+    with _display_streaming_merge_cache_lock:
+        _display_streaming_merge_cache[sid] = {
+            "key": cache_key,
+            "messages": merged,
+            "stored_at": time.monotonic(),
+        }
+        _display_streaming_merge_cache.move_to_end(sid, last=True)
+        while len(_display_streaming_merge_cache) > _DISPLAY_STREAMING_MERGE_CACHE_MAX:
+            _display_streaming_merge_cache.popitem(last=False)
+
+
+def _streaming_entry_fresh(entry) -> bool:
+    """TTL gate for streaming entries (legacy keys keep the other helper)."""
+    try:
+        age = time.monotonic() - float(entry["stored_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return 0.0 <= age <= _DISPLAY_MERGE_STREAMING_TTL_SECONDS
+
+
+def probe_streaming_merge_entry(session, *, msg_limit):
+    """Return the cached merge rows for an ACTIVE session, or None on a miss.
+
+    Fail-closed by construction: inactive sessions belong to the legacy
+    display-merge cache and are refused here, an unbuildable key never probes,
+    and entries older than _DISPLAY_MERGE_STREAMING_TTL_SECONDS are evicted
+    rather than served (mid-turn token deltas land continuously, so the entry
+    only ever speaks for "same tail, repeat poll" traffic).
+    """
+    try:
+        if not _display_merge_session_is_active(session):
+            return None
+        cache_key = _display_streaming_merge_cache_key(session, msg_limit=msg_limit)
+        if cache_key is None:
+            return None
+        sid = str(getattr(session, "session_id", "") or "")
+        with _display_streaming_merge_cache_lock:
+            entry = _display_streaming_merge_cache.get(sid)
+            if entry is None or not _streaming_entry_fresh(entry):
+                if entry is not None:
+                    _display_streaming_merge_cache.pop(sid, None)
+                return None
+            if entry.get("key") != cache_key:
+                return None
+            _display_streaming_merge_cache.move_to_end(sid, last=True)
+            return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
+    except Exception:
+        return None
+
+
+def evict_streaming_merge_entries(session_id) -> None:
+    """Drop the streaming merge entry for a session (turn-end belt, Task 4)."""
+    sid = str(session_id or "")
+    if not sid:
+        return
+    with _display_streaming_merge_cache_lock:
+        _display_streaming_merge_cache.pop(sid, None)
+
+
+def evict_streaming_redact_entry(session_id) -> None:
+    """Forward the turn-end belt to the redact memo (Task 5 wires its helper)."""
+    sid = str(session_id or "")
+    if not sid:
+        return
+    try:
+        from api import helpers as _helpers
+
+        pop = getattr(_helpers, "_session_redact_cache_pop", None)
+        if callable(pop):
+            pop(sid)
+    except Exception:
+        pass
 
 
 def _state_db_target_session_signature(db_path, session_id):
@@ -13504,6 +13760,9 @@ def handle_get(handler, parsed) -> bool:
             # branch below, including the ones that never probe the cache.
             _display_cache_hit = None
             _display_state_db_signature = None
+            _full_open_via_cache = False
+            _full_open_cache_candidate = False
+            _full_open_state_db_signature = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -13535,22 +13794,54 @@ def handle_get(handler, parsed) -> bool:
                 # 36k-row session) even when the merge itself was served from
                 # cache. Probe the cache first and skip the load on a hit.
                 #
-                # Deliberately narrow: only when msg_limit is set (the merge
-                # helper below is the sole consumer) and only for inactive
-                # sessions, matching the cache's own validity rule. Any miss
-                # falls through to the normal full load, so this can only skip
-                # work that would have produced an identical merged result.
+                # Two disjoint cache layers, split on the exact active/inactive
+                # boundary the caches themselves enforce:
+                #   - INACTIVE sessions -> the legacy display-merge cache
+                #     (behavior unchanged);
+                #   - ACTIVE sessions (live stream or pending user turn) ->
+                #     the streaming merge cache: mid-turn polls are pure
+                #     repeats of the previous merge (state.db rows land per
+                #     turn, not per token), so a TTL-bounded hit skips the
+                #     state.db load exactly like the inactive path does.
+                # #4070 trap: a msg_before page read has a different state.db
+                # scope than the tail read -- msg_before is not None bypasses
+                # BOTH layers and always takes the full load (hard rule; the
+                # legacy probe used to enforce this inside its own gate).
+                # Fail-closed: any miss falls through to the normal full load
+                # + merge below, so a hit can only skip work that would have
+                # produced an identical merged result.
                 _display_cache_hit = None
-                if (
-                    msg_limit is not None
-                    and not getattr(s, "active_stream_id", None)
-                    and not getattr(s, "pending_user_message", None)
-                ):
-                    _display_cache_hit = _display_merge_cached_messages(
-                        s,
-                        limited_sidecar_messages,
-                        msg_before=msg_before,
+                if msg_limit is not None and msg_before is None:
+                    _session_active_for_cache = bool(
+                        getattr(s, "active_stream_id", None)
+                        or getattr(s, "pending_user_message", None)
                     )
+                    if not _session_active_for_cache:
+                        _display_cache_hit = _display_merge_cached_messages(
+                            s,
+                            limited_sidecar_messages,
+                            msg_before=msg_before,
+                        )
+                    else:
+                        # Active session: probe the streaming cache. Safe to
+                        # skip the row load on a hit because the merge block
+                        # below consumes _display_cache_hit only under the
+                        # same `msg_limit is not None` gate this probe runs
+                        # under — a hit can never leak into the msg_limit=None
+                        # full-transcript branch (#4070 fail-closed rules).
+                        _display_cache_hit = probe_streaming_merge_entry(
+                            s, msg_limit=msg_limit
+                        )
+                elif msg_limit is None and msg_before is None and not is_messaging_session:
+                    # Full open (msg_limit=None): probe the dedicated full-open
+                    # cache. Same fail-closed contract — a hit skips the
+                    # state.db load AND the full lineage merge below; any
+                    # source change invalidates the content-addressed key.
+                    _full_open_cache_candidate = True
+                    _full_open_cache_hit = _full_open_merge_cached_messages(s)
+                    if _full_open_cache_hit is not None:
+                        _display_cache_hit = _full_open_cache_hit
+                        _full_open_via_cache = True
                 if _display_cache_hit is not None:
                     state_db_messages = []
                 else:
@@ -13562,6 +13853,25 @@ def handle_get(handler, parsed) -> bool:
                         (
                             state_db_messages,
                             _display_state_db_signature,
+                        ) = _load_state_db_messages_with_stable_signature(
+                            sid,
+                            _session_profile,
+                            _state_db_reader_kwargs,
+                        )
+                    elif (
+                        msg_limit is None
+                        and msg_before is None
+                        and not is_messaging_session
+                        and not getattr(s, "active_stream_id", None)
+                        and not getattr(s, "pending_user_message", None)
+                        and _full_open_cache_candidate
+                    ):
+                        # Full open on an inactive session: load with a
+                        # signature bracket so the store step can verify no
+                        # concurrent write raced the read (fail-closed).
+                        (
+                            state_db_messages,
+                            _full_open_state_db_signature,
                         ) = _load_state_db_messages_with_stable_signature(
                             sid,
                             _session_profile,
@@ -13615,13 +13925,32 @@ def handle_get(handler, parsed) -> bool:
                             msg_before=msg_before,
                         )
                 else:
-                    _all_msgs = merge_session_messages_append_only(
-                        _webui_sidecar_lineage_messages_for_display(s),
-                        state_db_messages,
-                        truncation_watermark=getattr(s, "truncation_watermark", None),
-                        truncation_boundary=getattr(s, "truncation_boundary", None),
-                    )
-                    _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
+                    if _full_open_via_cache and _display_cache_hit is not None:
+                        # Full-open cache hit: rows are content-addressed to the
+                        # exact sidecar+lineage+state.db signatures probed above.
+                        _all_msgs = _display_cache_hit
+                    else:
+                        _all_msgs = merge_session_messages_append_only(
+                            _webui_sidecar_lineage_messages_for_display(s),
+                            state_db_messages,
+                            truncation_watermark=getattr(s, "truncation_watermark", None),
+                            truncation_boundary=getattr(s, "truncation_boundary", None),
+                        )
+                        _all_msgs = _merged_webui_lineage_messages_for_display(s, _all_msgs)
+                        if (
+                            _full_open_cache_candidate
+                            and _full_open_state_db_signature is not None
+                            and _full_open_state_db_signature
+                            == _state_db_session_signature(
+                                sid, getattr(s, "profile", None) or None
+                            )
+                        ):
+                            # Store only when the read was signature-stable: the
+                            # DB signature after the merge still matches the one
+                            # that bracketed the row load, so nothing wrote to
+                            # this session's state.db mid-merge. Signature-based
+                            # keying means a later change re-keys and recomputes.
+                            _full_open_merge_cache_put(s, _all_msgs)
             else:
                 if is_messaging_session and cli_messages:
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -13875,7 +14204,77 @@ def handle_get(handler, parsed) -> bool:
                 )
                 if revision:
                     raw["regeneration_revision"] = revision
-            redact = redact_session_data(raw)
+            # perf(webui/session-load-latency): memoize the transcript redact
+            # stage. Fail-closed: caches split on the active/inactive boundary -
+            # INACTIVE sessions reuse the base memo; ACTIVE (streaming/pending)
+            # sessions reuse the streaming TTL memo - mid-turn repeat polls skip
+            # a full walk while the state.db signature is available和 unchanged
+            # (any write invalidates); msg_before paging is not in play. On any
+            # uncertainty the
+            # override is skipped and redact_session_data() walks everything.
+            _redact_session_active = False
+            _redact_cache_sig = None
+            _redact_cached_msgs = None
+            _redact_cache_put = None
+            _redact_cache_get = None
+            try:
+                _redact_session_active = _display_merge_session_is_active(s)
+                if (
+                    load_messages
+                    and msg_before is None
+                    and not (_display_cache_hit is not None and _redact_session_active)
+                ):
+                    from api.helpers import (
+                        _session_redact_signature,
+                        _session_redact_cached_get,
+                        _session_redact_cached_put,
+                        _session_redact_streaming_cached_get,
+                        _session_redact_streaming_cached_put,
+                    )
+                    from api.config import load_settings as _load_settings_for_redact
+
+                    if _redact_session_active:
+                        _redact_cache_get = _session_redact_streaming_cached_get
+                        _redact_cache_put = _session_redact_streaming_cached_put
+                    else:
+                        _redact_cache_get = _session_redact_cached_get
+                        _redact_cache_put = _session_redact_cached_put
+                    _redact_enabled = bool(
+                        _load_settings_for_redact().get("api_redact_enabled", True)
+                    )
+                    _db_sig = _state_db_session_signature(
+                        getattr(s, "session_id", None),
+                        getattr(s, "profile", None) or None,
+                    )
+                    _redact_cache_sig = _session_redact_signature(
+                        sid,
+                        messages=_truncated_msgs,
+                        state_db_signature=_db_sig,
+                        redact_enabled=_redact_enabled,
+                        msg_limit=msg_limit,
+                        messages_offset=_messages_offset,
+                    )
+                    _redact_cached_msgs = _redact_cache_get(
+                        sid, _redact_cache_sig
+                    )
+            except Exception:
+                _redact_cache_sig = None
+                _redact_cached_msgs = None
+                _redact_cache_put = None
+                _redact_cache_get = None
+            if _redact_cached_msgs is None:
+                redact = redact_session_data(raw)
+                if _redact_cache_sig is not None and _redact_cache_put is not None:
+                    _redact_cache_put(
+                        sid, _redact_cache_sig, redact.get("messages", [])
+                    )
+            else:
+                redact = redact_session_data(
+                    raw,
+                    _messages_override=[
+                        dict(m) if isinstance(m, dict) else m for m in _redact_cached_msgs
+                    ],
+                )
             _t5 = _time.monotonic()
             if _diag: _diag.stage("t5_after_redact")
             resp = j(handler, {"session": redact})
@@ -19280,9 +19679,59 @@ def _handle_gateway_sse_stream(handler, parsed):
 
     q = watcher.subscribe()
     try:
-        # Send initial snapshot immediately
-        from api.models import get_cli_sessions
-        initial = get_cli_sessions()
+        # Send initial snapshot immediately. Use the SAME session-list payload
+        # cache as /api/sessions (single-flight, stale-return, background
+        # rebuild) so N browser tabs / phone reconnects share ONE DB query instead
+        # of each SSE connect running get_cli_sessions() raw on the whole state.db
+        # (~4-5s each, all stacked). (#perf SSE /api/sessions consistency)
+        try:
+            from api import profiles as _profiles_api
+            _settings = load_settings()
+            _initial_payload = _get_cached_session_list_payload(
+                key=_session_list_cache_key(
+                    active_profile=_profiles_api.get_active_profile_name(),
+                    all_profiles=False,
+                    show_cli_sessions=bool(_settings.get("show_cli_sessions")),
+                    show_previous_messaging_sessions=bool(
+                        _settings.get("show_previous_messaging_sessions")
+                    ),
+                    show_cron_sessions=bool(_settings.get("show_cron_sessions")),
+                    show_claude_code_sessions=True,
+                    include_archived=False,
+                    exclude_hidden=False,
+                    visible_only=True,
+                    show_webhook_sessions=bool(_settings.get("show_webhook_sessions")),
+                    show_kanban_sessions=bool(_settings.get("show_kanban_sessions")),
+                    source_filter=_settings.get("agent_session_source_filter"),
+                    sidebar_source=None,
+                    archived_limit=None,
+                    archived_offset=0,
+                ),
+                builder=lambda: _build_session_list_cache_payload(
+                    active_profile=_profiles_api.get_active_profile_name(),
+                    all_profiles=False,
+                    show_cli_sessions=bool(_settings.get("show_cli_sessions")),
+                    show_previous_messaging_sessions=bool(
+                        _settings.get("show_previous_messaging_sessions")
+                    ),
+                    show_cron_sessions=bool(_settings.get("show_cron_sessions")),
+                    show_claude_code_sessions=True,
+                    include_archived=False,
+                    exclude_hidden=False,
+                    visible_only=True,
+                    show_webhook_sessions=bool(_settings.get("show_webhook_sessions")),
+                    show_kanban_sessions=bool(_settings.get("show_kanban_sessions")),
+                    source_filter=_settings.get("agent_session_source_filter"),
+                    sidebar_source=None,
+                    archived_limit=None,
+                    archived_offset=0,
+                ),
+            )
+            initial = _session_list_payload_to_response(_initial_payload).get("sessions", []) or []
+        except Exception:
+            logger.exception("SSE initial session snapshot via cache failed; falling back to direct load")
+            from api.models import get_cli_sessions
+            initial = get_cli_sessions()
         _sse(handler, 'sessions_changed', {'sessions': initial})
 
         while True:

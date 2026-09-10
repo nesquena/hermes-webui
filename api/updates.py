@@ -1054,6 +1054,34 @@ def _channel_up_to_date_info(path, name, channel, current_tag):
     }
 
 
+# The agent install checkout is shallow and its upstream remote carries a pile of
+# junk "backup" tags (``refs/tags/backup/*``, ``merge-commit-backup``,
+# ``clean-before-remerge``, ``premerge-oh-god``, ...) — preserved pre-force-push
+# history refs. A blanket ``--tags`` fetch against that checkout forces GitHub to
+# send the multi-GB ancestry behind every junk tag (against the shallow boundary),
+# blowing far past any sane git timeout (the update check used to hang
+# indefinitely/timed out at 15s). The updater only ever compares against release
+# tags (``^v[0-9]...`` per ``_RELEASE_TAG_RE```), so fetch exactly those plus main.
+
+def _agent_fetch_args():
+    """Git fetch args for the agent install checkout (main + release-shaped tags only).
+
+    The agent checkout is a `--depth=1` install. Fetching main or any tag
+    target WITHOUT ``--depth`` forces Git to retrieve the full ancestry behind it
+    against the shallow boundary — the multi-GB history that made the update check
+    hang for minutes. ``--depth=1`` per ref keeps every fetch bounded: each
+    ref's tip commit + tag object is all the updater ever needs (its apply path
+    force-resets, it never walks history), and the compare/guard helpers only
+    consult tip SHAs. First load pulls every release tag (~90s measured); later
+    fetches are incremental (fast).
+    """
+    return [
+        'fetch', 'origin', '--force', '--depth=1',
+        '+refs/heads/main:refs/remotes/origin/main',
+        '+refs/tags/v*:refs/tags/v*',
+    ]
+
+
 def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest published channel release tag."""
     channel = _normalize_channel(channel)
@@ -1268,7 +1296,8 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    fetch_args = _agent_fetch_args() if name == 'agent' else ['fetch', 'origin', '--tags', '--force']
+    fetch_out, fetch_ok = _run_git(fetch_args, path, timeout=120 if name == 'agent' else 60)
     if not fetch_ok:
         release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
@@ -1980,7 +2009,8 @@ def apply_force_update(target: str, channel=None) -> dict:
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
         # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+        fetch_args = _agent_fetch_args() if target == 'agent' else ['fetch', 'origin', '--quiet', '--tags', '--force']
+        fetch_out, fetch_ok = _run_git(fetch_args, path, timeout=120 if target == 'agent' else 60)
         if not fetch_ok:
             return {
                 'ok': False,
@@ -2130,7 +2160,8 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    fetch_args = _agent_fetch_args() if target == 'agent' else ['fetch', 'origin', '--quiet', '--tags', '--force']
+    fetch_out, fetch_ok = _run_git(fetch_args, path, timeout=120 if target == 'agent' else 60)
     if not fetch_ok:
         if _is_git_lock_error(fetch_out):
             return {

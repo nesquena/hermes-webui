@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from api.run_journal import (
@@ -271,3 +272,42 @@ def test_stale_interrupted_event_skips_terminal_journal(tmp_path, monkeypatch):
     monkeypatch.setattr("api.run_journal._default_session_dir", lambda: tmp_path)
 
     assert stale_interrupted_event("session_1", "run_1") is None
+
+
+def test_prune_run_journal_dir_oldest_first(tmp_path):
+    from api.run_journal import RUN_JOURNAL_DIR_NAME, prune_run_journal_dir
+
+    d = tmp_path / RUN_JOURNAL_DIR_NAME / "sess_prune"
+    d.mkdir(parents=True)
+    (d / "old.jsonl").write_bytes(b"x" * 500)
+    (d / "mid.jsonl").write_bytes(b"x" * 300)
+    (d / "new.jsonl").write_bytes(b"x" * 50)
+    os.utime(d / "old.jsonl", (1000, 1000))
+    os.utime(d / "mid.jsonl", (2000, 2000))
+    os.utime(d / "new.jsonl", (3000, 3000))
+
+    assert prune_run_journal_dir(d, max_bytes=250) is True
+    assert not (d / "old.jsonl").exists()
+    assert not (d / "mid.jsonl").exists()
+    assert (d / "new.jsonl").exists()
+    # Already under cap -> no-op, nothing deleted
+    assert prune_run_journal_dir(d, max_bytes=250) is False
+
+
+def test_run_journal_append_prunes_periodically(tmp_path, monkeypatch):
+    from api.run_journal import RUN_JOURNAL_DIR_NAME, append_run_event
+
+    monkeypatch.setattr("api.run_journal._RUN_JOURNAL_PRUNE_CHECK_INTERVAL", 2)
+    monkeypatch.setenv("HERMES_WEBUI_RUN_JOURNAL_MAX_BYTES", "256")
+
+    for rid in ("run_a", "run_b"):
+        append_run_event("sess_periodic", rid, "e", {"p": "x" * 10}, session_dir=tmp_path)
+    append_run_event("sess_periodic", "run_b", "e", {"p": "x" * 10}, session_dir=tmp_path)
+
+    d = tmp_path / RUN_JOURNAL_DIR_NAME / "sess_periodic"
+    total = sum(e.stat().st_size for e in os.scandir(d) if e.is_file())
+    # Journal bounded well under the sum of raw appends; oldest run pruned,
+    # newest run retained.
+    assert total <= 512
+    assert not (d / "run_a.jsonl").exists()
+    assert (d / "run_b.jsonl").exists()

@@ -2316,6 +2316,35 @@ def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | 
     )
 
 
+def _evict_display_caches_for_session(session) -> None:
+    """Drop the streaming merge/redact display caches for one session.
+
+    Turn-end belt (Task 4): the streaming merge cache and the streaming redact
+    memo (Task 5) speak only for repeat polls of an UNCHANGED in-memory tail.
+    A settled turn -- done, cancel, or apperror -- changed that tail, so any
+    entry cached for the session is dead at best: the next poll's key would
+    mismatch anyway. Evicting here just frees the memory earlier and closes
+    the stale window outright. ``session`` may be a Session object or an id;
+    every call site is best effort, so any failure is logged and swallowed.
+    """
+    try:
+        if isinstance(session, str):
+            sid = session
+        else:
+            sid = str(getattr(session, "session_id", "") or "")
+        if not sid:
+            return
+        from api.routes import (
+            evict_streaming_merge_entries,
+            evict_streaming_redact_entry,
+        )
+
+        evict_streaming_merge_entries(sid)
+        evict_streaming_redact_entry(sid)
+    except Exception:
+        logger.debug("Streaming cache eviction at turn end failed", exc_info=True)
+
+
 def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
     """Persist a user-cancelled terminal state without provider-error wording.
 
@@ -9496,6 +9525,8 @@ def _run_agent_streaming(
             with _agent_lock:
                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
             put('cancel', _cancel_event_payload('Cancelled before start'))
+            # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+            _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
             return
 
         # Resolve profile home for this agent run — use the session's own profile
@@ -10787,6 +10818,8 @@ def _run_agent_streaming(
                     with _agent_lock:
                         _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
+                    # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                    _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                     return
 
             # Prepend workspace context so the agent always knows which directory
@@ -11079,6 +11112,8 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
+                # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                 return
             # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
             if ephemeral:
@@ -11100,6 +11135,8 @@ def _run_agent_streaming(
                     'ephemeral': True,
                     'answer': _answer,
                 })
+                # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
                 try:
@@ -11128,6 +11165,8 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
+                # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                 return
             _writeback_timings = []
             _writeback_started = time.perf_counter()
@@ -11189,6 +11228,8 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
+                        # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                        _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                         return
                     _result_messages = _settle_result_messages(
                         s,
@@ -11443,6 +11484,8 @@ def _run_agent_streaming(
                             except Exception:
                                 logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
+                        # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                        _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                         return
                     _err_str = str(_last_err) if _last_err else ''
                     if _is_quota:
@@ -11735,6 +11778,8 @@ def _run_agent_streaming(
                             _error_payload['terminal_state'] = 'tool_limit_reached'
                             _error_payload['terminal_reason'] = 'max_iterations'
                         put('apperror', _error_payload)
+                        # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                        _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                         # Legacy #373 source tests and clients look for the
                         # no_response type; #1765 keeps that type but improves
                         # the catch-all label, hint, and provider details.
@@ -12156,6 +12201,8 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
+                    # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                    _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                     return
                 with _stream_writeback_stage(_writeback_timings, "session_save"):
                     s.save()
@@ -12174,6 +12221,8 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
+                    # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                    _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                     return
                 if not ephemeral:
                     try:
@@ -12278,6 +12327,8 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                     put('cancel', _cancel_event_payload('Cancelled by user'))
+                    # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                    _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                     return
                 try:
                     _latest_pause_owner = get_session(getattr(s, 'session_id', session_id))
@@ -12310,6 +12361,8 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
+                        # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                        _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                         return
                     with _stream_writeback_stage(_writeback_timings, "process_wakeup_pause_clear_save"):
                         s.save(touch_updated_at=False)
@@ -12333,6 +12386,8 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
+                        # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                        _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                         return
                 _success_writeback_committed = True
             usage = {
@@ -12580,6 +12635,12 @@ def _run_agent_streaming(
                 meter_stats.setdefault('tps_available', False)
                 meter_stats.setdefault('estimated', False)
                 put('metering', meter_stats)
+                # Turn-end belt (Task 4): streaming merge/redact entries speak only
+                # for repeat polls of an UNCHANGED in-memory tail; a settled turn
+                # changed the tail, so drop them. The key's tail marker would also
+                # mismatch on the next poll -- this just frees the memory earlier.
+                # Best effort: cache bookkeeping must never affect terminal delivery.
+                _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
             try:
                 _log_stream_writeback_timings(
                     getattr(s, 'session_id', session_id),
@@ -12712,6 +12773,8 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Failed to append cancelled turn journal event", exc_info=True)
             put('cancel', _cancel_event_payload('Cancelled by user'))
+            # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+            _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
             return
         _exc_is_quota = _classification['type'] == 'quota_exhausted'
         # Exception quota text still includes: 'more credits' in _exc_lower, 'can only afford' in _exc_lower, 'fewer max_tokens' in _exc_lower.
@@ -12897,6 +12960,8 @@ def _run_agent_streaming(
                                     'session': _done_session_payload,
                                     'usage': {'input_tokens': 0, 'output_tokens': 0},
                                 })
+                                # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+                                _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
                                 put('stream_end', {'session_id': session_id})
                             logger.info('[webui] self-heal (except path): retry succeeded')
                             return  # skip error emission
@@ -13060,6 +13125,8 @@ def _run_agent_streaming(
             _error_payload['session_id'] = getattr(s, 'session_id', session_id)
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
+        # Turn-end belt (Task 4): drop the streaming merge/redact display caches.
+        _evict_display_caches_for_session(getattr(s, 'session_id', None) or session_id)
     finally:
         # #4633/#2476: symmetric metering teardown. begin_session() (top of the
         # outer try) had no paired end_session(), so zero-token turns leaked a

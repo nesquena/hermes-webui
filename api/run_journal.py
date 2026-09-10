@@ -55,7 +55,20 @@ _SNAPSHOT_ARGS_MAX_ITEMS = 64
 _SNAPSHOT_ARGS_MAX_DEPTH = 8
 _SNAPSHOT_ARGS_MAX_STRING_CHARS = 8192
 _SNAPSHOT_ARGS_MAX_TOTAL_CHARS = 64 * 1024
-_SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "...[truncated]"
+_SNAPSHOT_ARGS_TRUNCATED_SUFFIX = "..."
+# Per-session run-journal retention cap. Journals store one bounded-payload
+# event row per append and grow unboundedly over a session's lifetime (each run's
+# ``.jsonl`` persists until the session is deleted( — a long-lived agent session can
+# accumulate hundreds of MB across runs. Replay only ever needs the most recent
+# ``_SESSION_REPLAY_MAX_BYTES`` window, so bound each session's journal dir and
+# prune the oldest run files once it exceeds the cap. ``0`` (or an unparseable
+# env value( disables pruning.
+_RUN_JOURNAL_MAX_BYTES_ENV = "HERMES_WEBUI_RUN_JOURNAL_MAX_BYTES"
+_RUN_JOURNAL_MAX_BYTES_DEFAULT = 32 * 1024 * 1024
+# Check the size the every Nth append (scan+prune is O(files); once per ~32
+# events per session keeps it negligible against the actual journal writes.
+_RUN_JOURNAL_PRUNE_CHECK_INTERVAL = 32
+_PRUNE_CHECK_COUNTER: dict[str, int] = {}
 
 
 def _default_session_dir() -> Path:
@@ -385,6 +398,68 @@ def _iter_bounded_raw_jsonl_lines(path: Path, *, max_bytes: int, retained_bytes:
         return
 
 
+def _run_journal_max_bytes() -> int:
+    """Resolve the per-session journal cap from env/constant. `<=0` disables pruning."""
+    raw = os.environ.get(_RUN_JOURNAL_MAX_BYTES_ENV, "")
+    if not raw.strip():
+        return _RUN_JOURNAL_MAX_BYTES_DEFAULT
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return _RUN_JOURNAL_MAX_BYTES_DEFAULT
+
+
+def prune_run_journal_dir(session_dir: Path, max_bytes: int) -> bool:
+    """Delete the oldest run journals in a session's journal dir until its total
+    size fits under ``max_bytes``. Best-effort; returns ``True`` iff anything was
+    deleted. No per-path locks are heldhere; unlink while a concurrent writer keeps
+    an open fd is safe (Linux(: the writer keeps appending to the unlinked inode
+    and the next periodic check reconciles the dir.
+    """
+    try:
+        entries = [
+            (entry.stat().st_mtime_ns, entry.stat().st_size, entry.name)
+            for entry in os.scandir(session_dir)
+            if entry.is_file(follow_symlinks=False)
+        ]
+    except (FileNotFoundError, OSError):
+        return False
+    total = sum(size for _, size, _ in entries)
+    if total <= max_bytes:
+        return False
+    removed: list[Path] = []
+    for _, size, name in sorted(entries):
+        if total <= max_bytes:
+            break
+        try:
+            os.unlink(session_dir / name)
+            total -= size
+            removed.append(session_dir / name)
+        except (FileNotFoundError, OSError):
+            break
+    for path in removed:
+        _discard_cached_summary(path)
+    return bool(removed)
+
+
+def _maybe_prune_run_journal_dir(session_dir: Path) -> None:
+    """Periodically enforce the per-session cap (every Nth append(. Best-effort:
+    pruning failures must never break an append."""
+    with _SEQ_CACHE_LOCK:
+        key = str(session_dir)
+        n = _PRUNE_CHECK_COUNTER.get(key, 0) + 1
+        _PRUNE_CHECK_COUNTER[key] = n
+        if n % _RUN_JOURNAL_PRUNE_CHECK_INTERVAL != 0:
+            return
+    max_bytes = _run_journal_max_bytes()
+    if max_bytes <= 0:
+        return
+    try:
+        prune_run_journal_dir(session_dir, max_bytes)
+    except Exception:
+        pass  # best-effort: never break an append
+
+
 def append_run_event(
     session_id: str,
     run_id: str,
@@ -433,7 +508,8 @@ def append_run_event(
         _discard_cached_summary(path)
         if created_file:
             _fsync_parent_dir(path)
-        return event
+    _maybe_prune_run_journal_dir(path.parent)
+    return event
 
 
 class RunJournalWriter:
@@ -751,6 +827,7 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         with _SEQ_CACHE_LOCK:
             for cache_key in [entry for entry in _SEQ_CACHE if str(Path(entry).parent) == dir_key]:
                 del _SEQ_CACHE[cache_key]
+            _PRUNE_CHECK_COUNTER.pop(dir_key, None)
         with _SUMMARY_CACHE_LOCK:
             for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
                 del _SUMMARY_CACHE[cache_key]
