@@ -296,13 +296,14 @@ def test_gateway_runs_api_submission():
     ):
         runs_called["called"] = True
         captured["body_extras"] = body_extras
+        captured["api_key"] = api_key
         return (original_text, {"input_tokens": 10, "output_tokens": 5})
 
     mock_session = MagicMock()
     mock_session.active_stream_id = stream_id
     mock_session.workspace = "/tmp"
     mock_session.model = "test"
-    mock_session.model_provider = None
+    mock_session.model_provider = "openai-codex"
     mock_session.profile = None
     mock_session.context_messages = []
     mock_session.messages = []
@@ -314,6 +315,15 @@ def test_gateway_runs_api_submission():
         with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_args, **_kwargs: True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", fake_runs_streaming), \
+                 patch("api.gateway_chat._gateway_api_key", return_value="gateway-server-key"), \
+                 patch(
+                     "api.gateway_chat.resolve_owner_model_state",
+                     return_value=SimpleNamespace(
+                         outbound_model="test-model",
+                         provider="openai-codex",
+                         api_key="provider-auth-store-key",
+                     ),
+                 ), \
                  patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value="high"), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
                  patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
@@ -324,6 +334,7 @@ def test_gateway_runs_api_submission():
                     model="test-model",
                     workspace="/tmp",
                     stream_id=stream_id,
+                    model_provider="openai-codex",
                 )
     finally:
         with STREAMS_LOCK:
@@ -331,6 +342,8 @@ def test_gateway_runs_api_submission():
 
     assert runs_called["called"], "The runs-API streaming path should have been invoked"
     assert captured["body_extras"]["reasoning_effort"] == "high"
+    assert "provider" not in captured["body_extras"]
+    assert captured["api_key"] == "gateway-server-key"
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +484,7 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert run_body["input"] == "hi"
     assert run_body["instructions"] == "system prompt"
     assert run_body["conversation_history"] == [{"role": "assistant", "content": "earlier reply"}]
-    assert run_body["provider"] == "anthropic"
+    assert "provider" not in run_body
     assert run_body["session_id"] == "sess1"
     assert "messages" not in run_body
 

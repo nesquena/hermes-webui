@@ -35,7 +35,7 @@ def _post_session_new(tmp_path, monkeypatch, body, *, config_default, workspace_
     monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
     monkeypatch.setattr(routes, "read_body", lambda handler: body)
     monkeypatch.setattr(
-        routes, "_worktree_default_from_config", lambda profile: config_default
+        routes, "_worktree_default_from_config", lambda profile, **_kwargs: config_default
     )
     if workspace_dir is not None:
         monkeypatch.setattr(

@@ -17,6 +17,20 @@ back to ``split(":", 1)`` so trailing suffixes stay with the model.
 """
 
 from api.config import resolve_model_provider, model_with_provider_context
+import pytest
+
+
+@pytest.fixture
+def configured_named_custom_provider(monkeypatch):
+    import api.config as cfg_mod
+
+    old = cfg_mod.cfg.get("custom_providers")
+    cfg_mod.cfg["custom_providers"] = [{"name": "my-key", "models": ["some-model"]}]
+    yield
+    if old is None:
+        cfg_mod.cfg.pop("custom_providers", None)
+    else:
+        cfg_mod.cfg["custom_providers"] = old
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +105,7 @@ def test_openrouter_thinking_suffix():
         _restore_config(old, cfg_mod)
 
 
-def test_custom_provider_rsplit_still_works():
+def test_custom_provider_rsplit_still_works(configured_named_custom_provider):
     """custom:my-key:model must still parse correctly via rsplit."""
     qualified = "@custom:my-key:some-model"
     model, provider, _ = resolve_model_provider(qualified)
@@ -132,7 +146,7 @@ def test_known_provider_anthropic():
 # it back so the model becomes "<b>:<c>".
 # ---------------------------------------------------------------------------
 
-def test_custom_provider_free_suffix_1776():
+def test_custom_provider_free_suffix_1776(configured_named_custom_provider):
     """@custom:my-key:some-model:free → custom:my-key + some-model:free (#1776)."""
     qualified = "@custom:my-key:some-model:free"
     model, provider, _ = resolve_model_provider(qualified)
@@ -140,7 +154,7 @@ def test_custom_provider_free_suffix_1776():
     assert model == "some-model:free", f"expected model='some-model:free', got '{model}'"
 
 
-def test_custom_provider_beta_suffix_1776():
+def test_custom_provider_beta_suffix_1776(configured_named_custom_provider):
     """@custom:my-key:some-model:beta — same bug class as :free."""
     qualified = "@custom:my-key:some-model:beta"
     model, provider, _ = resolve_model_provider(qualified)
@@ -148,7 +162,7 @@ def test_custom_provider_beta_suffix_1776():
     assert model == "some-model:beta"
 
 
-def test_custom_provider_thinking_suffix_1776():
+def test_custom_provider_thinking_suffix_1776(configured_named_custom_provider):
     """@custom:my-key:some-model:thinking — same bug class as :free."""
     qualified = "@custom:my-key:some-model:thinking"
     model, provider, _ = resolve_model_provider(qualified)
@@ -156,7 +170,7 @@ def test_custom_provider_thinking_suffix_1776():
     assert model == "some-model:thinking"
 
 
-def test_custom_provider_preview_suffix_1776():
+def test_custom_provider_preview_suffix_1776(configured_named_custom_provider):
     """@custom:my-key:some-model:preview — same bug class, no allowlist needed."""
     qualified = "@custom:my-key:some-model:preview"
     model, provider, _ = resolve_model_provider(qualified)
@@ -164,7 +178,7 @@ def test_custom_provider_preview_suffix_1776():
     assert model == "some-model:preview"
 
 
-def test_custom_provider_slashed_model_with_free_suffix_1776():
+def test_custom_provider_slashed_model_with_free_suffix_1776(configured_named_custom_provider):
     """@custom:my-key:org/model:free — custom hint + slashed model + suffix."""
     qualified = "@custom:my-key:org/model:free"
     model, provider, _ = resolve_model_provider(qualified)

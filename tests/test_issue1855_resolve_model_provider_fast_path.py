@@ -196,6 +196,14 @@ class TestSlowPathStillFires:
                 result = _resolve_compatible_session_model_state(
                     "@local-llama:unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL",
                     "local-llama",
+                    profile_config={
+                        "providers": {
+                            "local-llama": {
+                                "base_url": "http://127.0.0.1:8088/v1",
+                                "api_key": "test-key",
+                            },
+                        },
+                    },
                 )
         finally:
             config.cfg.clear()

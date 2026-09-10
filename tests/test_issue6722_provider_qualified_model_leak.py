@@ -25,12 +25,42 @@ guessing either way breaks the other. These tests pin both shapes so a future
 
 from collections import OrderedDict
 import json
+import pytest
 
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
 from api.config import STREAMS, create_stream_channel
 from api.models import new_session
+
+
+OWNER = {
+    "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+    "providers": {"openai-codex": {"models": ["gpt-5.5"]}},
+}
+
+
+@pytest.fixture
+def configured_named_custom_provider(monkeypatch):
+    import api.config as cfg_mod
+
+    old_custom = cfg_mod.cfg.get("custom_providers")
+    old_model = cfg_mod.cfg.get("model")
+    cfg_mod.cfg["custom_providers"] = [{"name": "backup"}]
+    cfg_mod.cfg["model"] = {
+        "provider": "ollama",
+        "default": "hermes-reasoner:latest",
+        "base_url": "http://127.0.0.1:11434/v1",
+    }
+    yield
+    if old_custom is None:
+        cfg_mod.cfg.pop("custom_providers", None)
+    else:
+        cfg_mod.cfg["custom_providers"] = old_custom
+    if old_model is None:
+        cfg_mod.cfg.pop("model", None)
+    else:
+        cfg_mod.cfg["model"] = old_model
 
 
 # (qualified value, expected bare model, expected provider)
@@ -133,7 +163,10 @@ class TestSessionModelStatePreservesQualifierForRepair:
             },
         )
         model_value, provider = routes._session_model_state_from_request(
-            "@removed:mistral-large", None, "removed"
+            "@removed:mistral-large",
+            None,
+            current_provider="removed",
+            profile_config=OWNER,
         )
         assert model_value == "gpt-5.5", (
             f"removed/unconfigured qualified provider must repair to the active "
@@ -261,20 +294,20 @@ class TestGatewayRequestBodiesCarryBareModel:
         assert payload["model"] == "deepseek-v4-flash"
         assert not payload["model"].startswith("@")
 
-    def test_legacy_body_keeps_named_custom_provider_model_intact(self, tmp_path, monkeypatch):
+    def test_legacy_body_keeps_named_custom_provider_model_intact(self, tmp_path, monkeypatch, configured_named_custom_provider):
         """The multi-segment case a positional split would truncate."""
         payload = _run_legacy_gateway_chat(
             tmp_path, monkeypatch, "@custom:backup:model-a:free"
         )
         assert payload["model"] == "model-a:free"
 
-    def test_legacy_body_keeps_host_port_custom_provider_model_intact(self, tmp_path, monkeypatch):
+    def test_legacy_body_keeps_host_port_custom_provider_model_intact(self, tmp_path, monkeypatch, configured_named_custom_provider):
         payload = _run_legacy_gateway_chat(
             tmp_path, monkeypatch, "@custom:192.168.1.5:11434:llama4"
         )
         assert payload["model"] == "llama4"
 
-    def test_runs_api_body_has_bare_model(self, monkeypatch):
+    def test_runs_api_body_has_bare_model(self, monkeypatch, configured_named_custom_provider):
         """The runs API builder is the second gateway request site."""
         captured = {}
 
@@ -306,3 +339,35 @@ class TestGatewayRequestBodiesCarryBareModel:
         payload = json.loads(captured["body"])
         assert payload["model"] == "model-a:free"
         assert not payload["model"].startswith("@")
+
+    def test_runs_api_body_uses_canonical_model_without_unsupported_provider_field(self, monkeypatch):
+        captured = {}
+
+        def fake_urlopen(req, timeout=0):
+            captured["body"] = req.data.decode("utf-8")
+            raise AssertionError("stop after the POST body is captured")
+
+        monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(gateway_chat, "update_active_run", lambda *a, **k: None)
+
+        try:
+            gateway_chat._run_gateway_runs_api_streaming(
+                "sess-6722",
+                "hi",
+                "org/model",
+                "/tmp",
+                "stream-6722-runs-provider",
+                "http://gateway.local",
+                "owner-key",
+                [],
+                {"provider": "custom:backup"},
+                put_gateway_event=lambda *a, **k: None,
+                cancel_event=None,
+                active_provider="custom:backup",
+            )
+        except Exception:
+            pass
+
+        payload = json.loads(captured["body"])
+        assert payload["model"] == "org/model"
+        assert "provider" not in payload

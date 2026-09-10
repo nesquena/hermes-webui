@@ -12,6 +12,7 @@ Discovery order for all paths:
 import collections
 import copy
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -27,6 +28,7 @@ import urllib.error
 import urllib.request
 import uuid
 import weakref
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -1379,7 +1381,9 @@ def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
 
 def _configured_model_ids(raw_models: object) -> list[str]:
     """Return ordered model IDs from supported config allowlist shapes."""
-    if isinstance(raw_models, dict):
+    if isinstance(raw_models, str):
+        candidates = (raw_models,)
+    elif isinstance(raw_models, dict):
         candidates = (key for key in raw_models if isinstance(key, str))
     elif isinstance(raw_models, list):
         candidates = raw_models
@@ -1540,7 +1544,10 @@ def _normalize_base_url_for_match(value: object) -> str:
     url = str(value or "").strip().rstrip("/")
     if not url:
         return ""
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    except ValueError:
+        return ""
     scheme = (parsed_url.scheme or "http").lower()
     netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
     path = parsed_url.path.rstrip("/")
@@ -1562,11 +1569,17 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     url = str(value or "").strip().rstrip("/")
     if not url:
         return set()
-    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    try:
+        parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    except ValueError:
+        return set()
     host = (parsed_url.hostname or "").strip().lower()
     if not host:
         return set()
-    port = parsed_url.port
+    try:
+        port = parsed_url.port
+    except ValueError:
+        return set()
     if port is None:
         scheme = (parsed_url.scheme or "http").lower()
         port = 443 if scheme == "https" else 80
@@ -1666,12 +1679,34 @@ def _provider_is_known_or_configured(
     raw = str(provider_id or "").strip().lower()
     if not raw:
         return False
-    # Configured custom provider: a named slug in custom_providers, or any
-    # ``custom`` / ``custom:<slug>`` form when custom_providers are defined.
-    if _named_custom_provider_slug_for_provider(raw, config_obj):
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    providers = source.get("providers", {}) if isinstance(source, dict) else {}
+    if isinstance(providers, dict):
+        if raw in {str(key).strip().lower() for key in providers}:
+            return True
+    # Bare ``custom`` is a real built-in lane. Named custom lanes, however,
+    # are identities minted by this owner's entries, not a namespace that any
+    # configured custom provider implicitly authorizes.
+    if raw == "custom":
         return True
-    if raw == "custom" or raw.startswith("custom:"):
-        return bool(_custom_provider_entries(config_obj))
+    if raw.startswith("custom:"):
+        if _custom_slug_rest_looks_like_host_port(raw.removeprefix("custom:")):
+            return True
+        if _named_custom_provider_slug_for_provider(raw, config_obj):
+            return True
+        source_entries = _custom_provider_entries(config_obj)
+        endpoint_slugs = {
+            slug
+            for entry in source_entries
+            for slug in _custom_endpoint_slugs_for_base_url(entry.get("base_url"))
+        }
+        model_cfg = source.get("model", {}) if isinstance(source, dict) else {}
+        endpoint_slugs.update(
+            _custom_endpoint_slugs_for_base_url(
+                model_cfg.get("base_url") if isinstance(model_cfg, dict) else None
+            )
+        )
+        return raw in endpoint_slugs
     # Known first-party / built-in provider id (alias-resolved). Static registry
     # knowledge that is always available, so a live-discovery provider whose
     # catalog group is momentarily absent still counts as known.
@@ -2444,7 +2479,11 @@ def _is_local_server_provider(provider_id: str) -> bool:
     return False
 
 
-def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> bool:
+def _model_id_declared_in_config(
+    model_id: str,
+    config_provider: str | None,
+    config_obj: dict | None = None,
+) -> bool:
     """True when the user's own config declares ``model_id`` verbatim (full form).
 
     This is the COLD-catalog provenance signal for #5979: when the live
@@ -2461,7 +2500,8 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     model = str(model_id or "").strip()
     if not model:
         return False
-    model_cfg = cfg.get("model", {})
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    model_cfg = source.get("model", {})
     if isinstance(model_cfg, dict):
         if str(model_cfg.get("default") or "").strip() == model:
             return True
@@ -2472,7 +2512,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     prov = str(config_provider or "").strip().lower()
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
-        for entry in _custom_provider_entries():
+        for entry in _custom_provider_entries(config_obj):
             slug = _custom_provider_slug_from_name(entry.get("name"))
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
@@ -2577,11 +2617,16 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
-def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
+def _parse_provider_qualified_model_id(
+    model_id: str,
+    config_obj: dict | None = None,
+) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
     The provider segment can contain colons for named custom providers, while
     the model segment can also contain colons for tags such as ``:free``.
+    ``config_obj`` supplies the registry and active model identities for the
+    owning profile; omitted callers retain the ambient configuration.
     Keep this parser shared with ``resolve_model_provider`` so any caller that
     compares route-hinted model lanes uses the same grammar.
     """
@@ -2589,20 +2634,69 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     if not candidate.startswith("@") or ":" not in candidate:
         return None
     inner = candidate[1:]
+    active_config = config_obj if isinstance(config_obj, dict) else cfg
+    if inner.startswith("custom:"):
+        custom_slugs = _named_custom_provider_slugs(active_config)
+        matching_slugs = [
+            slug for slug in custom_slugs
+            if inner.startswith(f"{slug}:") and len(inner) > len(slug) + 1
+        ]
+        if matching_slugs:
+            provider_hint = max(matching_slugs, key=len)
+            return inner[len(provider_hint) + 1:], provider_hint
+
+        model_config = active_config.get("model", {})
+        endpoint_slugs = _custom_endpoint_slugs_for_base_url(
+            model_config.get("base_url") if isinstance(model_config, dict) else None
+        )
+        matching_endpoints = [
+            slug for slug in endpoint_slugs
+            if inner.startswith(f"{slug}:") and len(inner) > len(slug) + 1
+        ]
+        if matching_endpoints:
+            provider_hint = max(matching_endpoints, key=len)
+            return inner[len(provider_hint) + 1:], provider_hint
+
+        custom_rest = inner[len("custom:"):]
+        custom_parts = custom_rest.split(":")
+        if len(custom_parts) >= 3:
+            endpoint_rest = ":".join(custom_parts[:2])
+            if _custom_slug_rest_looks_like_host_port(endpoint_rest):
+                return ":".join(custom_parts[2:]), f"custom:{endpoint_rest}"
+
+        active_provider = (
+            str(model_config.get("provider") or "").strip().lower()
+            if isinstance(model_config, dict) else ""
+        )
+        active_self_hosted = active_provider == "custom" or _is_local_server_provider(active_provider)
+        active_models = set()
+        if active_self_hosted and isinstance(model_config, dict):
+            active_models.update(_configured_model_ids(model_config.get("models")))
+            if model_config.get("default"):
+                active_models.add(str(model_config["default"]).strip())
+        providers = active_config.get("providers", {})
+        provider_config = providers.get(active_provider) if active_self_hosted and isinstance(providers, dict) else None
+        if isinstance(provider_config, dict):
+            if provider_config.get("model"):
+                active_models.add(str(provider_config["model"]).strip())
+            active_models.update(_configured_model_ids(provider_config.get("models")))
+        if custom_rest in {value for value in active_models if value}:
+            return custom_rest, "custom"
+
     provider_hint, bare_model = inner.rsplit(":", 1)
-    if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
-        _slug_rest = provider_hint[len("custom:"):]
-        if not _custom_slug_rest_looks_like_host_port(_slug_rest):
-            provider_hint, extra = provider_hint.rsplit(":", 1)
-            bare_model = f"{extra}:{bare_model}"
-    elif (provider_hint not in _PROVIDER_MODELS
+    if (provider_hint not in _PROVIDER_MODELS
             and provider_hint not in _PROVIDER_DISPLAY
             and not provider_hint.startswith("custom:")):
         provider_hint, bare_model = inner.split(":", 1)
+    elif provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
+        slug_rest = provider_hint[len("custom:"):]
+        if not _custom_slug_rest_looks_like_host_port(slug_rest):
+            provider_hint, extra = provider_hint.rsplit(":", 1)
+            bare_model = f"{extra}:{bare_model}"
     return bare_model, provider_hint
 
 
-def _get_provider_base_url(provider_id):
+def _get_provider_base_url(provider_id, config_obj: dict | None = None):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
     Checks two locations, in order:
@@ -2615,11 +2709,12 @@ def _get_provider_base_url(provider_id):
 
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    prov_cfg = _get_provider_cfg(provider_id, config_obj)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    model_cfg = source.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -2629,13 +2724,14 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+def _get_providers_cfg(config_obj: dict | None = None) -> dict:
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    providers_cfg = source.get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
-def _get_provider_cfg(provider_id) -> dict:
-    provider_cfg = _get_providers_cfg().get(provider_id, {})
+def _get_provider_cfg(provider_id, config_obj: dict | None = None) -> dict:
+    provider_cfg = _get_providers_cfg(config_obj).get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
@@ -2718,7 +2814,12 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
-def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
+def resolve_model_provider(
+    model_id: str,
+    *,
+    explicitly_picked: bool = False,
+    config_obj: dict | None = None,
+) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -2749,14 +2850,15 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
     """
+    owner_cfg = config_obj if isinstance(config_obj, dict) else cfg
     config_provider = None
     config_base_url = None
-    model_cfg = cfg.get("model", {})
+    model_cfg = owner_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         config_base_url = model_cfg.get("base_url")
         config_provider = _resolve_configured_provider_id(
             model_cfg.get("provider"),
-            cfg,
+            owner_cfg,
             base_url=config_base_url,
             resolve_alias=False,
         )
@@ -2787,7 +2889,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         """
         if isinstance(provider, str) and provider.startswith("custom:"):
             _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                owner_cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider),
             )
         return model, provider, base_url
@@ -2834,7 +2936,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # own declared models and can't be hijacked by another providers.<slug>
     # entry that happens to list the same bare id earlier in config order (#5511).
     if _canon_config_provider:
-        _providers_cfg_own = cfg.get('providers', {})
+        _providers_cfg_own = owner_cfg.get('providers', {})
         if isinstance(_providers_cfg_own, dict):
             for _slug, _pdef in _providers_cfg_own.items():
                 if not isinstance(_pdef, dict):
@@ -2853,7 +2955,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = owner_cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         # Disambiguation guard: when two custom_providers[] entries both list the
         # same bare model id (e.g. dogapi and packyapi both advertise
@@ -2925,7 +3027,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # Check user-defined providers (config.yaml → providers:).
     # Mirrors the custom_providers scan above — exact match against each
     # entry's declared models list (case-sensitive to match custom_providers).
-    providers_cfg = cfg.get('providers', {})
+    providers_cfg = owner_cfg.get('providers', {})
     if isinstance(providers_cfg, dict):
         target = model_id.strip()
         # Honor the same active/default ownership guard as the custom_providers
@@ -2976,7 +3078,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     #
     # Exception: ``custom:<ip-or-host>:<port>`` is a single logical slug derived
     # from OpenAI ``base_url`` authority and contains no eaten model segments.
-    parsed_provider_hint = _parse_provider_qualified_model_id(model_id)
+    parsed_provider_hint = _parse_provider_qualified_model_id(model_id, owner_cfg)
     if parsed_provider_hint is not None:
         bare_model, provider_hint = parsed_provider_hint
         # Session/send/handoff shapes encode the provider as @custom:<slug>:model
@@ -2993,7 +3095,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
         ):
             return _finalize(bare_model, config_provider, config_base_url)
-        return _finalize(bare_model, provider_hint, _get_provider_base_url(provider_hint))
+        return _finalize(
+            bare_model, provider_hint, _get_provider_base_url(provider_hint, owner_cfg)
+        )
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -3035,7 +3139,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = owner_cfg.get("custom_providers", [])
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -3102,7 +3206,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 # (1) Config declares the full id verbatim (model.default /
                 #     model.models / custom_providers[].models). Authoritative and
                 #     network-free, so #5979 survives a cold restart — preserve.
-                if _model_id_declared_in_config(model_id, config_provider):
+                if _model_id_declared_in_config(model_id, config_provider, owner_cfg):
                     return _finalize(model_id, config_provider, config_base_url)
                 # (2) The endpoint's live/cached catalog advertised it.
                 _advertised = _endpoint_advertised_model_ids(config_provider)
@@ -3183,7 +3287,12 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     return _finalize(model_id, config_provider, config_base_url)
 
 
-def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
+def resolve_custom_provider_connection(
+    provider_id: str,
+    config_obj: dict | None = None,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[str | None, str | None]:
     """Return (api_key, base_url) for a named ``custom:*`` provider.
 
     Supports ``custom_providers[].api_key`` as either a literal key or
@@ -3200,20 +3309,34 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
 
     # Read the live config snapshot to avoid stale module-level cache edge
     # cases after profile switches or runtime config edits.
-    cfg_data = get_config()
+    cfg_data = config_obj if isinstance(config_obj, dict) else get_config()
+
+    owner_env = env
+    if owner_env is None and isinstance(config_obj, dict):
+        candidate_env = config_obj.get("_env") or config_obj.get("env")
+        if isinstance(candidate_env, dict):
+            owner_env = {str(key): str(value) for key, value in candidate_env.items()}
+
+    def _env_value(name: object) -> str:
+        key = str(name or "").strip()
+        if not key:
+            return ""
+        if owner_env is not None:
+            return str(owner_env.get(key) or "")
+        return _thread_local_env_value(key)
 
     def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
         api_key = None
         if raw_api_key is not None:
             key_text = str(raw_api_key).strip()
             if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
-                api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
+                api_key = _env_value(key_text[2:-1]).strip() or None
             elif key_text:
                 api_key = key_text
         if not api_key:
             key_env = str(raw_key_env or "").strip()
             if key_env:
-                api_key = _thread_local_env_value(key_env).strip() or None
+                api_key = _env_value(key_env).strip() or None
         if not api_key and provider_hint:
             api_key = _lookup_custom_api_key_env(provider_hint)
         return api_key
@@ -3268,6 +3391,243 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
         return fallback_key, fallback_base or None
 
     return None, None
+
+
+@dataclass(frozen=True)
+class OwnerModelState:
+    """One owner-scoped interpretation of a persisted model selection."""
+
+    model: str
+    outbound_model: str
+    provider: str | None
+    base_url: str | None
+    api_key: str | None
+    repaired: bool = False
+    runtime_fallback_allowed: bool = True
+    runtime_route: dict | None = None
+
+
+def _owner_runtime_fallback_allowed(
+    config_obj: dict | None,
+    provider: str | None,
+) -> bool:
+    """Allow runtime credential lookup only for ambient or real owner lanes."""
+    if config_obj is None:
+        return True
+    return bool(provider and not str(provider).startswith("custom:"))
+
+
+def resolve_owner_runtime_state(
+    state: OwnerModelState,
+    *,
+    config_obj: dict | None = None,
+    owner_env: dict[str, str] | None = None,
+    owner_profile: str | None = None,
+    runtime_resolver=None,
+) -> OwnerModelState:
+    """Fill runtime credentials under the owner policy, never ambiently."""
+    if not state.runtime_fallback_allowed:
+        return state
+    try:
+        from contextlib import nullcontext
+
+        scope = nullcontext()
+        if owner_profile and config_obj is not None:
+            from api.profiles import profile_scope_for_detached_worker
+
+            scope = profile_scope_for_detached_worker(
+                owner_profile,
+                "owner runtime provider resolution",
+            )
+        with scope:
+            from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+            if runtime_resolver is None:
+                try:
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+                except ImportError:
+                    def resolve_runtime_provider(**kwargs):
+                        return {"provider": kwargs.get("requested")}
+            else:
+                resolve_runtime_provider = runtime_resolver
+
+            previous_env = getattr(_thread_ctx, "env", None)
+            previous_block = getattr(_thread_ctx, "block_process_env_fallback", False)
+            if owner_env is not None and not owner_profile:
+                _thread_ctx.env = dict(owner_env)
+                _thread_ctx.block_process_env_fallback = True
+            try:
+                runtime_kwargs = {"requested": state.provider}
+                try:
+                    runtime_parameters = inspect.signature(resolve_runtime_provider).parameters
+                except (TypeError, ValueError):
+                    runtime_parameters = {}
+                if "target_model" in runtime_parameters or any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in runtime_parameters.values()
+                ):
+                    runtime_kwargs["target_model"] = state.outbound_model
+                runtime = resolve_runtime_provider_with_anthropic_env_lock(
+                    resolve_runtime_provider,
+                    **runtime_kwargs,
+                )
+            finally:
+                if owner_env is not None and not owner_profile:
+                    if previous_env is None:
+                        delattr(_thread_ctx, "env")
+                    else:
+                        _thread_ctx.env = previous_env
+                    _thread_ctx.block_process_env_fallback = previous_block
+        return replace(
+            state,
+            provider=state.provider or runtime.get("provider"),
+            base_url=state.base_url or runtime.get("base_url"),
+            api_key=runtime.get("api_key") or state.api_key,
+            runtime_route=runtime,
+        )
+    except Exception:
+        logger.debug("owner runtime credential resolution failed", exc_info=True)
+        return state
+
+
+def resolve_owner_model_state(
+    model_id: str | None,
+    stored_provider: str | None = None,
+    *,
+    config_obj: dict | None = None,
+    explicitly_picked: bool = False,
+    owner_env: dict[str, str] | None = None,
+    resolver=None,
+) -> OwnerModelState:
+    """Resolve model, provider, connection, and catalog ownership together."""
+    owner_cfg = config_obj if isinstance(config_obj, dict) else cfg
+    if owner_env is None and isinstance(owner_cfg, dict):
+        candidate_env = owner_cfg.get("_env") or owner_cfg.get("env")
+        if isinstance(candidate_env, dict):
+            owner_env = {str(key): str(value) for key, value in candidate_env.items()}
+    requested = str(model_id or "").strip()
+    original_requested = requested
+    model_cfg = owner_cfg.get("model", {}) if isinstance(owner_cfg, dict) else {}
+    default_model = str(model_cfg.get("default") or "").strip() if isinstance(model_cfg, dict) else ""
+    default_provider = (
+        str(model_cfg.get("provider") or "").strip() if isinstance(model_cfg, dict) else ""
+    )
+    parsed = _parse_provider_qualified_model_id(requested, owner_cfg)
+    repaired = False
+
+    if parsed:
+        bare_model, explicit_provider = parsed
+        explicit_provider = str(explicit_provider or "").strip()
+        # A legacy Ollama selection can be serialized as @custom:model because
+        # the old parser split the tagged model at its final colon.
+        if (
+            explicit_provider == "custom"
+            and default_provider
+            and default_provider != "custom"
+            and bare_model in {default_model, *_configured_model_ids(
+                model_cfg.get("models") if isinstance(model_cfg, dict) else None
+            )}
+        ):
+            explicit_provider = default_provider
+        if not _provider_is_known_or_configured(explicit_provider, owner_cfg):
+            requested = default_model
+            repaired = True
+        else:
+            requested = str(bare_model or requested).strip()
+            resolved_provider = explicit_provider
+            if (
+                default_provider
+                and _is_local_server_provider(default_provider)
+                and explicit_provider.startswith("custom:")
+                and explicit_provider.lower() in _custom_endpoint_slugs_for_base_url(
+                    _get_provider_base_url(default_provider, owner_cfg)
+                )
+            ):
+                resolved_provider = default_provider
+            resolved_model = requested
+            resolved_base = _get_provider_base_url(resolved_provider, owner_cfg)
+            key = None
+            if resolved_provider.startswith("custom:"):
+                key, entry_base = resolve_custom_provider_connection(
+                    resolved_provider, owner_cfg, env=owner_env
+                )
+                resolved_base = resolved_base or entry_base
+            return OwnerModelState(
+                model=original_requested,
+                outbound_model=resolved_model,
+                provider=resolved_provider,
+                base_url=resolved_base,
+                api_key=key if resolved_provider.startswith("custom:") else None,
+                repaired=False,
+                runtime_fallback_allowed=_owner_runtime_fallback_allowed(
+                    config_obj, resolved_provider
+                ),
+            )
+
+    if not repaired and requested and stored_provider:
+        stored = str(stored_provider).strip()
+        if _provider_is_known_or_configured(stored, owner_cfg):
+            base = _get_provider_base_url(stored, owner_cfg)
+            key = None
+            if stored.startswith("custom:"):
+                key, entry_base = resolve_custom_provider_connection(
+                    stored, owner_cfg, env=owner_env
+                )
+                base = base or entry_base
+            return OwnerModelState(
+                requested,
+                requested,
+                stored,
+                base,
+                key,
+                False,
+                _owner_runtime_fallback_allowed(config_obj, stored),
+            )
+
+    resolver_fn = resolver or resolve_model_provider
+    resolver_kwargs = {}
+    try:
+        resolver_parameters = inspect.signature(resolver_fn).parameters
+    except (TypeError, ValueError):
+        resolver_parameters = {}
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in resolver_parameters.values()
+    )
+    if config_obj is not None and (
+        "config_obj" in resolver_parameters or accepts_kwargs
+    ):
+        resolver_kwargs["config_obj"] = owner_cfg
+    if explicitly_picked and (
+        "explicitly_picked" in resolver_parameters or accepts_kwargs
+    ):
+        resolver_kwargs["explicitly_picked"] = True
+    resolved_model, resolved_provider, resolved_base = resolver_fn(
+        requested,
+        **resolver_kwargs,
+    )
+    if not resolved_provider and default_provider:
+        resolved_provider = default_provider
+    if repaired or (parsed and resolved_provider != parsed[1]):
+        repaired = True
+    key = None
+    if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
+        key, entry_base = resolve_custom_provider_connection(
+            resolved_provider, owner_cfg, env=owner_env
+        )
+        resolved_base = resolved_base or entry_base
+    if not resolved_base and isinstance(model_cfg, dict):
+        resolved_base = str(model_cfg.get("base_url") or "").strip() or None
+    return OwnerModelState(
+        model=str(resolved_model or requested or default_model).strip(),
+        outbound_model=str(resolved_model or requested or default_model).strip(),
+        provider=str(resolved_provider).strip() if resolved_provider else None,
+        base_url=str(resolved_base).strip() if resolved_base else None,
+        api_key=key,
+        repaired=repaired,
+        runtime_fallback_allowed=_owner_runtime_fallback_allowed(
+            config_obj, str(resolved_provider) if resolved_provider else None
+        ),
+    )
 
 
 # Subprocess ACP transports (Cursor/Copilot CLI). Model IDs often contain '/'
@@ -5517,9 +5877,12 @@ def _minimal_static_models_catalog() -> dict:
         }
 
 
-def _static_models_catalog_without_live_probes() -> dict:
+def _static_models_catalog_without_live_probes(config_obj: dict | None = None) -> dict:
     """Return a network-free /api/models catalog from local config/auth only."""
     try:
+        # An explicit snapshot is an owner boundary. In particular, ``{}`` is
+        # an empty owner, not a request to fall back to the process config.
+        cfg = config_obj if isinstance(config_obj, dict) else globals()["cfg"]
         from api.providers import _provider_has_key
 
         active_provider = None
@@ -5539,21 +5902,22 @@ def _static_models_catalog_without_live_probes() -> dict:
                 active_provider = str(active_provider or "").strip() or None
 
         auth_store: dict = {}
-        try:
-            auth_store_path = _get_auth_store_path()
-            if auth_store_path.exists():
-                auth_store = json.loads(auth_store_path.read_text(encoding="utf-8"))
-                if not active_provider:
-                    active_provider = (
-                        _resolve_configured_provider_id(
-                            auth_store.get("active_provider"),
-                            cfg,
-                            base_url=cfg_base_url,
+        if config_obj is None:
+            try:
+                auth_store_path = _get_auth_store_path()
+                if auth_store_path.exists():
+                    auth_store = json.loads(auth_store_path.read_text(encoding="utf-8"))
+                    if not active_provider:
+                        active_provider = (
+                            _resolve_configured_provider_id(
+                                auth_store.get("active_provider"),
+                                cfg,
+                                base_url=cfg_base_url,
+                            )
+                            or None
                         )
-                        or None
-                    )
-        except Exception:
-            logger.debug("Failed to load auth store for static models catalog", exc_info=True)
+            except Exception:
+                logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
         default_model = get_effective_default_model(cfg)
         detected_providers: set[str] = set()
@@ -5561,7 +5925,7 @@ def _static_models_catalog_without_live_probes() -> dict:
         named_custom_groups: dict[str, dict[str, object]] = {}
         custom_group_models: list[dict] = []
         canonical_to_raw_provider_key: dict[str, str] = {}
-        providers_cfg = _get_providers_cfg()
+        providers_cfg = _get_providers_cfg(cfg)
 
         def _append_model_id(provider_id: str | None, model_id: object) -> None:
             pid = _canonicalise_provider_id(provider_id)
@@ -5575,6 +5939,9 @@ def _static_models_catalog_without_live_probes() -> dict:
         if active_provider:
             detected_providers.add(active_provider)
             _append_model_id(active_provider, default_model)
+            if isinstance(model_cfg, dict):
+                for model_id in _configured_model_ids(model_cfg.get("models")):
+                    _append_model_id(active_provider, model_id)
 
         try:
             _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
@@ -5621,9 +5988,17 @@ def _static_models_catalog_without_live_probes() -> dict:
                     if has_local_signal:
                         detected_providers.add(canonical)
 
+        configured_provider_ids = {
+            _canonicalise_provider_id(provider_id)
+            for provider_id in (providers_cfg.keys() if isinstance(providers_cfg, dict) else ())
+        }
         for provider_id in set(_PROVIDER_MODELS) | set(_PROVIDER_DISPLAY):
             canonical = _canonicalise_provider_id(provider_id)
-            if canonical and _provider_has_key(canonical):
+            if canonical and (
+                config_obj is None and _provider_has_key(canonical)
+                or config_obj is not None
+                and (canonical in configured_provider_ids or canonical == active_provider)
+            ):
                 detected_providers.add(canonical)
 
         # Plugin-only providers (e.g. 9router) are not in the static
@@ -5634,12 +6009,19 @@ def _static_models_catalog_without_live_probes() -> dict:
         # `providers:` block — otherwise the picker silently drops the
         # group when the live-rebuild cache is cold.
         try:
-            for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
-                if not _plugin_pid or not _provider_has_key(_plugin_pid):
-                    continue
-                _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
-                if _canonical:
-                    detected_providers.add(_canonical)
+            if config_obj is None:
+                for _plugin_pid in list(_plugin_model_provider_profiles().keys()):
+                    if not _plugin_pid or not _provider_has_key(_plugin_pid):
+                        continue
+                    _canonical = _canonicalise_provider_id(_plugin_pid) or _plugin_pid
+                    if _canonical:
+                        detected_providers.add(_canonical)
+            else:
+                # Explicit owners may use a plugin only when their snapshot
+                # names that provider. Never inspect ambient plugin auth state.
+                for _plugin_pid in configured_provider_ids:
+                    if _is_plugin_model_provider(_plugin_pid):
+                        detected_providers.add(_plugin_pid)
         except Exception:
             logger.debug("Plugin provider detection failed in static catalog", exc_info=True)
 
@@ -5737,7 +6119,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
-            provider_cfg = _get_provider_cfg(raw_key)
+            provider_cfg = _get_provider_cfg(raw_key, cfg)
             raw_models = []
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
                 raw_models = _configured_model_options(provider_cfg["models"])

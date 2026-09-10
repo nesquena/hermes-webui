@@ -25,6 +25,7 @@ from api.config import (
     STREAM_REASONING_TEXT,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
+    resolve_owner_model_state,
     clear_session_writeback_owner_if_owned,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
@@ -155,7 +156,7 @@ _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 
 
-def _gateway_model_field(model: str | None) -> str:
+def _gateway_model_field(model: str | None, config_obj: dict | None = None) -> str:
     """Return the bare model name to put in a gateway request body.
 
     The picker and ``_resolve_compatible_session_model_state`` intentionally
@@ -171,7 +172,7 @@ def _gateway_model_field(model: str | None) -> str:
     if not model:
         return ""
     value = str(model).strip()
-    parsed = _parse_provider_qualified_model_id(value)
+    parsed = _parse_provider_qualified_model_id(value, config_obj)
     if parsed:
         return str(parsed[0] or "").strip()
     return value
@@ -622,9 +623,13 @@ def _run_gateway_runs_api_streaming(
         if isinstance(run_input, list):
             run_input = [{"role": "user", "content": run_input}]
         run_body = {
-            "model": _gateway_model_field(model) or "default",
+            "model": _gateway_model_field(model, cfg) or "default",
             "input": run_input,
-            **body_extras,
+            **{
+                key: value
+                for key, value in (body_extras or {}).items()
+                if key != "provider"
+            },
             "session_id": session_id,
         }
         if instructions_parts:
@@ -992,6 +997,23 @@ def _run_gateway_chat_streaming(
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
+        owner_env = None
+        if getattr(s, "profile", None):
+            from api.profiles import (
+                get_hermes_home_for_profile,
+                get_profile_runtime_env,
+                resolve_profile_config_context,
+            )
+            _owner, cfg = resolve_profile_config_context(s.profile)
+            owner_env = get_profile_runtime_env(get_hermes_home_for_profile(s.profile))
+        owner_state = resolve_owner_model_state(
+            model,
+            model_provider,
+            config_obj=cfg,
+            owner_env=owner_env,
+        )
+        model = owner_state.outbound_model
+        model_provider = owner_state.provider
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
@@ -1053,8 +1075,6 @@ def _run_gateway_chat_streaming(
             prefill_messages = []
         if _use_runs_api:
             body_extras = {}
-            if model_provider:
-                body_extras["provider"] = model_provider
             if reasoning_effort is not None:
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
@@ -1125,7 +1145,7 @@ def _run_gateway_chat_streaming(
                     logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
                     message_content = str(msg_text or "")
             body = {
-                "model": _gateway_model_field(model) or "default",
+                "model": _gateway_model_field(model, cfg) or "default",
                 "stream": True,
                 "messages": [*prefill_messages, {"role": "user", "content": message_content}],
             }

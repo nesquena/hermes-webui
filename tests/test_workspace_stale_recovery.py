@@ -69,7 +69,9 @@ def test_resolve_chat_workspace_with_recovery_repairs_missing_implicit_workspace
 
     assert resolved == str(fallback.resolve())
     assert session.workspace == str(fallback.resolve())
-    assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["workspace"] == str(
+        fallback.resolve()
+    )
 
 
 def test_chat_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):
@@ -172,7 +174,9 @@ def _post_new_session_with_workspace(
         else (_ for _ in ()).throw(KeyError(sid)),
     )
     monkeypatch.setattr(routes, "get_last_workspace", get_fallback)
-    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda *_a: (None, None))
+    monkeypatch.setattr(
+        routes, "_session_model_state_from_request", lambda *_a, **_k: (None, None)
+    )
     monkeypatch.setattr(routes, "new_session", create_session)
     monkeypatch.setattr(
         session_lifecycle,
@@ -385,7 +389,9 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
 
     assert captured == {"workspace": fallback.resolve(), "rel_path": "."}
     assert session.workspace == str(fallback.resolve())
-    assert str(fallback.resolve()) in sidecar.read_text(encoding="utf-8")
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["workspace"] == str(
+        fallback.resolve()
+    )
     assert payload == {
         "entries": [],
         "signature": "sig",
@@ -435,7 +441,9 @@ def test_list_recovery_stays_bound_when_global_fallback_changes(
     assert payload["workspace"] == str(fallback_a.resolve())
     assert session.workspace == str(fallback_a.resolve())
     assert captured["listed"] == fallback_a.resolve()
-    assert str(fallback_a.resolve()) in sidecar.read_text(encoding="utf-8")
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["workspace"] == str(
+        fallback_a.resolve()
+    )
 
 
 def test_persisted_list_recovery_anchors_later_create_dir_to_fallback_a(

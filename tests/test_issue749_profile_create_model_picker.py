@@ -168,13 +168,45 @@ def test_profile_model_selection_rejects_unknown_model_provider_pair():
         )
 
 
+def test_profile_validation_catalog_uses_clone_source_config(monkeypatch):
+    source_config = {
+        "model": {"default": "source-only-model", "provider": "source-provider"},
+        "providers": {
+            "source-provider": {
+                "models": [
+                    "source-only-model",
+                    {"model": "source-dict-model"},
+                    {"name": "source-name-model"},
+                ]
+            }
+        },
+    }
+
+    monkeypatch.setattr(
+        "api.config.get_available_models",
+        lambda: (_ for _ in ()).throw(AssertionError("ambient catalog was consulted")),
+    )
+
+    profiles._validate_profile_model_selection(
+        "source-dict-model",
+        "source-provider",
+        config_obj=source_config,
+    )
+    with pytest.raises(ValueError, match="Selected model 'active-only-model'"):
+        profiles._validate_profile_model_selection(
+            "active-only-model",
+            "source-provider",
+            config_obj=source_config,
+        )
+
+
 def test_profile_create_rejects_unknown_model_before_creating_profile(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
         profiles,
         "_get_available_models_for_profile_validation",
-        lambda: {
+        lambda _config_obj=None: {
             "groups": [
                 {
                     "provider": "OpenAI Codex",
@@ -198,3 +230,51 @@ def test_profile_create_rejects_unknown_model_before_creating_profile(monkeypatc
         )
 
     assert calls == []
+
+
+def test_clone_validation_accepts_full_builtin_owner_catalog(monkeypatch):
+    owner = {"model": {"provider": "openai-codex", "default": "gpt-5.4"}}
+    monkeypatch.setattr(
+        "api.config.get_available_models",
+        lambda: (_ for _ in ()).throw(AssertionError("ambient catalog was consulted")),
+    )
+    profiles._validate_profile_model_selection("gpt-5.5", "openai-codex", config_obj=owner)
+
+
+def test_clone_validation_accepts_owner_model_models_allowlist(monkeypatch):
+    owner = {
+        "model": {
+            "provider": "openai-codex",
+            "default": "gpt-5.4",
+            "models": ["gpt-5.5"],
+        }
+    }
+    monkeypatch.setattr(
+        "api.config.get_available_models",
+        lambda: (_ for _ in ()).throw(AssertionError("ambient catalog was consulted")),
+    )
+    profiles._validate_profile_model_selection(
+        "gpt-5.5", "openai-codex", config_obj=owner
+    )
+
+
+def test_clone_validation_accepts_custom_provider_model_shapes():
+    owner = {
+        "custom_providers": [{
+            "name": "backup",
+            "model": "single-model",
+            "models": ["list-model", {"id": "id-model"}, {"model": "model-model"}, {"name": "name-model"}],
+        }]
+    }
+    catalog = profiles._get_available_models_for_profile_validation(owner)
+    ids = {
+        model["id"]
+        for group in catalog["groups"]
+        for model in group.get("models", [])
+    }
+    assert {"single-model", "list-model", "id-model", "model-model", "name-model"} <= ids
+
+
+def test_clone_validation_accepts_custom_provider_models_scalar_string():
+    owner = {"custom_providers": [{"name": "backup", "models": "org/model"}]}
+    profiles._validate_profile_model_selection("org/model", "custom:backup", config_obj=owner)

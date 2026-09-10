@@ -300,7 +300,7 @@ class TestReadProfileModelConfig:
             profile = "work"
 
         result = _read_profile_model_config(FakeSession(), "openai-codex")
-        assert result == (None, None, None)
+        assert result == (None, None, {})
 
     def test_reads_profile_config(self, tmp_path):
         """Reads model.provider and model.default from profile config.yaml."""
@@ -323,7 +323,7 @@ class TestReadProfileModelConfig:
         assert result[2] == {"model": {"provider": "anthropic", "default": "claude-sonnet-4.6"}}
 
     def test_missing_config_returns_none(self):
-        """Missing config.yaml returns (None, None, None)."""
+        """Missing config.yaml returns an empty owner config boundary."""
         from api.routes import _read_profile_model_config
         import tempfile
 
@@ -334,7 +334,7 @@ class TestReadProfileModelConfig:
             with patch("api.profiles.get_hermes_home_for_profile", return_value=Path(td)):
                 result = _read_profile_model_config(FakeSession(), None)
 
-        assert result == (None, None, None)
+        assert result == (None, None, {})
 
     def test_empty_provider_returns_none(self, tmp_path):
         """Empty model.provider in config returns (None, default, config)."""
