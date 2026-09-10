@@ -173,3 +173,34 @@ def test_prefix_and_tail_keys_agree_for_a_sentinel_row():
     )
     prefix_key = _session_message_visible_key(prefix_msg, normalize_workspace_prefix=True)
     assert prefix_key == tail_key
+
+
+# --- guard: every path that projects the content column must decode --------
+
+def test_all_content_projecting_read_paths_decode():
+    """The decode contract documented in docs/architecture/agent-api-contract.md.
+
+    Keys derived on one read path are compared against keys derived on another,
+    so a new raw projection of the ``content`` column would silently reintroduce
+    the prefix/tail mismatch. Pin the known call sites.
+    """
+    import inspect
+    import re
+
+    from api import models
+
+    expected = {
+        "_project_state_db_message",
+        "get_state_db_session_message_keys_before_timestamp",
+        "get_state_db_regeneration_tail_snapshot",
+    }
+    source = inspect.getsource(models)
+    found = set()
+    current = None
+    for line in source.splitlines():
+        match = re.match(r"^def (\w+)", line)
+        if match:
+            current = match.group(1)
+        if "_decode_state_db_content(" in line and "def " not in line and current:
+            found.add(current)
+    assert found == expected, f"decode call sites drifted: {found ^ expected}"
