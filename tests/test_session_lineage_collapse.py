@@ -31,6 +31,32 @@ def _run_node(source: str) -> str:
     return result.stdout.strip()
 
 
+def render_sidebar_rows(sessions, references):
+    """Run production sidebar grouping on API rows, including hidden ancestors."""
+    if NODE is None:
+        pytest.skip('node not on PATH')
+    js = SESSIONS_JS_PATH.read_text(encoding='utf-8')
+    return json.loads(_run_node(f"""
+const src = {json.dumps(js)};
+function extractFunc(name) {{
+  const start = src.indexOf('function ' + name + '(');
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start), depth = 1;
+  for (i++; depth > 0 && i < src.length; i++) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+  }}
+  return src.slice(start, i);
+}}
+for (const name of ['_sessionTimestampMs', '_isChildSession',
+  '_isForkWithResolvableParent', '_sessionLineageKey', '_sidebarLineageKeyForRow',
+  '_collapseSessionLineageForSidebar', '_attachChildSessionsToSidebarRows',
+  '_renderSidebarRowsFromRawSessions']) eval(extractFunc(name));
+console.log(JSON.stringify(_renderSidebarRowsFromRawSessions(
+  {json.dumps(sessions)}, {json.dumps(references)})));
+"""))
+
+
 def test_sidebar_lineage_collapse_keeps_latest_tip_and_counts_segments():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""

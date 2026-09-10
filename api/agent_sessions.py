@@ -1,6 +1,7 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import json
 import logging
+import math
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -339,6 +340,10 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     if parent.get('end_reason') not in {'compression', 'cli_close'}:
         return False
+    if _is_user_visible_reset_successor(parent, child):
+        # Reset intent is a conversation boundary in every lineage walk, even
+        # if an inconsistent parent row still records a compression ending.
+        return False
     ended_at = parent.get('ended_at')
     if ended_at is None:
         # Older state.db rows/tests may not have ended_at populated. Preserve
@@ -364,7 +369,7 @@ def _parse_model_config(value: object) -> dict | None:
         return {}
     try:
         parsed = json.loads(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -390,7 +395,7 @@ def _is_user_visible_reset_successor(parent: dict | None, child: dict | None) ->
 
     # An explicit branch/delegate marker wins over reset metadata. In a
     # conflict, fail closed and preserve the historical child projection.
-    if config.get('_branched_from') or config.get('_delegate_from'):
+    if '_branched_from' in config or '_delegate_from' in config:
         return False
 
     if '_reset_from' in config:
@@ -404,7 +409,21 @@ def _is_user_visible_reset_successor(parent: dict | None, child: dict | None) ->
 
     parent_key = str(parent.get('session_key') or '').strip()
     child_key = str(child.get('session_key') or '').strip()
-    return bool(parent_key and parent_key == child_key)
+    if not parent_key or parent_key != child_key:
+        return False
+
+    # /branch creates the child before switch_session ends its parent. Only
+    # infer a legacy reset when both timestamps prove the opposite ordering.
+    started_at = child.get('started_at')
+    ended_at = parent.get('ended_at')
+    if isinstance(started_at, bool) or isinstance(ended_at, bool):
+        return False
+    try:
+        started_at = float(started_at)
+        ended_at = float(ended_at)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(started_at) and math.isfinite(ended_at) and started_at >= ended_at
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:

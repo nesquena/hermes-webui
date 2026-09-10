@@ -69,7 +69,19 @@ emitting child-session metadata for a reset successor. Compression
 continuations remain one visible conversation, while explicit branch and
 delegate sessions remain nested children. The canonical reset marker is
 `_reset_from == parent_session_id`; compatibility inference for older rows must
-require a reset end reason and the same non-empty `session_key`.
+require a reset end reason, the same non-empty `session_key`, and finite timestamps
+proving `child.started_at >= parent.ended_at`. Missing or invalid timestamps do
+not establish a legacy reset. The presence of `_branched_from` or `_delegate_from`
+blocks reset classification even if its value is empty; invalid model-config
+JSON (including excessive nesting) must not abort projection of other sessions.
+Canonical reset boundaries also stop compression traversal so independent
+conversations cannot share a lineage root or produce duplicate sidebar IDs.
+
+A WebUI fork's `session_source` can survive compression while its parent link is
+rewritten to an archived snapshot. When state.db confirms a different compression
+root, the sidebar response normalizes that continuation's source to WebUI so it
+remains visible. The saved sidecar and original fork snapshot retain provenance;
+uncompressed forks still preserve their explicit fork source and branch indicator.
 
 ## Resolution Rules
 

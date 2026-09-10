@@ -6163,10 +6163,18 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
             # Preserve the explicit marker when it has the required parent;
             # otherwise keep the authoritative state.db normalization behavior,
             # including delegated subagent classification.
+            # Compression inherits session_source but rewrites the parent link
+            # to a snapshot. Once state.db confirms that continuation, do not
+            # present this link as a fork of its own archived ancestor (#7179).
+            is_compression_continuation = bool(
+                entry.get('_lineage_root_id')
+                and entry['_lineage_root_id'] != sid
+            )
             preserve_native_fork = bool(
                 state_db_source == 'webui'
                 and str(session.get('session_source') or '').strip().lower() == 'fork'
                 and str(session.get('parent_session_id') or '').strip()
+                and not is_compression_continuation
             )
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
