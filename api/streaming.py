@@ -915,7 +915,8 @@ WebUI progress guidance:
 WebUI file references:
 Apply these rules to local-file Markdown links in chat replies, including download links. Keep MEDIA: delivery and links inside authored files unchanged.
 - For workspace navigation, use [label](workspace://relative/path/to/file.ext).
-- For downloads or files outside the workspace, use an existing download URL when available; otherwise use [label](file:///absolute/path/to/file.ext). If WebUI access is denied or unknown, show its path in backticks.
+- For download links, use an existing download URL; if none is available, say so.
+- For open/view links to other local files, use [label](file:///absolute/path/to/file.ext). These may preview inline rather than download. If WebUI access is denied or unknown, show its path in backticks.
 - When constructing workspace:// or file:// links from filesystem paths, percent-encode each path segment, including spaces, parentheses, and literal %, while preserving the scheme and / separators.
 """.strip()
 
