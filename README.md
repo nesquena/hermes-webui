@@ -207,7 +207,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Thinking/reasoning display -- collapsible gold-themed cards for Claude extended thinking and o3 reasoning blocks
 - Approval card for dangerous shell commands (allow once / session / always / deny)
 - SSE auto-reconnect on network blips (SSH tunnel resilience)
-- File attachments persist across page reloads and are stored outside the active workspace by default (`~/.hermes/webui/attachments/<session_id>/`, or `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/` when configured)
+- File attachments persist across page reloads and are stored outside the active workspace by default (`~/.hermes/webui/attachments/<session_id>/`, or `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/` when configured). With a remote terminal backend (`terminal.backend: docker`, ssh, ...) the default inbox moves to the active profile's sandbox-visible cache subtree (`~/.hermes/cache/documents/webui-attachments/<session_id>/`), which hermes-agent auto-mounts into sandboxes, and the agent-facing path is translated to its container form. If you set `HERMES_WEBUI_ATTACHMENT_DIR` with a remote backend, point it at a directory that is actually bind-mounted into the sandbox (e.g. under `~/.hermes/attachments` or `~/.hermes/cache/...`).
 - Message timestamps (HH:MM next to each message, full date on hover)
 - Code block copy button with "Copied!" feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
