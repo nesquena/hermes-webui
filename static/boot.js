@@ -3818,9 +3818,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         ? _restoredDraft.files.filter(Boolean)
         : [];
       const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
-      // A pinned empty session is deliberate: /clear preserves its identity so a
-      // user can keep a pinned chat window after clearing its transcript.
-      if(S.session && (S.session.message_count||0) === 0 && !S.session.pinned && !_restoredInFlight && !_restoredHasDraft){
+      // A clear-marked empty session is deliberate: /clear preserves its identity
+      // whether the user keeps the chat pinned or not. Only a genuinely unstarted
+      // scratch session should become the fresh-composer state on reload.
+      const _restoredCleared = !!(S.session && S.session.clear_generation);
+      if(S.session && (S.session.message_count||0) === 0 && !_restoredCleared && !_restoredInFlight && !_restoredHasDraft){
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible
