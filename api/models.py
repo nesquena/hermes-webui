@@ -1920,6 +1920,11 @@ class Session:
             except Exception:
                 pass
             raise
+        # `compact()` prefers this load-time metadata value for cheap sidebar
+        # reads. A successful save is authoritative, including deliberate
+        # shrinking paths such as /clear and /truncate, so keep the live object
+        # aligned with the guarded message_count written to the sidecar.
+        self._metadata_message_count = len(guarded_messages)
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
