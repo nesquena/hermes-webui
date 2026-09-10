@@ -216,11 +216,10 @@ curl -sS https://opencode.ai/zen/go/v1/models \
   -H "Authorization: Bearer $OPENCODE_GO_API_KEY" | head -50
 ```
 
-If the failing model is absent from the `curl` output, it was delisted upstream (for example `ox-alpha-free`, removed from the relay on 2026-09-09) and only a stale fallback would offer it — upgrade the WebUI so the fallback resyncs.
+Interpret the two together:
 
-**Fix.**
-
-- For a listed-but-failing model (tier-gated or region-blocked): pin the models you actually use with an explicit allowlist in `config.yaml`, which takes precedence over both the live catalog and the fallback:
+- **Failing model absent from the `curl` output** → it was delisted upstream (for example `ox-alpha-free`, removed from the relay on 2026-09-09). A picker can still offer it from a **stale catalog merge**: Hermes core merges its own curated Go list into the live result, and Agent releases *between* v0.20.5 and the 2026-09-09 catalog sync (through v0.21.1) still carry the delisted id in that list — verified at runtime against v0.21.0, where the live path serves 37 ids including `ox-alpha-free`. **Upgrade the Agent** past the 2026-09-09 sync (or pin an allowlist below) so the dead id stops being offered.
+- **Failing model present in the `curl` output** → the relay lists it but your tier/region cannot serve it; the picker is behaving correctly. Pin the models you actually use with an explicit allowlist in `config.yaml`, which takes precedence over both the live catalog and the fallback:
 
   ```yaml
   providers:
@@ -231,7 +230,8 @@ If the failing model is absent from the `curl` output, it was delisted upstream 
   ```
 
   A lighter per-provider exclude capability is tracked in #7507.
-- For a missing new model: upgrade Hermes Agent to ≥ v0.20.5 so the picker reads the live catalog instead of the static fallback.
+- **Missing new model, Agent ≥ v0.20.5** → the live catalog is the source; refresh or check the endpoint with the `curl` above (cold rebuilds are also bounded by a 4-second foreground budget — the first picker open after a restart can serve the last-known list while the live rebuild finishes in the background, so re-open the picker once before concluding it's stale).
+- **Missing new model, Agent older than v0.20.5** → the static fallback is serving by design; upgrade the Agent to ≥ v0.20.5 so the picker reads the live catalog.
 
 **When to file a bug.** File a WebUI bug if a model fails on send *and* appears in the `curl` output for your key (a routing problem), or if a model is missing with Agent ≥ v0.20.5 and the live catalog reachable (fallback used when it should not be).
 
