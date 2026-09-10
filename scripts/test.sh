@@ -82,6 +82,7 @@ modules = [
     "pytest_asyncio",
     "pytest_shard",
     "pytest_timeout",
+    "playwright",
     "ruff",
     "yaml",
 ]
