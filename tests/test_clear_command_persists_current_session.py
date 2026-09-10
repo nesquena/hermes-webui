@@ -13,7 +13,7 @@ from tests.conftest import TEST_BASE, TEST_WORKSPACE
 _BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 
 
-def _seed_session(session_id: str, text: str) -> None:
+def _seed_session(session_id: str, text: str, *, pinned: bool = False) -> None:
     """Persist a transcript before the real WebUI server reads this session."""
     from api.models import Session
 
@@ -27,6 +27,7 @@ def _seed_session(session_id: str, text: str) -> None:
         workspace=str(TEST_WORKSPACE),
         messages=messages,
         context_messages=list(messages),
+        pinned=pinned,
     )
     session.save()
 
@@ -48,7 +49,7 @@ def _open_session(page, session_id: str) -> None:
     page.wait_for_function(
         """sid => typeof S !== 'undefined' && S._bootReady === true &&
         S.session && S.session.session_id === sid && Array.isArray(S.messages) && S.messages.length === 2""",
-        session_id,
+        arg=session_id,
         timeout=15_000,
     )
 
@@ -57,7 +58,7 @@ def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_ses
     """The real slash command clears server state and keeps the same session ID."""
     session_id = "clear_browser_pinned"
     cleanup_test_sessions.append(session_id)
-    _seed_session(session_id, "history that must not return")
+    _seed_session(session_id, "history that must not return", pinned=True)
 
     pw = _browser_or_skip()
     with pw.sync_playwright() as playwright:
@@ -73,7 +74,7 @@ def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_ses
             page.wait_for_function(
                 """sid => S.session && S.session.session_id === sid &&
                 Array.isArray(S.messages) && S.messages.length === 0""",
-                session_id,
+                arg=session_id,
                 timeout=10_000,
             )
             assert page.locator("#msgInner").inner_text().strip() == ""
@@ -85,7 +86,7 @@ def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_ses
                 """sid => typeof S !== 'undefined' && S._bootReady === true &&
                 S.session && S.session.session_id === sid &&
                 Array.isArray(S.messages) && S.messages.length === 0""",
-                session_id,
+                arg=session_id,
                 timeout=15_000,
             )
             assert page.locator("#msgInner").inner_text().strip() == ""
@@ -123,7 +124,7 @@ def test_slash_clear_api_failure_keeps_visible_and_durable_history(cleanup_test_
             page.wait_for_function(
                 """text => document.getElementById('toast').dataset.toastMessage
                 .includes(text)""",
-                "test clear failure",
+                arg="test clear failure",
                 timeout=10_000,
             )
             assert original_text in page.locator("#msgInner").inner_text()

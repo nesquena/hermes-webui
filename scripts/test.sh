@@ -226,6 +226,23 @@ else
   "$PYTHON_BIN" -m pip install -r "$REQ_FILE"
 fi
 
+# Browserregressioner kör den Chromium-version som Playwright-klienten begär.
+# Paketinstallationen ovan innehåller bara klienten; i en ny miljö saknas själva
+# browsern tills den hämtas till Playwrights standardcache. Kontrollera den
+# exakta sökvägen först så att vanliga testrundor inte laddar ned något igen.
+if ! "$PYTHON_BIN" - <<'PY'
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as playwright:
+    browser = Path(playwright.chromium.executable_path)
+raise SystemExit(0 if browser.exists() else 1)
+PY
+then
+  echo "Installing the Chromium browser required by Playwright regressions." >&2
+  "$PYTHON_BIN" -m playwright install chromium
+fi
+
 if [[ $# -eq 0 ]]; then
   set -- tests/ -v --timeout=60
 fi
