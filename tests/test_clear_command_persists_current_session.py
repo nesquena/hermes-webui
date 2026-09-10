@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from urllib.parse import quote
 from urllib.request import urlopen
 
@@ -54,11 +55,14 @@ def _open_session(page, session_id: str) -> None:
     )
 
 
-def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_sessions):
-    """The real slash command clears server state and keeps the same session ID."""
-    session_id = "clear_browser_pinned"
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+def test_slash_clear_persists_empty_session_after_reload(
+    cleanup_test_sessions, pinned: bool
+):
+    """A cleared session keeps its identity after reload whether pinned or not."""
+    session_id = f"clear_browser_{'pinned' if pinned else 'unpinned'}_{uuid.uuid4().hex}"
     cleanup_test_sessions.append(session_id)
-    _seed_session(session_id, "history that must not return", pinned=True)
+    _seed_session(session_id, "history that must not return", pinned=pinned)
 
     pw = _browser_or_skip()
     with pw.sync_playwright() as playwright:
@@ -70,7 +74,12 @@ def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_ses
 
             # Exercise the production slash dispatcher, command implementation,
             # and test-server API rather than a copied/mocked cmdClear function.
-            page.evaluate("executeCommand('/clear')")
+            with page.expect_response(
+                lambda response: response.url.endswith("/api/session/clear")
+                and response.request.method == "POST"
+            ) as clear_response:
+                page.evaluate("executeCommand('/clear')")
+            assert clear_response.value.ok
             page.wait_for_function(
                 """sid => S.session && S.session.session_id === sid &&
                 Array.isArray(S.messages) && S.messages.length === 0""",
@@ -78,6 +87,7 @@ def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_ses
                 timeout=10_000,
             )
             assert page.locator("#msgInner").inner_text().strip() == ""
+            assert _server_session(session_id)["messages"] == []
 
             # The regression: local-only clearing looked correct until a reload
             # rehydrated the transcript from durable session storage.
@@ -96,12 +106,12 @@ def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_ses
     persisted = _server_session(session_id)
     assert persisted["session_id"] == session_id
     assert persisted["messages"] == []
-    assert persisted["pinned"] is True
+    assert persisted["pinned"] is pinned
 
 
 def test_slash_clear_api_failure_keeps_visible_and_durable_history(cleanup_test_sessions):
     """A failed clear must not make the transcript disappear only locally."""
-    session_id = "clear_browser_failure"
+    session_id = f"clear_browser_failure_{uuid.uuid4().hex}"
     original_text = "history must remain after failed clear"
     cleanup_test_sessions.append(session_id)
     _seed_session(session_id, original_text)
