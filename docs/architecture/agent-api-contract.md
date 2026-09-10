@@ -41,9 +41,75 @@ helpers are genuinely shared code.
 | `docker_agent_source_volume` | Compose files and Docker docs expose `hermes-agent-src` and `/opt/hermes` to make the agent checkout visible to WebUI. | Remove the WebUI source mount only after startup install and runtime imports have migrated. This needs Docker/compose follow-up work, not a runtime behavior change in this audit PR. |
 | `startup_dependency_install` | `api/startup.py` discovers `HERMES_WEBUI_AGENT_DIR` or `$HERMES_HOME/hermes-agent`; `server.py` calls `auto_install_agent_deps()` after import verification fails; `docker_init.bash` installs from the staged agent source. | Replace source-tree pip installs with a packaged hermes-agent WebUI client plus an agent health/version capability contract. Keep `HERMES_WEBUI_AGENT_DIR` during migration as an override/debug path, but it should stop being required in normal multi-container startup. |
 | `runtime_auxiliary_model_metadata` | `api/streaming.py`, `api/routes.py`, `api/config.py`, and `api/providers.py` import `agent.auxiliary_client`, `agent.model_metadata`, `agent.models_dev`, `hermes_cli.models`, and `agent.account_usage`. | Existing provider/model WebUI endpoints can keep serving UI data where they already wrap agent helpers. Missing surfaces need hermes-agent endpoints or a client package for auxiliary task config, text auxiliary calls, context length, token estimate, provider catalog, and account usage. |
-| `runtime_session_state` | `api/streaming.py`, `api/goals.py`, and `api/state_sync.py` import `hermes_state.SessionDB` directly. `api/models.py` also opens the active profile's canonical `state.db` for scoped session deletion because the current canonical helper does not preserve branch/compression evidence ahead of inherited delegate metadata or expose retryable artifact-cleanup semantics. | Move cross-container state reads and writes, including destructive session deletion, behind hermes-agent session/state endpoints once the agent API provides equivalent lineage precedence, transaction, and retry-manifest guarantees. WebUI-only presentation state can remain local, but agent session storage should not be opened from the WebUI container. |
+| `runtime_session_state` | `api/streaming.py`, `api/goals.py`, and `api/state_sync.py` import `hermes_state.SessionDB` directly. `api/models.py` also reads the `messages` table directly (see [state.db message content encoding](#statedb-message-content-encoding) for the storage-format coupling that creates) and opens the active profile's canonical `state.db` for scoped session deletion because the current canonical helper does not preserve branch/compression evidence ahead of inherited delegate metadata or expose retryable artifact-cleanup semantics. | Move cross-container state reads and writes, including destructive session deletion, behind hermes-agent session/state endpoints once the agent API provides equivalent lineage precedence, transaction, and retry-manifest guarantees. WebUI-only presentation state can remain local, but agent session storage should not be opened from the WebUI container. |
 | `runtime_gateway_provider` | `api/streaming.py` and `api/routes.py` import `hermes_cli.runtime_provider`; adapter helpers such as `agent.anthropic_adapter` are also imported for gateway normalization. | Provider resolution, runtime routing, and gateway invocation should be hermes-agent API calls. WebUI can keep request validation and display formatting, but it should not import runtime provider internals from the agent checkout. |
 | `webui_local_or_client_package` | WebUI imports `hermes_cli.auth`, `hermes_cli.config`, `hermes_cli.plugins`, `hermes_cli.profiles`, `hermes_cli.goals`, `agent.skill_utils`, `agent.credential_pool`, and `hermes_constants`. | Pure schemas, constants, and parsing helpers can move into a small versioned client/shared package. Privileged data such as credential pools, auth status, profile mutation, plugin discovery, and goal persistence need hermes-agent endpoints. UI-only formatting can remain in WebUI. |
+
+## state.db message content encoding
+
+`api/models.py` reads the agent's `messages` table with its own SQL, so it also
+depends on how hermes-agent *encodes* that table, not only on its schema. This
+is a storage-format coupling and belongs with the `runtime_session_state`
+dependency class above.
+
+`hermes_state` stores list/dict message content (multimodal parts) as a
+sentinel-prefixed JSON string, because sqlite3 binds only scalars:
+
+```
+_CONTENT_JSON_PREFIX = "\x00json:"        # hermes_state.py
+```
+
+It provides `_decode_content()` to reverse this. Any WebUI read path that
+projects that column must apply an equivalent decode; a raw read hands the
+frontend an encoded string that no reader recognises, and an image part's
+base64 data URI then renders as literal transcript text.
+
+### WebUI decoding contract
+
+`_decode_state_db_content()` in `api/models.py` is the single decode point. It
+is deliberately narrower than the agent's own decoder, because the WebUI can
+only accept shapes the rest of its pipeline already renders:
+
+| Input | Result | Why |
+| --- | --- | --- |
+| Sentinel + list of supported parts | decoded `list` | the shape `msgContent`, `_messageIsRenderable`, and `renderMessages()` already handle |
+| Sentinel + dict or scalar root | unchanged string | a dict reaches `_getCachedRender()`, and `_renderCacheKey()` calls `text.slice()` on it, blanking the turn |
+| Sentinel + `NaN`/`Infinity`/overflowed float | unchanged string | Python emits them, browser `JSON.parse()` rejects the whole `/api/session` payload |
+| Sentinel + unsupported part shapes | unchanged string | `input_text`, `output_text`, scalar and unknown parts are dropped by the JS readers, so decoding them would silently lose content that is visible today |
+| Anything without the sentinel | unchanged | non-sentinel content is not this contract's concern |
+
+Supported parts are `{"type": "text", "text": <str>}` plus the image types in
+`_SESSION_MESSAGE_IMAGE_PART_TYPES` (`image`, `image_url`, `input_image`), which
+render from the `attachments` reference rather than from the inline payload.
+
+Widening the accepted schema requires teaching every shared content reader
+through one extractor first; until then unsupported shapes must keep falling
+back to the raw string.
+
+### Consequences for identity and bounded reads
+
+Decoding changes the runtime type of `content`, so every consumer that derives
+an identity from it must agree on one representation:
+
+- Merge, dedup, and visible-key paths use type-namespaced serialization.
+  Scalar content keys exactly as before; structured content is tagged, so a
+  structured message cannot collide with a scalar matching its `repr()`, and two
+  rich turns sharing visible text and timestamp stay distinct when their images
+  differ.
+- The multimodal mirror bridge pairs one rich image-bearing row with one scalar
+  mirror only. `require_image_parts` and `require_scalar_mirror` are mutually
+  exclusive so rich-to-rich pairing cannot occur.
+- Both prefix-key projections
+  (`get_state_db_session_message_keys_before_timestamp` and
+  `get_state_db_session_message_prefix_summary`) apply the same decoder as the
+  projected tail. If prefix keys stayed encoded while the tail was decoded, the
+  prefix/tail collision proof could miss a genuine repeated recovered turn and
+  `_bounded_tail_snapshot_if_safe` would reject the bounded path, reading the
+  entire transcript during regeneration.
+
+When session state moves behind hermes-agent endpoints, this decode should move
+with it: the agent should return structured content over the API and the WebUI
+should stop depending on the sentinel format at all.
 
 ## Replacement contract
 
