@@ -22969,6 +22969,7 @@ def _commit_chat_start_admission(
             restore_session_state(s, pre_attempt_snapshot)
         _restore_pending_start_markers(s, marker_claim)
         compensation_errors = []
+        sidecar_compensated = not save_attempted
         if save_attempted and pre_attempt_snapshot is not None and not successor_present:
             try:
                 save = getattr(s, "save", None)
@@ -22980,13 +22981,18 @@ def _commit_chat_start_admission(
                         path = getattr(s, "path", None)
                         if path is not None:
                             path.unlink(missing_ok=True)
+                sidecar_compensated = True
             except Exception as compensation_exc:
                 compensation_errors.append(compensation_exc)
                 logger.exception(
                     "Failed to persist compensated chat start for %s",
                     s.session_id,
                 )
-        if pre_attempt_snapshot is not None and not successor_present:
+        if (
+            pre_attempt_snapshot is not None
+            and not successor_present
+            and sidecar_compensated
+        ):
             try:
                 _restore_backup_before_image()
             except Exception as compensation_exc:

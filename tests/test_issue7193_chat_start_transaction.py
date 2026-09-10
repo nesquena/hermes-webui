@@ -269,32 +269,60 @@ def test_successful_regeneration_keeps_normal_backup_rotation(transaction_env, m
     assert session.path.with_suffix(".json.bak").read_bytes() == before_sidecar
 
 
-def test_backup_restore_runs_after_sidecar_compensation_failure(transaction_env, monkeypatch):
+@pytest.mark.parametrize("backup_state", ["absent", "empty", "six"])
+def test_rejected_regeneration_retains_backup_when_sidecar_compensation_fails(
+    transaction_env, monkeypatch, backup_state
+):
     from api.session_ops import plan_regeneration
 
-    session = _regeneration_session(transaction_env)
+    journal = __import__("api.turn_journal", fromlist=["read_turn_journal"])
+    session = _regeneration_session(transaction_env, backup_state=backup_state)
+    before_sidecar = session.path.read_bytes()
+    before_messages = copy.deepcopy(session.messages)
+    before_context_messages = copy.deepcopy(session.context_messages)
+    before_index = models.SESSION_INDEX_FILE.read_bytes()
     plan = plan_regeneration(session)
     backup = session.path.with_suffix(".json.bak")
-    replace_calls = []
+    backup_replace_calls = []
+    backup_unlink_calls = []
+    checkpoint_sidecar = []
+    sidecar_failure_seen = False
     real_replace = models._safe_replace
 
-    def fail_backup_restore(source, destination):
-        replace_calls.append((Path(source), Path(destination)))
-        if Path(destination) == backup and sum(dst == backup for _, dst in replace_calls) == 2:
-            raise OSError("backup restore failed")
+    def record_backup_replace(source, destination):
+        if Path(destination) == backup:
+            backup_replace_calls.append(sidecar_failure_seen)
         return real_replace(source, destination)
 
-    monkeypatch.setattr(models, "_safe_replace", fail_backup_restore)
+    monkeypatch.setattr(models, "_safe_replace", record_backup_replace)
+    real_unlink = Path.unlink
+
+    def record_backup_unlink(path, *args, **kwargs):
+        if path == backup:
+            backup_unlink_calls.append(sidecar_failure_seen)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", record_backup_unlink)
     real_save = models.Session.save
     save_calls = []
+    worker_calls = []
 
     def fail_sidecar_compensation(self, *args, **kwargs):
+        nonlocal sidecar_failure_seen
         save_calls.append(kwargs)
-        if len(save_calls) == 1:
-            return real_save(self, *args, **kwargs)
-        raise OSError("sidecar compensation failed")
+        if kwargs.get("skip_backup") is True:
+            sidecar_failure_seen = True
+            raise OSError("sidecar compensation failed")
+        result = real_save(self, *args, **kwargs)
+        checkpoint_sidecar.append(self.path.read_bytes())
+        return result
 
     monkeypatch.setattr(models.Session, "save", fail_sidecar_compensation)
+    monkeypatch.setattr(
+        routes,
+        "_run_agent_streaming",
+        lambda *args, **kwargs: worker_calls.append((args, kwargs)),
+    )
     monkeypatch.setattr(
         threading.Thread,
         "start",
@@ -307,15 +335,37 @@ def test_backup_restore_runs_after_sidecar_compensation_failure(transaction_env,
     message = str(exc_info.value)
     assert "thread start rejected" in message
     assert "sidecar compensation failed" in message
-    assert "backup restore failed" in message
-    assert message.index("sidecar compensation failed") < message.index("backup restore failed")
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "thread start rejected"
-    assert sum(destination == backup for _, destination in replace_calls) == 2
+    assert len(save_calls) == 2
+    assert save_calls[0].get("skip_backup") is not True
+    assert save_calls[1].get("skip_backup") is True
+    assert checkpoint_sidecar and checkpoint_sidecar[0] != before_sidecar
+    assert backup_replace_calls == [False]
+    assert backup_unlink_calls == []
+    assert worker_calls == []
+    assert session.path.read_bytes() == checkpoint_sidecar[0]
+    assert models.SESSION_INDEX_FILE.read_bytes() == before_index
+    assert backup.exists()
+    assert backup.read_bytes() == before_sidecar
+    backup_payload = json.loads(backup.read_text(encoding="utf-8"))
+    live_payload = json.loads(session.path.read_text(encoding="utf-8"))
+    assert backup_payload["messages"] == before_messages
+    assert backup_payload["context_messages"] == before_context_messages
+    assert live_payload["messages"] != before_messages
+    assert live_payload["context_messages"] != before_context_messages
+    assert not config.STREAMS
+    assert not config.STREAM_GOAL_RELATED
+    assert not config.STREAM_SESSION_OWNERS
+    assert not config.SESSION_WRITEBACK_OWNERS
+    assert [event["event"] for event in journal.read_turn_journal(session.session_id)["events"]] == [
+        "submitted",
+        "interrupted",
+    ]
     assert not list(backup.parent.glob(f".{backup.name}.*.tmp"))
 
 
-@pytest.mark.parametrize("failure_point", ["write", "flush", "fsync"])
+@pytest.mark.parametrize("failure_point", ["write", "flush", "fsync", "replace"])
 def test_backup_restore_tempfile_failures_settle_journal_and_clean_up(
     transaction_env, monkeypatch, failure_point
 ):
@@ -323,6 +373,7 @@ def test_backup_restore_tempfile_failures_settle_journal_and_clean_up(
 
     journal = __import__("api.turn_journal", fromlist=["read_turn_journal"])
     session = _regeneration_session(transaction_env)
+    before_sidecar = session.path.read_bytes()
     plan = plan_regeneration(session)
     backup = session.path.with_suffix(".json.bak")
     restore_fds = set()
@@ -371,6 +422,18 @@ def test_backup_restore_tempfile_failures_settle_journal_and_clean_up(
         return real_fsync(fd)
 
     monkeypatch.setattr(routes.os, "fsync", fsync)
+    if failure_point == "replace":
+        real_safe_replace = models._safe_replace
+        backup_replace_calls = []
+
+        def safe_replace(source, destination):
+            if Path(destination) == backup:
+                backup_replace_calls.append((Path(source), Path(destination)))
+                if len(backup_replace_calls) == 2:
+                    raise OSError("backup restore replace failed")
+            return real_safe_replace(source, destination)
+
+        monkeypatch.setattr(models, "_safe_replace", safe_replace)
     monkeypatch.setattr(
         threading.Thread,
         "start",
@@ -385,10 +448,13 @@ def test_backup_restore_tempfile_failures_settle_journal_and_clean_up(
     assert f"backup restore {failure_point} failed" in message
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "thread start rejected"
+    assert session.path.read_bytes() == before_sidecar
     assert [event["event"] for event in journal.read_turn_journal(session.session_id)["events"]] == [
         "submitted",
         "interrupted",
     ]
+    if failure_point == "replace":
+        assert len(backup_replace_calls) == 2
     assert not list(backup.parent.glob(f".{backup.name}.*.tmp"))
 
 
