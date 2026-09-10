@@ -71,6 +71,33 @@ def _run_node(script: str) -> dict:
     return json.loads(result.stdout)
 
 
+def _downloadable_preview_harness(function_name: str) -> tuple[list[str], str]:
+    next_functions = {
+        "loadCsvInline": "loadExcalidrawInline",
+        "loadPdfInline": "loadHtmlInline",
+        "loadHtmlInline": "renderMermaidBlocks",
+    }
+    helpers = [
+        _function_source("_requireMediaResponse"),
+        _function_source("_mediaPreviewErrorKey"),
+        _function_source("_mediaPreviewAllowsDownload"),
+        _section_source("_mediaSnapQuery", "_csvMediaUrl"),
+    ]
+    setup = ""
+    if function_name == "loadCsvInline":
+        helpers.extend(
+            [
+                _section_source("_mediaSessionQuery", "_mediaSnapQuery"),
+                _section_source("_csvMediaUrl", "buildCsvTablePreview"),
+                _section_source("_csvPreviewErrorHtml", "loadCsvInline"),
+            ]
+        )
+    elif function_name == "loadPdfInline":
+        setup = "let _pdfjsReady=true,_pdfjsLoading=false;const window={_pdfjsLib:{}};"
+    helpers.append(_section_source(function_name, next_functions[function_name]))
+    return helpers, setup
+
+
 def test_forbidden_copy_covers_location_and_permission_failures():
     script = (
         "const localStorage={getItem(){return null;},setItem(){}};\n"
@@ -217,3 +244,61 @@ setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
     assert "FORMAT ERROR" not in result["html"]
     if function_name in {"loadCsvInline", "loadPdfInline", "loadHtmlInline"}:
         assert "msg-media-link" not in result["html"]
+
+
+@pytest.mark.parametrize(
+    ("function_name", "extension"),
+    [
+        ("loadCsvInline", "csv"),
+        ("loadPdfInline", "pdf"),
+        ("loadHtmlInline", "html"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("failure", "expected_message", "should_link"),
+    [
+        ("403", "FORBIDDEN", False),
+        ("404", "NOT FOUND", False),
+        ("401", "UNAUTHORIZED", True),
+        ("network", "FORMAT ERROR", True),
+    ],
+)
+def test_downloadable_media_error_links_match_recoverability(
+    function_name: str, extension: str, failure: str, expected_message: str, should_link: bool
+):
+    raw_fname = f"<report&>.{extension}"
+    escaped_fname = f"&lt;report&amp;&gt;.{extension}"
+    path = f"/workspace/{raw_fname}"
+    helpers, setup = _downloadable_preview_harness(function_name)
+    if failure == "network":
+        fetch_impl = "const fetch=()=>Promise.reject(new TypeError('network'));"
+    else:
+        fetch_impl = f"const fetch=()=>Promise.resolve({{ok:false,status:{failure}}});"
+    script = f"""
+const el={{dataset:{{path:{json.dumps(path)}}},setAttribute(){{}},outerHTML:'',parentNode:{{}}}};
+const root={{querySelectorAll(){{return [el];}}}};
+const translations={{
+  media_preview_unauthorized:'UNAUTHORIZED',
+  media_preview_forbidden:'FORBIDDEN',
+  media_preview_not_found:'NOT FOUND',
+  csv_error:'FORMAT ERROR',pdf_error:'FORMAT ERROR',html_error:'FORMAT ERROR'
+}};
+const t=(key)=>translations[key]||key;
+const esc=(value)=>String(value).replace(/[&<>\"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[c]));
+{fetch_impl}
+{setup}
+{''.join(helpers)}
+{function_name}(root);
+setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
+"""
+    result = _run_node(script)
+    html = result["html"]
+    assert expected_message in html
+    assert escaped_fname in html
+    assert raw_fname not in html
+    if should_link:
+        assert "msg-media-link" in html
+        assert f'download="{escaped_fname}"' in html
+    else:
+        assert "msg-media-link" not in html
+        assert "<a " not in html
