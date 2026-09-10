@@ -8848,6 +8848,12 @@ _LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
 # exceeds the ceiling the response is silently clamped and _messages_truncated
 # is set (the existing truncation signal already covers "more rows exist").
 _MAX_MSG_LIMIT = 500
+# Default visible-row tail when a caller omits ?msg_limit= on a huge sidecar.
+# Matches the frontend's initial window (_INITIAL_MSG_LIMIT = 30). Without this,
+# cancel/restore/refresh hit the bare full-transcript path and serialize a
+# 30MB+ session (this chat: 2ecefb602e66) — redact + json_write wedges the GIL
+# and the rest of :8787 looks crashed. Opt out with ?full=1.
+_DEFAULT_DISPLAY_MSG_LIMIT = 30
 
 
 def _parse_msg_limit(raw):
@@ -8865,6 +8871,20 @@ def _parse_msg_limit(raw):
     except (TypeError, ValueError):
         return None
     return max(1, min(value, _MAX_MSG_LIMIT))
+
+
+def _parse_full_transcript_flag(raw) -> bool:
+    """Return True when the caller explicitly wants the unwindowed transcript."""
+    return str(raw or "").strip() in ("1", "true", "True")
+
+
+def _auto_msg_limit_for_huge_sidecar(session_id, msg_limit, full_transcript: bool):
+    """Bound omitted ?msg_limit= on huge sidecars unless ?full=1 is set."""
+    if msg_limit is not None or full_transcript or not session_id:
+        return msg_limit
+    if _sidecar_file_exceeds_threshold(session_id, _SIDECAR_BYTE_TAIL_THRESHOLD):
+        return _DEFAULT_DISPLAY_MSG_LIMIT
+    return msg_limit
 
 
 # If a sidecar JSON file exceeds this threshold, the display-path tail
@@ -13453,7 +13473,14 @@ def handle_get(handler, parsed) -> bool:
         # case (the client sees there are more rows than returned). Parsing +
         # clamping live in _parse_msg_limit so the expression has direct test
         # coverage; None means the bare no-msg_limit path (full transcript).
-        msg_limit = _parse_msg_limit(query.get("msg_limit", [None])[0])
+        # Huge sidecars without an explicit ?full=1 are forced onto the same
+        # 30-row tail the frontend uses for first paint — otherwise a 30MB
+        # session JSON redact/serialize wedges ThreadingHTTPServer.
+        msg_limit = _auto_msg_limit_for_huge_sidecar(
+            sid,
+            _parse_msg_limit(query.get("msg_limit", [None])[0]),
+            _parse_full_transcript_flag(query.get("full", [None])[0]),
+        )
         # ?msg_before=N — 0-based index into the full message array.
         # Returns messages before this index (for scroll-to-top lazy loading).
         # Combined with msg_limit for paging.

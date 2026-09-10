@@ -304,6 +304,22 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
+# Agent redact (~15 regexes, including Telegram) is catastrophic on megabyte
+# tool dumps and wedges ThreadingHTTPServer behind the GIL. After a VM crash
+# Firefox reopened a 33MB session; GET /api/session spent ~117s in
+# redact_sensitive_text and even GET / timed out. Above this cap, only the
+# cheap local fallback runs (still catches ghp_/sk-/AKIA/headers/keys).
+#
+# The fallback now also masks the three prefix-less agent-only shapes that used
+# to leak above this cap — bare JWTs (eyJ…), DB connection-string passwords
+# (postgres://u:***@host), and Telegram bot tokens (<digits>:<token>) — via the
+# cheap _JWT_RE/_URI_USERINFO_RE/_TELEGRAM_RE passes in _fallback_redact. So a
+# huge single field degrades only in that it skips the *expensive* agent pattern
+# set (Stripe/Slack/Google/… prefixes are still covered by the fallback's own
+# prefix list); the common credential shapes stay masked. Pinned both ways by
+# test_residual_shapes_masked_above_agent_cap. Raising the cap trades latency for
+# the remaining long-tail agent-only patterns.
+_REDACT_AGENT_MAX_TEXT_LEN = 16384
 
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
@@ -370,6 +386,18 @@ def _build_redact_fn():
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
 
+    # Prefix-less shapes the agent redactor covers but the prefix/keyword-based
+    # fallback historically did not. Added so the >16KB agent-pass bypass
+    # (see _REDACT_AGENT_MAX_TEXT_LEN) no longer leaks these in a huge single
+    # field — the exact incident class where a multi-MB config dump can carry a
+    # DB URL or JWT. All three are cheap and structure-preserving (they keep the
+    # non-secret context — botid, scheme/user/host — and mask only the secret).
+    _JWT_RE = _re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
+    # scheme://user:PASSWORD@host — keep scheme/user/host, mask the password.
+    _URI_USERINFO_RE = _re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://[^/:@\s]+:)([^@/\s]+)(@)")
+    # Telegram bot token <botid>:<token> — keep the numeric botid, mask token.
+    _TELEGRAM_RE = _re.compile(r"(\b\d{5,}:)([A-Za-z0-9_-]{20,})")
+
     def _mask(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
 
@@ -432,6 +460,10 @@ def _build_redact_fn():
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        # Prefix-less agent-only shapes — closes the documented >16KB residual.
+        text = _JWT_RE.sub("[REDACTED JWT]", text)
+        text = _URI_USERINFO_RE.sub(lambda m: m.group(1) + _mask(m.group(2)) + m.group(3), text)
+        text = _TELEGRAM_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         return text
 
     try:
@@ -448,10 +480,16 @@ def _build_redact_fn():
         # HERMES_REDACT_SECRETS opt-in. The local fallback then handles the
         # common short-prefix shapes the agent omits (ghp_, sk-, hf_, AKIA).
         try:
-            agent_redacted = redact_sensitive_text(text, force=True)
+            if len(text) > _REDACT_AGENT_MAX_TEXT_LEN:
+                agent_redacted = text
+            else:
+                agent_redacted = redact_sensitive_text(text, force=True)
         except TypeError:
             # Older hermes-agent builds that predate the force kwarg.
-            agent_redacted = redact_sensitive_text(text)
+            if len(text) > _REDACT_AGENT_MAX_TEXT_LEN:
+                agent_redacted = text
+            else:
+                agent_redacted = redact_sensitive_text(text)
         agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
         return _fallback_redact(agent_redacted)
 

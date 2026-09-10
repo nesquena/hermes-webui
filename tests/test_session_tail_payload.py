@@ -201,6 +201,50 @@ def test_msg_limit_tail_keeps_pre_compression_snapshot_parent_reachable():
     assert payload["_messages_truncated"] is False
 
 
+def test_huge_sidecar_without_msg_limit_auto_windows_to_default_tail():
+    session = _FakeSession(
+        [{"role": "user", "content": f"m{i}"} for i in range(40)]
+    )
+
+    with patch("api.routes._sidecar_file_exceeds_threshold", return_value=True):
+        payload = _invoke(
+            session,
+            query="session_id=tail_payload_001&messages=1&resolve_model=0",
+        )
+
+    assert len(payload["messages"]) == 30
+    assert payload["messages"][0]["content"] == "m10"
+    assert payload["messages"][-1]["content"] == "m39"
+    assert payload["_messages_truncated"] is True
+    assert payload["_messages_offset"] == 10
+
+
+def test_huge_sidecar_full_flag_keeps_unwindowed_transcript():
+    session = _FakeSession(
+        [{"role": "user", "content": f"m{i}"} for i in range(40)]
+    )
+
+    with patch("api.routes._sidecar_file_exceeds_threshold", return_value=True):
+        payload = _invoke(
+            session,
+            query="session_id=tail_payload_001&messages=1&resolve_model=0&full=1",
+        )
+
+    assert [m["content"] for m in payload["messages"]] == [f"m{i}" for i in range(40)]
+    assert payload["_messages_truncated"] is False
+
+
+def test_auto_msg_limit_helper_respects_explicit_limit_and_full_flag():
+    import api.routes as routes
+
+    with patch("api.routes._sidecar_file_exceeds_threshold", return_value=True):
+        assert routes._auto_msg_limit_for_huge_sidecar("sid", None, False) == 30
+        assert routes._auto_msg_limit_for_huge_sidecar("sid", 12, False) == 12
+        assert routes._auto_msg_limit_for_huge_sidecar("sid", None, True) is None
+    with patch("api.routes._sidecar_file_exceeds_threshold", return_value=False):
+        assert routes._auto_msg_limit_for_huge_sidecar("sid", None, False) is None
+
+
 def test_msg_limit_tail_truncates_large_hidden_tool_results():
     huge_tool_output = "x" * 20_000
     session = _FakeSession([
