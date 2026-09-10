@@ -13875,7 +13875,24 @@ def handle_get(handler, parsed) -> bool:
                 )
                 if revision:
                     raw["regeneration_revision"] = revision
+            # perf(conversation-switch): full-transcript loads splice the
+            # persisted per-message redaction cache (t5 stage); limited views
+            # and non-load requests are cheap enough to redact directly.
+            _transcript_lists = {}
+            if load_messages and msg_limit is None:
+                for _tk in ("messages", "context_messages"):
+                    if _tk in raw:
+                        _transcript_lists[_tk] = raw.pop(_tk)
+            try:
+                from api.process_event_utils import build_active_turn_token as _build_turn_token
+                _active_turn_token = _build_turn_token(raw.get("active_stream_id"), raw.get("pending_started_at"))
+            except Exception:
+                _active_turn_token = None
             redact = redact_session_data(raw)
+            if _transcript_lists:
+                from api.helpers import redact_session_lists_cached
+                redact.update(redact_session_lists_cached(
+                    sid, _transcript_lists, _active_turn_token=_active_turn_token))
             _t5 = _time.monotonic()
             if _diag: _diag.stage("t5_after_redact")
             resp = j(handler, {"session": redact})
@@ -15938,6 +15955,16 @@ def handle_post(handler, parsed) -> bool:
             delete_turn_journal(sid)
         except Exception:
             logger.debug("Failed to delete turn journal for deleted session %s", sid)
+        # The persisted redaction projection (STATE_DIR/redaction_cache/) is a
+        # derived artifact; unlike the journals it holds redacted text, but the
+        # surviving conversation still belongs to the deleted session (#7414
+        # follow-up).
+        try:
+            from api.helpers import delete_redaction_session_cache
+
+            delete_redaction_session_cache(sid)
+        except Exception:
+            logger.debug("Failed to delete redaction cache for deleted session %s", sid)
         try:
             from api.run_journal import delete_run_journal
 
@@ -22210,6 +22237,12 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 with LOCK:
                     SESSIONS.pop(p.stem, None)
                 p.unlink(missing_ok=True)
+                try:
+                    from api.helpers import delete_redaction_session_cache
+
+                    delete_redaction_session_cache(p.stem)
+                except Exception:
+                    pass
                 cleaned += 1
                 phase1_removed_ids.add(p.stem)
         except Exception:
@@ -22441,6 +22474,12 @@ def _handle_background(handler, body):
             # next rebuild via _index_entry_exists().
             try:
                 (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                try:
+                    from api.helpers import delete_redaction_session_cache
+
+                    delete_redaction_session_cache(bg_sid)
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
