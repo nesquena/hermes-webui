@@ -6631,6 +6631,7 @@ function _refreshProfileSwitchBackground(gen){
     _renderComposerSituationalControlChips();
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     window._showTitlebarProfile=!!(s&&s.show_titlebar_profile);
+    window._openFirstSessionOnProfileSwitch=!!(s&&s.open_first_session_on_profile_switch);
     if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
   }).catch(function(){});
 }
@@ -7187,6 +7188,29 @@ async function switchToProfile(name) {
       if (_switchGen !== _profileSwitchGeneration) return false;
       if (workspaceVisible && typeof clearWorkspaceTreeSkeleton === 'function') clearWorkspaceTreeSkeleton();
       showToast(t('profile_switched', name));
+    } else if (window._openFirstSessionOnProfileSwitch===true && typeof _openFirstSessionForActiveProfile==='function') {
+      // WebUI is configured to resume the destination profile's first visible
+      // conversation. Fetch its list before creating anything so a brand-new
+      // session cannot become the first row and mask the existing conversation.
+      const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+      await renderSessionList();
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      const openedExisting = await _openFirstSessionForActiveProfile({source:'profile-switch'});
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (!openedExisting) {
+        // No eligible visible row (empty profile, active filters, or only rows
+        // from other profiles): preserve the existing safe new-chat fallback.
+        await newSession(false, {awaitWorkspaceLoad: workspaceVisible, worktree: false});
+        if (_switchGen !== _profileSwitchGeneration) return false;
+        await renderSessionList();
+        if (_switchGen !== _profileSwitchGeneration) return false;
+      }
+      syncTopbar();
+      if ((!S.session || !S.session.workspace) && typeof clearWorkspaceTreeSkeleton === 'function') {
+        clearWorkspaceTreeSkeleton();
+      }
+      showToast(openedExisting ? t('profile_switched', name) : t('profile_switched_new_conversation', name));
     } else if (sessionInProgress) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
@@ -8776,6 +8800,8 @@ function _preferencesPayloadFromUi(){
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const newChatOnWorkspaceSwitchCb=$('settingsNewChatOnWorkspaceSwitch');
   if(newChatOnWorkspaceSwitchCb) payload.new_chat_on_workspace_switch=newChatOnWorkspaceSwitchCb.checked;
+  const openFirstSessionOnProfileSwitchCb=$('settingsOpenFirstSessionOnProfileSwitch');
+  if(openFirstSessionOnProfileSwitchCb) payload.open_first_session_on_profile_switch=openFirstSessionOnProfileSwitchCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   Object.assign(payload,_speechPreferencesPayloadFromUi());
@@ -9702,6 +9728,12 @@ async function loadSettingsPanel(){
       newChatOnWorkspaceSwitchCb.checked=!!settings.new_chat_on_workspace_switch;
       window._newChatOnWorkspaceSwitch=newChatOnWorkspaceSwitchCb.checked;
       newChatOnWorkspaceSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    const openFirstSessionOnProfileSwitchCb=$('settingsOpenFirstSessionOnProfileSwitch');
+    if(openFirstSessionOnProfileSwitchCb){
+      openFirstSessionOnProfileSwitchCb.checked=!!settings.open_first_session_on_profile_switch;
+      window._openFirstSessionOnProfileSwitch=openFirstSessionOnProfileSwitchCb.checked;
+      openFirstSessionOnProfileSwitchCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
