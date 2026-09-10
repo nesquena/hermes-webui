@@ -98,6 +98,46 @@ def test_slash_clear_persists_empty_pinned_session_after_reload(cleanup_test_ses
     assert persisted["pinned"] is True
 
 
+def test_slash_clear_api_failure_keeps_visible_and_durable_history(cleanup_test_sessions):
+    """A failed clear must not make the transcript disappear only locally."""
+    session_id = "clear_browser_failure"
+    original_text = "history must remain after failed clear"
+    cleanup_test_sessions.append(session_id)
+    _seed_session(session_id, original_text)
+
+    pw = _browser_or_skip()
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        try:
+            page = browser.new_page()
+            _open_session(page, session_id)
+            page.evaluate(
+                """() => {
+                    const realApi = window.api.bind(window);
+                    window.api = (path, options) => path === '/api/session/clear'
+                      ? Promise.reject(new Error('test clear failure'))
+                      : realApi(path, options);
+                    executeCommand('/clear');
+                }"""
+            )
+            page.wait_for_function(
+                """text => document.getElementById('toast').dataset.toastMessage
+                .includes(text)""",
+                "test clear failure",
+                timeout=10_000,
+            )
+            assert original_text in page.locator("#msgInner").inner_text()
+            assert page.evaluate("S.session.session_id") == session_id
+        finally:
+            browser.close()
+
+    persisted = _server_session(session_id)
+    assert [message["content"] for message in persisted["messages"]] == [
+        original_text,
+        f"Reply to {original_text}",
+    ]
+
+
 def test_late_clear_response_cannot_overwrite_newer_active_session(cleanup_test_sessions):
     """A clear for session A may finish after the user has opened session B."""
     session_a = "clear_race_a"
