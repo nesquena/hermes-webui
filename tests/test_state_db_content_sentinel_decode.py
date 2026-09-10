@@ -175,32 +175,105 @@ def test_prefix_and_tail_keys_agree_for_a_sentinel_row():
     assert prefix_key == tail_key
 
 
-# --- guard: every path that projects the content column must decode --------
+# --- every read path that projects content must decode (behavioural) ------
+#
+# Keys derived on one read path are compared against keys derived on another,
+# so a read path that projected the column raw while another decoded it would
+# silently reintroduce the prefix/tail mismatch. These exercise each path
+# against a real sentinel-encoded row rather than inspecting source.
 
-def test_all_content_projecting_read_paths_decode():
-    """The decode contract documented in docs/architecture/agent-api-contract.md.
+def _make_state_db(path, sid, rows):
+    import sqlite3
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, "
+        "model TEXT, started_at REAL, message_count INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
+        "role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, "
+        "tool_name TEXT, active INTEGER DEFAULT 1, api_content TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (sid, "webui", "Sentinel", "test-model", 1000.0, len(rows)),
+    )
+    for row in rows:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, active) "
+            "VALUES (?, ?, ?, ?, 1)",
+            (sid, row["role"], row["content"], row["timestamp"]),
+        )
+    conn.commit()
+    conn.close()
 
-    Keys derived on one read path are compared against keys derived on another,
-    so a new raw projection of the ``content`` column would silently reintroduce
-    the prefix/tail mismatch. Pin the known call sites.
-    """
-    import inspect
-    import re
 
+def _sentinel_session(tmp_path, monkeypatch):
+    """A session whose first row carries sentinel-encoded multimodal content."""
     from api import models
 
-    expected = {
-        "_project_state_db_message",
-        "get_state_db_session_message_keys_before_timestamp",
-        "get_state_db_regeneration_tail_snapshot",
-    }
-    source = inspect.getsource(models)
-    found = set()
-    current = None
-    for line in source.splitlines():
-        match = re.match(r"^def (\w+)", line)
-        if match:
-            current = match.group(1)
-        if "_decode_state_db_content(" in line and "def " not in line and current:
-            found.add(current)
-    assert found == expected, f"decode call sites drifted: {found ^ expected}"
+    sid = "sentineltest"
+    db = tmp_path / "state.db"
+    _make_state_db(db, sid, [
+        {"role": "user", "content": _sentinel(json.dumps(TEXT_AND_IMAGE)), "timestamp": 1000.0},
+        {"role": "assistant", "content": "plain reply", "timestamp": 2000.0},
+    ])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db, raising=False)
+    return models, sid
+
+
+def test_transcript_read_decodes_sentinel_rows(tmp_path, monkeypatch):
+    """The canonical projection hands the frontend structured content."""
+    models, sid = _sentinel_session(tmp_path, monkeypatch)
+    messages = models.get_state_db_session_messages(sid)
+    assert messages, "expected the fixture session to load"
+    assert messages[0]["content"] == TEXT_AND_IMAGE
+    # the base64 payload must not survive as literal transcript text
+    assert not isinstance(messages[0]["content"], str)
+
+
+def test_regeneration_prefix_and_tail_keys_agree_for_a_sentinel_row(tmp_path, monkeypatch):
+    """The same row keyed as prefix and as tail must produce one identity.
+
+    Decoding the projected tail while leaving prefix keys encoded would make
+    `_bounded_tail_snapshot_if_safe` reject the bounded path and re-read the
+    whole transcript, and could hide a genuine repeated recovered turn.
+    """
+    models, sid = _sentinel_session(tmp_path, monkeypatch)
+
+    # floor above the sentinel row -> it is part of the prefix proof
+    as_prefix = models.get_state_db_regeneration_tail_snapshot(sid, 1500.0)
+    # floor below it -> the same row is part of the bounded tail
+    as_tail = models.get_state_db_regeneration_tail_snapshot(sid, 500.0)
+    assert as_prefix is not None and as_tail is not None
+
+    assert as_prefix["prefix_keys"], "sentinel row should sit in the prefix"
+    assert as_tail["tail_keys"], "sentinel row should sit in the tail"
+    assert as_prefix["prefix_keys"][0] == as_tail["tail_keys"][0]
+
+
+def test_bounded_prefix_reader_agrees_with_the_projected_tail(tmp_path, monkeypatch):
+    """The standalone prefix-key reader shares the tail's representation."""
+    models, sid = _sentinel_session(tmp_path, monkeypatch)
+
+    prefix_keys = models.get_state_db_session_message_keys_before_timestamp(sid, 1500.0)
+    tail = models.get_state_db_regeneration_tail_snapshot(sid, 500.0)
+    assert prefix_keys, "expected a prefix key for the sentinel row"
+    assert tail is not None and tail["tail_keys"]
+    assert prefix_keys[0] == tail["tail_keys"][0]
+
+
+def test_unsupported_sentinel_shape_survives_the_read_path_as_text(tmp_path, monkeypatch):
+    """A shape the UI cannot render stays a string end-to-end, not silently dropped."""
+    from api import models
+
+    sid = "unsupported"
+    db = tmp_path / "state.db"
+    raw = _sentinel(json.dumps({"type": "text", "text": "dict root"}))
+    _make_state_db(db, sid, [{"role": "user", "content": raw, "timestamp": 1000.0}])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db, raising=False)
+
+    messages = models.get_state_db_session_messages(sid)
+    assert messages
+    assert messages[0]["content"] == raw
