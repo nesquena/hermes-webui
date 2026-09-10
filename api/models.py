@@ -1540,6 +1540,11 @@ class Session:
             except Exception:
                 pass
             raise
+        # `compact()` prefers this load-time metadata value for cheap sidebar
+        # reads. A successful save is authoritative, including deliberate
+        # shrinking paths such as /clear and /truncate, so keep it aligned with
+        # the message_count just written to the sidecar.
+        self._metadata_message_count = len(self.messages or [])
         if not skip_index:
             _write_session_index(updates=[self])
 
