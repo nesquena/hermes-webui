@@ -86,6 +86,10 @@ def test_slash_clear_persists_empty_session_after_reload(
                 arg=session_id,
                 timeout=10_000,
             )
+            clear_payload = clear_response.value.json()
+            assert clear_payload["ok"] is True
+            assert clear_payload["session"]["session_id"] == session_id
+            assert clear_payload["session"]["message_count"] == 0
             assert page.locator("#msgInner").inner_text().strip() == ""
             assert _server_session(session_id)["messages"] == []
 
