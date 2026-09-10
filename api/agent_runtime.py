@@ -12,6 +12,7 @@ import errno
 import math
 import os
 from pathlib import Path
+import stat
 import sys
 import subprocess
 import threading
@@ -35,6 +36,14 @@ _RESTART_REQUIRED_MESSAGE = (
 _AGENT_UPDATE_MARKER = ".hermes-update-in-progress"
 _AGENT_RECOVERY_MARKERS = (".update-incomplete", ".lazy-refresh-incomplete")
 _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
+# The update marker holds a PID and a start timestamp (two short numeric lines).
+# Anything larger is not a legitimate marker; cap the read so a huge or growing
+# regular file can never exhaust memory on the stale-runtime request path.
+_AGENT_UPDATE_MARKER_MAX_BYTES = 64 * 1024
+# O_NOFOLLOW is POSIX; on platforms that lack it (e.g. some Windows builds) fall
+# back to 0 so the open still succeeds — the fstat regular-file check below is
+# the portable backstop.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _HERMES_HOME = Path(_DEFAULT_STATE_HOME)
 _AGENT_PYTHON = Path(PYTHON_EXE).expanduser() if PYTHON_EXE else None
 
@@ -199,9 +208,16 @@ def _pid_is_alive(pid: int) -> bool | None:
 
 
 def _read_live_agent_update(marker: Path) -> str:
-    """Classify the shared Agent update marker without changing Agent state."""
+    """Classify the shared Agent update marker without changing Agent state.
+
+    The marker is attacker-adjacent shared state (any process that can write the
+    Agent home can create it), so the read is hardened: never follow a symlink,
+    never block on a FIFO/device, and never read an unbounded regular file.
+    Anything that is not a small regular file is classified ``unknown`` rather
+    than allowed to hang or exhaust memory on a stale-runtime request path.
+    """
     try:
-        raw = marker.read_text(encoding="utf-8")
+        fd = os.open(marker, os.O_RDONLY | os.O_NONBLOCK | _O_NOFOLLOW)
     except FileNotFoundError:
         try:
             marker.lstat()
@@ -209,8 +225,42 @@ def _read_live_agent_update(marker: Path) -> str:
             return "absent"
         except OSError:
             return "unknown"
+        # Path exists to lstat (e.g. a dangling/looping symlink) but O_NOFOLLOW
+        # refused to open it — treat as an unverifiable marker.
         return "unknown"
-    except (OSError, UnicodeError):
+    except (OSError, ValueError, TypeError):
+        # ELOOP (symlink under O_NOFOLLOW), ENXIO/EWOULDBLOCK (FIFO with no
+        # writer under O_NONBLOCK), a non-path marker object, or any other open
+        # failure — fail closed: an unreadable marker is never proof of safety.
+        return "unknown"
+
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return "unknown"
+        if not stat.S_ISREG(st.st_mode):
+            # FIFO, device, directory, socket — never a legitimate marker.
+            return "unknown"
+        if st.st_size > _AGENT_UPDATE_MARKER_MAX_BYTES:
+            return "unknown"
+        try:
+            # Read one byte past the cap so an oversized file that lied about
+            # st_size (or grew mid-read) is still rejected rather than truncated.
+            data = os.read(fd, _AGENT_UPDATE_MARKER_MAX_BYTES + 1)
+        except (OSError, BlockingIOError):
+            return "unknown"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    if len(data) > _AGENT_UPDATE_MARKER_MAX_BYTES:
+        return "unknown"
+    try:
+        raw = data.decode("utf-8")
+    except UnicodeError:
         return "unknown"
 
     lines = raw.splitlines()

@@ -311,6 +311,76 @@ else:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_read_live_agent_update_rejects_fifo_marker_without_hanging(tmp_path: Path):
+    """A FIFO in the marker path must classify ``unknown`` fast, not block.
+
+    Regression guard: the marker read once used ``Path.read_text()``, which
+    blocks forever on a FIFO (no writer) and would wedge the stale-runtime
+    request path. The hardened read opens O_NONBLOCK|O_NOFOLLOW and fstat-checks
+    for a small regular file, so a FIFO is rejected immediately.
+    """
+    from api import agent_runtime
+
+    fifo = tmp_path / "fifo-marker"
+    os.mkfifo(fifo)
+    start = time.time()
+    result = agent_runtime._read_live_agent_update(fifo)
+    elapsed = time.time() - start
+    assert result == "unknown"
+    assert elapsed < 1.0, f"marker read blocked on FIFO for {elapsed:.2f}s"
+
+
+def test_read_live_agent_update_rejects_oversized_marker(tmp_path: Path):
+    """An oversized regular marker must classify ``unknown``, never OOM-read.
+
+    Regression guard against unbounded ``read_text()``: even though the file
+    starts with a valid PID/timestamp, its size exceeds the cap so it is
+    rejected rather than read whole.
+    """
+    from api import agent_runtime
+
+    big = tmp_path / "big-marker"
+    big.write_bytes(
+        f"{os.getpid()}\n{time.time()}\n".encode("utf-8")
+        + b"x" * (agent_runtime._AGENT_UPDATE_MARKER_MAX_BYTES + 1024)
+    )
+    assert agent_runtime._read_live_agent_update(big) == "unknown"
+
+
+def test_read_live_agent_update_does_not_follow_symlink_marker(tmp_path: Path):
+    """A symlinked marker must classify ``unknown`` (O_NOFOLLOW), not be read
+    through to its target."""
+    from api import agent_runtime
+
+    if not getattr(os, "O_NOFOLLOW", 0):
+        pytest.skip("O_NOFOLLOW unavailable on this platform")
+
+    target = tmp_path / "real-marker"
+    target.write_text(f"{os.getpid()}\n{time.time()}\n", encoding="utf-8")
+    link = tmp_path / "link-marker"
+    link.symlink_to(target)
+    assert agent_runtime._read_live_agent_update(link) == "unknown"
+
+
+def test_read_live_agent_update_still_classifies_valid_markers(tmp_path: Path):
+    """The hardening must not regress the happy path: a small regular marker
+    with a live PID still reads as ``active`` and a stale one as ``stale``."""
+    from api import agent_runtime
+
+    active = tmp_path / "active-marker"
+    active.write_text(f"{os.getpid()}\n{time.time()}\n", encoding="utf-8")
+    assert agent_runtime._read_live_agent_update(active) == "active"
+
+    stale = tmp_path / "stale-marker"
+    stale.write_text(
+        f"{os.getpid()}\n{time.time() - agent_runtime._AGENT_UPDATE_MAX_AGE_SECONDS - 60}\n",
+        encoding="utf-8",
+    )
+    assert agent_runtime._read_live_agent_update(stale) == "stale"
+
+    assert agent_runtime._read_live_agent_update(tmp_path / "absent") == "absent"
+
+
 def test_initial_non_git_source_preserves_supported_runtime(monkeypatch):
     """Non-Git installs cannot be compared, so they preserve existing behavior."""
     from api import agent_runtime
