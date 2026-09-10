@@ -8222,24 +8222,88 @@ def _state_db_active_rows_digest(rows) -> str:
     return digest.hexdigest() if stamped else ''
 
 
-# hermes_state encodes list/dict message content (multimodal parts) as a
+# hermes_state stores list/dict message content (multimodal parts) as a
 # sentinel-prefixed JSON string because sqlite3 binds only scalars; see
 # hermes_state._CONTENT_JSON_PREFIX and _decode_content(). This module reads
 # that table with its own SQL, so it must apply the same decode. Without it an
 # image part's base64 data URI reaches the transcript as literal text -- a
 # single unbreakable ~65k-character run -- and WebKit computes min-content
 # width by scanning every line-break position, pinning a core for minutes.
+#
+# The decode deliberately does NOT widen `content` beyond the one shape the
+# rest of the WebUI already accepts:
+#   * list roots only. A dict root would reach _getCachedRender() unchanged and
+#     _renderCacheKey() would call text.slice() on an object, blanking the turn.
+#   * no non-finite numbers. Python emits NaN/Infinity, which the browser's
+#     JSON.parse() rejects, breaking the whole /api/session response.
+# Anything else is returned as the original string, exactly as before.
 _STATE_DB_CONTENT_JSON_PREFIX = "\x00json:"
 
 
+def _is_supported_content_part_list(parts) -> bool:
+    """True only for the exact list schema the current WebUI already renders.
+
+    The shared JS readers keep ``{"type": "text"}`` parts and render image
+    parts from the attachments reference; every other shape is dropped on the
+    way to the DOM. Decoding a shape the readers cannot handle would silently
+    lose content that today is at least visible as raw text, so anything
+    outside this schema stays an undecoded string until the readers are
+    taught about it through one shared extractor.
+    """
+    if not parts:
+        return False
+    for part in parts:
+        if not isinstance(part, dict):
+            return False
+        part_type = part.get("type")
+        if not isinstance(part_type, str):
+            return False
+        if part_type == "text":
+            if not isinstance(part.get("text"), str):
+                return False
+        elif part_type not in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+            return False
+    return True
+
+
+def _reject_non_finite_state_db_json_constant(value):
+    raise ValueError(f"unsupported JSON constant: {value}")
+
+
+def _parse_finite_state_db_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"unsupported JSON float: {value}")
+    return parsed
+
+
 def _decode_state_db_content(value):
-    """Reverse hermes_state's content encoding; non-sentinel values pass through."""
-    if isinstance(value, str) and value.startswith(_STATE_DB_CONTENT_JSON_PREFIX):
-        try:
-            return json.loads(value[len(_STATE_DB_CONTENT_JSON_PREFIX):])
-        except (TypeError, ValueError):
-            return value
-    return value
+    """Decode the Agent's structured-content storage form without widening it.
+
+    Returns the original value unchanged for anything that is not a
+    sentinel-prefixed, finite, list-rooted payload.
+    """
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if not isinstance(value, str) or not value.startswith(_STATE_DB_CONTENT_JSON_PREFIX):
+        return value
+    try:
+        decoded = json.loads(
+            value[len(_STATE_DB_CONTENT_JSON_PREFIX):],
+            parse_constant=_reject_non_finite_state_db_json_constant,
+            parse_float=_parse_finite_state_db_json_float,
+        )
+    except Exception:
+        return value
+    if not isinstance(decoded, list) or not _is_supported_content_part_list(decoded):
+        return value
+    try:
+        # Prove the decoded value survives the trip to the browser before
+        # handing it on: re-serialisable, finite, UTF-8 encodable.
+        json.dumps(decoded, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except Exception:
+        return value
+    return decoded
 
 
 def _project_state_db_message(row, available, id_col, optional):
@@ -8656,7 +8720,11 @@ def get_state_db_session_message_keys_before_timestamp(
                 _session_message_visible_key(
                     {
                         "role": row["role"],
-                        "content": row["content"],
+                        # Same guarded decode as the projected tail: prefix and
+                        # tail keys must share one representation or the
+                        # prefix/tail collision proof can miss a genuine
+                        # repeated recovered turn.
+                        "content": _decode_state_db_content(row["content"]),
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
                     },
@@ -8764,7 +8832,7 @@ def get_state_db_regeneration_tail_snapshot(
             prefix_keys = [
                 _session_message_visible_key({
                     "role": r["role"],
-                    "content": r["content"],
+                    "content": _decode_state_db_content(r["content"]),
                     "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
                     "api_content": r["api_content"] if "api_content" in r.keys() else None,
                 }, normalize_workspace_prefix=True)
@@ -8951,14 +9019,27 @@ def _session_message_multimodal_mirror_key(
     msg: dict,
     *,
     require_image_parts: bool = False,
+    require_scalar_mirror: bool = False,
 ):
-    """Return exact cross-store identity for a native multimodal mirror."""
+    """Return exact cross-store identity for a native multimodal mirror.
+
+    The bridge exists to pair ONE rich image-bearing row with ONE scalar row
+    holding the Agent's stored projection of it. It must never pair two rich
+    rows: distinct image turns can project to the same "[screenshot] <text>"
+    string, so rich-to-rich matching collapses different images into one turn.
+    Callers pass ``require_image_parts`` on the rich side and
+    ``require_scalar_mirror`` on the scalar side to keep the pairing asymmetric.
+    """
     if not isinstance(msg, dict):
+        return None
+    if require_image_parts and require_scalar_mirror:
         return None
     role = str(msg.get("role") or "").strip().lower()
     if role != "user":
         return None
     raw_content = msg.get("content")
+    if require_scalar_mirror and not isinstance(raw_content, str):
+        return None
     content = _agent_durable_multimodal_content(msg)
     if require_image_parts and content is None:
         return None
@@ -8984,6 +9065,31 @@ def _session_message_multimodal_mirror_key(
     )
 
 
+def _content_identity_for_key(content) -> str:
+    """Type-namespaced serialization of message content for identity keys.
+
+    Scalar content keys exactly as it did before, so existing reconciliation
+    behaviour is untouched for the overwhelmingly common case. Structured
+    (list) content -- which reaches these paths once the state.db sentinel is
+    decoded -- is tagged and serialized canonically so that:
+
+      * a structured message can never collide with a scalar message whose
+        text happens to match Python's repr() of that list, and
+      * two rich turns sharing visible text and timestamp keep distinct
+        identities when they carry different image parts, instead of
+        collapsing into one.
+    """
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    tag = "list" if isinstance(content, list) else "obj"
+    try:
+        return f"\x00{tag}:" + json.dumps(content, sort_keys=True, default=str)
+    except Exception:
+        return f"\x00{tag}:" + repr(content)
+
+
 def _session_message_merge_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
@@ -9003,7 +9109,7 @@ def _session_message_merge_key(msg: dict):
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
-        str(msg.get("content") or ""),
+        _content_identity_for_key(msg.get("content")),
         _normalized_message_timestamp_for_key(msg.get("timestamp")),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
@@ -9254,7 +9360,9 @@ def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
         )
         if (
             target_mirror_key is None
-            or target_mirror_key != _session_message_multimodal_mirror_key(source)
+            or target_mirror_key != _session_message_multimodal_mirror_key(
+                source, require_scalar_mirror=True
+            )
         ):
             return False
     if target.get("api_content") not in (None, ""):
@@ -9694,7 +9802,7 @@ def _session_message_dedup_key(msg: dict):
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
-        str(msg.get("content") or ""),
+        _content_identity_for_key(msg.get("content")),
         str(msg.get("timestamp") or ""),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
@@ -10412,7 +10520,9 @@ def merge_session_messages_append_only(
     if sidecar_multimodal_mirrors:
         state_multimodal_mirror_identities = {}
         for state_message in state_messages:
-            mirror_key = _session_message_multimodal_mirror_key(state_message)
+            mirror_key = _session_message_multimodal_mirror_key(
+                state_message, require_scalar_mirror=True
+            )
             state_multimodal_mirror_keys[id(state_message)] = mirror_key
             if (
                 mirror_key is not None
