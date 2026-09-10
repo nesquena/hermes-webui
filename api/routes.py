@@ -13020,7 +13020,18 @@ def _handle_session_get(handler, parsed) -> bool:
         _t3 = _time.monotonic()
         if _diag: _diag.stage("t3_after_model_resolve")
         if load_messages:
-            if is_messaging_session and cli_messages:
+            # A /clear-stamped session with no sidecar rows is intentionally
+            # empty. State-db rows can be an older append-only transcript, and
+            # merging them here would resurrect cleared history on the first
+            # refresh. Once a new turn starts the sidecar is non-empty, so its
+            # normal reconciliation path remains available.
+            _cleared_empty_session = bool(
+                getattr(s, "clear_generation", None)
+                and not getattr(s, "messages", None)
+            )
+            if _cleared_empty_session:
+                _all_msgs = []
+            elif is_messaging_session and cli_messages:
                 # Recovery/aggregate sidecars can intentionally contain a
                 # longer visible conversation than the single state.db
                 # segment for this messaging session id. Prefer the longer
