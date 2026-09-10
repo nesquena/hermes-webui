@@ -278,6 +278,16 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function jsArg(s){
+  // Encode a value for safe interpolation inside an inline on* handler's JS
+  // string literal. JSON.stringify quotes/escapes for the JS context; esc()
+  // then makes the result safe inside the HTML attribute. Without this, a
+  // value containing a quote breaks out of the handler (esc() alone is
+  // HTML-escaping, which the browser decodes BEFORE executing the inline
+  // handler). Promoted to a shared helper from the kanban dependency fix
+  // (#3797). Use as onclick="fn(${jsArg(v)})" — no manual quotes.
+  return esc(JSON.stringify(String(s == null ? '' : s)));
+}
 function _matchBacktickFenceLine(line){
   const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
   if(!m) return null;
@@ -608,6 +618,9 @@ function _resetMessageRenderWindow(sid){
   _clearRenderCache();
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
+}
+function _restoreMessageRenderWindowAfterSettledRender(){
+  _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 }
 function _cancelMessageVirtualizedRender(){
   if(_messageVirtualScrollRaf){
@@ -1625,6 +1638,14 @@ async function jumpToSessionStart(){
     // insertion is blocked by !S.busy, losing Activity until "done" fires.
     if(!(S.busy||S.activeStreamId)){
       renderMessages({ preserveScroll:true });
+    }else if(typeof _scheduleMessageVirtualizedRender==='function'){
+      // ...but on a virtualized transcript SOMETHING still has to mount the new
+      // render window. The scroll listener used to do it; it now correctly skips
+      // while a programmatic scroll is in flight (the idle re-render-loop fix),
+      // and this path deliberately does not call renderMessages() — so without an
+      // explicit schedule the jump lands on an all-spacer, zero-row transcript.
+      // Force the window update here, after invalidating _messageVirtualWindowKey.
+      _scheduleMessageVirtualizedRender(true);
     }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
@@ -4572,10 +4593,16 @@ function renderModelDropdown(){
     else if(_prevHasSearch){ for(const k in _groupOpenState) delete _groupOpenState[k]; }
     _prevHasSearch=hasSearch;
     const found=new Set();
+    // Fold whitespace/hyphens/dots on both sides so "ox alpha", "ox-alpha" and
+    // "ox.alpha" all match the same model (OpenRouter display names use spaces,
+    // ids use slashes/hyphens) (#7228).
+    const _foldModelSearch=(s)=>String(s||'').toLowerCase().replace(/[\s._-]+/g,'');
+    const foldTerm=_foldModelSearch(term);
     for(const m of _modelData){
       const name=m.name.toLowerCase();
       const id=m.id.toLowerCase();
-      if(name.includes(term)||id.includes(term)){
+      if(name.includes(term)||id.includes(term)
+         ||(foldTerm&&(_foldModelSearch(name).includes(foldTerm)||_foldModelSearch(id).includes(foldTerm)))){
         found.add(m.value);
       }
     }
@@ -5064,11 +5091,41 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
-  footer.classList.remove('cf-icons','cf-burger');
-  if(!overflows()) return;
-  footer.classList.add('cf-icons');
-  if(!overflows()) return;
-  footer.classList.add('cf-burger');
+  // Measure without ever PAINTING the expanded state. Stripping the stage
+  // classes makes the footer briefly full-width, which grows the composer and
+  // shrinks #messages by a few px; restoring them a moment later shrinks it
+  // back. A pinned reader sees that as a vertical up/down jitter on every
+  // fit pass (and fit passes run on each context-indicator update during SSE).
+  // `visibility:hidden` + a fixed height freeze the layout box during the
+  // measurement, so the scroll container's clientHeight never changes.
+  const prevVisibility=footer.style.visibility;
+  const prevHeight=footer.style.height;
+  const frozenHeight=footer.getBoundingClientRect().height;
+  if(frozenHeight>0){
+    footer.style.height=frozenHeight+'px';
+    footer.style.visibility='hidden';
+  }
+  let next='';
+  try{
+    footer.classList.remove('cf-icons','cf-burger');
+    if(overflows()){
+      footer.classList.add('cf-icons');
+      next='cf-icons';
+      if(overflows()){
+        footer.classList.add('cf-burger');
+        next='cf-icons cf-burger';
+      }
+    }
+  }finally{
+    // Restore the measured stage, then release the frozen box in the same
+    // task so no intermediate geometry is ever committed to the screen.
+    footer.classList.toggle('cf-icons',next.includes('cf-icons'));
+    footer.classList.toggle('cf-burger',next.includes('cf-burger'));
+    if(frozenHeight>0){
+      footer.style.height=prevHeight;
+      footer.style.visibility=prevVisibility;
+    }
+  }
 }
 window._fitComposerFooter=_fitComposerFooter;
 
@@ -6345,12 +6402,12 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
     if(_freshProgrammaticScrollActive()) return;
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -7496,7 +7553,7 @@ function _stripXmlToolCallsDisplay(s){
   s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
   // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
   s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
-  return s.trim();
+  return s.replace(/^\s+/, '');
 }
 
 function _sanitizeThinkingDisplayText(text){
@@ -7784,48 +7841,97 @@ function renderMd(raw){
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
-  function _renderListBlock(lines, ordered){
-    const marker=ordered?'\\d+\\. ':'[-*+] ';
-    let html=ordered?'<ol>':'<ul>';
-    let item=null;
-    const flush=()=>{
-      if(!item) return;
-      const body=item.parts.join('\n').trim();
-      const text=body;
-      let inner;
-      if(!ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
-      else if(!ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
-      else inner=inlineMd(text);
-      const valueAttr=item.value!==null?` value="${item.value}"`:'';
-      const styleAttr=item.indent?` style="margin-left:16px"`:'';
-      html+=`<li${valueAttr}${styleAttr}>${inner}</li>`;
-      item=null;
+  function _renderListBlock(lines){
+    // Single-pass mixed-marker list renderer (#6700). Builds a real nested
+    // <ul>/<ol> tree with a stack keyed by indentation depth + marker kind
+    // instead of rendering one marker family and re-parsing the generated
+    // HTML with the other. Only item text goes through inlineMd(); tags
+    // emitted here are never parsed as Markdown again.
+    const root={ordered:false,items:[]};   // container for top-level lists
+    const listStack=[];                    // listStack[k]: list open at depth k
+    const itemStack=[];                    // itemStack[k]: last item at depth k
+    const openList=(depth,ordered)=>{
+      const ln={ordered,items:[]};
+      // Attach to the nearest open ancestor item when indentation jumps by
+      // more than one level (e.g. 4-space indent straight from the top), so
+      // the new list nests under the right parent instead of detaching.
+      let parentItem=null;
+      for(let k=depth-1;k>=0;k--){
+        if(itemStack[k]){ parentItem=itemStack[k]; break; }
+      }
+      (parentItem?parentItem.sublists:root.items).push(ln);
+      listStack[depth]=ln;
+      return ln;
+    };
+    const openItem=(depth,ordered,value,content)=>{
+      for(let k=listStack.length-1;k>depth;k--) listStack.pop();
+      if(!listStack[depth]||listStack[depth].ordered!==ordered){
+        if(listStack[depth]) listStack.pop();
+        listStack[depth]=openList(depth,ordered);
+      }
+      const item={ordered,value,content:[content],sublists:[]};
+      listStack[depth].items.push(item);
+      itemStack[depth]=item;
+      for(let k=itemStack.length-1;k>depth;k--) itemStack.pop();
+      return item;
     };
     for(const raw of lines){
       const line=String(raw||'');
-      const nested=line.match(new RegExp(`^ {2,}(${marker})(.*)$`));
-      if(nested){
-        flush();
-        item={indent:true,value:ordered?parseInt(nested[1],10):null,parts:[nested[2]]};
-        continue;
+      const om=line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+      const um=line.match(/^(\s*)([-*+])\s+(.*)$/);
+      const m=om||um;
+      if(m){
+        const depth=m[1].length<2?0:Math.floor(m[1].length/2);
+        openItem(depth,!!om,om?parseInt(om[2],10):null,m[3]);
+      } else if(itemStack.length){
+        itemStack[itemStack.length-1].content.push(line.replace(/^ {2,}/,'').trim());
       }
-      const top=line.match(new RegExp(`^(?:  )?(${marker})(.*)$`));
-      if(top){
-        flush();
-        item={indent:false,value:ordered?parseInt(top[1],10):null,parts:[top[2]]};
-        continue;
-      }
-      if(!item) continue;
-      item.parts.push(line.replace(/^ {2,}/,'').trim());
     }
-    flush();
-    return html+(ordered?'</ol>':'</ul>');
+    // Iterative depth-first emit (#6700 re-gate). The recursive
+    // renderList/renderItem pair recursed once per nesting level, so a
+    // pathologically deep list (an agent dumping deeply nested structured
+    // data) threw RangeError at ~2,000 levels; renderMd() runs after the
+    // transcript container is cleared, so the uncaught throw blanked the
+    // whole session. Emit order is identical — list open, items, nested
+    // sublists, item close, list close — but sublists are pushed onto an
+    // explicit work stack instead of the call stack.
+    const html=[];
+    const work=[];                                  // {open:list} | {item} | {close:list} | {closeItem:true}
+    for(let i=root.items.length-1;i>=0;i--) work.push({open:root.items[i]});
+    while(work.length){
+      const f=work.pop();
+      if(f.item){
+        const it=f.item;
+        const text=it.content.join('\n').trim();
+        let inner;
+        if(!it.ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+        else if(!it.ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+        else inner=inlineMd(text);
+        const valueAttr=it.value!==null?` value="${it.value}"`:'';
+        html.push(`<li${valueAttr}>`,inner);
+        work.push({closeItem:true});                // </li> after any nested sublists
+        for(let i=it.sublists.length-1;i>=0;i--) work.push({open:it.sublists[i]});
+      } else if(f.closeItem){
+        html.push('</li>');
+      } else if(f.open){
+        const ln=f.open;
+        html.push('<',ln.ordered?'ol':'ul','>');
+        work.push({close:ln});                      // </ul>/</ol> after all items
+        for(let i=ln.items.length-1;i>=0;i--) work.push({item:ln.items[i]});
+      } else {
+        html.push('</',f.close.ordered?'ol':'ul','>');
+      }
+    }
+    return html.join('');
   }
-  function _renderLists(src, ordered){
+  function _renderLists(src){
+    // Single pass over source lines: collect a contiguous list region (any
+    // marker family, top-level or nested, plus continuation lines) and hand
+    // it to _renderListBlock, which builds the structural <ul>/<ol> tree.
     const lines=src.split('\n');
     const out=[];
-    const topRe=ordered?/^(?:  )?\d+\. /:/^(?:  )?[-*+] /;
-    const nestedRe=ordered?/^ {2,}\d+\. /:/^ {2,}[-*+] /;
+    const topRe=/^(?:  )?(?:\d+\.|[-*+]) /;
+    const nestedRe=/^ {2,}(?:\d+\.|[-*+]) /;
     const contRe=/^ {2,}\S/;
     let i=0;
     while(i<lines.length){
@@ -7852,18 +7958,16 @@ function renderMd(raw){
         }
         break;
       }
-      out.push(_renderListBlock(block,ordered));
+      out.push(_renderListBlock(block));
     }
     return out.join('\n');
   }
-  // Preserve continuation lines, nested indentation, and LaTeX placeholder lines
-  // inside list items without changing the wider markdown pipeline.
-  s=_renderLists(s,false);
-  // Ordered-list parsing intentionally runs on the post-unordered string; the
-  // unordered pass emits <ul> HTML that cannot satisfy the ordered-item regex.
-  // Keep continuation lines attached to their item and preserve explicit
-  // numbering via value= even when blank lines split the markdown.
-  s=_renderLists(s,true);
+  // Single-pass list stage (#6700): one parser handles both marker families
+  // with a stack keyed by indentation + marker kind, so mixed nested lists
+  // (ul→ol→ul) build valid <ul>/<ol> structure instead of re-parsing
+  // renderer-generated HTML as Markdown. value="N" is still emitted on every
+  // ordered <li> so explicit numbering survives blank-line splits (#886).
+  s=_renderLists(s);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
   // is handled by inlineMd() only — prevents double-linking.
@@ -8026,8 +8130,7 @@ function renderMd(raw){
     const a=_attrs(rawAttrs);
     if(name==='li'){
       const value=/^\d+$/.test(a.value||'')?` value="${esc(a.value)}"`:'';
-      const style=(a.style||'').replace(/\s+/g,'').toLowerCase()==='margin-left:16px'?` style="margin-left:16px"`:'';
-      return `<li${value}${style}>`;
+      return `<li${value}>`;
     }
     if(name==='span'){
       return `<span${_cls(a.class,['task-done','task-todo','katex-inline'])}${a['data-katex']==='inline'?' data-katex="inline"':''}>`;
@@ -13792,6 +13895,10 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   return true;
 }
 
+const _TRANSPARENT_FADE_BLOCK_TAGS = new Set([
+  'P','DIV','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','LI','UL','OL','PRE','TABLE',
+]);
+
 function _bindTransparentFadeCleanup(body){
   if(!body || body._transparentFadeCleanupBound || typeof body.addEventListener !== 'function') return;
   body._transparentFadeCleanupBound = true;
@@ -13806,6 +13913,20 @@ function _bindTransparentFadeCleanup(body){
     span.classList.remove('is-new');
     if(span.style) span.style.removeProperty('--stream-fade-ms');
   });
+}
+
+// Trailing block element of a live prose body, if any. Live rows are produced
+// by the incremental streaming-markdown path, which keeps an open block (a <p>)
+// as it parses; text appended as a sibling of that block would render on its
+// own line. Inline wrappers (fade spans) are not block boxes and are skipped.
+function _transparentFadeAppendTarget(body){
+  if(!body) return body;
+  const kids = body.childNodes;
+  if(!kids || !kids.length) return body;
+  const last = kids[kids.length - 1];
+  if(!last || last.nodeType !== 1) return body;
+  const tag = String(last.tagName || '').toUpperCase();
+  return _TRANSPARENT_FADE_BLOCK_TAGS.has(tag) ? last : body;
 }
 
 function _appendTransparentFadeText(body, text){
@@ -13833,13 +13954,58 @@ function _appendTransparentFadeText(body, text){
   }
   if(!changed) frag.appendChild(document.createTextNode(value));
   else if(last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
-  body.appendChild(frag);
+  // Append inside the trailing block element (the streaming markdown parser's
+  // open <p>) rather than at the root of .msg-body. A block sibling would start
+  // its own line box, so a continuation of the current sentence — in particular
+  // the tail of a word — must land inside that block to stay on the same line.
+  _transparentFadeAppendTarget(body).appendChild(frag);
 }
 
 function _refreshTransparentFadeProseRow(existing, node, preservedState){
+  if(!existing || !node) return node || existing;
+  if(existing === node) return existing;
   let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
   const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
-  const currentText = String(existing.getAttribute('data-stream-fade-text') || (body && body.textContent) || '');
+  // Resume strictly from the source-space cursor. `body.textContent` is NOT a
+  // valid substitute: rows built by the incremental streaming-markdown path
+  // render one character behind their source text (the parser holds the last
+  // character pending), so falling back to rendered text yields a delta that
+  // starts mid-word and tears the word in half. With no cursor we cannot know
+  // how much of the source is already rendered, so rebuild the body instead of
+  // guessing a delta.
+  const hasCursor = !!(existing.getAttribute && existing.getAttribute('data-stream-fade-text') !== null);
+  const currentText = hasCursor ? String(existing.getAttribute('data-stream-fade-text') || '') : '';
+  const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
+  const parserOwned = !!(candidateBody && candidateBody !== body && candidateBody.__smdParser);
+  const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
+    ? window.__streamFadeMuteRenderedPrefix
+    : null;
+  if(parserOwned){
+    // Promote the actual parser-owned candidate into the keyed row's DOM
+    // position once. Cloning its children into the old visible row on every
+    // later growth frame cuts off the previous tail word's ~620ms fade
+    // (`.is-new` is stripped from the replacement) and breaks word-node
+    // identity used for scroll-anchor stability. After this swap, later
+    // keyed renders hit `_refreshTransparentLiveRow(existing === node)` and
+    // keep growing the same parser target. Pending and MEDIA tails stay on
+    // the parser until it flushes them.
+    const prevRendered = String((body && body.textContent) || '');
+    if(candidateBody.classList) candidateBody.classList.add('stream-fade-active');
+    _bindTransparentFadeCleanup(candidateBody);
+    if(mute && prevRendered) mute(candidateBody, prevRendered);
+    if(node.removeAttribute) node.removeAttribute('data-stream-fade-text');
+    const parent = existing.parentNode || existing.parentElement || null;
+    if(parent && existing.parentNode === parent){
+      if(typeof parent.replaceChild === 'function'){
+        parent.replaceChild(node, existing);
+      }else if(typeof parent.insertBefore === 'function'){
+        parent.insertBefore(node, existing);
+        if(typeof existing.remove === 'function') existing.remove();
+      }
+    }
+    _rehydrateTransparentLiveRow(node, existing, preservedState);
+    return node;
+  }
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
   for(const pair of pairs){
@@ -13860,14 +14026,42 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.appendChild(body);
   }
   if(body.classList) body.classList.add('stream-fade-active');
-  if(!nextText.startsWith(currentText)){
-    body.textContent = '';
+  if(!hasCursor || !nextText.startsWith(currentText)){
+    // Rebuild branch. Snapshot the rendered text BEFORE clearing (#7082
+    // review should-fix): without it every word re-wraps as `.is-new`, the
+    // whole visible row dips to opacity 0 and fades back (~620ms), and the
+    // wholesale node replacement invites the one-time scroll-anchor bounce
+    // the #6257 comment in `_bindTransparentFadeCleanup` warns about.
+    const prevRendered = String(body.textContent || '');
     existing.setAttribute('data-stream-fade-text', '');
-    _appendTransparentFadeText(body, nextText);
+    // Non-parser candidates may still carry a parsed-looking body (tests and
+    // rewind rebuilds). Clone that DOM when present so we do not flatten it
+    // back to literal source.
+    let resumeCursor = nextText;
+    if(candidateBody && candidateBody !== body &&
+       typeof candidateBody.cloneNode === 'function' &&
+       candidateBody.childNodes && candidateBody.childNodes.length){
+      const clone = candidateBody.cloneNode(true);
+      body.textContent = '';
+      while(clone.childNodes && clone.childNodes.length) body.appendChild(clone.childNodes[0]);
+      _bindTransparentFadeCleanup(body);
+      const renderedNow = String(body.textContent || '');
+      if(renderedNow && nextText.startsWith(renderedNow)) resumeCursor = renderedNow;
+    }else{
+      body.textContent = '';
+      _appendTransparentFadeText(body, nextText);
+    }
+    // messages.js `_streamFadeMuteRenderedPrefix` idiom (exported on window the
+    // same way `__anchorProseIncrementalNode` is): rendered-space compare of the
+    // pre-rebuild snapshot against the rebuilt body, stripping `.is-new` from
+    // spans inside the common prefix so already-visible words do not replay
+    // their fade — only genuinely-new tail words animate.
+    if(mute && prevRendered) mute(body, prevRendered);
+    existing.setAttribute('data-stream-fade-text', resumeCursor);
   }else{
     _appendTransparentFadeText(body, nextText.slice(currentText.length));
+    existing.setAttribute('data-stream-fade-text', nextText);
   }
-  existing.setAttribute('data-stream-fade-text', nextText);
   _rehydrateTransparentLiveRow(existing, node, preservedState);
   return existing;
 }
@@ -19294,38 +19488,65 @@ function autoResizeTextarea(ta) {
   ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
 }
 
+// #2184 follow-up: submitEdit is re-entrant and destructive, and nothing stopped
+// a second invocation. Its only guard was S.busy, which send() does not set until
+// the LAST line — after two multi-second awaits (_ensureAllMessagesLoaded on a long
+// session, then the truncate round-trip). On a laggy instance that leaves a 10s+
+// window in which every further click on "Send edit" starts another full truncate.
+// Observed in the wild: seven concurrent POST /api/session/truncate, 5.2-8.5s each,
+// from one user clicking repeatedly because the UI had not yet acknowledged the first.
+//
+// That is not merely wasteful, it is a data-loss hazard. `absoluteKeepCount` is
+// deliberately captured BEFORE the awaits (see test_submit_edit_captures_absolute_
+// before_await): at click time `_oldestIdx` is the loaded window's offset and
+// `msgIdx` is window-relative, so their sum is the true absolute index. But the
+// first call's _ensureAllMessagesLoaded() sets `_oldestIdx = 0`, so a SECOND call
+// entering afterwards computes `0 + msgIdx` from a still-window-relative msgIdx —
+// a far smaller keep_count. Truncating a 2000-message session to that would delete
+// most of its history.
+//
+// Guard re-entry at the function itself rather than at the click handler: the edit
+// can also be submitted with Enter (the keydown handler clicks the button), and a
+// future caller would silently reopen the hole. Cleared in a finally so an early
+// return or a throw cannot wedge editing off for the rest of the page's life.
+let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
-  if(!S.session || S.busy) return;
-  const initialSid = S.session.session_id;
-  const absoluteKeepCount = _oldestIdx + msgIdx;
-  // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
-  // initialSid — a non-default session model (vs profile default), which is
-  // inference-free and survives the failed send's marker consumption. See
-  // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
-  const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  if(typeof _ensureAllMessagesLoaded==='function'){
-    await _ensureAllMessagesLoaded();
-  }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!S.session || S.busy || _submitEditInFlight) return;
+  _submitEditInFlight = true;
   try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    // #5924 SILENT-race guard: a session switch during the truncate await must not
-    // let this recovery apply session A's intent (truncate/re-arm/send) to the
-    // newly-visible session.
+    const initialSid = S.session.session_id;
+    const absoluteKeepCount = _oldestIdx + msgIdx;
+    // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
+    // initialSid — a non-default session model (vs profile default), which is
+    // inference-free and survives the failed send's marker consumption. See
+    // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
+    const _recoveryPick=_deliberateSessionModelPick(initialSid);
+    if(typeof _ensureAllMessagesLoaded==='function'){
+      await _ensureAllMessagesLoaded();
+    }
     if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = newText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // Re-arm the single-shot explicit-pick marker from the captured non-default
-    // pick — only if still safe at fire time (session unchanged, current model
-    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-    _reArmRecoveryPick(initialSid, _recoveryPick);
-    await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+    try {
+      await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+        session_id: initialSid,
+        keep_count: absoluteKeepCount
+      })});
+      // #5924 SILENT-race guard: a session switch during the truncate await must not
+      // let this recovery apply session A's intent (truncate/re-arm/send) to the
+      // newly-visible session.
+      if(!S.session || S.session.session_id !== initialSid) return;
+      S.messages = S.messages.slice(0, absoluteKeepCount);
+      renderMessages();
+      $('msg').value = newText;
+      // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
+      // Re-arm the single-shot explicit-pick marker from the captured non-default
+      // pick — only if still safe at fire time (session unchanged, current model
+      // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
+      _reArmRecoveryPick(initialSid, _recoveryPick);
+      await send();
+    } catch(e) { setStatus(t('edit_failed') + e.message); }
+  } finally {
+    _submitEditInFlight = false;
+  }
 }
 
 async function regenerateResponse(btn) {

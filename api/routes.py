@@ -36,6 +36,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 from api.agent_runtime import (
     AgentRuntimeChangedError,
+    agent_runtime_stale_payload,
     ensure_agent_runtime_current,
     require_ai_agent_class,
 )
@@ -1007,13 +1008,28 @@ def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path |
     return _find_skill_in_dirs(name, [skills_dir])
 
 
+# Cap on the courtesy list of names carried by a skill-not-found reply. The
+# bound stays; what it must never do is present a partial list as the whole
+# set, because a caller that cannot find its skill in `available_skills` will
+# conclude the skill is not installed.
+_SKILL_NOT_FOUND_LIST_LIMIT = 20
+
+
 def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
-    available = [s["name"] for s in _skills_list_from_dir(skills_dir).get("skills", [])[:20]]
+    all_names = [s["name"] for s in _skills_list_from_dir(skills_dir).get("skills", [])]
+    total = len(all_names)
+    available = all_names[:_SKILL_NOT_FOUND_LIST_LIMIT]
+    truncated = total > len(available)
+    hint = "Use skills_list to see all available skills"
+    if truncated:
+        hint = f"Showing {len(available)} of {total} skills. {hint}"
     return {
         "success": False,
         "error": f"Skill '{name}' not found.",
         "available_skills": available,
-        "hint": "Use skills_list to see all available skills",
+        "available_skills_truncated": truncated,
+        "total_skills": total,
+        "hint": hint,
     }
 
 
@@ -2280,8 +2296,11 @@ def _build_session_list_cache_payload(
         )
 
     def _all_sessions_for_sidebar():
+        kwargs = {"diag": diag, "include_lineage_metadata": False}
+        if _callable_accepts_kwarg(all_sessions, "sidebar_metadata_only"):
+            kwargs["sidebar_metadata_only"] = True
         if _callable_accepts_kwarg(all_sessions, "include_lineage_metadata"):
-            return all_sessions(diag=diag, include_lineage_metadata=False)
+            return all_sessions(**kwargs)
         # Focused tests and third-party callers sometimes monkeypatch
         # routes.all_sessions with the historical diag-only signature.
         return all_sessions(diag=diag)
@@ -2753,8 +2772,14 @@ def _get_cached_session_list_payload(
                                 "session list stale-cache background rebuild failed"
                             )
                             return
-                        if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-                            _session_list_cache_set(key, payload)
+                        if (
+                            _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+                            and _session_list_cache_set(
+                                key,
+                                payload,
+                                expected_invalidation_stamp=invalidation_stamp,
+                            )
+                        ):
                             return
                         rebuild_attempts += 1
                         if rebuild_attempts >= 3:
@@ -2790,8 +2815,14 @@ def _get_cached_session_list_payload(
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
                 payload = builder()
-                if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-                    _session_list_cache_set(key, payload)
+                if (
+                    _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+                    and _session_list_cache_set(
+                        key,
+                        payload,
+                        expected_invalidation_stamp=invalidation_stamp,
+                    )
+                ):
                     if diag is not None:
                         try:
                             diag.stage("session_list_cache_stored")
@@ -2850,7 +2881,11 @@ def _get_cached_session_list_payload(
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
     payload = builder()
     if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
-        _session_list_cache_set(key, payload)
+        _session_list_cache_set(
+            key,
+            payload,
+            expected_invalidation_stamp=invalidation_stamp,
+        )
     return payload
 
 from api.config import (
@@ -2881,6 +2916,7 @@ from api.config import (
     register_session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
+    peek_stream,
     unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
@@ -10661,71 +10697,12 @@ def _session_attention_summary(session_id: str) -> dict | None:
     return None
 
 
-_SIDEBAR_SESSION_RESPONSE_FIELDS = {
-    "session_id",
-    "title",
-    "display_title",
-    "_state_db_title",
-    "workspace",
-    "model",
-    "model_provider",
-    "message_count",
-    "user_message_count",
-    "created_at",
-    "updated_at",
-    "last_message_at",
-    "pinned",
-    "archived",
-    "project_id",
-    "profile",
-    "input_tokens",
-    "output_tokens",
-    "estimated_cost",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "cache_hit_percent",
-    "personality",
-    "context_length",
-    "config_context_length",
-    "window_usage_percent",
-    "source_tag",
-    "raw_source",
-    "session_source",
-    "source_label",
-    "is_cli_session",
-    "is_messaging_session",
-    "is_streaming",
-    "cron_running",
-    "active_stream_id",
-    "has_pending_user_message",
-    "pending_started_at",
-    "default_hidden",
-    "worktree_path",
-    "worktree_branch",
-    "parent_session_id",
-    "parent_title",
-    "parent_source",
-    "relationship_type",
-    "pre_compression_snapshot",
-    "_lineage_root_id",
-    "_lineage_tip_id",
-    "_compression_segment_count",
-    "_lineage_collapsed_count",
-    "_parent_lineage_root_id",
-    "_parent_lineage_tip_id",
-    "_cross_surface_child_session",
-    "match_type",
-    "match_preview",
-    # Preserved so the sidebar can suppress rename / action-menu / swipe on
-    # read-only (imported CLI + Claude Code) sessions, and render the detailed
-    # gateway model label. Dropping these silently regressed both surfaces.
-    # Only the latest `gateway_routing` is included (the sidebar label reader
-    # prefers it); the unbounded `gateway_routing_history` is intentionally NOT
-    # sent in the list payload to avoid per-row bloat.
-    "read_only",
-    "is_read_only",
-    "gateway_routing",
-}
+# One canonical allowlist owns both cache projection and final serialization.
+# Keeping it in the cache module avoids a circular-import fallback that could
+# silently truncate otherwise valid sidebar fields.
+_SIDEBAR_SESSION_RESPONSE_FIELDS = (
+    _route_session_list_cache._SIDEBAR_SESSION_RESPONSE_FIELDS
+)
 
 
 def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None = None) -> dict:
@@ -17632,7 +17609,11 @@ def handle_patch(handler, parsed) -> bool:
     )
     if proxy_result is not False:
         return proxy_result
-    body = read_body(handler)
+    try:
+        body = read_body(handler)
+    except ValueError as exc:
+        status = 413 if "too large" in str(exc).lower() else 400
+        return bad(handler, str(exc), status=status)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
@@ -17660,7 +17641,11 @@ def handle_delete(handler, parsed) -> bool:
     )
     if proxy_result is not False:
         return proxy_result
-    body = read_body(handler)
+    try:
+        body = read_body(handler)
+    except ValueError as exc:
+        status = 413 if "too large" in str(exc).lower() else 400
+        return bad(handler, str(exc), status=status)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
@@ -17696,7 +17681,11 @@ def handle_put(handler, parsed) -> bool:
     )
     if proxy_result is not False:
         return proxy_result
-    body = read_body(handler)
+    try:
+        body = read_body(handler)
+    except ValueError as exc:
+        status = 413 if "too large" in str(exc).lower() else 400
+        return bad(handler, str(exc), status=status)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
@@ -18771,7 +18760,7 @@ def _handle_sse_stream(handler, parsed):
     # rather than silently skip journal events.
     resume_cursor = _chat_stream_resume_cursor(handler, qs, stream_id)
     resume_after_seq, resume_requested, resume_raw_cursor, runner_resume_cursor = resume_cursor
-    stream = STREAMS.get(stream_id)
+    stream = peek_stream(stream_id)
     if stream is None:
         # Runner-observe path: consume the ALREADY-RESOLVED cursor — do not
         # re-parse query params or re-read the header (Codex r2 #3 / r3). The
@@ -18914,7 +18903,7 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
 
     def attach_active_stream():
         stream_id = _active_run_stream_for_session(session_id)
-        stream = STREAMS.get(stream_id) if stream_id else None
+        stream = peek_stream(stream_id) if stream_id else None
         if stream is None:
             return None, None, None, stream_id
         if hasattr(stream, "subscribe_with_snapshot"):
@@ -23022,11 +23011,7 @@ def _agent_runtime_barrier_response(
     try:
         ensure_agent_runtime_current()
     except AgentRuntimeChangedError as exc:
-        return {
-            "error": str(exc),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }
+        return agent_runtime_stale_payload(exc)
     return None
 
 
@@ -24492,11 +24477,13 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
+                _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
-                _restore_reasoning_metadata,
+                _restore_reasoning_metadata_before_boundary,
                 _sanitize_messages_for_agent,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
@@ -24554,9 +24541,20 @@ def _handle_chat_sync(handler, body):
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
-        _next_context_messages = _restore_reasoning_metadata(
+        # Active-turn boundary is fixed BEFORE any restoration (same as streaming),
+        # using whatever exact turn authority the result/Agent pair exported.
+        _active_turn_identity = _resolve_active_turn_authority(
+            {"token": None, "text": msg, "current_turn_user_idx": None, "turn_id": ""},
+            result=result,
+            agent=agent,
+        )
+        _turn_boundary = _active_turn_boundary(
+            _result_messages, _previous_context_messages, _active_turn_identity, msg,
+        )
+        _next_context_messages = _restore_reasoning_metadata_before_boundary(
             _previous_context_messages,
             _result_messages,
+            _turn_boundary,
         )
         # Mint ids on the shared result rows BEFORE dedupe deep-copies any
         # stale-user boundary row, so both arrays share the id (#5564).
@@ -24572,7 +24570,9 @@ def _handle_chat_sync(handler, body):
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
-            _restore_display_reasoning_metadata(_previous_messages, _result_messages),
+            _restore_display_reasoning_metadata(
+                _previous_messages, _result_messages, current_turn_boundary=_turn_boundary,
+            ),
             msg,
             source=getattr(s, "pending_user_source", None) or "webui",
         )
@@ -25137,11 +25137,7 @@ def _handle_git_commit_message(handler, body):
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except Exception as e:
         logger.exception("git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -25174,11 +25170,7 @@ def _handle_git_commit_message_selected(handler, body):
     except GitWorkspaceError as e:
         return _git_bad(handler, e)
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except Exception as e:
         logger.exception("selected git commit message generation failed")
         return bad(handler, _sanitize_error(e), 500)
@@ -26735,6 +26727,10 @@ def _manual_compression_status_payload(job):
             payload["type"] = job["error_type"]
         if job.get("retryable") is not None:
             payload["retryable"] = bool(job["retryable"])
+        if job.get("restart_scheduled") is not None:
+            payload["restart_scheduled"] = bool(job["restart_scheduled"])
+        if job.get("agent_update_state") is not None:
+            payload["agent_update_state"] = job["agent_update_state"]
     elif status == "cancelled":
         payload["ok"] = False
         payload["error"] = job.get("error") or "Compression cancelled"
@@ -26771,6 +26767,8 @@ def _run_manual_compression_job(sid, body):
                         "error_status": status,
                         "error_type": (payload or {}).get("type"),
                         "retryable": (payload or {}).get("retryable"),
+                        "restart_scheduled": (payload or {}).get("restart_scheduled"),
+                        "agent_update_state": (payload or {}).get("agent_update_state"),
                         "updated_at": now,
                     }
                 )
@@ -26784,16 +26782,19 @@ def _run_manual_compression_job(sid, body):
                 )
     except AgentRuntimeChangedError as exc:
         logger.warning("Manual compression worker found stale Agent runtime for session %s", sid)
+        stale_payload = agent_runtime_stale_payload(exc)
         with _MANUAL_COMPRESSION_JOBS_LOCK:
             job = _MANUAL_COMPRESSION_JOBS.get(sid)
             if job:
                 job.update(
                     {
                         "status": "error",
-                        "error": str(exc),
+                        "error": stale_payload["error"],
                         "error_status": 409,
-                        "error_type": "agent_runtime_stale",
-                        "retryable": True,
+                        "error_type": stale_payload["type"],
+                        "retryable": stale_payload["retryable"],
+                        "restart_scheduled": stale_payload.get("restart_scheduled"),
+                        "agent_update_state": stale_payload.get("agent_update_state"),
                         "updated_at": time.time(),
                     }
                 )
@@ -26851,11 +26852,7 @@ def _handle_session_compress_start(handler, body):
     except AgentRuntimeChangedError as exc:
         return j(
             handler,
-            {
-                "error": str(exc),
-                "type": "agent_runtime_stale",
-                "retryable": True,
-            },
+            agent_runtime_stale_payload(exc),
             status=409,
         )
 
@@ -27219,11 +27216,7 @@ def _handle_session_compress(handler, body):
             },
         )
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except Exception as e:
         logger.warning("Manual session compression failed: %s", e)
         return bad(handler, f"Compression failed: {_sanitize_error(e)}")
@@ -27693,13 +27686,13 @@ def _handle_handoff_summary(handler, body):
                 if not is_chatgpt_codex:
                     codex_kwargs["max_output_tokens"] = max_tokens
                 resp = agent._run_codex_stream(codex_kwargs)
-                assistant_message, _ = agent._normalize_codex_response(resp)
-                result["text"] = str((assistant_message.content or "") if assistant_message else "").strip()
+                normalized = agent._get_transport("codex_responses").normalize_response(resp)
+                result["text"] = str((normalized.content or "") if normalized else "").strip()
                 result["incomplete"] = _summary_output_incomplete(result["text"])
                 return result
 
             if getattr(agent, "api_mode", "") == "anthropic_messages":
-                from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
+                from agent.anthropic_adapter import build_anthropic_kwargs
 
                 ant_kwargs = build_anthropic_kwargs(
                     model=agent.model,
@@ -27712,11 +27705,11 @@ def _handle_handoff_summary(handler, body):
                     base_url=getattr(agent, "_anthropic_base_url", None),
                 )
                 resp = agent._anthropic_messages_create(ant_kwargs)
-                assistant_message, _ = normalize_anthropic_response(
+                normalized = agent._get_transport().normalize_response(
                     resp,
                     strip_tool_prefix=getattr(agent, "_is_anthropic_oauth", False),
                 )
-                result["text"] = str((assistant_message.content or "") if assistant_message else "").strip()
+                result["text"] = str((normalized.content or "") if normalized else "").strip()
                 result["incomplete"] = _summary_output_incomplete(result["text"])
                 return result
 
@@ -27898,11 +27891,7 @@ def _handle_handoff_summary(handler, body):
             "fallback": fallback,
         })
     except AgentRuntimeChangedError as e:
-        return j(handler, {
-            "error": str(e),
-            "type": "agent_runtime_stale",
-            "retryable": True,
-        }, status=409)
+        return j(handler, agent_runtime_stale_payload(e), status=409)
     except api_config.AmbiguousCustomProviderError as e:
         # A custom-provider slug collision is a user-fixable misconfiguration,
         # not a transient summary failure. Return 400 with the actionable rename
