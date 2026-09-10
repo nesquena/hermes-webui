@@ -140,6 +140,22 @@ process.stdout.write(JSON.stringify({{keys,networkKey,ok}}));
     }
 
 
+def test_unavailable_media_download_policy_only_blocks_forbidden_and_missing():
+    allows_download = _function_source("_mediaPreviewAllowsDownload")
+    result = _run_node(f"""
+{allows_download}
+const keys=[
+  'media_preview_unauthorized',
+  'media_preview_forbidden',
+  'media_preview_not_found',
+  'format_error'
+];
+const allowed=keys.map(key=>_mediaPreviewAllowsDownload(key));
+process.stdout.write(JSON.stringify({{allowed}}));
+""")
+    assert result == {"allowed": [True, False, False, True]}
+
+
 @pytest.mark.parametrize(
     ("function_name", "path"),
     [
@@ -163,6 +179,7 @@ def test_all_lazy_media_fetchers_render_the_shared_http_error_contract(
     helpers = [
         _function_source("_requireMediaResponse"),
         _function_source("_mediaPreviewErrorKey"),
+        _function_source("_mediaPreviewAllowsDownload"),
         _section_source("_mediaSnapQuery", "_csvMediaUrl"),
     ]
     setup = ""
@@ -198,3 +215,5 @@ setTimeout(()=>process.stdout.write(JSON.stringify({{html:el.outerHTML}})),0);
     assert "WebUI could not access this file" in result["html"]
     assert "check file permissions" in result["html"]
     assert "FORMAT ERROR" not in result["html"]
+    if function_name in {"loadCsvInline", "loadPdfInline", "loadHtmlInline"}:
+        assert "msg-media-link" not in result["html"]
