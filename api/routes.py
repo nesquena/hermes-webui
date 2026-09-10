@@ -12845,9 +12845,35 @@ def _static_content_identity(static_root: Path) -> str:
     metadata is deliberately excluded because a replacement can preserve it.
     """
     root = Path(static_root).resolve()
+
+    def inventory_files():
+        # Path.rglob() can silently omit a directory whose listing fails (for
+        # example a POSIX 0111 directory). Enumerate explicitly and let both
+        # scandir() and entry classification raise so identity becomes unknown.
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entry_mode = entry.stat(follow_symlinks=False).st_mode
+                    if _stat.S_ISDIR(entry_mode):
+                        pending.append(Path(entry.path))
+                    elif _stat.S_ISREG(entry_mode):
+                        yield Path(entry.path)
+                    elif _stat.S_ISLNK(entry_mode):
+                        # rglob()+is_file() followed file symlinks. Preserve
+                        # that inventory behavior; an unresolvable symlink is
+                        # an unclassifiable entry and therefore fails closed.
+                        target_mode = entry.stat(follow_symlinks=True).st_mode
+                        if _stat.S_ISREG(target_mode):
+                            yield Path(entry.path)
+                    # Other classified non-directory, non-file entries are not
+                    # servable static resources and intentionally do not enter
+                    # the byte identity.
+
     fingerprint = hashlib.sha256()
     paths = sorted(
-        (path for path in root.rglob("*") if path.is_file()),
+        inventory_files(),
         key=lambda path: path.relative_to(root).as_posix(),
     )
     for path in paths:
@@ -12896,7 +12922,10 @@ def _render_index_shell_base() -> str:
     version_token = _assets_cache_bust_token(api_config.get_static_root())
     if not _asset_identity_is_available(version_token):
         # Metadata cannot authorize reuse when some inventoried bytes could not
-        # be read. Read the current index every time and never cache this path.
+        # be read. Evict any earlier shell, read the current index every time,
+        # and never cache this path.
+        with _INDEX_SHELL_CACHE_LOCK:
+            _INDEX_SHELL_CACHE.pop("base", None)
         return (
             index_path.read_text(encoding="utf-8")
             .replace("__WEBUI_VERSION__", _ASSET_IDENTITY_UNAVAILABLE_TOKEN)

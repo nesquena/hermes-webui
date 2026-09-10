@@ -96,9 +96,12 @@ def test_token_changes_for_shell_bytes_with_stable_metadata(
     first = asset_token(static_root)
 
     bundle.write_bytes(second_bytes)
-    os.utime(bundle, (stat.st_atime, stat.st_mtime))
+    os.utime(bundle, ns=(stat.st_atime_ns, stat.st_mtime_ns))
 
     assert len(second_bytes) == len(first_bytes)
+    restored_stat = bundle.stat()
+    assert restored_stat.st_size == stat.st_size
+    assert restored_stat.st_mtime_ns == stat.st_mtime_ns
     assert asset_token(static_root) != first
 
 
@@ -239,6 +242,84 @@ def test_unavailable_identity_does_not_authorize_cached_shell_reuse(
     assert quote(WEBUI_VERSION, safe="") not in bytes(worker_handler.body).decode(
         "utf-8"
     )
+
+
+def test_search_only_vendor_directory_fails_closed(tmp_path, monkeypatch):
+    """A still-servable leaf beneath an unlistable vendor directory fails closed."""
+    if os.name != "posix":
+        pytest.skip("real 0111 directory semantics require POSIX")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("real 0111 directory semantics do not deny listing to root")
+
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    index_path = static_root / "index.html"
+    index_path.write_text(
+        '<html><script src="static/ui.js?v=__WEBUI_VERSION__"></script></html>',
+        encoding="utf-8",
+    )
+    (static_root / "ui.js").write_bytes(b"shell")
+    (static_root / "sw.js").write_text(
+        "const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';",
+        encoding="utf-8",
+    )
+    vendor = static_root / "vendor" / "private"
+    vendor.mkdir(parents=True)
+    leaf = vendor / "known-leaf.js"
+    leaf.write_bytes(b"export const value = 'alpha';\n")
+
+    monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
+    monkeypatch.setattr(api_config, "get_index_html_path", lambda: index_path)
+    monkeypatch.setattr(routes, "_INDEX_SHELL_CACHE", {})
+
+    # Prime the cache while the complete tree is readable, exactly as a process
+    # would do before a deployment directory is made search-only.
+    first_token = routes._assets_cache_bust_token(static_root)
+    assert routes._asset_identity_is_available(first_token)
+    first_shell = routes._render_index_shell_base()
+    assert "base" in routes._INDEX_SHELL_CACHE
+
+    vendor.chmod(0o111)
+    try:
+        try:
+            os.listdir(vendor)
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("0111 did not deny directory listing to this runner")
+
+        leaf_stat = leaf.stat()
+        leaf.write_bytes(b"export const value = 'bravo';\n")
+        os.utime(leaf, ns=(leaf_stat.st_atime_ns, leaf_stat.st_mtime_ns))
+        assert leaf.stat().st_size == leaf_stat.st_size
+        assert leaf.stat().st_mtime_ns == leaf_stat.st_mtime_ns
+
+        static_handler = _RouteHandler()
+        assert routes._serve_static(
+            static_handler,
+            urlparse("http://test/static/vendor/private/known-leaf.js"),
+        )
+        assert static_handler.status == 200
+        assert bytes(static_handler.body) == b"export const value = 'bravo';\n"
+
+        second_token = routes._assets_cache_bust_token(static_root)
+        assert not routes._asset_identity_is_available(second_token)
+        assert second_token.endswith(routes._ASSET_IDENTITY_UNAVAILABLE_SUFFIX)
+
+        second_shell = routes._render_index_shell_base()
+        assert routes._ASSET_IDENTITY_UNAVAILABLE_TOKEN in second_shell
+        assert second_shell is not first_shell
+        assert "base" not in routes._INDEX_SHELL_CACHE
+
+        worker_handler = _RouteHandler()
+        assert routes.handle_get(worker_handler, urlparse("http://test/sw.js")) is True
+        assert worker_handler.status == 503
+        assert ("Cache-Control", "no-store") in worker_handler.sent_headers
+        assert quote(WEBUI_VERSION, safe="") not in bytes(
+            worker_handler.body
+        ).decode("utf-8")
+    finally:
+        vendor.chmod(0o755)
 
 
 def test_sw_route_uses_bundle_fingerprint_token():
