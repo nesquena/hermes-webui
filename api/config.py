@@ -1838,10 +1838,11 @@ _PROVIDER_MODELS = {
     # Fallback only: the live Hermes CLI catalog (Go-specific
     # /zen/go/v1/models probe, core v0.20.5+) leads (#1240, #5311).
     # Mirrors Hermes core's curated opencode-go list
-    # (hermes_cli/models.py, synced there against the live endpoint and
-    # https://opencode.ai/docs/go/ on 2026-08-20/21). `ox-alpha-free` is the
-    # Go-subscription twin of Zen's keyless Ox Alpha — same id shape, but it
-    # requires the Go key.
+    # (hermes_cli/models_catalog_static.py, core main as of 2026-09-10).
+    # Core's 2026-09-09 sync dropped `ox-alpha-free` (Go relay delisted it:
+    # GET /zen/go/v1/models omits it, POST → 401) and added `glm-5.3-flash`
+    # and `muse-spark-1.3-contributor`. Core owns the sync duty against the
+    # live endpoint; WebUI mirrors.
     "opencode-go": [
         {"id": "kimi-k3",                  "label": "Kimi K3"},
         {"id": "kimi-k2.7-code",           "label": "Kimi K2.7 Code"},
@@ -1850,6 +1851,7 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5.6-luna",             "label": "GPT 5.6 Luna"},
         {"id": "grok-4.5",                 "label": "Grok 4.5"},
         {"id": "glm-5.3",                  "label": "GLM-5.3"},
+        {"id": "glm-5.3-flash",            "label": "GLM-5.3 Flash"},
         {"id": "glm-5.2",                  "label": "GLM-5.2"},
         {"id": "glm-5.1",                  "label": "GLM-5.1"},
         {"id": "glm-5",                    "label": "GLM-5"},
@@ -1870,7 +1872,7 @@ _PROVIDER_MODELS = {
         {"id": "hy3",                      "label": "HY3"},
         {"id": "hy3-preview",              "label": "HY3 Preview"},
         {"id": "muse-spark-1.2-contributor", "label": "Muse Spark 1.2 Contributor"},
-        {"id": "ox-alpha-free",            "label": "Ox Alpha (Go)"},
+        {"id": "muse-spark-1.3-contributor", "label": "Muse Spark 1.3 Contributor"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     # Model IDs are bare — sent directly to:

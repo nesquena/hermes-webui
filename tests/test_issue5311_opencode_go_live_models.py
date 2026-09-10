@@ -197,13 +197,13 @@ def test_opencode_go_config_allowlist_still_wins(monkeypatch, tmp_path):
 
 # ── Static fallback list contract ─────────────────────────────────────
 # The remaining tests pin the offline fallback list itself to Hermes core's
-# v0.20.5 release contract (commit fcbd1076, tag v2026.8.19). Core owns the
-# sync duty against the live
+# current curated contract (hermes_cli/models_catalog_static.py, core main
+# 2026-09-10; the list originated in v0.20.5, commit fcbd1076). Core owns
+# the sync duty against the live
 # https://opencode.ai/zen/go/v1/models endpoint and
 # https://opencode.ai/docs/go/, and WebUI only mirrors. This catches drift
-# in either direction: ids core added (kimi-k3, gpt-5.6-luna, glm-5.3,
-# grok-4.5, qwen3.8-max, hy3, hy3-preview, muse-spark-1.2-contributor,
-# ox-alpha-free) and ids core dropped.
+# in either direction: ids core added and ids core dropped (e.g.
+# ox-alpha-free, delisted from the Go relay on 2026-09-09).
 
 import ast
 from pathlib import Path
@@ -220,6 +220,7 @@ EXPECTED_OPENCODE_GO_MODEL_IDS = [
     "gpt-5.6-luna",
     "grok-4.5",
     "glm-5.3",
+    "glm-5.3-flash",
     "glm-5.2",
     "glm-5.1",
     "glm-5",
@@ -240,7 +241,7 @@ EXPECTED_OPENCODE_GO_MODEL_IDS = [
     "hy3",
     "hy3-preview",
     "muse-spark-1.2-contributor",
-    "ox-alpha-free",
+    "muse-spark-1.3-contributor",
 ]
 
 
@@ -256,13 +257,21 @@ def _opencode_go_static_models():
     raise AssertionError("_PROVIDER_MODELS assignment not found")
 
 
-def test_opencode_go_static_models_match_v0205_release_snapshot():
+def test_opencode_go_static_models_match_core_catalog_snapshot():
     models = _opencode_go_static_models()
     assert [model["id"] for model in models] == EXPECTED_OPENCODE_GO_MODEL_IDS
 
 
 def test_opencode_go_static_models_match_installed_core_curated_list():
-    """Exercise the actual Agent contract for the supported release pair."""
+    """Exercise the actual Agent contract for the supported release pair.
+
+    The snapshot mirrors core main's curated catalog. A released (installed)
+    core can lag that sync by a few days — e.g. v2026.9.7 still lists
+    ``ox-alpha-free``, which core removed on 2026-09-09 after the Go relay
+    delisted it. Equality binds only once the installed core carries the
+    mirrored sync; the marker for "lags the sync" is the delisted id still
+    being present. Anything else that differs is real drift and must fail.
+    """
     import pytest
 
     hermes_cli = pytest.importorskip(
@@ -271,9 +280,14 @@ def test_opencode_go_static_models_match_installed_core_curated_list():
     if not config._hermes_cli_supports_opencode_go_live_catalog():
         pytest.skip(f"installed hermes-agent {hermes_cli.__version__} predates v0.20.5")
     models_mod = pytest.importorskip("hermes_cli.models")
-    assert [model["id"] for model in _opencode_go_static_models()] == models_mod._PROVIDER_MODELS[
-        "opencode-go"
-    ]
+    installed = list(models_mod._PROVIDER_MODELS["opencode-go"])
+    if "ox-alpha-free" in installed:
+        pytest.skip(
+            "installed hermes-agent catalog predates core's 2026-09-09 sync "
+            "(still lists relay-delisted 'ox-alpha-free'); equality binds "
+            "once a release carrying that sync is installed"
+        )
+    assert [model["id"] for model in _opencode_go_static_models()] == installed
 
 
 def test_opencode_go_recent_additions_have_human_labels():
@@ -284,4 +298,5 @@ def test_opencode_go_recent_additions_have_human_labels():
     assert labels["grok-4.5"] == "Grok 4.5"
     assert labels["qwen3.8-max"] == "Qwen3.8 Max"
     assert labels["muse-spark-1.2-contributor"] == "Muse Spark 1.2 Contributor"
-    assert labels["ox-alpha-free"] == "Ox Alpha (Go)"
+    assert labels["muse-spark-1.3-contributor"] == "Muse Spark 1.3 Contributor"
+    assert labels["glm-5.3-flash"] == "GLM-5.3 Flash"
