@@ -29,6 +29,7 @@ from api.config import (
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
+    peek_stream,
     register_active_run,
     unregister_active_run,
     unregister_stream_owner,
@@ -919,7 +920,7 @@ def _run_gateway_chat_streaming(
     the configured Gateway API server into those local events and persists the
     final user/assistant turn back into the WebUI session.
     """
-    q = STREAMS.get(stream_id)
+    q = peek_stream(stream_id)
     if q is None:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)

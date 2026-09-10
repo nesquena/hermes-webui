@@ -507,10 +507,10 @@ def test_api_session_redacts_messages():
     """GET /api/session route must call redact_session_data() before returning."""
     import inspect
     import api.routes as routes
-    src = inspect.getsource(routes.handle_get)
+    src = inspect.getsource(routes._handle_session_get)
     # Verify redact_session_data is applied to the session payload
     assert "redact_session_data" in src, (
-        "api/routes.py handle_get must call redact_session_data() on /api/session response"
+        "api/routes.py GET /api/session handler must call redact_session_data() on the response"
     )
 
 

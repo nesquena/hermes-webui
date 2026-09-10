@@ -6,6 +6,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# state.db paths that already produced the "no 'source' column" warning below.
+# ``get_cli_sessions(all_profiles=True)`` re-reads every profile DB on every
+# sidebar poll (behind a 5 s cache), so a single pre-``source`` profile DB would
+# otherwise re-emit the identical WARNING line every ~15 s for the life of the
+# process. The condition is a property of the DB file, not of the poll, so it
+# is reported once per path. Process-lifetime only: a restart warns again,
+# which is the desired behaviour (the log line is the operator's cue that the
+# agent still needs upgrading). Plain ``set`` mutation under the GIL is
+# sufficient here; a duplicate line from two racing first calls is harmless.
+_SOURCE_COLUMN_WARNED_DB_PATHS: set[str] = set()
+
 
 def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
     """Open the live agent ``state.db`` read-only for a pure-read projection.
@@ -562,12 +573,15 @@ def read_importable_agent_session_rows(
         cur.execute("PRAGMA table_info(messages)")
         message_cols = {row[1] for row in cur.fetchall()}
         if 'source' not in session_cols:
-            log.warning(
-                "agent session listing skipped: state.db at %s has no 'source' column "
-                "(older hermes-agent?). Agent sessions unavailable. "
-                "Upgrade hermes-agent to fix this.",
-                db_path,
-            )
+            warned_key = str(db_path.resolve())
+            if warned_key not in _SOURCE_COLUMN_WARNED_DB_PATHS:
+                _SOURCE_COLUMN_WARNED_DB_PATHS.add(warned_key)
+                log.warning(
+                    "agent session listing skipped: state.db at %s has no 'source' column "
+                    "(older hermes-agent?). Agent sessions unavailable. "
+                    "Upgrade hermes-agent to fix this.",
+                    db_path,
+                )
             return []
 
         parent_expr = _optional_col('parent_session_id', session_cols)

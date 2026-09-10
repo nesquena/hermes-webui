@@ -1217,7 +1217,7 @@ function _cronAgentPromptCardHtml(job){
   return `<div class="detail-card">
         <div class="detail-card-title detail-card-title-row">
           <span>${esc(t('cron_prompt_label') || 'Prompt')}</span>
-          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded('${esc(job.id)}')" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
+          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded(${jsArg(job.id)})" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
         </div>
         <div class="detail-prompt ${promptExpanded ? 'expanded' : ''}">${esc(job.prompt || '')}</div>
       </div>`;
@@ -1366,11 +1366,11 @@ async function _loadCronDetailRuns(jobId, detailKey){
       const usageStrip = isScriptJob ? '' : _formatCronRunUsageStrip(run.usage);
       const runExpanded = _cronExpansionGet(_cronRunExpandKey(jobId, run.filename));
       const runToggleLabel = runExpanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
-      return `<div class="detail-run-item" id="${rid}">
-        <div class="detail-run-head" onclick="_loadRunContent('${esc(jobId)}','${esc(run.filename)}','${rid}')">
+      return `<div class="detail-run-item" id="${esc(rid)}">
+        <div class="detail-run-head" onclick="_loadRunContent(${jsArg(jobId)},${jsArg(run.filename)},${jsArg(rid)})">
           <span><span style="opacity:.7">${esc(ts)}</span> <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span>${usageStrip ? ` <span class="cron-run-usage-strip">${esc(usageStrip)}</span>` : ''}</span>
           <span class="detail-run-actions">
-            <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded('${esc(jobId)}','${esc(run.filename)}','${rid}')" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
+            <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded(${jsArg(jobId)},${jsArg(run.filename)},${jsArg(rid)})" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
             <span style="opacity:.6">▸</span>
           </span>
         </div>
@@ -1889,15 +1889,17 @@ function cancelCronForm(){
   _clearCronDetail();
 }
 
-function _cronModelBareName(model, provider) {
+function _modelBareNameForProvider(model, provider) {
   // Strip @provider: prefix from a model value when provider is stored separately.
-  // The model dropdown may contain values like "@custom:9router:chat" (from
-  // _apply_provider_prefix) but cron jobs store model and provider separately,
-  // so the model should be just "chat".
   if (model && provider && model.startsWith('@' + provider + ':')) {
     return model.slice(('@' + provider + ':').length);
   }
   return model;
+}
+
+function _cronModelBareName(model, provider) {
+  // Cron jobs store model and provider separately, just like auxiliary slots.
+  return _modelBareNameForProvider(model, provider);
 }
 
 async function saveCronForm(){
@@ -2211,7 +2213,7 @@ function _kanbanRenderSidebar(columns){
   }
   list.innerHTML = tasks.map(task => {
     const meta = _kanbanTaskMeta(task);
-    return `<button class="kanban-list-item" onclick="loadKanbanTask('${esc(task.id)}')">
+    return `<button class="kanban-list-item" onclick="loadKanbanTask(${jsArg(task.id)})">
       <span class="kanban-list-status">${esc(_kanbanColumnLabel(task.status))}</span>
       <span class="kanban-list-title">${esc(_kanbanTaskTitle(task))}</span>
       ${meta.length ? `<span class="kanban-meta">${esc(meta.join(' · '))}</span>` : ''}
@@ -2429,10 +2431,9 @@ function _kanbanCardStalenessClass(task){
 }
 
 function _kanbanCardQuickActions(task){
-  const id = esc(task.id || '');
   const status = task.status || '';
-  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','done')">${esc(t('kanban_card_complete'))}</button>` : '';
-  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,'${id}','archived')">${esc(t('kanban_card_archive'))}</button>` : '';
+  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,${jsArg(task.id)},'done')">${esc(t('kanban_card_complete'))}</button>` : '';
+  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,${jsArg(task.id)},'archived')">${esc(t('kanban_card_archive'))}</button>` : '';
   return `<div class="kanban-card-actions" onclick="event.stopPropagation()">${complete}${archive}</div>`;
 }
 
@@ -2515,7 +2516,7 @@ function _kanbanLaneNames(columns){
 
 function _kanbanRenderColumn(col){
   const tasks = col.tasks || [];
-  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, '${esc(col.name)}')">
+  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, ${jsArg(col.name)})">
       <div class="kanban-column-head">
         <span>${esc(_kanbanColumnLabel(col.name))}</span>
         <span class="kanban-count">${tasks.length}</span>
@@ -2583,7 +2584,7 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
-  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, ${jsArg(task.id)})" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, ${jsArg(task.id)})" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask(${jsArg(task.id)})}">
     <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
@@ -3092,14 +3093,6 @@ function _kanbanRunHtml(run){
   </div>`;
 }
 
-function _kanbanJsArg(s){
-  // Encode a value for safe interpolation inside an inline on* handler's JS
-  // string literal. JSON.stringify quotes/escapes for JS context; esc() then
-  // makes it safe inside the HTML attribute. Without this, a task id containing
-  // a quote breaks out of the handler (esc() alone is HTML-escaping, which the
-  // browser decodes BEFORE executing the inline handler). (#3797)
-  return esc(JSON.stringify(String(s == null ? '' : s)));
-}
 function _kanbanLinkableTaskOptions(excludeId){
   // Datalist of existing task ids (with title as the option label) so the
   // dependency field is a pick-from-real-tasks autocomplete rather than a blind
@@ -3124,7 +3117,7 @@ function _kanbanLinksHtml(links){
   const item = (id, isParent) => {
     const parentId = isParent ? id : taskId;
     const childId = isParent ? taskId : id;
-    return `<code>${esc(id)} <button class="btn mini" onclick="removeKanbanDependency(${_kanbanJsArg(parentId)},${_kanbanJsArg(childId)})" data-i18n="kanban_remove_dependency" title="${esc(t('kanban_remove_dependency') || 'Remove')}">✕</button></code>`;
+    return `<code>${esc(id)} <button class="btn mini" onclick="removeKanbanDependency(${jsArg(parentId)},${jsArg(childId)})" data-i18n="kanban_remove_dependency" title="${esc(t('kanban_remove_dependency') || 'Remove')}">✕</button></code>`;
   };
   const hasLinks = parents.length || children.length;
   return `<div class="kanban-detail-links-section">
@@ -3135,7 +3128,7 @@ function _kanbanLinksHtml(links){
     <div class="kanban-detail-links-controls">
       <input type="text" id="kanbanDependencyInput" class="kanban-detail-links-input" list="kanbanDependencyOptions" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_dependency_placeholder" placeholder="Task ID to link">
       <datalist id="kanbanDependencyOptions">${_kanbanLinkableTaskOptions(taskId)}</datalist>
-      <button class="btn secondary" onclick="addKanbanDependency(${_kanbanJsArg(taskId)})" data-i18n="kanban_add_dependency">Add dependency</button>
+      <button class="btn secondary" onclick="addKanbanDependency(${jsArg(taskId)})" data-i18n="kanban_add_dependency">Add dependency</button>
     </div>
   </div>`;
 }
@@ -3763,12 +3756,12 @@ function _kanbanRenderTaskDetail(data){
   // dashboard plugin's contract. UI users want to claim/promote a ready task
   // via the dispatcher Nudge button, not flip it to running by hand.
   const statusButtons = ['triage', 'todo', 'ready', 'blocked', 'done', 'archived'].map(status =>
-    `<button class="btn secondary" onclick="updateKanbanTask('${esc(task.id)}',{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
-  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask('${esc(task.id)}')">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask('${esc(task.id)}')">${esc(t('kanban_unblock'))}</button>`;
+    `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
+  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
       <button class="btn secondary kanban-back-btn" onclick="closeKanbanTaskDetail()">${esc(t('kanban_back_to_board'))}</button>
       <div class="kanban-task-preview-title">${esc(title)}</div>
-      <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit('${esc(task.id)}')" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
+      <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit(${jsArg(task.id)})" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
     </div>
     <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
@@ -3782,7 +3775,7 @@ function _kanbanRenderTaskDetail(data){
     </div>
     <div class="kanban-comment-form">
       <textarea id="kanbanCommentInput" rows="2" placeholder="${esc(t('kanban_add_comment'))}"></textarea>
-      <button class="btn primary" onclick="addKanbanComment('${esc(task.id)}')">${esc(t('kanban_add_comment'))}</button>
+      <button class="btn primary" onclick="addKanbanComment(${jsArg(task.id)})">${esc(t('kanban_add_comment'))}</button>
     </div>`;
 }
 
@@ -3972,7 +3965,7 @@ function _renderKanbanBoardMenu(boards, current){
     const icon = b.icon ? esc(b.icon) : '';
     const safeColor = _kanbanSafeColor(b.color);
     const colorStyle = safeColor ? `color:${safeColor}` : '';
-    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
+    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard(${jsArg(b.slug)})">
       <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
       <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
       <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
@@ -5374,13 +5367,13 @@ function _renderExternalNotesSources() {
           <div class="notes-source-card-head notes-ai-recent-head"><strong>${li('bot', 14)}${esc(t('external_notes_recent_ai'))}</strong><span class="detail-badge">${esc(t('external_notes_auto'))}</span></div>
           <div class="notes-ai-recent-list">${recentAiNotes.map(note => {
             const updated = note.updated_time ? new Date(Number(note.updated_time)).toLocaleString() : '';
-            return `<button type="button" class="notes-result-card notes-ai-recent-item" onclick="previewExternalNote('${esc(note.source||'joplin')}','${esc(note.id||'')}')"><strong>${esc(note.title||note.label||'Untitled')}</strong><span>${li('clock', 14)}${esc(note.label||t('external_notes_recent_ai_reason'))}${updated ? ` · ${esc(updated)}` : ''}</span></button>`;
+            return `<button type="button" class="notes-result-card notes-ai-recent-item" onclick="previewExternalNote(${jsArg(note.source||'joplin')},${jsArg(note.id||'')})"><strong>${esc(note.title||note.label||'Untitled')}</strong><span>${li('clock', 14)}${esc(note.label||t('external_notes_recent_ai_reason'))}${updated ? ` · ${esc(updated)}` : ''}</span></button>`;
           }).join('')}</div>
         </section>`
       : '';
     const searchError = _notesSearchError ? `<div class="detail-form-error">${esc(_notesSearchError)}</div>` : '';
     const resultHtml = _notesSearchResults.length
-      ? `<div class="notes-search-results">${_notesSearchResults.map(note => `<button type="button" class="notes-result-card" onclick="previewExternalNote('${esc(note.source||_notesSelectedSource)}','${esc(note.id||'')}')"><strong>${esc(note.title||'Untitled')}</strong>${note.snippet?`<span>${esc(note.snippet)}</span>`:''}</button>`).join('')}</div>`
+      ? `<div class="notes-search-results">${_notesSearchResults.map(note => `<button type="button" class="notes-result-card" onclick="previewExternalNote(${jsArg(note.source||_notesSelectedSource)},${jsArg(note.id||'')})"><strong>${esc(note.title||'Untitled')}</strong>${note.snippet?`<span>${esc(note.snippet)}</span>`:''}</button>`).join('')}</div>`
       : `<div class="memory-empty">${esc(t('external_notes_search_empty'))}</div>`;
     const previewHtml = _notesPreviewNote
       ? `<section class="notes-source-card notes-preview-card"><div class="notes-source-card-head"><strong>${esc(_notesPreviewNote.title||'Untitled')}</strong><span class="detail-badge">${esc(_notesPreviewNote.source||_notesSelectedSource)}</span></div><div class="memory-content preview-md">${renderMd(_notesPreviewNote.body||'')}</div></section>`
@@ -5832,9 +5825,11 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   const sc=searchRow.querySelector('.ws-search-clear');
   dd.appendChild(searchRow);
 
-  // ── Workspace list ──────────────────────────────────────────────────────
-  // Sort alphabetically by name (case-insensitive) before rendering.
-  const sorted=[...workspaces].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  // Render in the server's stored order — the same order shown in the
+  // Workspaces settings panel (user-controlled via drag-and-drop reorder,
+  // with the default "Home" workspace first). No client-side re-sorting.
+  // Shallow copy so later in-place mutations can't touch the caller's array.
+  const sorted=[...workspaces];
   const listContainer=document.createElement('div');
   listContainer.className='ws-list-container';
   dd.appendChild(listContainer);
@@ -12037,7 +12032,7 @@ async function loadPasskeys(){
     }
     const creds=(data&&data.credentials)||[];
     if(!creds.length){list.textContent='No passkeys registered.';return;}
-    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey('${esc(c.id)}')">Remove</button></div>`).join('');
+    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey(${jsArg(c.id)})">Remove</button></div>`).join('');
   }catch(e){list.textContent='Failed to load passkeys: '+e.message;}
 }
 
@@ -12333,17 +12328,25 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  const emptyOpt=document.createElement('option');
  emptyOpt.value='';emptyOpt.textContent=t('settings_aux_model_auto')||'auto (use provider default)';
  sel.appendChild(emptyOpt);
+ const canonicalCurrent=_modelBareNameForProvider(currentModel,provider)||'';
  if(!provider||provider==='auto'){
-  sel.value=currentModel||'';
-  return;
+  sel.value=canonicalCurrent;
+  return canonicalCurrent;
  }
  // Find matching provider in cached list
  const pData=providers.find(p=>p.slug===provider);
+ const modelValues=new Set();
  if(pData&&pData.models){
-  for(const mId of pData.models){
+  for(const modelEntry of pData.models){
+   const routeId=typeof modelEntry==='string'?modelEntry:String(modelEntry?.id||'');
+   const mId=_modelBareNameForProvider(routeId,provider)||'';
+   if(!mId||modelValues.has(mId)) continue;
+   modelValues.add(mId);
+   const routeLabel=typeof modelEntry==='string'?'':String(modelEntry?.label||'');
+   const modelLabel=_modelBareNameForProvider(routeLabel,provider)||mId;
    const opt=document.createElement('option');
-   opt.value=mId;opt.textContent=mId;
-   if(mId===currentModel) opt.selected=true;
+   opt.value=mId;opt.textContent=modelLabel;
+   if(mId===canonicalCurrent) opt.selected=true;
    sel.appendChild(opt);
   }
  }
@@ -12352,12 +12355,13 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
  sel.appendChild(customOpt);
  // If currentModel not in list and not empty, add it as a custom option
- if(currentModel&&!pData?.models?.includes(currentModel)){
+ if(canonicalCurrent&&!modelValues.has(canonicalCurrent)){
   const existingOpt=document.createElement('option');
-  existingOpt.value=currentModel;existingOpt.textContent=currentModel+' (configured)';
+  existingOpt.value=canonicalCurrent;existingOpt.textContent=canonicalCurrent+' (configured)';
   existingOpt.selected=true;
   sel.insertBefore(existingOpt,customOpt);
  }
+ return canonicalCurrent;
 }
 
 function _onAuxProviderChange(taskKey,providers){
@@ -12375,13 +12379,16 @@ async function _onAuxModelChange(taskKey){
  if(modelSel.value==='__custom__'){
   const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
   if(customModel&&customModel.trim()){
+   const provider=$('aux-prov-'+taskKey)?.value||'';
+   const enteredModel=customModel.trim();
+   const canonicalModel=_modelBareNameForProvider(enteredModel,provider)||enteredModel;
    // Insert custom model option before the __custom__ option
    const opt=document.createElement('option');
-   opt.value=customModel.trim();opt.textContent=customModel.trim();
+   opt.value=canonicalModel;opt.textContent=canonicalModel;
    // Remove __custom__ selection
    const customIdx=[...modelSel.options].findIndex(o=>o.value==='__custom__');
    if(customIdx>=0) modelSel.insertBefore(opt,modelSel.options[customIdx]);
-   modelSel.value=customModel.trim();
+   modelSel.value=canonicalModel;
   }else{
    modelSel.value='';
   }
@@ -12588,7 +12595,7 @@ async function _loadAuxiliaryModels(){
   _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
    slug:g.provider_id||g.provider,
    name:g.provider,
-   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
+   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>({id:m.id,label:m.label||m.id})),
   }));
   if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
    _mainAdvancedConfig=auxData.main||{};
@@ -12603,6 +12610,7 @@ async function _loadAuxiliaryModels(){
   _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
 
   container.innerHTML='';
+  let needsCanonicalSave=false;
   for(const task of _auxTasks){
    const cfg=taskMap[task.task]||{provider:'auto',model:''};
    const row=document.createElement('div');
@@ -12626,7 +12634,8 @@ async function _loadAuxiliaryModels(){
    const modelSel=document.createElement('select');
    modelSel.id='aux-model-'+task.task;
    modelSel.style.cssText=_auxSelectStyle();
-   _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   const canonicalModel=_buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   if(canonicalModel!==cfg.model) needsCanonicalSave=true;
    modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
    row.appendChild(modelSel);
 
@@ -12643,9 +12652,9 @@ async function _loadAuxiliaryModels(){
 
    container.appendChild(row);
   }
-  // Hide apply button (no changes yet)
+  // Matching legacy @provider:model values can be repaired with one explicit Apply.
   const applyBtn=$('btnApplyAuxModels');
-  if(applyBtn) applyBtn.style.display='none';
+  if(applyBtn) applyBtn.style.display=needsCanonicalSave?'':'none';
 
   // Reset button
   const resetBtn=$('btnResetAuxModels');
@@ -13271,7 +13280,7 @@ function loadMcpTools(){
 let _gatewayActionInFlight=false;
 function _gatewayActionButton(action){
   const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
-  return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction('${esc(action)}')" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
+  return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
 function _gatewayActionControls(r){
   const actions=(r&&r.running)?['stop','restart']:['start'];
@@ -13364,10 +13373,10 @@ async function _loadCheckpoints(workspace){
             </div>
           </div>
           <div style="display:flex;gap:4px;flex-shrink:0;margin-left:8px">
-            <button class="panel-head-btn" title="${esc(t('checkpoint_view_diff'))}" onclick="event.stopPropagation();_viewCheckpointDiff('${esc(workspace)}','${esc(ck.id)}')">
+            <button class="panel-head-btn" title="${esc(t('checkpoint_view_diff'))}" onclick="event.stopPropagation();_viewCheckpointDiff(${jsArg(workspace)},${jsArg(ck.id)})">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             </button>
-            <button class="panel-head-btn" title="${esc(t('checkpoint_restore'))}" onclick="event.stopPropagation();_restoreCheckpoint('${esc(workspace)}','${esc(ck.id)}','${esc(msg.replace(/'/g,"\\'"))}')">
+            <button class="panel-head-btn" title="${esc(t('checkpoint_restore'))}" onclick="event.stopPropagation();_restoreCheckpoint(${jsArg(workspace)},${jsArg(ck.id)},${jsArg(msg)})">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
             </button>
           </div>

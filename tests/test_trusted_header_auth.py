@@ -213,6 +213,100 @@ def test_group_map_prefers_mapping_order_over_header_order(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "raw_header, expected",
+    [
+        # Single group, no separator to parse.
+        ("admins", ["admins"]),
+        # Comma-separated (the format this parser originally supported).
+        ("admins,developpeur", ["admins", "developpeur"]),
+        # Newline-separated (already supported before this fix).
+        ("admins\ndeveloppeur", ["admins", "developpeur"]),
+        # Repeated/adjacent comma separators collapse instead of producing
+        # empty group names.
+        ("admins,,developpeur", ["admins", "developpeur"]),
+        # Surrounding and interior whitespace is trimmed per group.
+        ("admins, developpeur", ["admins", "developpeur"]),
+    ],
+)
+def test_trusted_groups_header_value_accepts_separator_variants(
+    monkeypatch, raw_header, expected
+):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups")
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR", raising=False)
+    handler = _Handler(headers={"Remote-User": "alice", "Remote-Groups": raw_header})
+
+    assert auth._trusted_groups_header_value(handler) == expected
+
+
+def test_trusted_groups_pipe_is_literal_by_default(monkeypatch):
+    """Without the opt-in, a '|' is part of the group NAME, not a separator.
+
+    This is the backward-compatibility guarantee: an existing deployment whose
+    group name legitimately contains a '|' must not be silently re-split into
+    two groups (which could change its profile binding)."""
+    _trusted_env(monkeypatch, groups_header="Remote-Groups")
+    monkeypatch.delenv("HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR", raising=False)
+    handler = _Handler(
+        headers={"Remote-User": "alice", "Remote-Groups": "admins|developpeur"}
+    )
+
+    assert auth._trusted_groups_header_value(handler) == ["admins|developpeur"]
+
+
+@pytest.mark.parametrize(
+    "raw_header, expected",
+    [
+        # Pipe-separated (this deployment's Authentik outpost format).
+        ("admins|developpeur", ["admins", "developpeur"]),
+        # Mixed separators in the same value.
+        ("admins,developpeur|it\nops", ["admins", "developpeur", "it", "ops"]),
+        # Repeated/adjacent pipe separators collapse instead of producing
+        # empty group names.
+        ("admins||developpeur", ["admins", "developpeur"]),
+        # Surrounding and interior whitespace is trimmed per group.
+        (" admins | developpeur ", ["admins", "developpeur"]),
+    ],
+)
+def test_trusted_groups_pipe_separator_opt_in(monkeypatch, raw_header, expected):
+    """With HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR set, '|' also splits."""
+    _trusted_env(monkeypatch, groups_header="Remote-Groups")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR", "1")
+    handler = _Handler(headers={"Remote-User": "alice", "Remote-Groups": raw_header})
+
+    assert auth._trusted_groups_header_value(handler) == expected
+
+
+def test_group_map_accepts_pipe_separated_header_value(monkeypatch):
+    # Some Authentik proxy provider / property mapping configs join multiple
+    # group names with "|" instead of ",". Regression case for the identity
+    # falling back to the unbound "default" profile despite being a member
+    # of a mapped group: a lone-membership identity works fine (no
+    # separator to parse), but a second group membership starts producing a
+    # pipe-joined header value that a comma-only split can't see through.
+    # Pipe splitting is opt-in, so this exercises the env flag explicitly.
+    #
+    # NOTE: this only covers the concrete-mapped-group case. The
+    # wildcard-mapped-group case (a "*" mapping value dominating a concrete
+    # one) is intentionally not exercised here — that precedence rule isn't
+    # implemented on this branch yet; it ships separately in #6798. See the
+    # PR description for the full scope note.
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups",
+        group_map={"hermes_devops": "devops"},
+    )
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_GROUPS_PIPE_SEPARATOR", "1")
+    handler = _Handler(
+        headers={"Remote-User": "alice", "Remote-Groups": "hermes_devops|other_group"}
+    )
+
+    info = auth.ensure_trusted_auth_session(handler)
+
+    assert info["bound_profile"] == "devops"
+    assert auth.trusted_session_allows_active_profile(info) is True
+
+
+@pytest.mark.parametrize(
     "group_map",
     [
         {"ops": "ops_profile", "": "admin"},
