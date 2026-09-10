@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import types
 
 import pytest
@@ -23,6 +24,195 @@ def _git(repo: Path, *args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+@pytest.fixture
+def changed_agent_checkout(monkeypatch, tmp_path):
+    """Exercise the real revision guard and scheduler without replacing a process."""
+    from api import agent_runtime, routes, updates
+
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    module_path = agent_root / "run_agent.py"
+    module_path.write_text("class AIAgent: pass\n", encoding="utf-8")
+    _git(agent_root, "init", "-q")
+    _git(agent_root, "add", "run_agent.py")
+    _git(agent_root, "commit", "-qm", "loaded")
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_MODULE_PATH", module_path)
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", _git(agent_root, "rev-parse", "HEAD"))
+    module_path.write_text("class AIAgent: revision = 'changed'\n", encoding="utf-8")
+    _git(agent_root, "commit", "-qam", "changed")
+
+    hermes_home = tmp_path / "home"
+    hermes_home.mkdir()
+    venv_root = tmp_path / "separate-install"
+    (venv_root / "venv" / "bin").mkdir(parents=True)
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", venv_root / "venv" / "bin" / "python")
+    workers = []
+
+    class CapturedThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+
+        def start(self):
+            workers.append(self.target)
+
+    monkeypatch.setattr(updates, "threading", types.SimpleNamespace(Thread=CapturedThread))
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
+    monkeypatch.setattr(
+        routes, "j",
+        lambda _handler, payload, status=200: {"status": status, "payload": payload},
+    )
+
+    def no_session_mutation(*_args, **_kwargs):
+        pytest.fail("stale runtime reached session materialization")
+
+    monkeypatch.setattr(routes, "_get_or_materialize_session", no_session_mutation)
+    return types.SimpleNamespace(
+        root=agent_root, home=hermes_home, venv_root=venv_root, workers=workers,
+        request=lambda: routes._handle_chat_start(object(), {"session_id": "stale-session"}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("marker_state", "diagnostic"),
+    [
+        ("absent", "unverified"),
+        ("failed-exit", "unverified"),
+        ("interrupted-exit", "unverified"),
+        ("active", "active"),
+        ("dead", "stale"),
+        ("over-age", "stale"),
+        ("malformed", "unknown"),
+        ("invalid-encoding", "unknown"),
+        ("future", "unknown"),
+        ("nonfinite", "unknown"),
+        ("oversized-pid", "unknown"),
+        ("dangling", "unknown"),
+        ("unreadable", "unknown"),
+        ("update-incomplete", "incomplete"),
+        ("lazy-refresh-incomplete", "incomplete"),
+        ("separate-venv-incomplete", "incomplete"),
+        ("symlink-venv-incomplete", "incomplete"),
+    ],
+)
+def test_unverified_update_keeps_manual_409_without_restart(
+    changed_agent_checkout, marker_state, diagnostic,
+):
+    """Readable HEAD and lifecycle markers never authorize process replacement."""
+    checkout = changed_agent_checkout
+    marker = checkout.home / ".hermes-update-in-progress"
+    if marker_state in {"active", "failed-exit", "interrupted-exit"}:
+        marker.write_text(f"{os.getpid()}\n{time.time()}\n", encoding="utf-8")
+        if marker_state != "active":
+            marker.unlink()  # Agent removes its marker on failed/interrupted exits.
+    elif marker_state == "dead":
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait(timeout=10)
+        marker.write_text(f"{process.pid}\n{time.time()}\n", encoding="utf-8")
+    elif marker_state == "over-age":
+        marker.write_text(f"{os.getpid()}\n{time.time() - 86400}\n", encoding="utf-8")
+    elif marker_state == "malformed":
+        marker.write_text("not-a-pid\nnot-a-time\n", encoding="utf-8")
+    elif marker_state == "invalid-encoding":
+        marker.write_bytes(b"\xff\xfe")
+    elif marker_state == "oversized-pid":
+        marker.write_text(f"{2 ** 100}\n{time.time()}\n", encoding="utf-8")
+    elif marker_state in {"future", "nonfinite"}:
+        timestamp = time.time() + 86400 if marker_state == "future" else "nan"
+        marker.write_text(f"{os.getpid()}\n{timestamp}\n", encoding="utf-8")
+    elif marker_state == "dangling":
+        marker.symlink_to(checkout.home / "missing")
+    elif marker_state == "unreadable":
+        marker.mkdir()
+    elif marker_state in {"update-incomplete", "lazy-refresh-incomplete"}:
+        (checkout.root / f".{marker_state}").touch()
+    elif marker_state == "separate-venv-incomplete":
+        (checkout.venv_root / ".update-incomplete").touch()
+    elif marker_state == "symlink-venv-incomplete":
+        (checkout.venv_root / "venv/bin/python").symlink_to(sys.executable)
+        (checkout.venv_root / ".update-incomplete").touch()
+
+    response = checkout.request()
+
+    assert checkout.workers == [], "revision mismatch scheduled an automatic restart"
+    assert response["status"] == 409
+    payload = response["payload"]
+    assert payload["type"] == "agent_runtime_stale"
+    assert payload["retryable"] is True
+    assert payload["restart_scheduled"] is False
+    assert payload["agent_update_state"] == diagnostic
+    assert "Restart Hermes WebUI manually" in payload["error"]
+    assert "success" not in payload["error"].lower()
+
+
+def test_final_read_cannot_authorize_restart_without_atomic_handoff(
+    monkeypatch, changed_agent_checkout,
+):
+    """An updater can acquire its marker after a read; no worker may be queued."""
+    from api import agent_runtime
+
+    checkout = changed_agent_checkout
+    read_revision = agent_runtime._read_agent_revision
+    marker = checkout.home / ".hermes-update-in-progress"
+    revision_reads = []
+
+    def read_then_start_update(*args, **kwargs):
+        revision = read_revision(*args, **kwargs)
+        revision_reads.append(revision)
+        marker.write_text(f"{os.getpid()}\n{time.time()}\n", encoding="utf-8")
+        return revision
+
+    monkeypatch.setattr(agent_runtime, "_read_agent_revision", read_then_start_update)
+    response = checkout.request()
+
+    assert checkout.workers == [], "an unprotected read authorized automatic restart"
+    assert revision_reads == [_git(checkout.root, "rev-parse", "HEAD")]
+    assert marker.is_file()
+    assert response["status"] == 409
+    assert response["payload"]["restart_scheduled"] is False
+
+
+@pytest.mark.parametrize("response_kind", ["http-error", "raised-error"])
+def test_async_compression_preserves_manual_restart_diagnostics(
+    monkeypatch, changed_agent_checkout, response_kind,
+):
+    """The real guard reaches the job's terminal error and repeated status reads."""
+    from api import agent_runtime, helpers, routes
+
+    checkout = changed_agent_checkout
+    sid = "stale-compression"
+    (checkout.root / ".update-incomplete").touch()
+    monkeypatch.setattr(routes, "get_session", lambda _sid: None)
+    monkeypatch.setattr(routes, "_MANUAL_COMPRESSION_JOBS", {
+        sid: {"session_id": sid, "status": "running", "updated_at": time.time()},
+    })
+
+    def compress(handler, _body):
+        try:
+            agent_runtime.ensure_agent_runtime_current()
+        except agent_runtime.AgentRuntimeChangedError as exc:
+            if response_kind == "raised-error":
+                raise
+            helpers.j(handler, agent_runtime.agent_runtime_stale_payload(exc), status=409)
+
+    monkeypatch.setattr(routes, "_handle_session_compress", compress)
+    routes._run_manual_compression_job(sid, {"session_id": sid})
+
+    for _ in range(2):
+        response = routes._handle_session_compress_status(object(), sid)
+        payload = response["payload"]
+        assert payload["status"] == "error"
+        assert payload["error_status"] == 409
+        assert payload["type"] == "agent_runtime_stale"
+        assert payload["retryable"] is True
+        assert payload["restart_scheduled"] is False
+        assert payload["agent_update_state"] == "incomplete"
+        assert "Restart Hermes WebUI manually" in payload["error"]
+    assert checkout.workers == []
 
 
 def test_loaded_agent_runtime_fails_closed_after_source_revision_changes(tmp_path: Path):
@@ -85,14 +275,14 @@ try:
 except RuntimeError as exc:
     message = str(exc)
     assert "Hermes Agent was updated" in message
-    assert "Restart Hermes WebUI" in message
+    assert "Restart Hermes WebUI manually" in message
 else:
     raise AssertionError("stale in-process AIAgent was reused after its source revision changed")
 
 try:
     agent_runtime.require_ai_agent_class()
 except agent_runtime.AgentRuntimeChangedError as exc:
-    assert "Restart Hermes WebUI" in str(exc)
+    assert "Restart Hermes WebUI manually" in str(exc)
 else:
     raise AssertionError("unguarded AIAgent import was allowed after its source revision changed")
 """.strip()
@@ -247,6 +437,83 @@ def test_known_revision_becoming_unreadable_fails_closed(monkeypatch):
         agent_runtime.ensure_agent_runtime_current()
 
 
+def test_live_agent_update_marker_reports_active(monkeypatch, tmp_path):
+    """A fresh marker owned by a live PID means the Agent update is active."""
+    from api import agent_runtime
+
+    hermes_home = tmp_path / "hermes-home"
+    agent_root = tmp_path / "hermes-agent"
+    hermes_home.mkdir()
+    agent_root.mkdir()
+    (hermes_home / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+
+    assert agent_runtime._agent_update_transaction_state() == "active"
+
+
+def test_dead_or_over_age_agent_update_marker_is_stale(monkeypatch, tmp_path):
+    """A dead or over-age owner does not prove update completion."""
+    from api import agent_runtime
+
+    hermes_home = tmp_path / "hermes-home"
+    agent_root = tmp_path / "hermes-agent"
+    hermes_home.mkdir()
+    agent_root.mkdir()
+    marker = hermes_home / ".hermes-update-in-progress"
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+
+    marker.write_text(f"99999999\n{time.time()}\n", encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "_pid_is_alive", lambda _pid: False)
+    assert agent_runtime._agent_update_transaction_state() == "stale"
+
+    marker.write_text(
+        f"{os.getpid()}\n{time.time() - agent_runtime._AGENT_UPDATE_MAX_AGE_SECONDS - 1}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_runtime, "_pid_is_alive", lambda _pid: True)
+    assert agent_runtime._agent_update_transaction_state() == "stale"
+
+
+@pytest.mark.parametrize(
+    "marker_name",
+    [".update-incomplete", ".lazy-refresh-incomplete"],
+)
+def test_agent_recovery_markers_block_automatic_restart(
+    monkeypatch, tmp_path, marker_name
+):
+    """Agent recovery markers report an incomplete environment."""
+    from api import agent_runtime
+
+    hermes_home = tmp_path / "hermes-home"
+    agent_root = tmp_path / "hermes-agent"
+    hermes_home.mkdir()
+    agent_root.mkdir()
+    (agent_root / marker_name).write_text("incomplete\n", encoding="utf-8")
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", hermes_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+
+    assert agent_runtime._agent_update_transaction_state() == "incomplete"
+
+
+def test_unreadable_agent_update_state_fails_closed(monkeypatch):
+    """An unreadable marker is unknown, never proof that restart is safe."""
+    from api import agent_runtime
+
+    class UnreadableMarker:
+        def read_text(self, **_kwargs):
+            raise PermissionError("denied")
+
+    assert agent_runtime._read_live_agent_update(UnreadableMarker()) == "unknown"
+
+
 def test_import_recapture_cannot_downgrade_known_revision(monkeypatch, tmp_path: Path):
     """A second unreadable revision read must not erase a known identity."""
     from api import agent_runtime
@@ -352,6 +619,7 @@ def test_runner_flag_does_not_bypass_webui_owned_hidden_turns(monkeypatch):
         "error": "restart required",
         "type": "agent_runtime_stale",
         "retryable": True,
+        "restart_scheduled": False,
     }
 
 
@@ -385,6 +653,7 @@ def test_chat_start_rejects_stale_runtime_before_session_materialization(monkeyp
             "error": "restart required",
             "type": "agent_runtime_stale",
             "retryable": True,
+            "restart_scheduled": False,
         },
     }
 
@@ -583,6 +852,7 @@ def test_git_commit_message_stale_runtime_returns_typed_409(
             "error": "restart required",
             "type": "agent_runtime_stale",
             "retryable": True,
+            "restart_scheduled": False,
         },
     }
 
@@ -688,6 +958,7 @@ def test_server_side_turn_rejects_stale_runtime_before_session_acceptance(monkey
             "error": "restart required",
             "type": "agent_runtime_stale",
             "retryable": True,
+            "restart_scheduled": False,
         },
     )
     monkeypatch.setattr(
@@ -704,5 +975,6 @@ def test_server_side_turn_rejects_stale_runtime_before_session_acceptance(monkey
         "error": "restart required",
         "type": "agent_runtime_stale",
         "retryable": True,
+        "restart_scheduled": False,
         "_status": 409,
     }
