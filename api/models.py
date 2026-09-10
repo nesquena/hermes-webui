@@ -2162,6 +2162,10 @@ class Session:
             'transcript_generation_baseline': self.transcript_generation_baseline,
             'pinned': self.pinned,
             'archived': self.archived,
+            # An opaque, durable marker set only when /clear removed an existing
+            # transcript. The boot client uses it to distinguish a deliberately
+            # cleared empty session from an unstarted scratch session.
+            'clear_generation': self.clear_generation,
             'project_id': self.project_id,
             'profile': self.profile,
             'input_tokens': self.input_tokens,
