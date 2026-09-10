@@ -40,10 +40,20 @@ _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
 # Anything larger is not a legitimate marker; cap the read so a huge or growing
 # regular file can never exhaust memory on the stale-runtime request path.
 _AGENT_UPDATE_MARKER_MAX_BYTES = 64 * 1024
-# O_NOFOLLOW is POSIX; on platforms that lack it (e.g. some Windows builds) fall
-# back to 0 so the open still succeeds — the fstat regular-file check below is
-# the portable backstop.
+# O_NOFOLLOW is POSIX; on platforms that lack it the fast os.open() path is not
+# taken at all (see _MARKER_SAFE_OPEN_AVAILABLE below).
+# The marker read hardening relies on two POSIX-only open flags to stay both
+# non-blocking (never hang on a FIFO/device) and symlink-safe. O_NONBLOCK is
+# Unix-only and O_NOFOLLOW is absent on some platforms; accessing them
+# unconditionally raises AttributeError on native Windows. Resolve them safely
+# and only take the os.open() fast path when BOTH are genuinely available —
+# otherwise the read cannot prove non-blocking + no-follow and must fall back to
+# an lstat-only classification (see _read_live_agent_update).
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_MARKER_SAFE_OPEN_AVAILABLE = bool(getattr(os, "O_NOFOLLOW", 0)) and bool(
+    getattr(os, "O_NONBLOCK", 0)
+)
 _HERMES_HOME = Path(_DEFAULT_STATE_HOME)
 _AGENT_PYTHON = Path(PYTHON_EXE).expanduser() if PYTHON_EXE else None
 
@@ -216,8 +226,20 @@ def _read_live_agent_update(marker: Path) -> str:
     Anything that is not a small regular file is classified ``unknown`` rather
     than allowed to hang or exhaust memory on a stale-runtime request path.
     """
+    if not _MARKER_SAFE_OPEN_AVAILABLE:
+        # Without both O_NONBLOCK and O_NOFOLLOW we cannot prove the read is
+        # non-blocking and symlink-safe (e.g. native Windows), so never open the
+        # marker: an unverifiable marker fails closed to ``unknown``, and only a
+        # genuinely missing path is ``absent``.
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            return "absent"
+        except (OSError, ValueError, TypeError):
+            return "unknown"
+        return "unknown"
     try:
-        fd = os.open(marker, os.O_RDONLY | os.O_NONBLOCK | _O_NOFOLLOW)
+        fd = os.open(marker, os.O_RDONLY | _O_NONBLOCK | _O_NOFOLLOW)
     except FileNotFoundError:
         try:
             marker.lstat()

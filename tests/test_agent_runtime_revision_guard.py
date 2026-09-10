@@ -381,6 +381,35 @@ def test_read_live_agent_update_still_classifies_valid_markers(tmp_path: Path):
     assert agent_runtime._read_live_agent_update(tmp_path / "absent") == "absent"
 
 
+def test_read_live_agent_update_windows_fallback_never_opens_marker(
+    tmp_path: Path, monkeypatch
+):
+    """When the atomic open flags are unavailable (e.g. native Windows), the
+    read must not call os.open (which would raise on a missing O_NONBLOCK) and
+    must fail closed: missing -> absent, anything present -> unknown.
+
+    Regression guard for the portability CORE: os.O_NONBLOCK is Unix-only, so
+    the fast path must be gated on both flags being present.
+    """
+    from api import agent_runtime
+
+    monkeypatch.setattr(agent_runtime, "_MARKER_SAFE_OPEN_AVAILABLE", False)
+
+    def _boom(*_a, **_k):  # os.open must never be reached on the fallback path
+        raise AssertionError("os.open called despite unavailable atomic flags")
+
+    monkeypatch.setattr(agent_runtime.os, "open", _boom)
+
+    # A present, otherwise-valid marker is unverifiable without the safe open →
+    # classified unknown (never active/absent), and does not raise.
+    present = tmp_path / "present-marker"
+    present.write_text(f"{os.getpid()}\n{time.time()}\n", encoding="utf-8")
+    assert agent_runtime._read_live_agent_update(present) == "unknown"
+
+    # A genuinely missing marker is still absent.
+    assert agent_runtime._read_live_agent_update(tmp_path / "missing") == "absent"
+
+
 def test_initial_non_git_source_preserves_supported_runtime(monkeypatch):
     """Non-Git installs cannot be compared, so they preserve existing behavior."""
     from api import agent_runtime
