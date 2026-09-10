@@ -351,6 +351,13 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+// Disabled skills are excluded from the backend skill-command map, so the slash
+// picker surfaces must agree. Single gate for every place that turns /api/skills
+// entries into selectable completions.
+function _isSkillDisabled(skill){
+  return !!(skill&&skill.disabled);
+}
+
 async function _loadSlashSkillSubArgs(force=false){
   if(_slashSkillCache&&!force) return _slashSkillCache;
   if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
@@ -359,6 +366,7 @@ async function _loadSlashSkillSubArgs(force=false){
       const data=await api('/api/skills');
       const values=[];
       for(const skill of (data&&data.skills)||[]){
+        if(_isSkillDisabled(skill)) continue;
         const name=_normalizeSlashSubArg(skill&&skill.name);
         if(name) values.push(name);
       }
@@ -2096,6 +2104,7 @@ function _getReservedSlashCommandSlugs(){
   return reserved;
 }
 function _buildSkillCommandEntry(skill){
+  if(_isSkillDisabled(skill))return null;
   const skillName=String(skill&&skill.name||'').trim();
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
