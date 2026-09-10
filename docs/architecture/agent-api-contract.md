@@ -99,13 +99,27 @@ an identity from it must agree on one representation:
 - The multimodal mirror bridge pairs one rich image-bearing row with one scalar
   mirror only. `require_image_parts` and `require_scalar_mirror` are mutually
   exclusive so rich-to-rich pairing cannot occur.
-- Both prefix-key projections
-  (`get_state_db_session_message_keys_before_timestamp` and
-  `get_state_db_session_message_prefix_summary`) apply the same decoder as the
-  projected tail. If prefix keys stayed encoded while the tail was decoded, the
+- Every read path that projects the `content` column applies the decoder, so
+  keys derived on one path cannot disagree with keys derived on another. There
+  are exactly three such call sites:
+
+  | Call site | Role |
+  | --- | --- |
+  | `_project_state_db_message()` | canonical row projection, shared by the transcript read and the regeneration tail |
+  | `get_state_db_session_message_keys_before_timestamp()` | bounded prefix keys |
+  | `get_state_db_regeneration_tail_snapshot()` | regeneration prefix keys |
+
+  If prefix keys stayed encoded while the projected tail was decoded, the
   prefix/tail collision proof could miss a genuine repeated recovered turn and
   `_bounded_tail_snapshot_if_safe` would reject the bounded path, reading the
   entire transcript during regeneration.
+
+  Two nearby paths deliberately need no decode.
+  `get_state_db_session_message_prefix_summary()` projects only timestamp
+  counts and never selects `content`. State-db sidecar reconstruction
+  (`_sync_sidecar_from_state_db_if_newer()`) sources its rows through
+  `get_state_db_session_messages()`, so it inherits the canonical decoded
+  projection rather than reading the column itself.
 
 When session state moves behind hermes-agent endpoints, this decode should move
 with it: the agent should return structured content over the API and the WebUI
