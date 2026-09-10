@@ -234,7 +234,8 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Directory tree with expand/collapse (single-click toggles, double-click navigates)
 - Breadcrumb navigation with clickable path segments
 - Preview text, code, Markdown (rendered), and images inline
-- Chat links using `workspace://path/to/file` open files in the right-side preview pane
+- Chat links using `[label](workspace://relative/path/to/file.ext)` open files in the right-side preview pane. WebUI guides the agent to percent-encode path segments, including spaces, parentheses, and literal `%`.
+- For file access, the agent can use an existing download URL or `[label](file:///absolute/path/to/file.ext)`. Absolute file links remain subject to media-serving restrictions and may preview supported types instead of downloading. If access is denied or unknown, the agent shows the path in backticks. `MEDIA:` delivery and links inside authored files are unchanged.
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
