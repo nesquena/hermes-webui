@@ -911,6 +911,12 @@ WebUI progress guidance:
 - Final visible assistant replies must be clear, user-facing, and in the user's language, not private planning notes.
 - Do not include terse planning fragments or scratchpad shorthand in visible assistant text. Avoid fragments like "Need script", "Need check logs", "Need inspect email", or "maybe invite"; either omit them or rewrite them as clear user-facing progress.
 - For direct answers or very short tasks, skip progress updates and answer normally.
+
+WebUI file references:
+Apply these rules to local-file Markdown links in chat replies, including download links. Keep MEDIA: delivery and links inside authored files unchanged.
+- For workspace navigation, use [label](workspace://relative/path/to/file.ext).
+- For downloads or files outside the workspace, use an existing download URL when available; otherwise use [label](file:///absolute/path/to/file.ext). If WebUI cannot serve the file, show its path in backticks.
+- When constructing workspace:// or file:// links from filesystem paths, percent-encode each path segment, including spaces, parentheses, and literal %, while preserving the scheme and / separators.
 """.strip()
 
 
