@@ -307,3 +307,95 @@ def test_turn_identity_binder_sets_ui_session_id():
         assert sc._SESSION_UI_SESSION_ID.get() == "webui-sid-42"
         assert sc.get_session_env("HERMES_UI_SESSION_ID", "") == "webui-sid-42"
     assert sc._SESSION_UI_SESSION_ID.get() is sc._UNSET
+
+
+# ---------------------------------------------------------------------------
+# Per-turn workspace cwd — the agent runs IN-PROCESS, so os.getcwd() is the
+# server's launch dir, not the user's selected workspace
+# ---------------------------------------------------------------------------
+
+def test_turn_identity_binder_sets_session_cwd():
+    """The binder must pin ``agent.runtime_cwd._SESSION_CWD`` to the turn's
+    workspace, and restore ``_UNSET`` on exit.
+
+    The WebUI runs the agent in-process, so any consumer resolving a default
+    working directory from the process sees the server's launch directory. That
+    is the Hermes install tree in a normal deployment, which is never a
+    workspace. ``TERMINAL_CWD`` is already stamped per turn for this purpose but
+    is a process-global that concurrent turns overwrite, so routing must use the
+    task-local contextvar for the same reason session-key routing does.
+
+    Pre-fix: the binder ignored the workspace entirely and ``_SESSION_CWD``
+    stayed ``_UNSET`` for the whole turn (RED).
+    """
+    streaming = importlib.import_module("api.streaming")
+    pytest.importorskip("agent.runtime_cwd", reason="hermes-agent not installed")
+    from agent import runtime_cwd as rc
+
+    assert rc._SESSION_CWD.get() is rc._UNSET
+    tokens = streaming._set_turn_session_identity("sid-cwd-1", workspace="/tmp")
+    try:
+        assert "session_cwd" in tokens, (
+            "binder ignored the workspace: _SESSION_CWD was never bound, so an "
+            "in-process agent still resolves the server's launch directory"
+        )
+        assert rc._SESSION_CWD.get() == "/tmp"
+        assert rc._session_cwd_override() == "/tmp"
+        assert str(rc.resolve_agent_cwd()) == "/tmp"
+    finally:
+        streaming._reset_turn_session_identity(tokens)
+    # Reset-token semantics, not a blanket clear: _UNSET (never "") so a reused
+    # thread-pool worker leaks no cwd and CLI/cron env fallback resumes.
+    assert rc._SESSION_CWD.get() is rc._UNSET
+
+
+def test_turn_identity_binder_omits_session_cwd_without_a_workspace():
+    """No workspace means no cwd binding, so non-workspace callers are unchanged."""
+    streaming = importlib.import_module("api.streaming")
+    pytest.importorskip("agent.runtime_cwd", reason="hermes-agent not installed")
+    from agent import runtime_cwd as rc
+
+    tokens = streaming._set_turn_session_identity("sid-cwd-2")
+    try:
+        assert "session_cwd" not in tokens
+        assert rc._SESSION_CWD.get() is rc._UNSET
+    finally:
+        streaming._reset_turn_session_identity(tokens)
+
+
+def test_concurrent_turns_keep_their_own_workspace_cwd():
+    """Two concurrent turns must not see each other's workspace.
+
+    This is the same invariant as the session-key race above, one variable over:
+    ``TERMINAL_CWD`` is a process-global the WebUI mutates per turn and restores
+    afterwards, so an overlapping turn leaves another session's workspace in it.
+    The contextvar binding is task-local and must therefore win.
+    """
+    streaming = importlib.import_module("api.streaming")
+    pytest.importorskip("agent.runtime_cwd", reason="hermes-agent not installed")
+    from agent import runtime_cwd as rc
+
+    seen: dict[str, str] = {}
+    barrier = threading.Barrier(2)
+
+    def turn(label: str, ws: str) -> None:
+        tokens = streaming._set_turn_session_identity(f"sid-{label}", workspace=ws)
+        try:
+            # Both turns are now bound; each must still read its OWN workspace.
+            barrier.wait(timeout=5)
+            seen[label] = rc._session_cwd_override()
+        finally:
+            streaming._reset_turn_session_identity(tokens)
+
+    threads = [
+        threading.Thread(target=turn, args=("A", "/tmp")),
+        threading.Thread(target=turn, args=("B", "/var/tmp")),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert seen.get("A") == "/tmp", f"turn A saw {seen.get('A')!r}"
+    assert seen.get("B") == "/var/tmp", f"turn B saw {seen.get('B')!r}"
+    assert rc._SESSION_CWD.get() is rc._UNSET
