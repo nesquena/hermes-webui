@@ -1,8 +1,10 @@
 """Behavioral coverage for the shared chat-start admission transaction."""
 
+import copy
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,7 @@ def transaction_env(tmp_path, monkeypatch):
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db")
     monkeypatch.setattr(config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
     monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "eager"}})
     monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: config.get_webui_session_save_mode(config.cfg))
@@ -61,6 +64,49 @@ def _users(session):
     return [row for row in session.messages if row.get("role") == "user"]
 
 
+def _regeneration_session(transaction_env, *, backup_state="six"):
+    session = new_session(workspace=str(transaction_env.parent), profile="profile-a")
+    rows = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "second answer"},
+        {"role": "user", "content": "third"},
+        {"role": "assistant", "content": "third answer"},
+    ]
+    session.messages = copy.deepcopy(rows)
+    session.context_messages = copy.deepcopy(rows)
+    session.save(touch_updated_at=False)
+    session.messages = copy.deepcopy(rows[:4])
+    session.context_messages = copy.deepcopy(rows[:4])
+    session.save(touch_updated_at=False)
+    backup = session.path.with_suffix(".json.bak")
+    if backup_state == "absent":
+        backup.unlink()
+    elif backup_state == "empty":
+        backup.write_bytes(b"")
+    return session
+
+
+def _rejected_regeneration(session, monkeypatch, worker_calls=None):
+    from api.session_ops import plan_regeneration
+
+    plan = plan_regeneration(session)
+    monkeypatch.setattr(
+        threading.Thread,
+        "start",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("thread start rejected")),
+    )
+    if worker_calls is not None:
+        monkeypatch.setattr(
+            routes,
+            "_run_agent_streaming",
+            lambda *args, **kwargs: worker_calls.append((args, kwargs)),
+        )
+    with pytest.raises(RuntimeError, match="thread start rejected"):
+        _start(session, regeneration=plan.turn)
+
+
 def test_eager_rejected_start_retry_reload_has_one_user_prompt(transaction_env, monkeypatch):
     session = new_session(workspace=str(transaction_env.parent))
     original_thread_start = threading.Thread.start
@@ -98,9 +144,15 @@ def test_fresh_session_thread_start_failure_removes_sidecar_and_index(transactio
 
 
 def test_rejected_start_preserves_persisted_composer_draft(transaction_env, monkeypatch):
+    events = []
     session = new_session(workspace=str(transaction_env.parent))
     session.composer_draft = {"text": "keep this draft", "files": []}
     session.save(touch_updated_at=False, skip_index=True)
+    monkeypatch.setattr(
+        routes,
+        "publish_session_list_changed",
+        lambda *args, **kwargs: events.append((args, kwargs)),
+    )
     monkeypatch.setattr(
         threading.Thread,
         "start",
@@ -113,6 +165,7 @@ def test_rejected_start_preserves_persisted_composer_draft(transaction_env, monk
     reloaded = models.Session.load(session.session_id)
     assert reloaded.composer_draft == {"text": "keep this draft", "files": []}
     assert _users(reloaded) == []
+    assert events == []
 
 
 def test_rejected_first_send_preserves_preexisting_empty_sidecar_and_index(transaction_env, monkeypatch):
@@ -161,6 +214,252 @@ def test_rejected_start_does_not_leave_rejected_prompt_in_sidecar_backup(transac
 
     assert backup.read_bytes() == before_backup
     assert "retry me" not in backup.read_text(encoding="utf-8")
+
+
+def test_rejected_regeneration_restores_backup_before_image_and_index(transaction_env, monkeypatch):
+    session = _regeneration_session(transaction_env)
+    before_sidecar = session.path.read_bytes()
+    backup = session.path.with_suffix(".json.bak")
+    before_backup = backup.read_bytes()
+    before_index = models.SESSION_INDEX_FILE.read_bytes()
+    worker_calls = []
+
+    _rejected_regeneration(session, monkeypatch, worker_calls)
+
+    assert session.path.read_bytes() == before_sidecar
+    assert backup.read_bytes() == before_backup
+    assert models.SESSION_INDEX_FILE.read_bytes() == before_index
+    assert worker_calls == []
+
+
+@pytest.mark.parametrize("backup_state", ["absent", "empty"])
+def test_rejected_regeneration_restores_backup_physical_prestate(
+    transaction_env, monkeypatch, backup_state
+):
+    session = _regeneration_session(transaction_env, backup_state=backup_state)
+    before_sidecar = session.path.read_bytes()
+    before_index = models.SESSION_INDEX_FILE.read_bytes()
+    backup = session.path.with_suffix(".json.bak")
+
+    _rejected_regeneration(session, monkeypatch)
+
+    assert session.path.read_bytes() == before_sidecar
+    assert models.SESSION_INDEX_FILE.read_bytes() == before_index
+    if backup_state == "absent":
+        assert not backup.exists()
+    else:
+        assert backup.exists()
+        assert backup.read_bytes() == b""
+
+
+def test_successful_regeneration_keeps_normal_backup_rotation(transaction_env, monkeypatch):
+    from api.session_ops import plan_regeneration
+
+    session = _regeneration_session(transaction_env)
+    before_sidecar = session.path.read_bytes()
+    plan = plan_regeneration(session)
+    worker_done = threading.Event()
+    monkeypatch.setattr(routes, "_run_agent_streaming", lambda *args, **kwargs: worker_done.set())
+
+    result = _start(session, regeneration=plan.turn)
+
+    assert result["session_id"] == session.session_id
+    assert worker_done.wait(2)
+    assert len(session.messages) == 3
+    assert session.path.with_suffix(".json.bak").read_bytes() == before_sidecar
+
+
+def test_backup_restore_runs_after_sidecar_compensation_failure(transaction_env, monkeypatch):
+    from api.session_ops import plan_regeneration
+
+    session = _regeneration_session(transaction_env)
+    plan = plan_regeneration(session)
+    backup = session.path.with_suffix(".json.bak")
+    replace_calls = []
+    real_replace = models._safe_replace
+
+    def fail_backup_restore(source, destination):
+        replace_calls.append((Path(source), Path(destination)))
+        if Path(destination) == backup and sum(dst == backup for _, dst in replace_calls) == 2:
+            raise OSError("backup restore failed")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(models, "_safe_replace", fail_backup_restore)
+    real_save = models.Session.save
+    save_calls = []
+
+    def fail_sidecar_compensation(self, *args, **kwargs):
+        save_calls.append(kwargs)
+        if len(save_calls) == 1:
+            return real_save(self, *args, **kwargs)
+        raise OSError("sidecar compensation failed")
+
+    monkeypatch.setattr(models.Session, "save", fail_sidecar_compensation)
+    monkeypatch.setattr(
+        threading.Thread,
+        "start",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("thread start rejected")),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _start(session, regeneration=plan.turn)
+
+    message = str(exc_info.value)
+    assert "thread start rejected" in message
+    assert "sidecar compensation failed" in message
+    assert "backup restore failed" in message
+    assert message.index("sidecar compensation failed") < message.index("backup restore failed")
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "thread start rejected"
+    assert sum(destination == backup for _, destination in replace_calls) == 2
+    assert not list(backup.parent.glob(f".{backup.name}.*.tmp"))
+
+
+@pytest.mark.parametrize("failure_point", ["write", "flush", "fsync"])
+def test_backup_restore_tempfile_failures_settle_journal_and_clean_up(
+    transaction_env, monkeypatch, failure_point
+):
+    from api.session_ops import plan_regeneration
+
+    journal = __import__("api.turn_journal", fromlist=["read_turn_journal"])
+    session = _regeneration_session(transaction_env)
+    plan = plan_regeneration(session)
+    backup = session.path.with_suffix(".json.bak")
+    restore_fds = set()
+    real_named_temporary_file = routes.tempfile.NamedTemporaryFile
+
+    class FailingTemporaryFile:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self.name = wrapped.name
+
+        def __enter__(self):
+            self._wrapped.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            fd = self._wrapped.fileno()
+            try:
+                return self._wrapped.__exit__(*args)
+            finally:
+                restore_fds.discard(fd)
+
+        def write(self, data):
+            if failure_point == "write":
+                raise OSError("backup restore write failed")
+            return self._wrapped.write(data)
+
+        def flush(self):
+            if failure_point == "flush":
+                raise OSError("backup restore flush failed")
+            return self._wrapped.flush()
+
+        def fileno(self):
+            return self._wrapped.fileno()
+
+    def named_temporary_file(*args, **kwargs):
+        wrapped = real_named_temporary_file(*args, **kwargs)
+        restore_fds.add(wrapped.fileno())
+        return FailingTemporaryFile(wrapped)
+
+    monkeypatch.setattr(routes.tempfile, "NamedTemporaryFile", named_temporary_file)
+    real_fsync = routes.os.fsync
+
+    def fsync(fd):
+        if failure_point == "fsync" and fd in restore_fds:
+            raise OSError("backup restore fsync failed")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(routes.os, "fsync", fsync)
+    monkeypatch.setattr(
+        threading.Thread,
+        "start",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("thread start rejected")),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _start(session, regeneration=plan.turn)
+
+    message = str(exc_info.value)
+    assert "thread start rejected" in message
+    assert f"backup restore {failure_point} failed" in message
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "thread start rejected"
+    assert [event["event"] for event in journal.read_turn_journal(session.session_id)["events"]] == [
+        "submitted",
+        "interrupted",
+    ]
+    assert not list(backup.parent.glob(f".{backup.name}.*.tmp"))
+
+
+def test_backup_restore_unlink_failure_reports_compensation_and_settles_journal(
+    transaction_env, monkeypatch
+):
+    from api.session_ops import plan_regeneration
+
+    journal = __import__("api.turn_journal", fromlist=["read_turn_journal"])
+    session = _regeneration_session(transaction_env, backup_state="absent")
+    plan = plan_regeneration(session)
+    backup = session.path.with_suffix(".json.bak")
+    real_unlink = Path.unlink
+
+    def fail_backup_unlink(path, *args, **kwargs):
+        if path == backup:
+            raise OSError("backup restore unlink failed")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_backup_unlink)
+    monkeypatch.setattr(
+        threading.Thread,
+        "start",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("thread start rejected")),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _start(session, regeneration=plan.turn)
+
+    message = str(exc_info.value)
+    assert "thread start rejected" in message
+    assert "backup restore unlink failed" in message
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "thread start rejected"
+    assert [event["event"] for event in journal.read_turn_journal(session.session_id)["events"]] == [
+        "submitted",
+        "interrupted",
+    ]
+
+
+def test_backup_read_failure_aborts_before_admission_mutation(transaction_env, monkeypatch):
+    session = new_session(workspace=str(transaction_env.parent))
+    before = copy.deepcopy(session.__dict__)
+    backup = session.path.with_suffix(".json.bak")
+    real_read_bytes = Path.read_bytes
+    prepare_calls = []
+
+    def fail_backup_read(path):
+        if path == backup:
+            raise OSError("backup unreadable")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_backup_read)
+
+    with pytest.raises(OSError, match="backup unreadable"):
+        routes._commit_chat_start_admission(
+            session,
+            prepare=lambda *_args: prepare_calls.append(True),
+            workspace="/tmp/workspace",
+            model=session.model,
+            model_provider=session.model_provider,
+            normalized_model=False,
+            goal_related=False,
+            backend_is_gateway=False,
+            moa_config=None,
+            diag=None,
+        )
+
+    assert session.__dict__ == before
+    assert prepare_calls == []
+    assert not session.path.exists()
 
 
 @pytest.mark.parametrize("prestate", ["both", "sidecar_only", "index_only", "neither"])
@@ -561,6 +860,41 @@ def test_session_list_publication_failure_does_not_reject_durable_start(transact
     assert session.path.exists()
 
 
+def test_draft_backed_first_send_publishes_session_new_once(transaction_env, monkeypatch):
+    events = []
+    session = new_session(workspace=str(transaction_env.parent), profile="profile-a")
+    session.composer_draft = {"text": "draft text", "files": []}
+    session.save(touch_updated_at=False)
+    assert all(row.get("session_id") != session.session_id for row in models.all_sessions())
+    monkeypatch.setattr(
+        routes,
+        "publish_session_list_changed",
+        lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+
+    response = _start(session)
+
+    assert response["session_id"] == session.session_id
+    session_new_events = [event for event in events if event[0] == ("session_new",)]
+    assert session_new_events == [
+        (
+            ("session_new",),
+            {"profile": "profile-a", "session_id": session.session_id},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [("active_stream_id", "stream-1"), ("pending_user_message", "pending")],
+)
+def test_active_or_pending_session_is_not_hidden(transaction_env, attribute, value):
+    session = new_session(workspace=str(transaction_env.parent))
+    setattr(session, attribute, value)
+
+    assert routes._is_hidden_empty_session(session) is False
+
+
 def test_session_index_publication_failure_does_not_reject_durable_start(transaction_env, monkeypatch):
     done = threading.Event()
     session = new_session(workspace=str(transaction_env.parent))
@@ -579,9 +913,19 @@ def test_session_index_publication_failure_does_not_reject_durable_start(transac
 
 def test_failed_admission_preserves_successor_owner_and_state(transaction_env, monkeypatch):
     session = new_session(workspace=str(transaction_env.parent))
+    session.messages = [
+        {"role": "user", "content": "previous"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    session.save(touch_updated_at=False)
+    session.messages = [{"role": "user", "content": "previous"}]
+    session.save(touch_updated_at=False)
+    backup = session.path.with_suffix(".json.bak")
+    before_backup = backup.read_bytes()
     successor = "successor-stream"
     successor_workspace = str(transaction_env / "successor-workspace")
     failed_stream = {}
+    successor_backup = {}
 
     def install_successor_before_compensation(_self):
         failed_stream["id"] = session.active_stream_id
@@ -590,7 +934,10 @@ def test_failed_admission_preserves_successor_owner_and_state(transaction_env, m
         session.title = "successor title"
         session.workspace = successor_workspace
         session.successor_only_state = {"kept": True}
+        session.messages = [{"role": "user", "content": "successor"}]
+        session.context_messages = copy.deepcopy(session.messages)
         session.save()
+        successor_backup["bytes"] = backup.read_bytes()
         raise RuntimeError("thread start rejected")
 
     monkeypatch.setattr(threading.Thread, "start", install_successor_before_compensation)
@@ -609,6 +956,8 @@ def test_failed_admission_preserves_successor_owner_and_state(transaction_env, m
     assert reloaded.title == "successor title"
     assert reloaded.workspace == successor_workspace
     assert reloaded.active_stream_id == successor
+    assert successor_backup["bytes"] != before_backup
+    assert backup.read_bytes() == successor_backup["bytes"]
 
 
 def test_pathless_successor_compensation_uses_legacy_save_signature(transaction_env, monkeypatch):

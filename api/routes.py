@@ -24,6 +24,7 @@ import stat as _stat
 import subprocess
 import sys
 import threading
+import tempfile
 from threading import Event as _ThreadEvent
 import time
 import uuid
@@ -22634,17 +22635,12 @@ def _prepare_chat_start_session_for_stream(
 
 
 def _is_hidden_empty_session(s) -> bool:
-    composer_draft = getattr(s, "composer_draft", None)
-    has_composer_draft = isinstance(composer_draft, dict) and (
-        bool(composer_draft.get("text")) or bool(composer_draft.get("files"))
-    )
     return (
         getattr(s, "title", "Untitled") == "Untitled"
         and not getattr(s, "messages", None)
         and not getattr(s, "active_stream_id", None)
         and not getattr(s, "pending_user_message", None)
         and not getattr(s, "worktree_path", None)
-        and not has_composer_draft
     )
 
 
@@ -22739,6 +22735,13 @@ def _commit_chat_start_admission(
     marker_claim = {"goal": False, "background": False}
     session_path = getattr(s, "path", None)
     sidecar_existed = bool(session_path and session_path.exists())
+    backup_path = session_path.with_suffix(".json.bak") if session_path is not None else None
+    backup_before_image = None
+    if backup_path is not None:
+        try:
+            backup_before_image = backup_path.read_bytes()
+        except FileNotFoundError:
+            backup_before_image = None
     was_hidden_empty_session = _is_hidden_empty_session(s)
     journal_event = {}
     journal_append = None
@@ -22776,6 +22779,36 @@ def _commit_chat_start_admission(
 
             _finish_gateway_run_starting(stream_id)
             _clear_gateway_run_starting(stream_id)
+
+    def _restore_backup_before_image():
+        if backup_path is None:
+            return
+        if backup_before_image is None:
+            backup_path.unlink(missing_ok=True)
+            return
+        from api import models as _models
+
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=backup_path.parent,
+                prefix=f".{backup_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as backup_temp:
+                temp_path = Path(backup_temp.name)
+                backup_temp.write(backup_before_image)
+                backup_temp.flush()
+                os.fsync(backup_temp.fileno())
+            _models._safe_replace(temp_path, backup_path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     try:
         pre_attempt_snapshot = snapshot_session_state(s)
@@ -22935,7 +22968,7 @@ def _commit_chat_start_admission(
         if not successor_present and pre_attempt_snapshot is not None:
             restore_session_state(s, pre_attempt_snapshot)
         _restore_pending_start_markers(s, marker_claim)
-        compensation_error = None
+        compensation_errors = []
         if save_attempted and pre_attempt_snapshot is not None and not successor_present:
             try:
                 save = getattr(s, "save", None)
@@ -22948,9 +22981,18 @@ def _commit_chat_start_admission(
                         if path is not None:
                             path.unlink(missing_ok=True)
             except Exception as compensation_exc:
-                compensation_error = compensation_exc
+                compensation_errors.append(compensation_exc)
                 logger.exception(
                     "Failed to persist compensated chat start for %s",
+                    s.session_id,
+                )
+        if pre_attempt_snapshot is not None and not successor_present:
+            try:
+                _restore_backup_before_image()
+            except Exception as compensation_exc:
+                compensation_errors.append(compensation_exc)
+                logger.exception(
+                    "Failed to restore chat start backup for %s",
                     s.session_id,
                 )
         elif successor_stream_remapped:
@@ -22962,7 +23004,7 @@ def _commit_chat_start_admission(
                     else:
                         save()
             except Exception as compensation_exc:
-                compensation_error = compensation_exc
+                compensation_errors.append(compensation_exc)
                 logger.exception(
                     "Failed to persist successor stream identity for %s",
                     s.session_id,
@@ -22980,9 +23022,10 @@ def _commit_chat_start_admission(
                 )
             except Exception:
                 logger.warning("Failed to close compensated turn journal event", exc_info=True)
-        if compensation_error is not None:
+        if compensation_errors:
+            compensation_detail = "; ".join(str(error) for error in compensation_errors)
             raise RuntimeError(
-                f"chat start failed: {exc}; compensation failed: {compensation_error}"
+                f"chat start failed: {exc}; compensation failed: {compensation_detail}"
             ) from exc
         if isinstance(exc, _AdmissionRejected):
             return exc.result
