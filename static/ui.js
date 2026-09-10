@@ -2906,7 +2906,27 @@ function _providerQuotaIndicatorText(status){
       // Peak state must be visible even with an unreadable multiplier, but the
       // rate itself is never invented: bare ⚡ when the number is missing.
       const peakSuffix=isPeak?(peakNum!==null&&peakNum>0?(' ⚡'+peakNum+'×'):' ⚡'):'';
-      return {label:remaining+peakSuffix, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+      // Name the window the percentage belongs to so the number is never a
+      // mystery percent (gate-cert follow-up: selected window in the tooltip).
+      const windowName=(w&&w.label)?' ('+w.label+' window)':'';
+      // The multiplier is an env-overridable plan-doc annotation, not API
+      // data; the tooltip must not present it as an unqualified fact.
+      const peakNote=isPeak&&status.peak&&status.peak.source==='plan_docs'?' [plan-doc rate]':'';
+      // Switch time is server-rendered in the server's timezone; when the
+      // UTC timestamp is available, re-render it in the browser's timezone
+      // instead (remote-browser UX, gate-cert follow-up).
+      let base=(status.message||'Provider usage loaded');
+      let switchNote='';
+      const nc=status.peak&&status.peak.next_change;
+      if(nc){
+        const d=new Date(nc);
+        if(!isNaN(d.getTime())){
+          const cut=base.indexOf('; switches ');
+          if(cut>=0)base=base.slice(0,cut);
+          switchNote='; switches '+d.toLocaleString([],{weekday:'short',hour:'2-digit',minute:'2-digit'});
+        }
+      }
+      return {label:remaining+peakSuffix, title:provider+' — '+base+' — '+remaining+' remaining'+windowName+peakNote+switchNote};
     }
   }
   const quota=status.quota||null;
@@ -2950,6 +2970,9 @@ function renderProviderQuotaIndicator(status){
   }
   label.textContent=text.label;
   chip.title=text.title;
+  // Accessible name for screen readers: the visible label alone ("91% ⚡3×")
+  // is not a meaningful button name (gate-cert follow-up).
+  chip.setAttribute('aria-label', text.title);
   chip.hidden=false;
   if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
   if(mobileLabel) mobileLabel.textContent=text.label;

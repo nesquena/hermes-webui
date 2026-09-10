@@ -181,3 +181,58 @@ def test_numeric_string_multiplier_accepted():
         "return _providerQuotaIndicatorText(status);})()"
     )
     assert out["label"] == "91% ⚡2×"
+
+
+# ── Gate-cert #7203 follow-ups (tooltip grounding) ──────────────────────────
+
+def test_title_names_selected_window():
+    out = _harness(
+        "(()=>{const status={status:'available',display_name:'Z.AI / GLM',message:'m',"
+        "account_limits:{windows:[{label:'5-hour',remaining_percent:91}]}};"
+        "return _providerQuotaIndicatorText(status);})()"
+    )
+    assert "(5-hour window)" in out["title"]
+
+
+def test_title_qualifies_plan_doc_rate():
+    out = _harness(
+        "(()=>{const status={status:'available',display_name:'X',message:'m',"
+        "peak:{is_peak:true,multiplier:3,source:'plan_docs'},"
+        "account_limits:{windows:[{label:'5-hour',remaining_percent:91}]}};"
+        "return _providerQuotaIndicatorText(status);})()"
+    )
+    assert "[plan-doc rate]" in out["title"]
+
+
+def test_title_no_qualifier_when_rate_is_api_fact():
+    out = _harness(
+        "(()=>{const status={status:'available',display_name:'X',message:'m',"
+        "peak:{is_peak:true,multiplier:3,source:'api'},"
+        "account_limits:{windows:[{label:'5-hour',remaining_percent:91}]}};"
+        "return _providerQuotaIndicatorText(status);})()"
+    )
+    assert "[plan-doc rate]" not in out["title"]
+
+
+def test_switch_time_rerendered_in_browser_timezone():
+    out = _harness(
+        "(()=>{const status={status:'available',display_name:'X',"
+        "message:'X quota loaded. Peak 3x (weekdays 14:00-18:00 UTC+8); switches Wed 04:00 MDT.',"
+        "peak:{is_peak:true,multiplier:3,source:'plan_docs',next_change:'2026-09-16T10:00:00Z'},"
+        "account_limits:{windows:[{label:'5-hour',remaining_percent:91}]}};"
+        "const t=_providerQuotaIndicatorText(status).title;"
+        "return {server_cut:t.indexOf('switches Wed 04:00 MDT')<0, has_switch:t.includes('; switches ')};})()"
+    )
+    assert out["server_cut"] is True  # server-tz string dropped
+    assert out["has_switch"] is True  # browser-tz string appended
+
+
+def test_switch_time_absent_keeps_message_intact():
+    out = _harness(
+        "(()=>{const status={status:'available',display_name:'X',"
+        "message:'X quota loaded. Off-peak 2x (weekdays 14:00-18:00 UTC+8); switches Mon 06:00 MDT.',"
+        "peak:{is_peak:false,multiplier:2,source:'plan_docs'},"
+        "account_limits:{windows:[{label:'5-hour',remaining_percent:91}]}};"
+        "return _providerQuotaIndicatorText(status);})()"
+    )
+    assert "switches Mon 06:00 MDT" in out["title"]

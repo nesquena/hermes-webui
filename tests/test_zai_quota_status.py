@@ -363,7 +363,7 @@ class TestZaiQuotaBranch:
         """Payloads: list returned per call; records call count on .calls."""
         recorder = SimpleNamespace(calls=0, gate=None)
 
-        def tracked_fetch(api_key):
+        def tracked_fetch(api_key, monitor_url=None):
             if recorder.gate is not None:
                 recorder.gate.wait(timeout=10)
             recorder.calls += 1
@@ -462,7 +462,7 @@ class TestZaiQuotaBranch:
         recorder = self._mock_fetch(monkeypatch, [_LITE_FIXTURE, _LITE_FIXTURE])
         real_invalidate = providers.invalidate_zai_quota_cache
 
-        def fetch_then_invalidate(api_key):
+        def fetch_then_invalidate(api_key, monitor_url=None):
             # Simulate a credential mutation landing mid-flight.
             real_invalidate("zai")
             recorder.calls += 0
@@ -472,7 +472,7 @@ class TestZaiQuotaBranch:
         providers.get_provider_quota("zai", refresh=True)
         with providers._zai_quota_cache_lock:
             assert providers._zai_quota_cache == {}  # epoch guard blocked publish
-        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k: _LITE_FIXTURE)
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k, monitor_url=None: _LITE_FIXTURE)
         result = providers.get_provider_quota("zai", refresh=True)
         assert result["status"] == "available"
 
@@ -541,7 +541,7 @@ class TestZaiConcurrencyRegressions:
     def _mock(self, monkeypatch, payloads):
         rec = SimpleNamespace(calls=0, gates=None)
 
-        def fetch(api_key):
+        def fetch(api_key, monitor_url=None):
             rec.calls += 1
             item = payloads[min(rec.calls - 1, len(payloads) - 1)]
             if isinstance(item, Exception):
@@ -576,7 +576,7 @@ class TestZaiConcurrencyRegressions:
                     break
             time.sleep(0.005)
         # T1: newer refresh supersedes, returns quickly with 10
-        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k: self._payload(10))
+        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k, monitor_url=None: self._payload(10))
         newer = providers.get_provider_quota("zai", refresh=True)
         assert newer["account_limits"]["windows"][0]["used_percent"] == 10.0
         # T2: release the old fetch; it must NOT publish its older payload
@@ -592,7 +592,7 @@ class TestZaiConcurrencyRegressions:
         calls = {"n": 0}
         release = threading.Event()
 
-        def owner_fetch(api_key):
+        def owner_fetch(api_key, monitor_url=None):
             release.wait(timeout=10)
             calls["n"] += 1
             return self._payload(42)
@@ -626,11 +626,11 @@ class TestZaiConcurrencyRegressions:
         old_release = threading.Event()
         new_release = threading.Event()
 
-        def old_refresh(api_key):
+        def old_refresh(api_key, monitor_url=None):
             old_release.wait(timeout=10)
             return self._payload(5)
 
-        def new_refresh(api_key):
+        def new_refresh(api_key, monitor_url=None):
             new_release.wait(timeout=10)
             return self._payload(70)
 
@@ -666,7 +666,10 @@ class TestZaiConcurrencyRegressions:
             time.sleep(0.005)
         # Wait until the newer flight object actually REPLACED the older one
         # (identity change, not mere presence — robust on free-threaded builds).
-        cache_key = f"zai|{providers._get_hermes_home()}|{hashlib.sha256(b'k').hexdigest()}"
+        cache_key = (
+            f"zai|{providers._get_hermes_home()}|{hashlib.sha256(b'k').hexdigest()}|"
+            f"{providers._zai_cache_origin_id(None)}"
+        )
         newer_event = None
         for _ in range(400):
             with providers._zai_quota_cache_lock:
@@ -756,7 +759,7 @@ class TestSetProviderKeyAliasClearing:
         monkeypatch.setattr(prov.os, "environ", {})
         calls = []
 
-        def fake_fetch(api_key):
+        def fake_fetch(api_key, monitor_url=None):
             calls.append(api_key)
             return _LITE_FIXTURE
 

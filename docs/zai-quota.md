@@ -8,6 +8,42 @@ subscription dashboard uses. It is **unofficial and undocumented**: the WebUI
 parses it defensively and fails soft (the chip hides rather than showing
 stale or wrong data) if Z.AI changes its shape.
 
+## Credential routing (trust boundary)
+
+The monitor credential is only ever sent to the origin the operator
+configured for this provider. Requests never follow redirects and the
+response body is size-capped; a redirected or oversized response fails
+closed (no quota data) rather than risking the credential or the process.
+
+- **No `base_url` configured** → the request goes to `https://api.z.ai`,
+  the canonical monitor host.
+- **`providers.zai.base_url` (or the active `model.base_url`) configured** →
+  the monitor path is derived from that origin. Example:
+  `https://open.bigmodel.cn/api/coding/paas/v4` becomes
+  `https://open.bigmodel.cn/api/monitor/usage/quota/limit`. A regional
+  endpoint key therefore never leaks to the global host (or vice versa).
+- **Non-https origin** (except loopback `http`, kept for local proxies) →
+  no request at all. The feature reports unavailable, and a local
+  credential-pool snapshot (if one exists) answers in the monitor's place.
+- The effective monitor origin is part of the quota cache key: changing the
+  origin immediately re-fetches instead of serving the other origin's data.
+
+## Failure behavior
+
+Failures are shared, bounded, and never resurrect stale success:
+
+- One transport call in flight per cache key; concurrent callers join it.
+- A failed fetch publishes a short-lived (15 s) sanitized failure marker
+  that absorbs immediate retries — an outage does not become one request
+  per caller.
+- A failed forced refresh atomically evicts the previously cached success,
+  so the next ordinary request reports unavailable instead of the old
+  "available".
+- On auth/transport/parser failure (or no key), the pre-existing Z.AI local
+  credential-pool snapshot, when present, keeps answering with the pool
+  breakdown; on remote success the pool envelope is merged into the
+  account-limits card.
+
 ## Peak-rate marker
 
 Z.AI bills premium-model requests at a higher multiplier during **weekdays
