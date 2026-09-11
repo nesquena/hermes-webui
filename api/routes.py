@@ -15690,21 +15690,21 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(sid):
-            s.enabled_toolsets = toolsets
-            s.save()
-
-            # Changing the session toolset changes both the resolved tools[]
-            # snapshot and the assembled system prompt. Clear Hermes' persisted
-            # cache pins so the next AIAgent rebuild reflects the new toolset.
+            # Invalidate Hermes' persisted Agent cache pins before making the
+            # new WebUI toolset override durable. This keeps failures fail-closed:
+            # the old toolset remains authoritative until both invalidations
+            # have completed successfully.
             from hermes_state import SessionDB
-            from api.models import _active_state_db_path
 
             _state_db = SessionDB(_active_state_db_path())
             try:
-                _state_db.update_session_tool_names(sid, None)
                 _state_db.update_system_prompt(sid, None)
+                _state_db.update_session_tool_names(sid, None)
             finally:
                 _state_db.close()
+
+            s.enabled_toolsets = toolsets
+            s.save()
 
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
 
