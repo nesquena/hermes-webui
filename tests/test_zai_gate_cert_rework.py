@@ -140,6 +140,22 @@ def test_monitor_url_rejects_unparseable_and_plain_http():
         "http://127.0.0.1:8080/api/monitor/usage/quota/limit"
 
 
+def test_monitor_url_dns_name_with_127_prefix_is_not_loopback():
+    # "127.evil.example" is a DNS name, not a loopback address; a bearer must
+    # never be sent there over plain http (review finding on the first fix).
+    assert providers._zai_monitor_url("http://127.evil.example/v1") is None
+    assert providers._zai_monitor_url("http://127.0.0.1.0/v1") is None
+    # Genuine loopback forms stay allowed.
+    assert providers._zai_monitor_url("http://localhost:9000/v1") is not None
+    assert providers._zai_monitor_url("http://127.0.0.2/v1") is not None
+    assert providers._zai_monitor_url("http://[::1]:9000/v1") is not None
+
+
+def test_monitor_url_rejects_invalid_port_and_userinfo():
+    assert providers._zai_monitor_url("https://api.z.ai:notaport/v4") is None
+    assert providers._zai_monitor_url("https://u:p@api.z.ai/v4") is None
+
+
 def test_credential_goes_to_configured_origin_not_hardcoded_host(monkeypatch):
     opener = _ok_opener()
     monkeypatch.setattr(providers, "_zai_http_opener", lambda: opener)
@@ -367,3 +383,130 @@ def test_unverified_origin_falls_back_to_pool(monkeypatch):
     assert result["status"] == "available"
     assert result["label"] == "Credential pool"
     assert opener.calls == []
+
+
+# ── Verification-review round 2 findings ────────────────────────────────────
+
+def test_waiter_cannot_return_success_after_newer_refresh_fails(monkeypatch):
+    """A waiter joined to an older flight must not return its success after a
+    newer forced refresh failed (review finding: refresh=unavailable,
+    waiter=available)."""
+    import threading as _th
+    old_release = _th.Event()
+
+    def old_owner(api_key, monitor_url=None):
+        old_release.wait(timeout=10)
+        return _payload(20)
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", old_owner)
+    _set_key(monkeypatch)
+    waiter_result = {}
+
+    def run_waiter():
+        waiter_result["r"] = providers.get_provider_quota("zai")
+
+    t_waiter = _th.Thread(target=run_waiter)
+    t_waiter.start()
+    for _ in range(400):
+        with providers._zai_quota_cache_lock:
+            if providers._zai_quota_flights:
+                break
+        time.sleep(0.005)
+    # Newer forced refresh fails immediately.
+    def failing(api_key, monitor_url=None):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", failing)
+    refresh = providers.get_provider_quota("zai", refresh=True)
+    assert refresh["status"] == "unavailable"
+    old_release.set()
+    t_waiter.join(timeout=10)
+    assert waiter_result["r"]["status"] == "unavailable"
+
+
+def test_waiter_success_invalidated_by_credential_mutation(monkeypatch):
+    """A waiter's joined success must not survive a credential mutation that
+    landed while it waited (epoch guard covers publication only — review
+    finding: owner=available, waiter=available, cache_entries=0)."""
+    import threading as _th
+    release = _th.Event()
+
+    def owner(api_key, monitor_url=None):
+        release.wait(timeout=10)
+        providers.invalidate_zai_quota_cache("zai")  # mid-flight mutation
+        return _payload(30)
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", owner)
+    _set_key(monkeypatch)
+    waiter_result = {}
+
+    def run_waiter():
+        waiter_result["r"] = providers.get_provider_quota("zai")
+
+    t_owner = _th.Thread(target=lambda: providers.get_provider_quota("zai"))
+    t_owner.start()
+    for _ in range(400):
+        with providers._zai_quota_cache_lock:
+            if providers._zai_quota_flights:
+                break
+        time.sleep(0.005)
+    t_waiter = _th.Thread(target=run_waiter)
+    t_waiter.start()
+    release.set()
+    t_owner.join(timeout=10)
+    t_waiter.join(timeout=10)
+    assert waiter_result["r"]["status"] == "unavailable"
+
+
+def test_json_null_body_publishes_failure_marker(monkeypatch):
+    """A JSON null body is a terminal parser failure and must publish the
+    shared failure marker (review finding: retried without bound)."""
+    calls = {"n": 0}
+
+    def null_fetch(api_key, monitor_url=None):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", null_fetch)
+    _set_key(monkeypatch)
+    first = providers.get_provider_quota("zai", refresh=True)
+    second = providers.get_provider_quota("zai")  # ordinary, right after
+    assert first["status"] == "unavailable"
+    assert second["status"] == "unavailable"
+    assert calls["n"] == 1
+
+
+def test_truncated_response_fails_closed_to_pool(monkeypatch):
+    """http.client.IncompleteRead must fall back to the local pool, not
+    propagate (review finding: exception outside the catch tuple)."""
+    import http.client as _hc
+
+    def truncated(api_key, monitor_url=None):
+        raise _hc.IncompleteRead(partial=b"", expected=10)
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", truncated)
+    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda p: _pool_snapshot())
+    _set_key(monkeypatch)
+    result = providers.get_provider_quota("zai", refresh=True)
+    assert result["status"] == "available"
+    assert result["account_limits"]["source"] == "local_pool"
+
+
+def test_alias_configured_origin_is_honored(monkeypatch):
+    """providers.glm.base_url (alias) must gate the origin exactly like
+    providers.zai.base_url (review finding: alias config ignored)."""
+    opener = _ok_opener()
+    monkeypatch.setattr(providers, "_zai_http_opener", lambda: opener)
+    _set_key(monkeypatch)
+    seen = {}
+
+    def fake_lookup(pid):
+        seen[pid] = True
+        return "https://open.bigmodel.cn/api/coding/paas/v4" if pid == "glm" else None
+
+    monkeypatch.setattr(config, "_get_provider_base_url", fake_lookup, raising=False)
+    result = providers.get_provider_quota("zai", refresh=True)
+    assert result["status"] == "available"
+    assert seen.get("glm") is True
+    assert len(opener.calls) == 1
+    assert opener.calls[0]["url"].startswith("https://open.bigmodel.cn/")

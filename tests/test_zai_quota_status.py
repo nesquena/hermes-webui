@@ -563,7 +563,7 @@ class TestZaiConcurrencyRegressions:
         # T0: slow older miss starts (will return 80)
         gates = [threading.Event()]
 
-        def slow_old(api_key):
+        def slow_old(api_key, monitor_url=None):
             gates[0].wait(timeout=10)
             return self._payload(80)
 

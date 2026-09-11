@@ -11,10 +11,12 @@ import atexit
 import base64
 import copy
 import hashlib
+import http.client
 import json
 import logging
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -2156,12 +2158,31 @@ class _ZaiFlight:
 
 
 def _zai_configured_origin() -> str | None:
-    """The operator-configured origin for the z.ai provider, if any."""
+    """The operator-configured origin for the z.ai provider, if any.
+
+    Returns the raw base_url string or None when nothing is configured
+    (callers then use the canonical z.ai host). Config-lookup failures raise
+    so the caller can fail closed instead of silently defaulting.
+    """
+    from api.config import _get_provider_base_url
+
+    for candidate in ("zai",):
+        direct = _get_provider_base_url(candidate)
+        if direct:
+            return direct
+    # Alias-configured providers (providers.glm.base_url etc.) resolve to
+    # zai; check those keys too so a regional endpoint set under an alias is
+    # honored rather than ignored.
     try:
-        from api.config import _get_provider_base_url
-        return _get_provider_base_url("zai")
-    except Exception:
+        from api.config import _PROVIDER_ALIASES
+    except ImportError:
         return None
+    for alias, canonical in (_PROVIDER_ALIASES or {}).items():
+        if canonical == "zai":
+            value = _get_provider_base_url(alias)
+            if value:
+                return value
+    return None
 
 
 def _zai_monitor_url(base_url: str | None) -> str | None:
@@ -2169,8 +2190,8 @@ def _zai_monitor_url(base_url: str | None) -> str | None:
 
     The credential is only ever sent to the origin the operator configured
     for this provider (default: z.ai's canonical monitor host). Any origin we
-    cannot verify as https (or loopback http for local proxies) fails closed
-    with ``None`` — callers must not send the bearer anywhere.
+    cannot verify as https (or genuine loopback http for local proxies) fails
+    closed with ``None`` — callers must not send the bearer anywhere.
     """
     raw = str(base_url or "").strip()
     if not raw:
@@ -2178,20 +2199,25 @@ def _zai_monitor_url(base_url: str | None) -> str | None:
     try:
         parts = urllib.parse.urlsplit(raw)
         host = (parts.hostname or "").strip().lower()
+        # A non-numeric "host" (anything with label structure) can never be
+        # loopback: "127.evil.example" resolves to an attacker's server. Only
+        # literal IPv4 127.0.0.0/8, ::1, "localhost", or *.localhost qualify.
+        host_is_numeric_loopback = bool(re.fullmatch(r"127(?:\.\d{1,3}){3}", host))
+        host_is_name_loopback = host == "localhost" or host.endswith(".localhost") or host == "::1"
         if not host or parts.username or parts.password:
             return None
-        loopback = (
-            host == "localhost"
-            or host.endswith(".localhost")
-            or host == "::1"
-            or host.startswith("127.")
-        )
-        if parts.scheme == "https" or (parts.scheme == "http" and loopback):
-            return urllib.parse.urlunsplit(
-                (parts.scheme, parts.netloc, _ZAI_MONITOR_PATH, "", ""))
+        if not (host_is_numeric_loopback or host_is_name_loopback):
+            if parts.scheme != "https":
+                return None
+        elif parts.scheme not in ("https", "http"):
+            return None
+        port = parts.port  # raises ValueError for an invalid port
+        if port is not None and not (0 < port < 65536):
+            return None
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, _ZAI_MONITOR_PATH, "", ""))
     except ValueError:
         return None
-    return None
 
 
 class _ZaiNoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -2524,11 +2550,21 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
             "no_key",
             "Z.AI quota status needs a ZAI_API_KEY/GLM_API_KEY configured on the server.")
 
-    monitor_url = _zai_monitor_url(_zai_configured_origin())
+    monitor_url = None
+    origin_lookup_failed = False
+    try:
+        monitor_url = _zai_monitor_url(_zai_configured_origin())
+    except Exception:
+        origin_lookup_failed = True
     if monitor_url is None:
         pool = _zai_pool_envelope(provider, display_name)
         if pool is not None:
             return pool
+        if origin_lookup_failed:
+            return _failure(
+                "unavailable",
+                "Z.AI quota monitor is unavailable: the configured base_url "
+                "could not be read. No request was made.")
         return _failure(
             "unavailable",
             "Z.AI quota monitor is disabled: the configured base_url must be an "
@@ -2577,6 +2613,12 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
             failure = result
         elif result is not None:
             payload, fetched_at = result
+            # Epoch guard for joined results: a credential mutation landing
+            # after the owner published invalidates this success for us too.
+            if result[0] is not None:
+                with _zai_quota_cache_lock:
+                    if _zai_quota_epoch != epoch_at_start:
+                        payload, fetched_at = None, None
         else:
             # Owner superseded or hung. Elect ONE bounded replacement owner:
             # claim the registration so at most one waiter fetches.
@@ -2609,7 +2651,8 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
             else:
                 failure = _ZaiQuotaFailure(
                     "unavailable", "Z.AI quota status is temporarily unavailable.")
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError,
+                OSError, ValueError, http.client.HTTPException):
             failure = _ZaiQuotaFailure(
                 "unavailable", "Z.AI quota status is temporarily unavailable.")
         finally:
@@ -2618,20 +2661,29 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
             # can never observe "flight gone, cache empty" from a successful
             # owner, and a failed owner's marker atomically REPLACES any
             # stale success (no resurrection on the next ordinary request).
-            # Identity check: a superseded owner neither publishes its
-            # (older) payload nor removes the newer registration.
-            my_flight.result = failure if failure is not None else (payload, fetched_at)
+            if failure is None and payload is None:
+                # A None payload (e.g. JSON null body) is a terminal parser
+                # failure: publish the failure marker so retries stay bounded.
+                failure = _ZaiQuotaFailure(
+                    "unavailable", "Z.AI quota status is temporarily unavailable.")
             with _zai_quota_cache_lock:
                 still_owner = _zai_quota_flights.get(cache_key) is my_flight
+                superseded = (not still_owner) or (_zai_quota_epoch != epoch_at_start)
                 if still_owner and _zai_quota_epoch == epoch_at_start:
                     if failure is not None:
                         _zai_quota_cache[cache_key] = (time.monotonic(), failure, None)
-                        _zai_quota_cache_limit()
-                    elif payload is not None:
+                    else:
                         _zai_quota_cache[cache_key] = (time.monotonic(), payload, fetched_at)
-                        _zai_quota_cache_limit()
+                    _zai_quota_cache_limit()
                 if still_owner:
                     _zai_quota_flights.pop(cache_key, None)
+            if superseded and failure is None:
+                # A superseded owner (newer refresh registered, or credential
+                # mutation landed) must not hand its older success to waiters
+                # or to its own caller: the newer state owns the truth now.
+                failure = _ZaiQuotaFailure(
+                    "unavailable", "Z.AI quota status is temporarily unavailable.")
+            my_flight.result = failure if failure is not None else (payload, fetched_at)
             my_flight.event.set()
 
     if failure is not None:
