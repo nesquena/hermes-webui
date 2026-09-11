@@ -651,6 +651,7 @@ def pytest_collection_modifyitems(config, items):
         'test_delivery_options_structure',
         'test_delivery_options_includes_common_platforms',
         'test_delivery_options_local_label',
+        'test_delivery_options_survives_the_authority_module_move',
         # Skills endpoints (need tools.skills_tool module)
         'test_skills_list',
         'test_skills_list_has_required_fields',
