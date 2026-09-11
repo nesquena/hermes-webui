@@ -8176,14 +8176,46 @@ def _load_cli_sessions_uncached(
                         remaining = effective_limit - kept_per_project.get(project_id, 0)
                         if remaining <= 0:
                             continue
-                        _spend_assigned_rows(read_importable_agent_session_rows(
-                            db_path,
-                            limit=remaining,
-                            log=logger,
-                            exclude_sources=interactive_excluded,
-                            project_assignment='assigned',
-                            project_ids=(project_id,),
-                        ))
+                        # A scoped query carries a raw candidate window of its
+                        # own, and compression segments plus the post-projection
+                        # visibility filters are spent from that window BEFORE
+                        # the logical slice. A lineage-heavy project can
+                        # therefore come back short with its window fully
+                        # consumed and older assigned conversations of its own
+                        # still waiting behind it. Without the exhaustion signal
+                        # the loop would advance to the next project and leave
+                        # this one under-delivered on every rebuild — the same
+                        # failure the global query already guards against
+                        # (greptile P1 on #6659). Re-query once at the widest
+                        # limit this pass is allowed to scan, so the retry is
+                        # bounded to one extra query per starved project and
+                        # cannot out-read the pass's own scan budget.
+                        scoped_limit = remaining
+                        while True:
+                            scoped_rows, scoped_window_exhausted = cast(
+                                tuple[list[dict], bool],
+                                read_importable_agent_session_rows(
+                                    db_path,
+                                    limit=scoped_limit,
+                                    log=logger,
+                                    exclude_sources=interactive_excluded,
+                                    project_assignment='assigned',
+                                    project_ids=(project_id,),
+                                    return_window_exhaustion=True,
+                                ),
+                            )
+                            _spend_assigned_rows(scoped_rows)
+                            if (
+                                not scoped_window_exhausted
+                                # A binding window on a project that is now
+                                # full needs no second query, and neither does
+                                # one that cannot be widened any further.
+                                or kept_per_project.get(project_id, 0)
+                                >= effective_limit
+                                or scoped_limit >= query_limit
+                            ):
+                                break
+                            scoped_limit = query_limit
             except Exception:
                 logger.debug("Project-assigned CLI recovery pass failed", exc_info=True)
 

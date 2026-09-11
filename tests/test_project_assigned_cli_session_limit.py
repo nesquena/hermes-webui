@@ -765,6 +765,88 @@ def test_short_global_projection_still_refills_a_starved_project(
     assert scoped_queries == [("project-quiet", per_project_limit)]
 
 
+def test_scoped_recovery_widens_when_its_own_raw_window_is_exhausted(
+    fake_hermes_home, tmp_path, monkeypatch
+):
+    """A starved project's OWN raw window can be consumed, not just the global one.
+
+    The global window's exhaustion is what triggers the project-scoped
+    follow-up, but that scoped query carries a raw candidate window of its own
+    (``limit * 8``, re-widened to ``limit * 32`` by the shared reader). A
+    lineage-heavy project fills it with compression segments, so the query
+    collapses them to one logical conversation and comes back short of
+    ``remaining`` — while an older assigned conversation of the SAME project
+    sits just beyond that window. Without the exhaustion signal the loop
+    advances to the next project and leaves this one under-delivered on every
+    rebuild, so the conversation behind the window is never recovered.
+    """
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 5)
+    monkeypatch.setattr(models, "PROJECT_ASSIGNED_CLI_SCAN_CEILING", 20)
+    _register_projects(tmp_path, "project-busy", "project-quiet")
+    per_project_limit = 4
+    # The pass's own scan budget for two projects under a ceiling of 20.
+    scoped_scan_budget = min(per_project_limit * 2, 20)
+
+    # The starved project's remaining budget is the full per-project limit, and
+    # its scoped raw windows — 4 * 8, then 4 * 32 — are filled by its own
+    # compression segments, which collapse to a single logical conversation.
+    scoped_raw_window = per_project_limit * max(agent_sessions.CANDIDATE_WINDOW_MULTIPLIERS)
+    rows = [_session("quiet-old", BASE_TS, project_id="project-quiet")]
+    rows.extend(_lineage(
+        "quiet-chain",
+        BASE_TS + 10_000,
+        scoped_raw_window + 100,
+        project_id="project-quiet",
+        step=1.0,
+    ))
+    rows.extend(
+        _session(f"busy-{index:03d}", BASE_TS + 1000 + index, project_id="project-busy")
+        for index in range(25)
+    )
+    rows.extend(_session(f"plain-{index:02d}", BASE_TS + 9000 + index) for index in range(25))
+    _write_state_db(fake_hermes_home / "state.db", rows)
+
+    scoped_queries = []
+    real_reader = models.read_importable_agent_session_rows
+
+    def _counting_reader(*args, **kwargs):
+        if kwargs.get("project_ids"):
+            scoped_queries.append((
+                kwargs["project_ids"][0],
+                kwargs.get("limit"),
+                kwargs.get("return_window_exhaustion"),
+            ))
+        return real_reader(*args, **kwargs)
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", _counting_reader)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_hermes_home,
+        fake_hermes_home / "state.db",
+        "default",
+        project_assigned_limit=per_project_limit,
+    )
+
+    quiet = {
+        session["session_id"]
+        for session in sessions
+        if session["project_id"] == "project-quiet"
+    }
+    assert "quiet-old" in quiet, "the conversation behind the scoped raw window is lost"
+
+    # Every scoped query asks for the exhaustion signal, the binding window
+    # buys exactly ONE wider re-query, and that re-query stays inside the
+    # pass's own scan budget.
+    assert scoped_queries == [
+        ("project-quiet", per_project_limit, True),
+        ("project-quiet", scoped_scan_budget, True),
+    ], "one retry at the pass's scan budget, not a widening loop"
+    assert all(
+        limit <= models.PROJECT_ASSIGNED_CLI_SCAN_CEILING
+        for _, limit, _ in scoped_queries
+    )
+
+
 def test_saturated_window_pays_one_query_per_starved_project(
     fake_hermes_home, tmp_path, monkeypatch
 ):
