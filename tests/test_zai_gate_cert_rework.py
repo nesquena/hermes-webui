@@ -510,3 +510,63 @@ def test_alias_configured_origin_is_honored(monkeypatch):
     assert seen.get("glm") is True
     assert len(opener.calls) == 1
     assert opener.calls[0]["url"].startswith("https://open.bigmodel.cn/")
+
+
+# ── Verification-review round 3 findings ────────────────────────────────────
+
+def test_monitor_url_rejects_malformed_ipv4_loopback_forms():
+    # Non-canonical/malformed octets must not pass the loopback gate
+    # (round-2 finding: 127.999.999.999 and 127.0.0.256 were accepted).
+    for bad in ("http://127.999.999.999/v1", "http://127.0.0.256/v1",
+                "http://127.000.000.001/v1", "http://0127.0.0.1/v1",
+                "http://127.0.0.1.0/v1"):
+        assert providers._zai_monitor_url(bad) is None, bad
+
+
+def test_monitor_url_accepts_ipv6_mapped_loopback():
+    # ::ffff:127.0.0.1 is a legitimate loopback destination
+    # (round-2 finding: wrongly rejected).
+    assert providers._zai_monitor_url("http://[::ffff:127.0.0.1]:9000/v1") == \
+        "http://[::ffff:127.0.0.1]:9000/api/monitor/usage/quota/limit"
+    assert providers._zai_monitor_url("http://[::1]/v1") is not None
+    # But a mapped NON-loopback address stays rejected on plain http.
+    assert providers._zai_monitor_url("http://[::ffff:8.8.8.8]/v1") is None
+
+
+def test_superseded_owner_caller_also_unavailable(monkeypatch):
+    """When a newer refresh supersedes an older flight mid-fetch, the older
+    owner's own caller must also report unavailable (no stale success from
+    either side of the flight — closes the pop→assign race window)."""
+    import threading as _th
+    old_release = _th.Event()
+
+    def old_owner(api_key, monitor_url=None):
+        old_release.wait(timeout=10)
+        return _payload(50)
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", old_owner)
+    _set_key(monkeypatch)
+    owner_result = {}
+
+    def run_owner():
+        owner_result["r"] = providers.get_provider_quota("zai")
+
+    t_owner = _th.Thread(target=run_owner)
+    t_owner.start()
+    for _ in range(400):
+        with providers._zai_quota_cache_lock:
+            if providers._zai_quota_flights:
+                break
+        time.sleep(0.005)
+    # Newer forced refresh supersedes (registers its own flight) and fails.
+    def failing(api_key, monitor_url=None):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", failing)
+    refresh = providers.get_provider_quota("zai", refresh=True)
+    assert refresh["status"] == "unavailable"
+    old_release.set()
+    t_owner.join(timeout=10)
+    # The old owner was superseded: its caller must NOT report its stale
+    # success even though the fetch itself succeeded.
+    assert owner_result["r"]["status"] == "unavailable"
