@@ -21150,12 +21150,19 @@ function _remapWorkspaceCachesAfterMove(oldPath,newPath,isDir){
     }
     if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
   }
-  delete S._dirCache[_workspaceParentDir(oldPath)];
-  delete S._dirCache[_workspaceParentDir(newPath)];
+  if(S._dirCache){
+    delete S._dirCache[_workspaceParentDir(oldPath)];
+    delete S._dirCache[_workspaceParentDir(newPath)];
+  }
   if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
     if(_previewCurrentPath===oldPath)_previewCurrentPath=newPath;
     else if(_previewCurrentPath.startsWith(oldPath+'/'))_previewCurrentPath=newPath+_previewCurrentPath.slice(oldPath.length);
   }
+  if(typeof _previewRawContentPath!=='undefined'&&_previewRawContentPath){
+    if(_previewRawContentPath===oldPath)_previewRawContentPath=newPath;
+    else if(_previewRawContentPath.startsWith(oldPath+'/'))_previewRawContentPath=newPath+_previewRawContentPath.slice(oldPath.length);
+  }
+  if(typeof syncPreviewCopyContentBtn==='function')syncPreviewCopyContentBtn();
 }
 
 async function _performWorkspaceMove(srcPath,destDir,isDir){
@@ -21330,17 +21337,18 @@ function _renderTreeItems(container, entries, depth){
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
               showToast(t('renamed_to')+newName);
+              const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
+              const newPath=parent==='.'?newName:parent+'/'+newName;
+              _remapWorkspaceCachesAfterMove(item.path,newPath,isDirLike);
               // Update expanded dirs cache key if renaming a directory
               if(isDirLike&&S._expandedDirs){
                 S._expandedDirs.delete(item.path);
-                const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
-                const newPath=parent==='.'?newName:parent+'/'+newName;
                 S._expandedDirs.add(newPath);
-                if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+                if(S._dirCache&&S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
                 if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
               }
               // Invalidate cache and re-render
-              delete S._dirCache[S.currentDir];
+              if(S._dirCache)delete S._dirCache[S.currentDir];
               await loadDir(S.currentDir);
             }catch(err){showToast(t('rename_failed')+err.message);}
           }
@@ -21635,18 +21643,23 @@ async function _inlineRenameFileItem(item){
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
     showToast(t('renamed_to')+newName);
+    const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
+    const newPath=parent==='.'?newName:parent+'/'+newName;
+    _remapWorkspaceCachesAfterMove(item.path,newPath,isDirLike);
     // Update expanded dirs cache key if renaming a directory
     if(isDirLike&&S._expandedDirs){
       S._expandedDirs.delete(item.path);
-      const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
-      const newPath=parent==='.'?newName:parent+'/'+newName;
       S._expandedDirs.add(newPath);
-      if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+      if(S._dirCache&&S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
       if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
     }
-    delete S._dirCache[S.currentDir];
+    if(S._dirCache)delete S._dirCache[S.currentDir];
     await loadDir(S.currentDir);
   }catch(err){showToast(t('rename_failed')+err.message);}
+}
+
+async function _menuRenameWorkspaceItem(item){
+  return _inlineRenameFileItem(item);
 }
 
 async function deleteWorkspaceFile(relPath, name){

@@ -3493,9 +3493,11 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
    its text label to icon-only when the RIGHT PANEL (not the viewport) is narrow —
    .rightpanel is a named inline-size container, so this fires on pane resize too,
    staying accessible via the button's title + aria-label. */
+@container rightpanel (max-width:760px){
+  .preview-path #btnCopyPreviewContent .preview-btn-label{display:none;}
+}
 @container rightpanel (max-width:520px){
   .preview-path #btnCopyPreviewRelPath .preview-btn-label{display:none;}
-  .preview-path #btnCopyPreviewContent .preview-btn-label{display:none;}
 }
 
 /* Preview badge typography */

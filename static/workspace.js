@@ -1045,15 +1045,9 @@ function syncPreviewCopyContentBtn(){
   const btn=$('btnCopyPreviewContent');
   if(!btn) return;
   btn.style.display = previewRawContentIsCopyable()?'inline-flex':'none';
-  if(previewRawContentIsBinaryForCurrentPreview()){
-    btn.setAttribute('aria-disabled','true');
-    btn.title=t('content_binary_not_copyable');
-    btn.setAttribute('aria-label',t('content_binary_not_copyable'));
-  }else{
-    btn.removeAttribute('aria-disabled');
-    btn.title=t('copy_file_contents');
-    btn.setAttribute('aria-label',t('copy_file_contents'));
-  }
+  btn.removeAttribute('aria-disabled');
+  btn.title=t('copy_file_contents');
+  btn.setAttribute('aria-label',t('copy_file_contents'));
 }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
@@ -1232,13 +1226,14 @@ async function openFile(path, opts={}){
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
   const cacheBust=bustCache?`&_=${Date.now()}`:'';
 
+  const previewGen = (typeof bumpPreviewGeneration==='function') ? bumpPreviewGeneration() : 0;
+
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
+    if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
     downloadFile(path);
     return;
   }
-
-  const previewGen = bumpPreviewGeneration();
 
   _previewServerEditable = null;
   _previewSaveRoute = '/api/file/save';
@@ -1326,6 +1321,7 @@ async function openFile(path, opts={}){
       const data=await api(_workspaceRouteForPath(path, 'read'));
       if(previewGenerationIsStale(previewGen)) return;
       if(data.binary){
+        if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
         downloadFile(path);
         return;
       }
@@ -1334,6 +1330,7 @@ async function openFile(path, opts={}){
     }catch(e){
       if(previewGenerationIsStale(previewGen)) return;
       resetTextPreviewCopyState(path,previewGen);
+      if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
       downloadFile(path);
     }
   } else {
@@ -1343,6 +1340,7 @@ async function openFile(path, opts={}){
       if(previewGenerationIsStale(previewGen)) return;
       if(data.binary){
         // Server flagged this as binary content
+        if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
         downloadFile(path);
         return;
       }
@@ -1365,6 +1363,7 @@ async function openFile(path, opts={}){
         return;
       }
       // If it's a 400/too-large error, offer download instead
+      if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
       downloadFile(path);
     }
   }

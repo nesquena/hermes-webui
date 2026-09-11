@@ -288,21 +288,30 @@ def test_preview_generation_counter_exists_and_openfile_captures_it():
     """The preview-open generation counter mirrors the existing workspace-tree
     generation pattern (_wsTreeGen / bumpWorkspaceTreeGen, used by loadDir()) so
     that overlapping openFile() calls can be told apart. openFile() must capture
-    the generation immediately after the DOWNLOAD_EXTS early return, before any
-    other state is touched.
+    the generation before the DOWNLOAD_EXTS early return, before any
+    other state is touched, so selecting a download-only file while a preview
+    request is pending advances the generation and invalidates the pending read.
     """
     assert "let _previewGen = 0;" in WORKSPACE_JS
     assert "function bumpPreviewGeneration(){" in WORKSPACE_JS
     assert "function previewGenerationIsStale(previewGen){" in WORKSPACE_JS
 
     compact = _compact(WORKSPACE_JS)
-    assert "constpreviewGen=bumpPreviewGeneration();" in compact
+    capture = (
+        "constpreviewGen=(typeofbumpPreviewGeneration==='function')?bumpPreviewGeneration():0;"
+    )
+    assert capture in compact
 
-    download_guard = "if(DOWNLOAD_EXTS.has(ext)){downloadFile(path);return;}"
+    download_guard = (
+        "if(DOWNLOAD_EXTS.has(ext)){"
+        "if(typeofinvalidatePreviewRawContent==='function')invalidatePreviewRawContent();"
+        "downloadFile(path);"
+        "return;"
+        "}"
+    )
     assert download_guard in compact
-    capture = "constpreviewGen=bumpPreviewGeneration();"
     capture_idx = compact.index(capture)
-    assert compact.index(download_guard) < capture_idx
+    assert capture_idx < compact.index(download_guard)
     # Nothing else in openFile() writes preview state before the generation is captured.
     assert capture_idx < compact.index("_previewServerEditable=null;", capture_idx)
 
@@ -423,12 +432,20 @@ def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane(
     assert 'data-i18n-aria-label="copy_file_contents"' in btn
     # A narrow-PANE container query (right panel, not viewport) hides the label
     # (icon-only), keeping the glyph — so it fires on pane resize even on desktop.
+    # #btnCopyPreviewContent folds at 760px while #btnCopyPreviewRelPath folds at 520px.
     assert re.search(
-        r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[\s\S]*?"
+        r"@container\s+rightpanel[^{]*max-width:\s*760px[^{]*\{[\s\S]*?"
         r"\.preview-path\s+#btnCopyPreviewContent\s+\.preview-btn-label\s*\{\s*display:\s*none",
         STYLE,
     ), (
-        "expected a @container rightpanel query hiding the copy-content-button label on a narrow pane"
+        "expected a @container rightpanel query hiding the copy-content-button label at 760px"
+    )
+    assert re.search(
+        r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[^}]*"
+        r"\.preview-path\s+#btnCopyPreviewRelPath\s+\.preview-btn-label\s*\{\s*display:\s*none",
+        STYLE,
+    ), (
+        "expected a @container rightpanel query hiding the copy-relative-path label at 520px"
     )
 
 
@@ -823,9 +840,8 @@ def test_unknown_type_binary_file_is_not_offered_as_copyable_text():
         f"expected the localized binary state, got {out['toasts']}"
     )
     assert last["type"] == "error", f"expected an error-level notification: {last}"
-    assert out["ariaDisabled"] == "true", f"the control must read as disabled: {out}"
-    assert out["title"] == "content_binary_not_copyable", (
-        f"the disabled reason must be localized through t(): {out}"
+    assert out["ariaDisabled"] is None, (
+        f"dead aria-disabled must be removed from hidden button: {out}"
     )
 
 
@@ -1433,3 +1449,253 @@ def test_clear_preview_regression_fails_when_generation_bump_removed():
     assert out["mdHtml"] == "<p># Heading\nBody text</p>", (
         "expected stale markdown render in DOM when generation bump is missing"
     )
+
+
+@requires_node
+def test_deferred_text_preview_download_only_file_advances_generation_and_drops_pending_preview():
+    """Greptile review comment 3985363643 (PR #6957):
+    Selecting a download-only file (.zip, .bin, .exe) while a text preview request
+    is pending must advance the preview generation and invalidate raw content authority.
+    When the deferred preview response resolves, its stale generation causes it to be
+    discarded without rendering into DOM, claiming raw content, or showing the copy button.
+    """
+    out = _run_preview_scenario(
+        """
+  // --- Scenario A: Deferred Markdown preview interrupted by download-only file ---
+  let releaseMd = null;
+  api = (route) => new Promise(res => { releaseMd = () => res({content: "# Pending Markdown\\nBody text"}); });
+
+  // 1. Start opening markdown file (deferred read)
+  const openMdPromise = openFile("notes/doc.md");
+  await tick();
+
+  const preDownloadGenMd = _previewGen;
+
+  // 2. Select a download-only file while markdown preview request is in flight
+  await openFile("downloads/bundle.zip");
+  await tick();
+
+  const postDownloadGenMd = _previewGen;
+
+  // 3. Resolve deferred markdown preview read (now stale)
+  releaseMd();
+  await openMdPromise;
+  await tick();
+
+  const stateAfterMd = {
+    preDownloadGen: preDownloadGenMd,
+    postDownloadGen: postDownloadGenMd,
+    mode: _previewCurrentMode,
+    mdHtml: $('previewMd').innerHTML,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    rawContentGen: _previewRawContentGen,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    downloads: [...downloads],
+  };
+
+  // --- Scenario B: Deferred Code preview interrupted by download-only file ---
+  let releaseCode = null;
+  api = (route) => new Promise(res => { releaseCode = () => res({content: "def util():\\n    return 42\\n"}); });
+
+  // 4. Start opening code file (deferred read)
+  const openCodePromise = openFile("src/util.py");
+  await tick();
+
+  const preDownloadGenCode = _previewGen;
+
+  // 5. Select a download-only file while code preview request is in flight
+  await openFile("downloads/binary.bin");
+  await tick();
+
+  const postDownloadGenCode = _previewGen;
+
+  // 6. Resolve deferred code preview read (now stale)
+  releaseCode();
+  await openCodePromise;
+  await tick();
+
+  const stateAfterCode = {
+    preDownloadGen: preDownloadGenCode,
+    postDownloadGen: postDownloadGenCode,
+    mode: _previewCurrentMode,
+    codeText: $('previewCode').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    rawContentGen: _previewRawContentGen,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    downloads: [...downloads],
+  };
+
+  console.log(JSON.stringify({ stateAfterMd, stateAfterCode }));
+"""
+    )
+
+    # Validate Markdown scenario
+    md_state = out["stateAfterMd"]
+    assert md_state["postDownloadGen"] > md_state["preDownloadGen"], (
+        f"openFile() on download-only file must advance generation: {md_state}"
+    )
+    assert "downloads/bundle.zip" in md_state["downloads"], (
+        f"downloadFile() must be called for download-only file: {md_state}"
+    )
+    assert md_state["mdHtml"] == "", (
+        f"pending preview rendered markdown into DOM: {md_state['mdHtml']}"
+    )
+    assert md_state["rawContent"] == "", (
+        f"pending preview claimed raw content authority: {md_state['rawContent']}"
+    )
+    assert md_state["rawContentPath"] == "", (
+        f"pending preview claimed raw content path: {md_state['rawContentPath']}"
+    )
+    assert md_state["rawContentGen"] == -1, (
+        f"pending preview claimed raw content gen: {md_state['rawContentGen']}"
+    )
+    assert md_state["copyable"] is False, f"raw content marked copyable: {md_state}"
+    assert md_state["copyBtnDisplay"] == "none", (
+        f"copy button displayed after download: {md_state['copyBtnDisplay']}"
+    )
+
+    # Validate Code scenario
+    code_state = out["stateAfterCode"]
+    assert code_state["postDownloadGen"] > code_state["preDownloadGen"], (
+        f"openFile() on download-only file must advance generation: {code_state}"
+    )
+    assert "downloads/binary.bin" in code_state["downloads"], (
+        f"downloadFile() must be called for download-only file: {code_state}"
+    )
+    assert code_state["codeText"] == "", (
+        f"pending preview rendered code into DOM: {code_state['codeText']}"
+    )
+    assert code_state["rawContent"] == "", (
+        f"pending preview claimed raw content authority: {code_state['rawContent']}"
+    )
+    assert code_state["rawContentPath"] == "", (
+        f"pending preview claimed raw content path: {code_state['rawContentPath']}"
+    )
+    assert code_state["rawContentGen"] == -1, (
+        f"pending preview claimed raw content gen: {code_state['rawContentGen']}"
+    )
+    assert code_state["copyable"] is False, f"raw content marked copyable: {code_state}"
+    assert code_state["copyBtnDisplay"] == "none", (
+        f"copy button displayed after download: {code_state['copyBtnDisplay']}"
+    )
+
+
+def test_preview_toolbar_groups_copy_content_in_right_cluster_before_download():
+    """Maintainer review PR #6957:
+    The copy content button must be grouped in the right cluster with export actions
+    (immediately before Download), wrapped in .preview-actions carrying margin-left:auto
+    so Download's margin does not split the free space into a double gap.
+    """
+    assert 'class="preview-actions"' in INDEX
+    assert 'id="btnCopyPreviewContent"' in INDEX
+    assert 'id="btnDownloadFile"' in INDEX
+    actions_idx = INDEX.index('class="preview-actions"')
+    copy_idx = INDEX.index('id="btnCopyPreviewContent"')
+    download_idx = INDEX.index('id="btnDownloadFile"')
+    assert actions_idx < copy_idx < download_idx, (
+        "btnCopyPreviewContent must sit inside .preview-actions before btnDownloadFile"
+    )
+    btn_download = INDEX[download_idx : download_idx + 150]
+    assert "margin-left:auto" not in btn_download
+
+
+@requires_node
+def test_binary_and_download_fallback_invalidates_copy_state():
+    """Maintainer review defect #4:
+    Opening a binary file (data.binary: true) or a download-fallback file must
+    invalidate raw content and hide the copy button so the previous file's button
+    does not linger under the new filename.
+    """
+    out = _run_preview_scenario(
+        """
+  // 1. Open a valid text file
+  api = async (url) => ({ content: "Hello text" });
+  await openFile("hello.txt");
+  await tick();
+  const stateText = {
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+  };
+
+  // 2. Open a binary file that returns data.binary: true
+  api = async (url) => ({ binary: true });
+  await openFile("data.bin");
+  await tick();
+  const stateBinary = {
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    downloads: [...downloads],
+  };
+
+  console.log(JSON.stringify({ stateText, stateBinary }));
+"""
+    )
+    assert out["stateText"]["copyBtnDisplay"] == "inline-flex"
+    assert out["stateText"]["rawContent"] == "Hello text"
+    assert out["stateBinary"]["copyBtnDisplay"] == "none", (
+        f"copy button lingered visible for binary file: {out}"
+    )
+    assert out["stateBinary"]["rawContent"] == "", (
+        f"raw content was not cleared for binary file: {out}"
+    )
+    assert out["stateBinary"]["rawContentPath"] == ""
+    assert "data.bin" in out["stateBinary"]["downloads"]
+
+
+@requires_node
+def test_rename_previewed_file_remaps_raw_content_and_keeps_copyable():
+    """Maintainer review defect #4:
+    Renaming a currently-previewed file remaps _previewCurrentPath AND _previewRawContentPath
+    and calls syncPreviewCopyContentBtn() so copying under the new filename succeeds
+    without failing through to content_not_available.
+    """
+    script = (
+        _DOM_STUB
+        + "\n"
+        + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
+        + "\n"
+        + _js_functions(UI_JS, ["_workspaceParentDir", "_remapWorkspaceCachesAfterMove"])
+        + """
+  (async () => {
+    // 1. Open a text file
+    api = async (url) => ({ content: "Editable note content" });
+    await openFile("docs/note.md");
+    await tick();
+
+    const beforeRename = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      copyable: previewRawContentIsCopyable(),
+    };
+
+    // 2. Simulate renaming docs/note.md -> docs/renamed.md
+    _remapWorkspaceCachesAfterMove("docs/note.md", "docs/renamed.md", false);
+
+    // 3. Try to copy content after rename
+    await copyPreviewContent();
+
+    const afterRename = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      copyable: previewRawContentIsCopyable(),
+      copied: [...copied],
+      toasts: [...toasts],
+    };
+
+    console.log(JSON.stringify({ beforeRename, afterRename }));
+  })();
+"""
+    )
+    out = _run_node(script)
+    assert out["beforeRename"]["copyable"] is True
+    assert out["afterRename"]["curPath"] == "docs/renamed.md"
+    assert out["afterRename"]["rawPath"] == "docs/renamed.md"
+    assert out["afterRename"]["copyable"] is True
+    assert out["afterRename"]["copied"] == ["Editable note content"]
+    assert not any(t["msg"] == "content_not_available" for t in out["afterRename"]["toasts"])
