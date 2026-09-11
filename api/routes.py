@@ -556,6 +556,10 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
         return False
     if cli_meta.get("profile"):
         return False
+    if not bool(cli_meta.get("read_only")):
+        return False
+    if str(cli_meta.get("session_source") or "").strip().lower() != "external_agent":
+        return False
     sources = {
         str(cli_meta.get("source_tag") or "").strip().lower(),
         str(cli_meta.get("raw_source") or "").strip().lower(),
@@ -569,6 +573,37 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
     except ImportError:
         pass
     return bool(sources & profile_agnostic_sources)
+
+
+def _scope_rows_to_active_profile(rows, active_profile, *, is_isolated=None):
+    """Filter session rows down to what ``active_profile`` may see.
+
+    Single source of truth for the sidebar scoping rule, shared by the
+    ``/api/sessions`` payload builder and the gateway SSE stream so the list
+    and the live push can never disagree:
+
+      * normal mode — a row is visible when it matches the active profile OR
+        it is a profile-agnostic external-agent row (Claude Code / Codex),
+        which belongs to no Hermes profile and must stay reachable under any
+        named profile;
+      * isolated profile mode — the agnostic passthrough is revoked, because
+        those transcripts live outside the pinned profile tree and isolation
+        promises the deployment sees nothing but its own profile.
+    """
+    if is_isolated is None:
+        is_isolated = _is_isolated_profile_mode()
+    scoped = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        matches_profile = _profiles_match(row.get("profile"), active_profile)
+        is_agnostic = _is_profile_agnostic_foreign_session(row)
+        if is_isolated:
+            if matches_profile and not is_agnostic:
+                scoped.append(row)
+        elif matches_profile or is_agnostic:
+            scoped.append(row)
+    return scoped
 
 
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
@@ -2507,8 +2542,11 @@ def _build_session_list_cache_payload(
         scoped = merged
         other_profile_count = 0
     else:
-        scoped = [s for s in merged if _profiles_match(s.get("profile"), active_profile)]
-        other_profile_count = 0 if _is_isolated_profile_mode() else len(merged) - len(scoped)
+        is_isolated = _is_isolated_profile_mode()
+        scoped = _scope_rows_to_active_profile(
+            merged, active_profile, is_isolated=is_isolated
+        )
+        other_profile_count = 0 if is_isolated else len(merged) - len(scoped)
     diag_stage("messaging_dedupe")
     archived_scoped = _keep_latest_messaging_session_per_source(
         list(scoped),
@@ -3972,16 +4010,15 @@ def _ensure_full_session_before_mutation(sid: str, session):
     metadata must upgrade the cached stub first so they do not trip that guard
     or risk writing an incomplete object.
     """
-    if not getattr(session, "_loaded_metadata_only", False):
-        return session
-    full_session = Session.load(sid)
-    if full_session is None:
-        raise KeyError(sid)
-    with LOCK:
-        SESSIONS[sid] = full_session
-        SESSIONS.move_to_end(sid)
-        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-    return full_session
+    if getattr(session, "_loaded_metadata_only", False) or not getattr(session, "messages", None):
+        full_session = Session.load(sid)
+        if full_session is not None:
+            with LOCK:
+                SESSIONS[sid] = full_session
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+            return full_session
+    return session
 
 
 _ANCHOR_ACTIVITY_SCENE_MAX_BYTES = 256_000
@@ -5465,7 +5502,7 @@ def _resolve_share_session_pair(sid: str, handler):
     sessions that have not yet created local metadata.
     """
     try:
-        stored_session = get_session(sid)
+        stored_session = get_session(sid, metadata_only=True)
         cli_meta = (
             _lookup_cli_session_metadata(sid)
             if _session_requires_cli_metadata_lookup(stored_session)
@@ -5476,6 +5513,8 @@ def _resolve_share_session_pair(sid: str, handler):
             or getattr(stored_session, "profile", None)
             or None
         )
+        if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
+            raise KeyError(sid)
         if not _session_visible_to_active_profile(effective_profile, handler):
             raise KeyError(sid)
         stored_session = _ensure_full_session_before_mutation(sid, stored_session)
@@ -5488,6 +5527,8 @@ def _resolve_share_session_pair(sid: str, handler):
     except KeyError:
         cli_meta = _lookup_cli_session_metadata(sid) or {}
         effective_profile = cli_meta.get("profile") or None
+        if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
+            raise KeyError(sid) from None
         if not _session_visible_to_active_profile(effective_profile, handler):
             raise KeyError(sid) from None
         synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
@@ -12896,8 +12937,18 @@ def _handle_session_get(handler, parsed) -> bool:
     try:
         _t1 = _time.monotonic()
         if _diag: _diag.stage("t1_after_get_session_check")
-        s = get_session(sid, metadata_only=(not load_messages))
+        s = get_session(sid, metadata_only=True)
         _session_profile = getattr(s, 'profile', None) or None
+        # Isolation gate runs on metadata alone, BEFORE any message hydration
+        # below, so an isolated deployment never reads a profile-agnostic
+        # transcript off disk just to throw it away.
+        # Only CLI/foreign rows can be profile-agnostic: the predicate requires
+        # read_only, which is itself one of the markers that puts a session on
+        # the CLI lookup path — so a WebUI-native session can never match.
+        if _is_isolated_profile_mode() and _session_requires_cli_metadata_lookup(s):
+            if _is_profile_agnostic_foreign_session(_lookup_cli_session_metadata(sid)):
+                if _diag: _diag.finish()
+                return bad(handler, "Session not found", 404)
         if not _session_visible_to_active_profile(_session_profile, handler):
             if _session_profile:
                 # Valid session owned by a KNOWN other profile: 409 so the
@@ -12916,6 +12967,8 @@ def _handle_session_get(handler, parsed) -> bool:
             # otherwise emit a useless 409 with profile=null.
             if _diag: _diag.finish()
             return bad(handler, "Session not found", 404)
+        if load_messages:
+            s = get_session(sid, metadata_only=False)
         original_stream_id = getattr(s, "active_stream_id", None)
         _clear_stale_stream_state(s)
         cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -13353,6 +13406,9 @@ def _handle_session_get(handler, parsed) -> bool:
         # below would 404 every one of them under a named active profile
         # even though /api/sessions happily lists them. Exempt them.
         _profile_agnostic = _is_profile_agnostic_foreign_session(cli_meta)
+        if _profile_agnostic and _is_isolated_profile_mode():
+            if _diag: _diag.finish()
+            return bad(handler, "Session not found", 404)
         if not _profile_agnostic and not _session_visible_to_active_profile(_session_profile, handler):
             if _session_profile:
                 # Valid CLI/foreign session owned by a KNOWN other profile:
@@ -19288,7 +19344,20 @@ def _handle_gateway_sse_stream(handler, parsed):
         # Send initial snapshot immediately
         from api.models import get_cli_sessions
         initial = get_cli_sessions()
-        _sse(handler, 'sessions_changed', {'sessions': initial})
+
+        # The watcher is profile-blind: it scans every store and broadcasts the
+        # full row set. Scope it per connection with the same rule /api/sessions
+        # uses, or an isolated-profile deployment would receive foreign and
+        # profile-agnostic (Claude Code / Codex) rows over the stream that the
+        # sidebar fetch correctly withholds.
+        active_profile = _get_active_profile_name()
+        is_isolated = _is_isolated_profile_mode()
+
+        _sse(handler, 'sessions_changed', {
+            'sessions': _scope_rows_to_active_profile(
+                initial, active_profile, is_isolated=is_isolated
+            ),
+        })
 
         while True:
             try:
@@ -19299,6 +19368,18 @@ def _handle_gateway_sse_stream(handler, parsed):
                 continue
             if event_data is None:
                 break  # watcher is stopping
+            # Scoping the initial snapshot alone would be cosmetic: the very
+            # next watcher tick pushes the unfiltered list. Filter a COPY —
+            # _notify_subscribers hands the same dict to every subscriber, so
+            # mutating it would leak this connection's scope to other clients.
+            if isinstance(event_data.get('sessions'), list):
+                event_data = dict(
+                    event_data,
+                    sessions=_scope_rows_to_active_profile(
+                        event_data['sessions'], active_profile,
+                        is_isolated=is_isolated,
+                    ),
+                )
             _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
     except _CLIENT_DISCONNECT_ERRORS:
         pass
@@ -28229,6 +28310,15 @@ def _handle_session_import_cli(handler, body):
     if allow_all_profiles and not requested_profile:
         return bad(handler, "profile is required for all_profiles import", 400)
 
+    if _is_isolated_profile_mode():
+        _initial_cli_meta = _resolve_cli_import_metadata(
+            sid,
+            requested_profile=requested_profile,
+            allow_all_profiles=allow_all_profiles,
+        )
+        if _is_profile_agnostic_foreign_session(_initial_cli_meta):
+            return bad(handler, "Session not found in CLI store", 404)
+
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
@@ -28250,6 +28340,8 @@ def _handle_session_import_cli(handler, body):
             requested_profile=refresh_profile,
             allow_all_profiles=allow_all_profiles,
         )
+        if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
+            return bad(handler, "Session not found in CLI store", 404)
         fresh_msgs = get_cli_session_messages(
             sid,
             profile=(cli_meta or {}).get("profile") or refresh_profile,
@@ -28331,6 +28423,8 @@ def _handle_session_import_cli(handler, body):
         requested_profile=requested_profile,
         allow_all_profiles=allow_all_profiles,
     )
+    if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
+        return bad(handler, "Session not found in CLI store", 404)
     profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
     msgs = get_cli_session_messages(sid, profile=profile)
     if not msgs:
