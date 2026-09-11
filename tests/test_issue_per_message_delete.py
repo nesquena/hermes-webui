@@ -301,3 +301,46 @@ def test_id_less_context_duplicate_signature_middle_target():
     assert result["removed_context_count"] == 1
     # The middle context row (u2_idless's true counterpart) is gone.
     assert result_ctx == ["first", "third"]
+
+
+def test_duplicate_content_target_removes_own_ctx_row():
+    """Real duplicate-content coverage for the PR #7075 P1 fix.
+
+    Suggested by Manny7717 in PR review: the two existing regression
+    tests (``test_id_less_context_duplicate_signature_targets_correct_row``
+    and ``test_id_less_context_duplicate_signature_middle_target``) use
+    fixtures where every display row has UNIQUE content ("first" /
+    "second" / "third"). With unique signatures, the old linear-scan
+    implementation that started from cursor 0 always landed on the right
+    row - so the tests could not distinguish the pre-fix from the
+    post-fix implementation. The duplicate-signature collision the P1
+    fix targets never occurred in those fixtures.
+
+    This fixture uses IDENTICAL content on two consecutive display rows,
+    so the only way to remove the correct ctx row is to advance the
+    cursor on every match - exactly the path the fix restores.
+
+    Verified by Manny to FAIL pre-fix and PASS post-fix.
+    """
+    s = Session(
+        session_id="t-dup",
+        messages=[
+            {"id": "m1", "role": "user", "content": "check status", "timestamp": 1.0},
+            {"id": "m2", "role": "user", "content": "check status", "timestamp": 2.0},
+            {"id": "a2", "role": "assistant", "content": "all good", "timestamp": 2.5},
+        ],
+        context_messages=[
+            {"id": "m1", "role": "user", "content": "check status"},
+            {"id": "m2", "role": "user", "content": "check status"},
+            {"role": "assistant", "content": "all good"},
+        ],
+    )
+    result = delete_message_at_signature(s, "m2", scope="pair")
+    # pair scope removes both halves of the turn (m2 + a2).
+    # old_message_count started at 3 (m1, m2, a2), new is 1 (only m1).
+    assert result["new_message_count"] == 1
+    assert result["old_message_count"] == 3
+    # Only m1's context row should remain. On pre-fix the matcher would
+    # stop on the duplicate-signal m2_idless but pick the wrong cursor
+    # advancement, leaving m2's context row in the model history.
+    assert [m["id"] for m in s.context_messages] == ["m1"]
