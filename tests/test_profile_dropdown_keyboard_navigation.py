@@ -75,6 +75,7 @@ def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
           setAttribute(key, value) {{ this._attrs[key] = String(value); }}
           getAttribute(key) {{ return this._attrs[key] !== undefined ? this._attrs[key] : null; }}
           addEventListener(type, fn) {{ if (type === 'keydown') this._keydowns.push(fn); }}
+          querySelector(selector) {{ return this._qs && this._qs[selector] ? this._qs[selector] : null; }}
           querySelectorAll(selector) {{
             if (selector === '.profile-opt') return this.children.filter((child) => String(child.className).split(/\\s+/).includes('profile-opt'));
             return [];
@@ -84,9 +85,15 @@ def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
           click() {{ return typeof this.onclick === 'function' ? this.onclick() : undefined; }}
         }}
         const elements = new Map();
-        for (const id of ['profileDropdown', 'profileChip', 'titlebarProfileBtn', 'titlebarProfileLabel', 'msg']) {{
+        for (const id of ['profileDropdown', 'profileChip', 'titlebarProfileBtn', 'titlebarProfileLabel', 'msg', 'panelProfiles', 'panelProfilesHead']) {{
           elements.set(id, new Element('div', id));
         }}
+        // Mirror static/index.html: the triggers declare a menu popup.
+        elements.get('profileChip').setAttribute('aria-haspopup', 'menu');
+        elements.get('titlebarProfileBtn').setAttribute('aria-haspopup', 'menu');
+        // Profiles panel with its heading, for the Manage-activation case.
+        elements.get('panelProfiles').appendChild(elements.get('panelProfilesHead'));
+        elements.get('panelProfiles')._qs = {{ '.panel-head': elements.get('panelProfilesHead') }};
         globalThis.document = {{
           hidden: false,
           activeElement: null,
@@ -171,17 +178,21 @@ def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
           __kbTest.seedCache(multiProfileResponse);
           __kbTest.toggle('profileChip');
           assert.strictEqual(__kbTest.isOpen(), true, 'dropdown should open');
-          assert.strictEqual(__kbTest.ddRole(), 'listbox', 'menu container must be a listbox');
+          assert.strictEqual(__kbTest.ddRole(), 'menu', 'popup must use the menu contract (rows + Manage command)');
           const items = __kbTest.options();
           assert.strictEqual(items.length, 4, 'three profiles + manage row should be rendered');
-          // Listbox option contract, asserted on the live DOM.
+          // Menu contract, asserted on the live DOM: every row is a menuitem,
+          // the active profile is marked with aria-current, and nothing uses
+          // listbox option semantics.
           for (const o of items) {{
-            assert.strictEqual(o.getAttribute('role'), 'option');
+            assert.strictEqual(o.getAttribute('role'), 'menuitem');
             assert.strictEqual(o.getAttribute('tabindex'), '-1');
+            assert.strictEqual(o.getAttribute('aria-selected'), null, 'no listbox option semantics on menu rows');
           }}
-          assert.strictEqual(items[0].getAttribute('aria-selected'), 'true', 'active profile selected');
-          assert.strictEqual(items[1].getAttribute('aria-selected'), 'false');
+          assert.strictEqual(items[0].getAttribute('aria-current'), 'true', 'active profile marked aria-current');
+          assert.strictEqual(items[1].getAttribute('aria-current'), null);
           assert.strictEqual(items[0].getAttribute('data-profile'), 'default');
+          assert.strictEqual(document.getElementById('profileChip').getAttribute('aria-haspopup'), 'menu');
           assert.strictEqual(__kbTest.active(), items[0], 'focus should land on the active profile option on open');
           assert.strictEqual(__kbTest.chipExpanded(), 'true');
 
@@ -286,12 +297,31 @@ def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
           assert.strictEqual(items[1].getAttribute('data-profile'), 'alpha');
         }}
 
+        async function runManageRowActivation() {{
+          __kbTest.reset();
+          __kbTest.seedCache(multiProfileResponse);
+          __kbTest.toggle('profileChip');
+          let switchedPanel = null;
+          globalThis.mobileSwitchPanel = (name) => {{ switchedPanel = name; }};
+          const items = __kbTest.options();
+          __kbTest.dispatchKey('End');
+          assert.strictEqual(__kbTest.active(), items[items.length - 1], 'End lands on the Manage row');
+          assert.strictEqual(items[items.length - 1].getAttribute('data-profile'), '__manage__');
+          __kbTest.dispatchKey('Enter');
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.strictEqual(switchedPanel, 'profiles', 'Enter on Manage must open the Profiles panel');
+          assert.strictEqual(__kbTest.isOpen(), false, 'menu must close');
+          assert.strictEqual(__kbTest.active(), document.getElementById('panelProfilesHead'),
+            'focus must land on the Profiles panel heading, not the (possibly hidden on mobile) opener');
+        }}
+
         (async () => {{
           await runOpenNavigationEnter();
           await runEscapeClosesAndRestores();
           await runArrowDownOnTriggerOpens();
           await runHandlerInertWhenFocusLeftMenu();
           await runRefreshPreservesInProgressSelection();
+          await runManageRowActivation();
         }})().catch((err) => {{ console.error(err && err.stack || err); process.exit(1); }});
         """
     )

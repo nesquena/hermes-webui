@@ -6856,11 +6856,12 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
-  // ARIA listbox contract: the menu is a keyboard-navigable list of options
-  // (ArrowUp/Down/Home/End move focus, Enter/Space selects, Escape closes).
-  // Options get role="option" + tabindex="-1" + aria-selected so screen readers
-  // and keyboard users see the same structure mouse users see.
-  dd.setAttribute('role','listbox');
+  // ARIA menu-button contract: the popup is a menu whose rows the user chooses
+  // between, plus one navigation command (Manage profiles). A listbox would be
+  // wrong here — it is for selecting a *value*, and a command cannot be an
+  // option. role="menu"/"menuitem" fits both rows, and the active profile is
+  // marked with aria-current rather than aria-selected.
+  dd.setAttribute('role','menu');
   dd.setAttribute('aria-label', t('tab_profiles') || 'Profiles');
   const allProfiles = (Array.isArray(data.profiles) ? data.profiles : []).filter(p => p && typeof p.name === 'string');
   const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
@@ -6870,9 +6871,9 @@ function renderProfileDropdown(data) {
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
-    opt.setAttribute('role','option');
+    opt.setAttribute('role','menuitem');
     opt.setAttribute('tabindex','-1');
-    opt.setAttribute('aria-selected', p.name === active ? 'true' : 'false');
+    if (p.name === active) opt.setAttribute('aria-current','true');
     opt.setAttribute('data-profile', p.name);
     const meta = [];
     if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
@@ -6893,12 +6894,18 @@ function renderProfileDropdown(data) {
   if (!data.single_profile_mode) {
     const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
     const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
-    mgmt.setAttribute('role','option');
+    mgmt.setAttribute('role','menuitem');
     mgmt.setAttribute('tabindex','-1');
-    mgmt.setAttribute('aria-label', t('manage_profiles'));
     mgmt.setAttribute('data-profile', '__manage__');
     mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
-    mgmt.onclick = () => { closeProfileDropdown({restore:true}); mobileSwitchPanel('profiles'); };
+    mgmt.onclick = () => {
+      // This is a navigation command, not a selection: close WITHOUT restoring
+      // focus (the opener chip/button can be hidden after the switch, e.g. on
+      // mobile) and land focus on the destination panel instead.
+      closeProfileDropdown();
+      mobileSwitchPanel('profiles');
+      _focusProfilesPanelDestination();
+    };
     dd.appendChild(mgmt);
   }
   // Sync titlebar label to the resolved active profile
@@ -6984,8 +6991,19 @@ window.addEventListener('resize',()=>{
 // The dropdown is a plain-div menu, so it previously had NO keyboard support:
 // opening it (click or Enter) left focus on the trigger and ArrowUp/Down did
 // nothing, forcing mouse-only selection. Mirror the session action menu pattern
-// (sessions.js _mountSessionActionMenu): options are focusable, arrow keys move
-// focus, Enter/Space select, Escape closes and returns focus to the trigger.
+// (sessions.js _mountSessionActionMenu): rows are focusable menuitems, arrow
+// keys move focus, Enter/Space activate, Escape closes and returns focus to the
+// trigger.
+
+function _focusProfilesPanelDestination(){
+  // After "Manage profiles" the opener may be hidden (mobile), so focus the
+  // destination panel heading instead of restoring focus to the trigger.
+  const panel=$('panelProfiles');
+  const head=panel && panel.querySelector('.panel-head');
+  if(!head) return;
+  if(head.getAttribute('tabindex')===null) head.setAttribute('tabindex','-1');
+  try{head.focus({preventScroll:true});}catch(_){head.focus();}
+}
 
 function _profileDropdownOptions(){
   const dd=$('profileDropdown');
@@ -7015,7 +7033,7 @@ function _focusProfileDropdownOption(){
   // re-focus the rebuilt row with the same data-profile instead of jumping
   // back to the active one.
   if(focusAttached) idx=items.findIndex(o=>o.getAttribute('data-profile')===_profileDropdownFocusedName);
-  if(idx<0) idx=items.findIndex(o=>o.getAttribute('aria-selected')==='true');
+  if(idx<0) idx=items.findIndex(o=>o.getAttribute('aria-current')==='true');
   if(idx<0) idx=0;
   const target=items[idx];
   if(target && target!==fe){
