@@ -12315,11 +12315,22 @@ function _buildAuxProviderOptions(sel,providers,currentProvider){
  autoOpt.value='auto';autoOpt.textContent='auto ('+t('settings_aux_provider_auto')+')';
  if(currentProvider==='auto'||!currentProvider) autoOpt.selected=true;
  sel.appendChild(autoOpt);
+ let matched=currentProvider==='auto'||!currentProvider;
  for(const p of providers){
   const opt=document.createElement('option');
   opt.value=p.slug;opt.textContent=p.name;
-  if(p.slug===currentProvider) opt.selected=true;
+  if(p.slug===currentProvider){opt.selected=true;matched=true;}
   sel.appendChild(opt);
+ }
+ // The configured provider can be absent from the /api/models catalog (e.g. its
+ // group exposes no models). Keep it selectable: with no matching option the
+ // select falls back to its first entry ('auto') and the next Apply would
+ // persist that, silently discarding the configured value.
+ if(!matched&&currentProvider){
+  const configuredOpt=document.createElement('option');
+  configuredOpt.value=currentProvider;configuredOpt.textContent=currentProvider+' (configured)';
+  configuredOpt.selected=true;
+  sel.appendChild(configuredOpt);
  }
 }
 
