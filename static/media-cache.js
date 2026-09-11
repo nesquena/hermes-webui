@@ -13,13 +13,13 @@ const testCfg=(typeof window!=='undefined'&&window.__HERMES_VIDEO_CACHE_TEST__)|
 const PER_FILE_BYTES=Math.max(1,Number(testCfg.perFileBytes)||DEFAULT_PER_FILE_BYTES);
 const TOTAL_BYTES=Math.max(PER_FILE_BYTES,Number(testCfg.totalBytes)||DEFAULT_TOTAL_BYTES);
 const forceCacheUnavailable=!!testCfg.forceCacheUnavailable;
+const CACHE_CLEANUP_TIMEOUT_MS=250;
+const CACHE_OPERATION_TIMEOUT_MS=Math.max(1,Number(testCfg.cacheOpTimeoutMs)||CACHE_CLEANUP_TIMEOUT_MS);
 
 let scope='';
 let scopeContext='';
-let scopePromise=null;
-let scopePromiseContext='';
+let scopeRequest=null;
 let scopeGeneration=0;
-const scopeWaiters=new Set();
 let cacheOps=Promise.resolve();
 let visibilityObserver=null;
 let domObserver=null;
@@ -42,6 +42,12 @@ function _cacheStorage(){
   if(forceCacheUnavailable||typeof caches==='undefined'||typeof BroadcastChannel==='undefined'||
     typeof navigator==='undefined'||!navigator.locks||typeof navigator.locks.request!=='function') return null;
   return caches;
+}
+function _prefersReducedData(){
+  try{
+    if(navigator.connection&&navigator.connection.saveData) return true;
+    return typeof matchMedia==='function'&&matchMedia('(prefers-reduced-data: reduce)').matches;
+  }catch(_){return false;}
 }
 function _cacheName(value){return CACHE_PREFIX+value;}
 function _metaUrl(){return new URL(META_PATH,location.origin).href;}
@@ -90,16 +96,28 @@ async function _blobDigest(blob){
   const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer()));
   return Array.from(bytes,value=>value.toString(16).padStart(2,'0')).join('');
 }
-function _progress(record,received,total){
-  if(!record||!record.video) return;
-  const video=record.video;
-  const numeric=total>0?Math.min(100,Math.floor(received*100/total)):received;
-  video.dataset.cacheProgress=String(numeric);
-  const host=video.closest&&video.closest('.msg-media-editor');
-  const label=host&&host.querySelector&&host.querySelector('.msg-media-cache-progress');
+function _progressLabel(record){
+  const video=record&&record.video;
+  const host=video&&video.closest&&video.closest('.msg-media-editor');
+  return host&&host.querySelector&&host.querySelector('.msg-media-cache-progress');
+}
+function _showProgressLabel(record,text,{alert=false}={}){
+  const label=_progressLabel(record);
   if(!label) return;
   label.hidden=false;
-  label.textContent=total>0?numeric+'%':Math.max(1,Math.ceil(received/1024))+' KB';
+  label.textContent=text;
+  label.setAttribute('role',alert?'alert':'status');
+  label.setAttribute('aria-live',alert?'assertive':'polite');
+}
+function _showLoading(record){
+  const text=typeof t==='function'?t('loading'):'Loading';
+  _showProgressLabel(record,text);
+}
+function _progress(record,received,total){
+  if(!record||!record.video) return;
+  const numeric=total>0?Math.min(100,Math.floor(received*100/total)):received;
+  record.video.dataset.cacheProgress=String(numeric);
+  _showProgressLabel(record,total>0?numeric+'%':Math.max(1,Math.ceil(received/1024))+' KB');
 }
 function _clearProgress(record){
   if(!record||!record.video) return;
@@ -132,8 +150,24 @@ function _metaBytes(meta){
 }
 function _total(meta){return Object.values(meta.entries).reduce((sum,item)=>sum+item.size,0)+_metaBytes(meta);}
 function _queueCacheOp(fn){
-  const locked=()=>navigator.locks.request(CACHE_FAMILY+'quota-lock',{mode:'exclusive'},fn);
-  const run=cacheOps.then(locked,locked);
+  // Start the deadline at enqueue time. A prior callback can retain the Web
+  // Lock forever; successors must still leave this promise queue and fall back
+  // to native playback instead of waiting forever before requesting the lock.
+  const controller=new AbortController();
+  let timer=null;
+  const deadline=new Promise((_,reject)=>{
+    timer=setTimeout(()=>{
+      controller.abort();
+      reject(new DOMException('Cache operation deadline exceeded','TimeoutError'));
+    },CACHE_OPERATION_TIMEOUT_MS);
+  });
+  const locked=()=>navigator.locks.request(
+    CACHE_FAMILY+'quota-lock',
+    {mode:'exclusive',signal:controller.signal},
+    fn,
+  );
+  const queued=cacheOps.then(locked,locked);
+  const run=Promise.race([queued,deadline]).finally(()=>{if(timer!==null) clearTimeout(timer);});
   cacheOps=run.catch(()=>{});
   return run;
 }
@@ -182,30 +216,83 @@ async function _writeMeta(cache,meta){
     headers:{'Content-Type':'application/json','Cache-Control':'no-store'},
   }));
 }
-async function _deleteOldCaches(keepName=''){
+async function _deleteOldCaches(keepName='',timeoutMs=CACHE_CLEANUP_TIMEOUT_MS){
   const storage=_cacheStorage();
   if(!storage||typeof storage.keys!=='function') return;
-  await navigator.locks.request(CACHE_FAMILY+'quota-lock',{mode:'exclusive'},async()=>{
-    const names=await storage.keys();
-    await Promise.all(names.filter(name=>name.startsWith(CACHE_FAMILY)&&name!==keepName).map(name=>storage.delete(name)));
+  const names=await storage.keys();
+  const targets=names.filter(name=>name.startsWith(CACHE_FAMILY)&&name!==keepName);
+  if(!targets.length) return;
+  const controller=new AbortController();
+  let timer=null;
+  const timeout=new Promise((_,reject)=>{
+    timer=setTimeout(()=>{
+      controller.abort();
+      reject(new DOMException('Cache cleanup deadline exceeded','TimeoutError'));
+    },timeoutMs);
   });
+  const deletion=navigator.locks.request(
+    CACHE_FAMILY+'quota-lock',
+    {mode:'exclusive',signal:controller.signal},
+    ()=>Promise.all(targets.map(name=>storage.delete(name))),
+  );
+  try{await Promise.race([deletion,timeout]);}
+  finally{if(timer!==null) clearTimeout(timer);}
 }
-async function _cachedBlob(sourceUrl,currentScope){
+async function _boundedCachedBlob(response){
+  if(!response.body||typeof TransformStream==='undefined'||typeof Response==='undefined') throw new Error('bounded cache read unavailable');
+  let received=0;
+  const counted=response.body.pipeThrough(new TransformStream({
+    transform(chunk,controller){
+      received+=chunk&&Number(chunk.byteLength)||0;
+      if(received>PER_FILE_BYTES){
+        controller.error(new MediaCacheLimitError('cached video exceeds persistent cache limit'));
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  }));
+  const blob=await new Response(counted,{headers:{'Content-Type':response.headers.get('Content-Type')||''}}).blob();
+  if(blob.size!==received||blob.size>PER_FILE_BYTES) throw new MediaCacheLimitError('invalid cached video size');
+  return blob;
+}
+async function _cachedBlob(cacheKey,sourceUrl,currentScope){
   const storage=_cacheStorage();
   if(!storage||!currentScope) return null;
   return _queueCacheOp(async()=>{
     if(scope!==currentScope) return null;
     const cache=await storage.open(_cacheName(currentScope));
     const meta=await _readMeta(cache);
-    const response=await cache.match(sourceUrl);
+    const response=await cache.match(cacheKey);
     if(!response) return null;
-    const declared=Number(response.headers.get('Content-Length'));
-    const size=Number(meta.entries[sourceUrl]&&meta.entries[sourceUrl].size)||
-      (Number.isFinite(declared)&&declared>=0?declared:0);
-    meta.entries[sourceUrl]={size,at:Date.now()};
+    const lengthHeader=response.headers.get('Content-Length');
+    const declared=lengthHeader===null?NaN:Number(lengthHeader);
+    const recorded=Number(meta.entries[cacheKey]&&meta.entries[cacheKey].size);
+    const contentType=String(response.headers.get('Content-Type')||'').split(';')[0].trim().toLowerCase();
+    let requestedDigest='';
+    try{requestedDigest=String(new URL(sourceUrl,document.baseURI||location.href).searchParams.get('snap')||'').toLowerCase();}
+    catch(_){}
+    let blob=null;
+    let valid=/^[0-9a-f]{64}$/.test(requestedDigest)&&contentType.startsWith('video/')&&
+      Number.isFinite(declared)&&declared>=0&&declared<=PER_FILE_BYTES&&
+      Number.isFinite(recorded)&&recorded===declared;
+    if(valid){
+      try{
+        blob=await _boundedCachedBlob(response);
+        valid=blob.size===declared&&blob.type.toLowerCase().startsWith('video/')&&
+          await _blobDigest(blob)===requestedDigest;
+      }catch(_){valid=false;}
+    }
+    if(!valid){
+      await cache.delete(cacheKey);
+      delete meta.entries[cacheKey];
+      await _writeMeta(cache,meta);
+      debugMeta=meta;
+      return null;
+    }
+    meta.entries[cacheKey]={size:blob.size,at:Date.now()};
     await _writeMeta(cache,meta);
     debugMeta=meta;
-    return response.blob();
+    return blob;
   });
 }
 async function _evictOldest(cache,meta,exclude=''){
@@ -258,8 +345,8 @@ async function _storeBlob(sourceUrl,blob,currentScope){
     return true;
   });
 }
-async function _requestScope(sourceUrl){
-  const generation=scopeGeneration;
+async function _requestScope(sourceUrl,request){
+  const generation=request.generation;
   const sessionContext=_sessionContext(sourceUrl);
   if(!sessionContext) throw new Error('media cache session context unavailable');
   const endpoint=new URL('api/media-cache/scope',document.baseURI||location.href);
@@ -271,9 +358,8 @@ async function _requestScope(sourceUrl){
     credentials:'include',cache:'no-store',headers:{'Accept':'application/json'},
   });
   if(!response.ok){
-    // Invalidate old partitions without releasing the videos waiting on this
-    // authorization decision; they still need to enter the native fallback.
-    await clearAll(true,scopeWaiters);
+    if(generation!==scopeGeneration) throw new DOMException('Superseded','AbortError');
+    await clearAll(true,request.waiters);
     throw new Error('media cache scope unavailable');
   }
   const payload=await response.json();
@@ -284,30 +370,35 @@ async function _requestScope(sourceUrl){
   }
   if(generation!==scopeGeneration) throw new DOMException('Superseded','AbortError');
   if(scope&&scope!==value){
-    _teardownActive(scopeWaiters);
+    _teardownActive(request.waiters,{reobserve:true});
     debugMeta={entries:{}};
   }
   scope=value;
   scopeContext=sessionContext;
-  await _deleteOldCaches(_cacheName(value));
+  try{await _deleteOldCaches(_cacheName(value));}catch(_){}
   return {scope:value,resource};
 }
 function _ensureScope(validate=false,preserveVideo=null,sourceUrl=''){
   const sessionContext=_sessionContext(sourceUrl);
   const requestContext=_scopeRequestContext(sourceUrl);
   if(!sessionContext||!requestContext) return Promise.reject(new Error('media cache session context unavailable'));
-  if(preserveVideo) scopeWaiters.add(preserveVideo);
-  if(scopePromise){
-    if(scopePromiseContext===requestContext) return scopePromise;
-    return scopePromise.catch(()=>{}).then(()=>_ensureScope(validate,preserveVideo,sourceUrl));
+  const current=scopeRequest;
+  if(current){
+    if(current.context===requestContext){
+      if(preserveVideo) current.waiters.add(preserveVideo);
+      return current.promise;
+    }
+    return current.promise.catch(()=>{}).then(()=>_ensureScope(validate,preserveVideo,sourceUrl));
   }
-  scopePromiseContext=requestContext;
-  scopePromise=_requestScope(sourceUrl).finally(()=>{
-    scopePromise=null;
-    scopePromiseContext='';
-    scopeWaiters.clear();
+  const request={context:requestContext,generation:scopeGeneration,waiters:new Set(),promise:null};
+  if(preserveVideo) request.waiters.add(preserveVideo);
+  request.promise=_requestScope(sourceUrl,request).finally(()=>{
+    if(Array.isArray(testCfg.scopeRequestFinalized)) testCfg.scopeRequestFinalized.push(request.context);
+    if(scopeRequest===request) scopeRequest=null;
+    request.waiters.clear();
   });
-  return scopePromise;
+  scopeRequest=request;
+  return request.promise;
 }
 function _taskKey(currentScope,cacheKey){return currentScope+'\n'+cacheKey;}
 async function _rejectResponse(task,response,error){
@@ -323,7 +414,7 @@ async function _rejectResponse(task,response,error){
   throw error;
 }
 async function _download(task){
-  const cached=await _cachedBlob(task.cacheKey,task.scope);
+  const cached=await _cachedBlob(task.cacheKey,task.sourceUrl,task.scope);
   if(cached) return cached;
   const response=await fetch(task.sourceUrl,{
     credentials:'include',cache:'no-store',signal:task.controller.signal,
@@ -435,6 +526,7 @@ function _failIntegrity(record){
     delete video.dataset.persistentVideoFallback;
     video.dataset.persistentVideoState='integrity-error';
   }
+  _showProgressLabel(record,typeof t==='function'?t('file_open_failed'):'Could not open file',{alert:true});
   try{video.load();}catch(_){}
 }
 async function _activate(video){
@@ -443,11 +535,12 @@ async function _activate(video){
   if(!record||record.activated) return;
   record.activated=true;
   if(visibilityObserver) try{visibilityObserver.unobserve(video);}catch(_){}
-  if(!_cacheStorage()){
+  if(!_cacheStorage()||_prefersReducedData()){
     _fallback(record);
     return;
   }
   video.dataset.persistentVideoState='loading';
+  _showLoading(record);
   try{
     // Revalidate authority before every new consumption. Otherwise an expired
     // auth cookie could keep reading an in-memory old scope without contacting
@@ -515,44 +608,40 @@ function _videosIn(node){
   if(node.querySelectorAll) found.push(...node.querySelectorAll('.msg-media-video'));
   return found;
 }
-function _teardownActive(preserveVideos=null){
+function _teardownActive(preserveVideos=null,{reobserve=false}={}){
+  const mounted=[];
   for(const video of Array.from(consumers.keys())){
     if(preserveVideos&&preserveVideos.has(video)) continue;
+    if(reobserve&&video.isConnected) mounted.push(video);
     _release(video);
   }
   for(const task of tasks.values()) if(!task.settled) task.controller.abort();
   tasks.clear();
+  if(reobserve) for(const video of mounted) _observe(video);
 }
-async function clearAll(broadcast=true,preserveVideos=null){
+function clearAll(broadcast=true,preserveVideos=null){
   if(broadcast&&authorityChannel){
     try{authorityChannel.postMessage({type:'authority-change'});}catch(_){}
   }
   scopeGeneration++;
   scope='';
   scopeContext='';
-  scopePromise=null;
-  scopePromiseContext='';
-  _teardownActive(preserveVideos);
+  scopeRequest=null;
+  _teardownActive(preserveVideos,{reobserve:true});
   debugMeta={entries:{}};
   const storage=_cacheStorage();
-  if(!storage) return;
-  await _deleteOldCaches('');
+  if(!storage) return Promise.resolve();
+  return _deleteOldCaches('').catch(()=>{});
 }
-async function prepareAuthorityChange(){
-  // Cache cleanup is best-effort plumbing, never the authority mutation itself.
-  // clearAll() invalidates this tab's scope/tasks/Blob URLs before its first
-  // await; if persistent deletion then fails, the new server-issued scope still
-  // makes the old partition unreadable and a later reconciliation can remove it.
-  try{await clearAll();}catch(_){}
+function prepareAuthorityChange(){
+  void clearAll().catch(()=>{});
+  return Promise.resolve();
 }
-async function authorityChanged(){
-  await clearAll();
+function authorityChanged(){
+  void clearAll().catch(()=>{});
   return Promise.resolve('');
 }
-async function refreshAuthority(){
-  // This is the post-mutation half of profile/workspace transitions. A second
-  // broadcast is required because another tab may have started old-scope work
-  // after the pre-clear but before the server committed the authority change.
+function refreshAuthority(){
   return authorityChanged();
 }
 function debugSnapshot(){

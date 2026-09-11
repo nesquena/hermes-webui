@@ -12894,11 +12894,11 @@ async function saveSettings(andClose){
 async function signOut(){
   try{
     if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
-      try{await window.HermesPersistentVideoCache.clearAll();}catch(_){}
+      try{void Promise.resolve(window.HermesPersistentVideoCache.clearAll()).catch(()=>{});}catch(_){}
     }
     const response=await api('/api/auth/logout',{method:'POST',body:'{}'});
     if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
-      try{await window.HermesPersistentVideoCache.clearAll();}catch(_){}
+      try{void Promise.resolve(window.HermesPersistentVideoCache.clearAll()).catch(()=>{});}catch(_){}
     }
     window.location.href=response.trusted_logout_url||'login';
   }catch(e){

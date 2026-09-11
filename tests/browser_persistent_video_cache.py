@@ -38,6 +38,10 @@ class State:
     ranges: dict[str, list[str]] = {}
     authority = "scope-a"
     retarget_mode = "first"
+    scope_owner_a_started = threading.Event()
+    scope_owner_a_release = threading.Event()
+    scope_owner_b_started = threading.Event()
+    scope_owner_b_release = threading.Event()
 
     @classmethod
     def reset(cls):
@@ -49,6 +53,10 @@ class State:
             cls.ranges.clear()
             cls.authority = "scope-a"
             cls.retarget_mode = "first"
+            cls.scope_owner_a_started.clear()
+            cls.scope_owner_a_release.clear()
+            cls.scope_owner_b_started.clear()
+            cls.scope_owner_b_release.clear()
 
 
 class FixtureServer(ThreadingHTTPServer):
@@ -82,7 +90,7 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         if parsed.path == "/":
             no_cache = query.get("nocache", [""])[0] == "1"
-            prefix = "window.__HERMES_VIDEO_CACHE_TEST__={perFileBytes:4096,totalBytes:5000,forceCacheUnavailable:true};" if no_cache else "window.__HERMES_VIDEO_CACHE_TEST__={perFileBytes:4096,totalBytes:5000};"
+            prefix = "window.__HERMES_VIDEO_CACHE_TEST__={perFileBytes:4096,totalBytes:5000,cacheOpTimeoutMs:100,scopeRequestFinalized:[],forceCacheUnavailable:true};" if no_cache else "window.__HERMES_VIDEO_CACHE_TEST__={perFileBytes:4096,totalBytes:5000,cacheOpTimeoutMs:100,scopeRequestFinalized:[]};"
             html = f"""<!doctype html><meta charset=utf-8><link rel=stylesheet href=/static/style.css><style>
 body{{margin:0;background:var(--bg,#111);color:var(--text,#eee)}} .host{{padding:16px;width:min(520px,calc(100vw - 32px));box-sizing:border-box}}
 </style><div class=host id=host></div><script>window.__HERMES_CONFIG__={{maxUploadBytes:20971520}};window.t=window.t||((key)=>key);{prefix}</script><script src=/static/media-cache.js></script><script src=/static/ui.js></script>"""
@@ -119,6 +127,15 @@ body{{margin:0;background:var(--bg,#111);color:var(--text,#eee)}} .host{{padding
                 return
             with State.lock:
                 State.scope_requests[media_path] += 1
+            if media_path.endswith("scope-owner-c.mp4"):
+                self._send(404, b'{"error":"immutable binding not found"}', "application/json")
+                return
+            if media_path.endswith("scope-owner-a.mp4"):
+                State.scope_owner_a_started.set()
+                State.scope_owner_a_release.wait(timeout=5)
+            if media_path.endswith("scope-owner-b.mp4"):
+                State.scope_owner_b_started.set()
+                State.scope_owner_b_release.wait(timeout=5)
             if media_path.endswith("slow-scope-left.mp4"):
                 time.sleep(0.35)
             if (
@@ -343,6 +360,8 @@ def run(base: str, artifact_dir: Path) -> None:
         production_url = media_url("production", 1800)
         production = page.evaluate_handle(production_video_script(production_url))
         wait_state(page, production, "ready")
+        page.evaluate("v => { v.muted=true; return v.play(); }", production)
+        page.wait_for_function("v => v.currentTime > 0", arg=production, timeout=5000)
         require(page.evaluate("v => !v.dataset.cacheProgress && v.closest('.msg-media-editor').querySelector('.msg-media-cache-progress').hidden", production), "ready production player must clear and hide cache progress")
         production_counts = counts(page)
         require(production_counts["requests"].get("production") == 1, "production renderer must issue one bounded application fetch")
@@ -383,6 +402,8 @@ def run(base: str, artifact_dir: Path) -> None:
         wait_state(page, bfcache_video, "ready")
         require(page.evaluate("([v,old]) => v.dataset.cacheBlobUrl && v.dataset.cacheBlobUrl !== old", [bfcache_video, old_bfcache_blob]), "pageshow must install a fresh Blob URL")
         require(counts(page)["requests"].get("bfcache") == 1, "BFCache restore must reuse Cache Storage without another media request")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", bfcache_video)
+        page.wait_for_function("() => HermesPersistentVideoCache.debugSnapshot().consumers === 0")
 
         # Persistent cleanup is optional plumbing: a Cache Storage/Web Lock
         # deletion failure must not suppress the profile/workspace mutation that
@@ -402,6 +423,44 @@ def run(base: str, artifact_dir: Path) -> None:
         }""")
         require(page.evaluate("window.__authorityMutationSent") is True, "optional cache cleanup failure must not block authority mutation")
         require(page.evaluate("() => { const s=HermesPersistentVideoCache.debugSnapshot(); return s.scope===''&&s.tasks===0&&s.consumers===0; }"), "failed persistent cleanup must still invalidate in-memory authority state")
+
+        lock_ready = page.evaluate_handle(production_video_script(media_url("lock-ready", 1800)))
+        wait_state(page, lock_ready, "ready")
+        lock_ready_blob = page.evaluate("v => v.dataset.cacheBlobUrl", lock_ready)
+        page.evaluate("""() => {
+          window.__quotaLockHeld=false;
+          window.__quotaLockReleased=false;
+          navigator.locks.request('hermes-snapshot-video-vquota-lock',async()=>{
+            window.__quotaLockHeld=true;
+            await new Promise(resolve=>{window.__releaseQuotaLock=resolve;});
+            window.__quotaLockHeld=false;
+            window.__quotaLockReleased=true;
+          });
+        }""")
+        page.wait_for_function("window.__quotaLockHeld === true")
+        bounded_cleanup = page.evaluate("""async () => Promise.race([
+          HermesPersistentVideoCache.prepareAuthorityChange().then(()=> 'done'),
+          new Promise(resolve=>setTimeout(()=>resolve('timeout'),400))
+        ])""")
+        page.evaluate("v => v.scrollIntoView({block:'center'})", lock_ready)
+        wait_state(page, lock_ready, "fallback", timeout=3000)
+        require(
+            page.evaluate("([v,old]) => !v.src.startsWith('blob:') && v.src.includes('lock-ready') && window.__lifecycleRevoked.includes(old)", [lock_ready, lock_ready_blob]),
+            "a held quota lock must not strand a re-observed mounted player in loading",
+        )
+        page.evaluate("window.__releaseQuotaLock()")
+        page.wait_for_function("window.__quotaLockReleased === true")
+        require(bounded_cleanup == "done", "a never-granted quota lock must not gate authority mutation")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", lock_ready)
+
+        ready_clear = page.evaluate_handle(production_video_script(media_url("ready-clear", 1800)))
+        wait_state(page, ready_clear, "ready")
+        ready_clear_blob = page.evaluate("v => v.dataset.cacheBlobUrl", ready_clear)
+        page.evaluate("() => HermesPersistentVideoCache.clearAll(false)")
+        page.evaluate("v => v.scrollIntoView({block:'center'})", ready_clear)
+        wait_state(page, ready_clear, "ready", timeout=10000)
+        require(page.evaluate("([v,old]) => v.src.startsWith('blob:') && v.dataset.cacheBlobUrl !== old", [ready_clear, ready_clear_blob]), "clearAll must re-observe and recover a mounted ready player")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", ready_clear)
 
         playback_error = page.evaluate_handle(production_video_script(media_url("blob-error", 1800)))
         wait_state(page, playback_error, "ready")
@@ -453,6 +512,171 @@ def run(base: str, artifact_dir: Path) -> None:
         wait_state(page, rotated, "ready")
         require(counts(page)["requests"].get("first") == 2, "authority rotation must force a new authorized media fetch")
         require(page.evaluate("HermesPersistentVideoCache.debugSnapshot().scope") == "scope-rotated", "authority scope must refresh before cache read")
+
+        print("PHASE persistent-hit-integrity", flush=True)
+        page.evaluate("() => { document.getElementById('host').replaceChildren(); return HermesPersistentVideoCache.clearAll(false); }")
+        cache_integrity_url = media_url("cache-hit-integrity", 1800)
+        page.evaluate("""async url => {
+          const source=new URL(url,location.href);
+          const endpoint=new URL('/api/media-cache/scope',location.origin);
+          for(const name of ['session_id','path','snap']) endpoint.searchParams.set(name,source.searchParams.get(name));
+          const authorization=await fetch(endpoint).then(r=>r.json());
+          const key=location.origin+'/__hermes_snapshot_video_cache_resource__/'+authorization.resource;
+          const cache=await caches.open('hermes-snapshot-video-v2-'+authorization.scope);
+          const response=await fetch(url);
+          const bytes=new Uint8Array(await response.arrayBuffer());
+          bytes[bytes.length-1]^=1;
+          await cache.put(key,new Response(bytes,{headers:{'Content-Type':'video/mp4','Content-Length':String(bytes.byteLength)}}));
+          const entries={}; entries[key]={size:bytes.byteLength,at:Date.now()};
+          await cache.put(location.origin+'/__hermes_snapshot_video_cache_meta__',new Response(JSON.stringify({entries}),{headers:{'Content-Type':'application/json'}}));
+        }""", cache_integrity_url)
+        cache_integrity = page.evaluate_handle(video_script(cache_integrity_url, offscreen=True, activate=True))
+        wait_state(page, cache_integrity, "ready", timeout=10000)
+        require(counts(page)["requests"].get("cache-hit-integrity") == 1, "a digest-mismatched persistent hit must be evicted and refetched")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", cache_integrity)
+
+        cache_mime_url = media_url("cache-hit-wrong-mime", 1800)
+        page.evaluate("""async url => {
+          const source=new URL(url,location.href);
+          const endpoint=new URL('/api/media-cache/scope',location.origin);
+          for(const name of ['session_id','path','snap']) endpoint.searchParams.set(name,source.searchParams.get(name));
+          const authorization=await fetch(endpoint).then(r=>r.json());
+          const key=location.origin+'/__hermes_snapshot_video_cache_resource__/'+authorization.resource;
+          const cache=await caches.open('hermes-snapshot-video-v2-'+authorization.scope);
+          const bytes=await fetch(url).then(r=>r.arrayBuffer());
+          await cache.put(key,new Response(bytes,{headers:{'Content-Type':'text/plain','Content-Length':String(bytes.byteLength)}}));
+          const entries={}; entries[key]={size:bytes.byteLength,at:Date.now()};
+          await cache.put(location.origin+'/__hermes_snapshot_video_cache_meta__',new Response(JSON.stringify({entries}),{headers:{'Content-Type':'application/json'}}));
+        }""", cache_mime_url)
+        cache_mime = page.evaluate_handle(video_script(cache_mime_url, offscreen=True, activate=True))
+        wait_state(page, cache_mime, "ready", timeout=10000)
+        require(counts(page)["requests"].get("cache-hit-wrong-mime") == 1, "a non-video persistent hit must be evicted and refetched even when its bytes and digest are valid")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", cache_mime)
+
+        cache_size_url = media_url("cache-hit-size-mismatch", 1800)
+        page.evaluate("""async url => {
+          const source=new URL(url,location.href);
+          const endpoint=new URL('/api/media-cache/scope',location.origin);
+          for(const name of ['session_id','path','snap']) endpoint.searchParams.set(name,source.searchParams.get(name));
+          const authorization=await fetch(endpoint).then(r=>r.json());
+          const key=location.origin+'/__hermes_snapshot_video_cache_resource__/'+authorization.resource;
+          const cache=await caches.open('hermes-snapshot-video-v2-'+authorization.scope);
+          const bytes=await fetch(url).then(r=>r.arrayBuffer());
+          const declared=bytes.byteLength-1;
+          await cache.put(key,new Response(bytes,{headers:{'Content-Type':'video/mp4','Content-Length':String(declared)}}));
+          const entries={}; entries[key]={size:declared,at:Date.now()};
+          await cache.put(location.origin+'/__hermes_snapshot_video_cache_meta__',new Response(JSON.stringify({entries}),{headers:{'Content-Type':'application/json'}}));
+        }""", cache_size_url)
+        cache_size = page.evaluate_handle(video_script(cache_size_url, offscreen=True, activate=True))
+        wait_state(page, cache_size, "ready", timeout=10000)
+        require(counts(page)["requests"].get("cache-hit-size-mismatch") == 1, "an in-cap persistent hit whose actual size differs from its declaration must be evicted and refetched")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", cache_size)
+
+        cache_oversize_url = media_url("cache-hit-oversize", 4200)
+        page.evaluate("""async url => {
+          const source=new URL(url,location.href);
+          const endpoint=new URL('/api/media-cache/scope',location.origin);
+          for(const name of ['session_id','path','snap']) endpoint.searchParams.set(name,source.searchParams.get(name));
+          const authorization=await fetch(endpoint).then(r=>r.json());
+          const key=location.origin+'/__hermes_snapshot_video_cache_resource__/'+authorization.resource;
+          const cache=await caches.open('hermes-snapshot-video-v2-'+authorization.scope);
+          const response=await fetch(url);
+          const bytes=new Uint8Array(await response.arrayBuffer());
+          const declared=bytes.byteLength-200;
+          await cache.put(key,new Response(bytes,{headers:{'Content-Type':'video/mp4','Content-Length':String(declared)}}));
+          const entries={}; entries[key]={size:declared,at:Date.now()};
+          await cache.put(location.origin+'/__hermes_snapshot_video_cache_meta__',new Response(JSON.stringify({entries}),{headers:{'Content-Type':'application/json'}}));
+        }""", cache_oversize_url)
+        cache_oversize = page.evaluate_handle(video_script(cache_oversize_url, offscreen=True, activate=True))
+        wait_state(page, cache_oversize, "fallback", timeout=10000)
+        require(counts(page)["requests"].get("cache-hit-oversize") == 1, "an over-cap persistent hit must be evicted instead of becoming ready")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", cache_oversize)
+
+        cache_stream_url = media_url("cache-hit-stream-cap", 1800)
+        page.evaluate("""async url => {
+          const source=new URL(url,location.href);
+          const endpoint=new URL('/api/media-cache/scope',location.origin);
+          for(const name of ['session_id','path','snap']) endpoint.searchParams.set(name,source.searchParams.get(name));
+          const authorization=await fetch(endpoint).then(r=>r.json());
+          const key=location.origin+'/__hermes_snapshot_video_cache_resource__/'+authorization.resource;
+          const cache=await caches.open('hermes-snapshot-video-v2-'+authorization.scope);
+          const bytes=await fetch(url).then(r=>r.arrayBuffer());
+          await cache.put(key,new Response(bytes,{headers:{'Content-Type':'video/mp4','Content-Length':'4096'}}));
+          const entries={}; entries[key]={size:4096,at:Date.now()};
+          await cache.put(location.origin+'/__hermes_snapshot_video_cache_meta__',new Response(JSON.stringify({entries}),{headers:{'Content-Type':'application/json'}}));
+          const proto=Object.getPrototypeOf(cache);
+          const original=proto.match;
+          window.__boundedCachePulls=0;
+          window.__boundedCacheCancelled=false;
+          window.__restoreBoundedCacheMatch=()=>{proto.match=original;};
+          proto.match=function(request){
+            const requested=String(request&&request.url||request);
+            if(requested!==key) return original.call(this,request);
+            let emitted=0;
+            const body=new ReadableStream({
+              pull(controller){
+                emitted++;
+                window.__boundedCachePulls++;
+                if(emitted>100){controller.close();return;}
+                controller.enqueue(new Uint8Array(1024));
+              },
+              cancel(){window.__boundedCacheCancelled=true;},
+            },{highWaterMark:0});
+            return Promise.resolve(new Response(body,{headers:{'Content-Type':'video/mp4','Content-Length':'4096'}}));
+          };
+        }""", cache_stream_url)
+        cache_stream = page.evaluate_handle(video_script(cache_stream_url, offscreen=True, activate=True))
+        wait_state(page, cache_stream, "ready", timeout=10000)
+        stream_cap = page.evaluate("() => ({pulls:window.__boundedCachePulls,cancelled:window.__boundedCacheCancelled})")
+        page.evaluate("window.__restoreBoundedCacheMatch()")
+        require(stream_cap["cancelled"] and stream_cap["pulls"] < 20, f"cached body must stop near the byte cap instead of being fully materialized: {stream_cap}")
+        require(counts(page)["requests"].get("cache-hit-stream-cap") == 1, "an over-cap cached stream must be evicted and refetched")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", cache_stream)
+
+        page.evaluate("""() => {
+          const proto=Object.getPrototypeOf(caches);
+          const originalOpen=proto.open;
+          let wedged=false;
+          window.__cacheQueueWedgeStarted=false;
+          window.__restoreCacheQueueWedge=()=>{proto.open=originalOpen;};
+          proto.open=async function(...args){
+            const cache=await originalOpen.apply(this,args);
+            if(wedged) return cache;
+            wedged=true;
+            const cacheProto=Object.getPrototypeOf(cache);
+            const originalMatch=cacheProto.match;
+            cacheProto.match=function(request){
+              if(window.__cacheQueueWedgeStarted) return originalMatch.call(this,request);
+              window.__cacheQueueWedgeStarted=true;
+              return new Promise(resolve=>{window.__releaseCacheQueueWedge=()=>resolve(originalMatch.call(this,request));});
+            };
+            window.__restoreCacheQueueWedge=()=>{cacheProto.match=originalMatch;proto.open=originalOpen;};
+            return cache;
+          };
+        }""")
+        queue_wedge = page.evaluate_handle(video_script(media_url("cache-queue-wedge", 1800), offscreen=True, activate=True))
+        page.wait_for_function("window.__cacheQueueWedgeStarted === true")
+        queue_successors = [
+            page.evaluate_handle(video_script(media_url(f"cache-queue-successor-{index}", 1800), offscreen=True, activate=True))
+            for index in range(6)
+        ]
+        queue_wait_started = time.monotonic()
+        wait_state(page, queue_successors[-1], "fallback", timeout=3000)
+        queue_elapsed = time.monotonic() - queue_wait_started
+        require(queue_elapsed < 0.45, f"queued cache operations must share enqueue-time deadlines, elapsed={queue_elapsed:.3f}s")
+        require(
+            all(
+                page.evaluate(
+                    "([v,index]) => v.src.includes(`cache-queue-successor-${index}`) && !v.src.startsWith('blob:')",
+                    [video, index],
+                )
+                for index, video in enumerate(queue_successors)
+            ),
+            "every successor queued behind a permanently pending cache callback must reach native fallback by its own enqueue-time deadline",
+        )
+        page.evaluate("window.__releaseCacheQueueWedge(); window.__restoreCacheQueueWedge()")
+        for video in [queue_wedge, *queue_successors]:
+            page.evaluate("v => v.closest('.msg-media-editor').remove()", video)
 
         print("PHASE canonical-retarget", flush=True)
         page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
@@ -632,6 +856,7 @@ def run(base: str, artifact_dir: Path) -> None:
         require(page.evaluate("([v,old]) => v.dataset.cacheBlobUrl !== old", [reused, old_blob]), "same-node replacement must own a new Blob URL")
 
         print("PHASE unknown-oversize", flush=True)
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", reused)
         page.evaluate("HermesPersistentVideoCache.clearAll()")
         # Unknown length is counted while streaming; oversize never enters cache.
         unknown_case = "slow-unknown-oversize"
@@ -669,6 +894,10 @@ def run(base: str, artifact_dir: Path) -> None:
         require(
             page.evaluate("v => v.dataset.persistentVideoState === 'integrity-error'", wrong_body),
             "wrong body/right header must fail closed instead of entering native fallback",
+        )
+        require(
+            page.evaluate("v => { const label=v.closest('.msg-media-editor').querySelector('.msg-media-cache-progress'); return !label.hidden&&label.getAttribute('role')==='alert'&&label.textContent===t('file_open_failed'); }", wrong_body),
+            "integrity failure must expose a localized accessible error state",
         )
         require(
             page.evaluate("v => !v.hasAttribute('src') && !v.src.startsWith('blob:')", wrong_body),
@@ -765,7 +994,7 @@ def run(base: str, artifact_dir: Path) -> None:
         )
 
         # Crash reconciliation repairs an orphan body plus dangling metadata.
-        page.evaluate("HermesPersistentVideoCache.clearAll()")
+        page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
         prime = page.evaluate_handle(video_script(media_url("crash-prime", 1800), offscreen=True, activate=True))
         wait_state(page, prime, "ready")
         orphan_url = media_url("crash-orphan", 1800)
@@ -792,7 +1021,7 @@ def run(base: str, artifact_dir: Path) -> None:
         # A crash can leave an existing metadata row with the previous body's
         # smaller size. Reconciliation must re-read Content-Length for every
         # body, not only metadata-less orphans, before enforcing global quota.
-        page.evaluate("HermesPersistentVideoCache.clearAll()")
+        page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
         stale_prime = page.evaluate_handle(video_script(media_url("stale-prime", 1800), offscreen=True, activate=True))
         wait_state(page, stale_prime, "ready")
         stale_a = media_url("stale-size-a", 3000)
@@ -828,6 +1057,36 @@ def run(base: str, artifact_dir: Path) -> None:
         require(actual["snapshot"]["totalBytes"] <= 5000, f"stale metadata size bypassed global quota: {actual}")
         require(len(actual["bodies"]) == 1 and actual["bodies"][0] == actual["expected"], f"stale-size reconciliation must evict the older body: {actual}")
 
+        print("PHASE scope-request-ownership", flush=True)
+        page.evaluate("document.getElementById('host').replaceChildren()")
+        page.evaluate("() => HermesPersistentVideoCache.clearAll(false)")
+        page.evaluate(video_script(media_url("scope-owner-a", 1800), offscreen=True, activate=True))
+        require(State.scope_owner_a_started.wait(timeout=5), "scope owner A never reached the server barrier")
+        page.evaluate("() => HermesPersistentVideoCache.clearAll(false)")
+        owner_b = page.evaluate_handle(video_script(media_url("scope-owner-b", 1800), activate=True))
+        require(State.scope_owner_b_started.wait(timeout=5), "scope owner B never reached the server barrier")
+        owner_b_loading = page.evaluate("v => { const label=v.closest('.msg-media-editor').querySelector('.msg-media-cache-progress'); return {state:v.dataset.persistentVideoState||'',hidden:label.hidden,role:label.getAttribute('role')||'',text:label.textContent||'',expected:t('loading'),src:v.getAttribute('src')||''}; }", owner_b)
+        State.scope_owner_a_release.set()
+        page.wait_for_function("window.__HERMES_VIDEO_CACHE_TEST__.scopeRequestFinalized.some(value => value.includes('scope-owner-a.mp4'))", timeout=5000)
+        owner_c = page.evaluate_handle(video_script(media_url("scope-owner-c", 1800), offscreen=True, activate=True))
+        page.wait_for_timeout(100)
+        with State.lock:
+            owner_c_started_early = State.scope_requests.get("/tmp/scope-owner-c.mp4", 0) != 0
+        State.scope_owner_b_release.set()
+        require(
+            owner_b_loading["state"] == "loading" and not owner_b_loading["hidden"] and owner_b_loading["role"] == "status" and owner_b_loading["text"] == owner_b_loading["expected"],
+            f"scope wait must show a localized accessible loading affordance: {owner_b_loading}",
+        )
+        require(
+            not owner_c_started_early,
+            "a stale scope finalizer must not let a third request bypass its pending successor",
+        )
+        wait_state(page, owner_c, "fallback", timeout=10000)
+        page.evaluate("v => v.scrollIntoView({block:'center'})", owner_b)
+        wait_state(page, owner_b, "ready", timeout=10000)
+        require(page.evaluate("v => v.src.startsWith('blob:')", owner_b), "a stale scope finalizer must not strand its successor's mounted video")
+        page.evaluate("document.getElementById('host').replaceChildren()")
+
         print("PHASE authority", flush=True)
         # Authority transition clears old bytes before new-scope reads.
         page.evaluate("fetch('/test/scope?value=scope-b').then(() => HermesPersistentVideoCache.authorityChanged())")
@@ -855,7 +1114,7 @@ def run(base: str, artifact_dir: Path) -> None:
         require(counts(page)["requests"].get("observer-once") == 1, "intersection must activate an eligible video only once")
 
         print("PHASE cross-tab-quota", flush=True)
-        page.evaluate("HermesPersistentVideoCache.clearAll()")
+        page.evaluate("document.getElementById('host').replaceChildren(); HermesPersistentVideoCache.clearAll()")
         peer = context.new_page()
         peer.goto("/", wait_until="domcontentloaded")
         peer.wait_for_function("window.HermesPersistentVideoCache && HermesPersistentVideoCache.ready")
@@ -876,10 +1135,17 @@ def run(base: str, artifact_dir: Path) -> None:
         require(actual["total"] <= 5000, f"cross-tab global quota exceeded: {actual}")
         require(sorted(actual["bodies"]) == sorted(actual["meta"]["entries"].keys()), f"cross-tab metadata/body mismatch: {actual}")
         require(len(actual["bodies"]) == 1, f"cross-tab LRU must evict one 3000-byte body: {actual}")
-        page.evaluate("HermesPersistentVideoCache.clearAll()")
-        peer.wait_for_function("HermesPersistentVideoCache.debugSnapshot().scope === '' && HermesPersistentVideoCache.debugSnapshot().consumers === 0")
+        peer.evaluate("v => { v.closest('.msg-media-editor').style.marginTop='0'; v.scrollIntoView({block:'center'}); }", right)
+        right_blob = peer.evaluate("v => v.dataset.cacheBlobUrl", right)
+        page.evaluate("() => HermesPersistentVideoCache.clearAll()")
+        wait_state(peer, right, "ready", timeout=10000)
+        require(peer.evaluate("([v,old]) => v.src.startsWith('blob:') && v.dataset.cacheBlobUrl !== old", [right, right_blob]), "cross-tab authority clear must recover a mounted ready player")
+        page.evaluate("v => v.closest('.msg-media-editor').remove()", left)
+        peer.evaluate("v => v.closest('.msg-media-editor').remove()", right)
+        page.evaluate("() => HermesPersistentVideoCache.clearAll()")
+        peer.wait_for_function("HermesPersistentVideoCache.debugSnapshot().consumers === 0")
         remaining = page.evaluate("caches.keys().then(keys => keys.filter(k => k.startsWith('hermes-snapshot-video-v')))")
-        require(remaining == [], f"authority clear must remove every tab's persistent cache: {remaining}")
+        require(remaining == [], f"authority clear must remove every tab's persistent cache after consumers detach: {remaining}")
 
         # Model the production two-phase transition: a pre-clear happens before
         # the server mutation, another tab starts old-scope work in that gap,
@@ -892,11 +1158,13 @@ def run(base: str, artifact_dir: Path) -> None:
         wait_progress(peer, raced)
         page.evaluate("fetch('/test/scope?value=scope-race-new')")
         page.evaluate("HermesPersistentVideoCache.refreshAuthority()")
-        peer.wait_for_function("() => { const s=HermesPersistentVideoCache.debugSnapshot(); return s.scope===''&&s.tasks===0&&s.consumers===0; }")
         deadline=time.time()+3
         while time.time()<deadline and not counts(page)["aborted"].get("slow-authority-race",0):
             time.sleep(0.1)
         require(counts(page)["aborted"].get("slow-authority-race",0) >= 1, "post-switch refresh must abort cross-tab work started after pre-clear")
+        peer.evaluate("v => { v.closest('.msg-media-editor').style.marginTop='0'; v.scrollIntoView({block:'center'}); }", raced)
+        wait_state(peer, raced, "ready", timeout=10000)
+        require(peer.evaluate("() => HermesPersistentVideoCache.debugSnapshot().scope") == "scope-race-new", "mounted player must recover only under the post-switch authority")
         stale_names = page.evaluate("caches.keys().then(keys => keys.filter(k => k.includes('scope-race-old')))")
         require(stale_names == [], f"old-authority cache survived final transition: {stale_names}")
         peer.close()
@@ -916,6 +1184,7 @@ def run(base: str, artifact_dir: Path) -> None:
         visual = page.evaluate_handle(production_video_script(media_url("slow-visual", 3500)))
         page.evaluate("v => v.scrollIntoView({block:'center'})", visual)
         wait_progress(page, visual)
+        require(page.evaluate("v => { const label=v.closest('.msg-media-editor').querySelector('.msg-media-cache-progress'); return !label.hidden&&label.getAttribute('role')==='status'&&label.getAttribute('aria-live')==='polite'; }", visual), "loading progress must be exposed as an accessible status")
         page.locator('.msg-media-editor').last.screenshot(path=str(artifact_dir / "persistent-video-cache-desktop.png"))
         mobile = browser.new_context(base_url=base, viewport={"width": 390, "height": 844}, is_mobile=True)
         mpage = mobile.new_page()
@@ -939,6 +1208,17 @@ def run(base: str, artifact_dir: Path) -> None:
         wait_state(npage, nv, "fallback")
         require(not counts(npage)["requests"].get("no-cache-storage"), "CacheStorage-unavailable path must fall back before app fetch")
         no_cache.close()
+
+        reduced_data = browser.new_context(base_url=base)
+        reduced_data.add_init_script("Object.defineProperty(navigator,'connection',{value:{saveData:true},configurable:true})")
+        rpage = reduced_data.new_page()
+        rpage.goto("/", wait_until="domcontentloaded")
+        rpage.wait_for_function("window.HermesPersistentVideoCache && HermesPersistentVideoCache.ready")
+        rv = rpage.evaluate_handle(video_script(media_url("reduced-data", 1800)))
+        rpage.evaluate("v => v.dispatchEvent(new Event('play'))", rv)
+        wait_state(rpage, rv, "fallback")
+        require(not counts(rpage)["requests"].get("reduced-data"), "saveData must choose native playback before the application cache fetch")
+        reduced_data.close()
 
         require(not errors, f"uncaught browser errors: {errors}")
         context.close()

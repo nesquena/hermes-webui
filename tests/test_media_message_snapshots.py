@@ -457,6 +457,27 @@ def test_handle_media_denies_direct_store_path(routes, monkeypatch, tmp_path):
     assert denied.status == 403
 
 
+def test_preverified_snapshot_reuses_digest_etag_without_second_hash(routes, monkeypatch, tmp_path):
+    payload = bytearray(b"verified-once")
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(payload)
+    fd = routes._open_file_read_fd(source, tmp_path)
+
+    def forbidden_hash(_data):
+        raise AssertionError("attested snapshot was hashed again for ETag")
+
+    monkeypatch.setattr(routes, "_bytes_etag", forbidden_hash)
+    handler = _FakeHandler()
+    routes._serve_file_bytes(
+        handler, source, "video/mp4", "inline", "private, immutable",
+        opened_fd=fd, opened_snapshot=payload, opened_etag='W/"preverified"',
+    )
+
+    assert handler.status == 200
+    assert bytes(handler.body) == bytes(payload)
+    assert handler.header("ETag") == 'W/"preverified"'
+
+
 def test_handle_media_snapshot_range_request(routes, monkeypatch, snap_dir, tmp_path):
     from api.media_snapshots import capture_snapshot
 

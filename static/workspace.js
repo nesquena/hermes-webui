@@ -54,7 +54,7 @@ async function api(path,opts={}){
             // page preserves its own inner next); elsewhere, capture the path.
             if(redirect401){
               if(typeof window!=='undefined'&&window.HermesPersistentVideoCache){
-                try{await window.HermesPersistentVideoCache.clearAll();}catch(_){}
+                try{void Promise.resolve(window.HermesPersistentVideoCache.clearAll()).catch(()=>{});}catch(_){}
               }
               // Already on the login page? Reload login WITHOUT a next.
               const _p=(window.location.pathname||'').replace(/\/+$/,'');

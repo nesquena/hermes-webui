@@ -118,12 +118,15 @@ State directory (runtime data, separate from source):
 Only same-origin `/api/media` video URLs with a concrete conversation session,
 canonical media path, and 64-hex `snap` digest are eligible. The session authorizes
 each path consumption but is not part of the persistent resource identity. Before
-persistence, the server hashes and captures one immutable byte observation from the
-opened snapshot file descriptor, serves that captured observation with
-`X-Hermes-Media-Snapshot`, and the browser independently hashes the bounded Blob.
-A missing snapshot or canonical binding failure may use the ordinary live-file
-fallback, which is never persisted. A response whose attested body fails the browser
-digest check is rejected fail-closed: those bytes are neither played nor cached.
+persistence, the server rejects snapshot objects above the shared 16 MiB cache ceiling
+from regular-file metadata without hashing their bodies. For eligible objects it opens
+the snapshot once, hashes into one bounded byte buffer, serves a zero-copy view with
+`X-Hermes-Media-Snapshot` and the precomputed digest ETag, and the browser independently
+hashes the bounded Blob. Larger snapshot videos keep the native Range path and never
+enter persistent Cache Storage. A missing snapshot or canonical binding failure may use
+the ordinary live-file fallback, which is never persisted. A response whose attested
+body fails the browser digest check is rejected fail-closed: those bytes are neither
+played nor cached.
 
 `GET /api/media-cache/scope` returns an opaque HMAC partition derived from the
 verified WebUI auth session (or the installation-local no-auth authority), the
@@ -135,8 +138,9 @@ The schema-v2 scope endpoint
 rejects a missing, deleted, or foreign-profile session and re-runs the existing
 session-media authorization for the exact canonical path and requested snapshot
 digest before every new cache consumption. It shares the immutable-video
-eligibility chokepoint with `/api/media`: hard deny, video MIME, verified snapshot
-bytes, and exact canonical path-to-digest binding must all pass. On success the
+eligibility chokepoint with `/api/media`: hard deny, video MIME, regular bounded
+snapshot metadata, and exact canonical path-to-digest binding must all pass. Body
+verification remains owned by the opened `/api/media` response path. On success the
 server returns the authority scope separately from an opaque resource fingerprint
 bound to the canonical target and digest. Cache, task, and metadata keys use that
 fingerprint rather than the raw request URL. Concurrent validation is deduplicated
@@ -150,26 +154,37 @@ invalidation; 401 redirects, authority rotation, build updates, and schema
 changes also clear or retire the previous partition.
 
 Pre-mutation cleanup is deliberately best-effort: in-memory scope, tasks, and
-Blob URLs are invalidated before the first await, but a Cache Storage/Web Lock
-deletion failure cannot suppress the authoritative profile/workspace request.
-The newly issued scope makes any undeleted old partition unreadable, and later
-reconciliation retries persistent cleanup.
+Blob URLs are invalidated synchronously, while persistent deletion and every queued
+Cache Storage operation use an abortable 250 ms Web Lock acquisition deadline and never
+gate logout, 401 recovery, profile/workspace mutation, or mounted-player recovery.
+A clear re-observes still-mounted eligible videos so ready and in-flight
+players recover under the next authorized scope instead of retaining a revoked Blob
+URL. The newly issued scope makes any undeleted old partition unreadable, and later
+reconciliation retries persistent cleanup. Service-worker install/activate cleanup is
+separately restricted to obsolete `hermes-shell-*` caches; snapshot-video and unrelated
+origin caches are not owned by the shell worker.
 
 The cache is limited to 16 MiB per video, 256 entries, and 96 MiB total including
 video bodies plus LRU index metadata. Cache body and LRU
 metadata changes run under an origin-wide Web Lock; browsers without Web Locks
-use the native media URL instead. Each locked operation reconciles Cache Storage
-keys and every stored body's declared size with metadata so interrupted body/metadata
-writes fail closed or repair on the next access. `QuotaExceededError` causes LRU
-eviction and one retry.
+use the native media URL instead. Every persistent hit is consumed through the same
+byte-counting ceiling, cancels its body as soon as that ceiling is crossed, and verifies
+actual length, video MIME, and SHA-256 against the
+source URL's `snap` value before playback; a mismatch is evicted and refetched. Each
+locked operation also reconciles Cache Storage keys and declared sizes with metadata so
+interrupted body/metadata writes fail closed or repair on the next access.
+`QuotaExceededError` causes LRU eviction and one retry.
 
 The bounded fetch uses a counting `TransformStream` into one shared Blob, not a
 JavaScript chunk array plus a second Blob. Concurrent players share the network
 task and Blob while owning separate progress state and object URLs. The final
 consumer teardown aborts the fetch; DOM removal, same-node source replacement,
 page teardown, profile/auth changes, success, and errors release observers,
-tasks, and URLs. Attribute observation yields permanently to the native player
-after fallback unless the node is explicitly assigned a different source.
+tasks, and URLs. Loading/progress and integrity failure reuse the localized status
+surface with `status`/`alert` live-region semantics. `saveData` and
+`prefers-reduced-data` select native playback before any application-cache fetch.
+Attribute observation yields permanently to the native player after fallback unless
+the node is explicitly assigned a different source.
 
 Every rejection after response headers arrive first cancels the response body
 and aborts its task controller. This includes HTTP errors, snapshot-attestation

@@ -31,7 +31,7 @@ MUTATIONS = {
     ),
     "drop-canonical-path-binding": (
         "api/routes.py",
-        "if snapshot_file is None or not snapshot_servable_for_path(digest, canonical_target):",
+        "if not snapshot_servable_for_path(digest, canonical_target):",
         "if snapshot_file is None:",
         "tests/test_persistent_video_cache_scope.py::test_media_cache_scope_rejects_retargeted_path_without_digest_binding",
     ),
@@ -46,6 +46,30 @@ MUTATIONS = {
         "                opened_snapshot=snapshot_bytes,",
         "                opened_snapshot=None,",
         "tests/test_media_message_snapshots.py::test_handle_media_serves_the_bytes_verified_before_attestation",
+    ),
+    "rehash-scope-snapshot": (
+        "api/routes.py",
+        "snapshot_file = snapshot_candidate_for_digest(digest)",
+        "snapshot_file = __import__('api.media_snapshots', fromlist=['snapshot_path_for_digest']).snapshot_path_for_digest(digest)",
+        "tests/test_persistent_video_cache_scope.py::test_persistent_video_scope_does_not_rehash_eligible_body",
+    ),
+    "rehash-native-range-snapshot": (
+        "api/routes.py",
+        "snapshot_file = snapshot_candidate_for_digest(snap_digest)",
+        "snapshot_file = snapshot_path_for_digest(snap_digest)",
+        "tests/test_persistent_video_cache_scope.py::test_oversize_video_snapshot_range_streams_without_hashing",
+    ),
+    "drop-persistent-size-bound": (
+        "api/routes.py",
+        "if snapshot_size < 0 or snapshot_size > _PERSISTENT_VIDEO_CACHE_MAX_BYTES:",
+        "if snapshot_size < 0:",
+        "tests/test_persistent_video_cache_scope.py::test_persistent_video_scope_rejects_oversize_before_hashing",
+    ),
+    "rehash-preverified-etag": (
+        "api/routes.py",
+        "etag = opened_etag or _bytes_etag(snapshot)",
+        "etag = _bytes_etag(snapshot)",
+        "tests/test_media_message_snapshots.py::test_preverified_snapshot_reuses_digest_etag_without_second_hash",
     ),
 }
 

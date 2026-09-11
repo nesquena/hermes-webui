@@ -6,6 +6,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import hashlib
+import hmac
 import inspect
 import errno
 import io
@@ -19481,29 +19482,35 @@ def _open_file_read_fd(target: Path, anchor_root: Path | None = None) -> int:
 
 def _open_verified_snapshot_fd(
     target: Path, anchor_root: Path, digest: str
-) -> tuple[int, bytes] | None:
-    """Open a snapshot and capture the exact verified bytes to serve.
+) -> tuple[int, bytearray] | None:
+    """Open, bound, and hash one eligible snapshot into one byte buffer.
 
-    Keeping the fd alone is insufficient: another process can rewrite the same
-    inode after hashing.  Returning the captured bytes binds the later response
-    header, range calculation, and body to one immutable observation.
+    The bytearray is the response body owner: callers send a memoryview of it,
+    avoiding the former bytearray-to-bytes full copy and a second ETag hash.
     """
     fd = None
     try:
         fd = _open_file_read_fd(target, anchor_root)
+        st = os.fstat(fd)
+        if st.st_size > _PERSISTENT_VIDEO_CACHE_MAX_BYTES:
+            _close_fd_quietly(fd)
+            return None
         actual = hashlib.sha256()
         captured = bytearray()
         while True:
-            chunk = os.read(fd, 1024 * 1024)
+            chunk = os.read(fd, min(1024 * 1024, _PERSISTENT_VIDEO_CACHE_MAX_BYTES + 1 - len(captured)))
             if not chunk:
                 break
             actual.update(chunk)
             captured.extend(chunk)
-        if actual.hexdigest() != digest:
+            if len(captured) > _PERSISTENT_VIDEO_CACHE_MAX_BYTES:
+                _close_fd_quietly(fd)
+                return None
+        if not hmac.compare_digest(actual.hexdigest(), digest):
             _close_fd_quietly(fd)
             return None
         os.lseek(fd, 0, os.SEEK_SET)
-        return fd, bytes(captured)
+        return fd, captured
     except (OSError, ValueError):
         _close_fd_quietly(fd)
         return None
@@ -19575,7 +19582,7 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
     return _bytes_etag(data), data, actual_size
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None, extra_headers: dict[str, str] | None = None, opened_fd: int | None = None, opened_snapshot: bytes | None = None):
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None, extra_headers: dict[str, str] | None = None, opened_fd: int | None = None, opened_snapshot: bytes | bytearray | None = None, opened_etag: str | None = None):
     """Serve a file with correct MIME/disposition and optional byte-range support.
 
     Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
@@ -19620,7 +19627,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         try:
             if opened_snapshot is not None:
                 snapshot = opened_snapshot
-                etag = _bytes_etag(snapshot)
+                etag = opened_etag or _bytes_etag(snapshot)
             else:
                 no_store = "no-store" in cache_control
                 if no_store or file_size > _ETAG_SIZE_CAP:
@@ -19707,7 +19714,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         if content_length:
             try:
                 if snapshot is not None:
-                    handler.wfile.write(snapshot[start:start + content_length])
+                    handler.wfile.write(memoryview(snapshot)[start:start + content_length])
                 else:
                     with os.fdopen(fd, "rb", closefd=True) as f:
                         fd = None
@@ -20626,6 +20633,7 @@ def _media_deny_reason(target: Path) -> str | None:
 
 
 _PERSISTENT_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/webm", "video/ogg"}
+_PERSISTENT_VIDEO_CACHE_MAX_BYTES = 16 * 1024 * 1024
 
 
 def _immutable_video_snapshot_resource(
@@ -20634,12 +20642,10 @@ def _immutable_video_snapshot_resource(
     *,
     path_authorized: bool,
 ) -> tuple[Path, Path, Path, str] | None:
-    """Resolve one cacheable immutable video through the full serve contract.
+    """Resolve bounded persistent-video eligibility without reading snapshot bytes.
 
-    Both ``/api/media`` and ``/api/media-cache/scope`` call this chokepoint.
-    The caller supplies the result of its normal path authorization gate; this
-    function owns the remaining hard-deny, video type, snapshot byte integrity,
-    exact canonical path binding, and opaque resource identity decisions.
+    The scope endpoint only mints authority metadata. The media response later
+    opens and hashes the bounded object once before it sends an attestation.
     """
     if not path_authorized:
         return None
@@ -20657,15 +20663,21 @@ def _immutable_video_snapshot_resource(
     from api.media_snapshots import (
         get_snapshot_dir,
         is_valid_digest,
-        snapshot_path_for_digest,
+        snapshot_candidate_for_digest,
         snapshot_servable_for_path,
     )
 
     digest = str(snap_digest or "").strip().lower()
     if not is_valid_digest(digest):
         return None
-    snapshot_file = snapshot_path_for_digest(digest)
-    if snapshot_file is None or not snapshot_servable_for_path(digest, canonical_target):
+    snapshot_file = snapshot_candidate_for_digest(digest)
+    try:
+        snapshot_size = snapshot_file.stat().st_size if snapshot_file is not None else -1
+    except OSError:
+        return None
+    if snapshot_size < 0 or snapshot_size > _PERSISTENT_VIDEO_CACHE_MAX_BYTES:
+        return None
+    if not snapshot_servable_for_path(digest, canonical_target):
         return None
     snapshot_root = get_snapshot_dir().resolve()
     resource = build_media_cache_resource(canonical_target, digest)
@@ -20819,10 +20831,12 @@ def _handle_media(handler, parsed):
     snap_digest = qs.get("snap", [""])[0].strip().lower()
     snapshot_file = None
     snap_dir = None
+    cache_fetch_requested = handler.headers.get("X-Hermes-Video-Cache", "") == "1"
     if snap_digest:
         from api.media_snapshots import (
             get_snapshot_dir,
             is_valid_digest,
+            snapshot_candidate_for_digest,
             snapshot_path_for_digest,
             snapshot_servable_for_path,
         )
@@ -20835,40 +20849,57 @@ def _handle_media(handler, parsed):
             )
             if eligibility is not None:
                 target, snapshot_file, snap_dir, _resource = eligibility
+            elif not cache_fetch_requested and is_valid_digest(snap_digest):
+                snap_dir = get_snapshot_dir().resolve()
+                snapshot_file = snapshot_candidate_for_digest(snap_digest)
+                if snapshot_file is not None and not snapshot_servable_for_path(snap_digest, target):
+                    snapshot_file = None
         else:
             snap_dir = get_snapshot_dir().resolve()
             if is_valid_digest(snap_digest):
                 snapshot_file = snapshot_path_for_digest(snap_digest)
-                # Server-owned source-path binding (#6979 Round 2 MUST-FIX 1): a
-                # digest may only be served back for the EXACT canonical path it
-                # was captured from. Replaying a digest through a different
-                # (allowed) path must not leak the stored bytes — treat it as an
-                # invalid snapshot and fall back to the live file (or 404 when the
-                # live file is absent).
                 if snapshot_file is not None and not snapshot_servable_for_path(snap_digest, target):
                     snapshot_file = None
     if snapshot_file is not None:
-        # Verify the exact opened object before attesting it, then transfer that
-        # same fd into the response path. A digest-shaped filename and a prior
-        # path check are not byte provenance and would leave a re-open TOCTOU.
-        verified_snapshot = _open_verified_snapshot_fd(snapshot_file, snap_dir, snap_digest)
-        if verified_snapshot is not None:
-            snapshot_fd, snapshot_bytes = verified_snapshot
-            # Content-addressed and immutable: the digest IS the SHA-256 of the
-            # exact opened bytes, so the browser may cache forever.
-            return _serve_file_bytes(
-                handler,
-                snapshot_file,
-                mime,
-                disposition,
-                "private, max-age=31536000, immutable",
-                csp=csp,
-                download_name=target.name,
-                anchor_root=snap_dir,
-                extra_headers={"X-Hermes-Media-Snapshot": snap_digest},
-                opened_fd=snapshot_fd,
-                opened_snapshot=snapshot_bytes,
-            )
+        try:
+            snapshot_size = snapshot_file.stat().st_size
+        except OSError:
+            snapshot_size = -1
+        if 0 <= snapshot_size <= _PERSISTENT_VIDEO_CACHE_MAX_BYTES:
+            verified_snapshot = _open_verified_snapshot_fd(snapshot_file, snap_dir, snap_digest)
+            if verified_snapshot is not None:
+                snapshot_fd, snapshot_bytes = verified_snapshot
+                return _serve_file_bytes(
+                    handler,
+                    snapshot_file,
+                    mime,
+                    disposition,
+                    "private, max-age=31536000, immutable",
+                    csp=csp,
+                    download_name=target.name,
+                    anchor_root=snap_dir,
+                    extra_headers={"X-Hermes-Media-Snapshot": snap_digest},
+                    opened_fd=snapshot_fd,
+                    opened_snapshot=snapshot_bytes,
+                    opened_etag=f'W/"{snap_digest}"',
+                )
+        elif snapshot_size > _PERSISTENT_VIDEO_CACHE_MAX_BYTES and not cache_fetch_requested:
+            try:
+                snapshot_fd = _open_file_read_fd(snapshot_file, snap_dir)
+            except (OSError, ValueError):
+                snapshot_fd = None
+            if snapshot_fd is not None:
+                return _serve_file_bytes(
+                    handler,
+                    snapshot_file,
+                    mime,
+                    disposition,
+                    "private, max-age=31536000, immutable",
+                    csp=csp,
+                    download_name=target.name,
+                    anchor_root=snap_dir,
+                    opened_fd=snapshot_fd,
+                )
 
     if not target.exists() or not target.is_file():
         return j(handler, {"error": "not found"}, status=404)

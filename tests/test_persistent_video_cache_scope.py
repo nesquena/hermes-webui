@@ -338,6 +338,101 @@ def test_snapshot_response_attests_exact_digest_but_live_fallback_does_not(tmp_p
     assert not any(name == "X-Hermes-Media-Snapshot" for name, _value in missing.sent_headers)
 
 
+def test_persistent_video_scope_rejects_oversize_before_hashing(monkeypatch, tmp_path):
+    """An over-cap snapshot must take the native path without a whole-file hash."""
+    import json
+
+    from api import media_snapshots, routes
+
+    store = tmp_path / "snapshots"
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    store.mkdir()
+    target = tmp_path / "large.mp4"
+    target.write_bytes(b"live")
+    digest = "a" * 64
+    snapshot = store / f"{digest}.snap"
+    with snapshot.open("wb") as handle:
+        handle.seek(16 * 1024 * 1024)
+        handle.write(b"x")
+    (store / f"{digest}.src.json").write_text(
+        json.dumps({"digest": digest, "sources": [str(target.resolve())]}),
+        encoding="utf-8",
+    )
+
+    def forbidden_hash(*_args, **_kwargs):
+        raise AssertionError("oversized snapshot body was hashed")
+
+    monkeypatch.setattr(media_snapshots, "_snapshot_bytes_match_digest", forbidden_hash)
+    assert routes._immutable_video_snapshot_resource(
+        target, digest, path_authorized=True
+    ) is None
+
+
+def test_oversize_video_snapshot_range_streams_without_hashing(monkeypatch, tmp_path):
+    """Native Range playback stays bounded when a snapshot exceeds the cache cap."""
+    from api import media_snapshots, routes
+
+    store = tmp_path / "snapshots"
+    store.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    target = tmp_path / "large.mp4"
+    target.write_bytes(b"live")
+    digest = "b" * 64
+    snapshot = store / f"{digest}.snap"
+    with snapshot.open("wb") as handle:
+        handle.write(b"S")
+        handle.seek(routes._PERSISTENT_VIDEO_CACHE_MAX_BYTES + 1)
+        handle.write(b"x")
+    (store / f"{digest}.src.json").write_text(
+        json.dumps({"digest": digest, "sources": [str(target.resolve())]}),
+        encoding="utf-8",
+    )
+
+    def forbidden_hash(*_args, **_kwargs):
+        raise AssertionError("native Range path hashed the oversized snapshot")
+
+    monkeypatch.setattr(media_snapshots, "_snapshot_bytes_match_digest", forbidden_hash)
+    handler = Handler()
+    handler.headers["Range"] = "bytes=0-0"
+    routes._handle_media(
+        handler,
+        SimpleNamespace(
+            path="/api/media",
+            query=(
+                f"path={urllib.parse.quote(str(target))}&inline=1&snap={digest}"
+            ),
+        ),
+    )
+
+    assert handler.status == 206
+    assert bytes(handler.body) == b"S"
+    assert ("Content-Length", "1") in handler.sent_headers
+    assert not any(name == "X-Hermes-Media-Snapshot" for name, _ in handler.sent_headers)
+
+
+def test_persistent_video_scope_does_not_rehash_eligible_body(monkeypatch, tmp_path):
+    """Scope authorization is metadata-only; opened bytes are attested by /api/media."""
+    from api import media_snapshots, routes
+
+    store = tmp_path / "snapshots"
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"eligible-snapshot")
+    digest = media_snapshots.capture_snapshot(target)
+    assert digest
+
+    def forbidden_hash(*_args, **_kwargs):
+        raise AssertionError("scope authorization rehashed snapshot bytes")
+
+    monkeypatch.setattr(media_snapshots, "_snapshot_bytes_match_digest", forbidden_hash)
+    eligibility = routes._immutable_video_snapshot_resource(
+        target, digest, path_authorized=True
+    )
+    assert eligibility is not None
+    assert eligibility[0] == target.resolve()
+
+
 def test_signout_clears_before_logout_and_cleanup_failure_never_blocks_logout():
     if not NODE:
         return

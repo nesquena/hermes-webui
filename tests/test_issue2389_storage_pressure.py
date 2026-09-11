@@ -1,5 +1,9 @@
 """Regression coverage for storage-pressure cleanup from issue #2389."""
 from pathlib import Path
+import json
+import shutil
+import subprocess
+
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +37,43 @@ def test_service_worker_keeps_activate_cleanup_safety_net():
     activate_block = SW_SRC[activate_idx : activate_idx + 500]
     assert "event.waitUntil(deleteOldShellCaches())" in activate_block
     assert "self.clients.claim()" in activate_block
+
+
+def test_service_worker_prunes_only_obsolete_shell_cache_family():
+    node = shutil.which("node")
+    if not node:
+        return
+    start = SW_SRC.index("function deleteOldShellCaches()")
+    brace = SW_SRC.index("{", start)
+    depth = 1
+    cursor = brace + 1
+    while depth:
+        if SW_SRC[cursor] == "{":
+            depth += 1
+        elif SW_SRC[cursor] == "}":
+            depth -= 1
+        cursor += 1
+    function_source = SW_SRC[start:cursor]
+    script = f"""
+const CACHE_NAME='hermes-shell-current';
+const deleted=[];
+const caches={{
+  keys:async()=>[
+    CACHE_NAME,
+    'hermes-shell-old',
+    'hermes-snapshot-video-v2-authority',
+    'unrelated-origin-cache'
+  ],
+  delete:async name=>{{deleted.push(name);return true;}}
+}};
+{function_source}
+deleteOldShellCaches().then(()=>process.stdout.write(JSON.stringify(deleted)));
+"""
+    result = subprocess.run(
+        [node, "-e", script], text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["hermes-shell-old"]
 
 
 def test_deleted_sessions_prune_all_session_tracking_maps():

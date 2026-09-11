@@ -57,7 +57,7 @@ MUTATIONS = {
     ],
     "release-scope-waiter-on-deny": [
         (
-            "await clearAll(true,scopeWaiters);",
+            "await clearAll(true,request.waiters);",
             "await clearAll();",
         ),
     ],
@@ -70,8 +70,108 @@ MUTATIONS = {
     ],
     "let-prepare-cleanup-failure-escape": [
         (
-            "async function prepareAuthorityChange(){\n  // Cache cleanup is best-effort plumbing, never the authority mutation itself.\n  // clearAll() invalidates this tab's scope/tasks/Blob URLs before its first\n  // await; if persistent deletion then fails, the new server-issued scope still\n  // makes the old partition unreadable and a later reconciliation can remove it.\n  try{await clearAll();}catch(_){}\n}",
-            "async function prepareAuthorityChange(){\n  await clearAll();\n}",
+            "function prepareAuthorityChange(){\n  void clearAll().catch(()=>{});\n  return Promise.resolve();\n}",
+            "function prepareAuthorityChange(){\n  return clearAll();\n}",
+        ),
+        ("const CACHE_CLEANUP_TIMEOUT_MS=250;", "const CACHE_CLEANUP_TIMEOUT_MS=60000;"),
+    ],
+    "drop-cache-op-lock-deadline": [
+        (
+            "timer=setTimeout(()=>{\n      controller.abort();\n      reject(new DOMException('Cache operation deadline exceeded','TimeoutError'));\n    },CACHE_OPERATION_TIMEOUT_MS);",
+            "timer=setTimeout(()=>{\n      controller.abort();\n      reject(new DOMException('Cache operation deadline exceeded','TimeoutError'));\n    },60000);",
+        ),
+    ],
+    "start-cache-op-deadline-after-queue": [
+        (
+            """function _queueCacheOp(fn){
+  // Start the deadline at enqueue time. A prior callback can retain the Web
+  // Lock forever; successors must still leave this promise queue and fall back
+  // to native playback instead of waiting forever before requesting the lock.
+  const controller=new AbortController();
+  let timer=null;
+  const deadline=new Promise((_,reject)=>{
+    timer=setTimeout(()=>{
+      controller.abort();
+      reject(new DOMException('Cache operation deadline exceeded','TimeoutError'));
+    },CACHE_OPERATION_TIMEOUT_MS);
+  });
+  const locked=()=>navigator.locks.request(
+    CACHE_FAMILY+'quota-lock',
+    {mode:'exclusive',signal:controller.signal},
+    fn,
+  );
+  const queued=cacheOps.then(locked,locked);
+  const run=Promise.race([queued,deadline]).finally(()=>{if(timer!==null) clearTimeout(timer);});
+  cacheOps=run.catch(()=>{});
+  return run;
+}""",
+            """function _queueCacheOp(fn){
+  const locked=()=>{
+    const controller=new AbortController();
+    let timer=null;
+    const deadline=new Promise((_,reject)=>{
+      timer=setTimeout(()=>{
+        controller.abort();
+        reject(new DOMException('Cache operation deadline exceeded','TimeoutError'));
+      },CACHE_OPERATION_TIMEOUT_MS);
+    });
+    const operation=navigator.locks.request(
+      CACHE_FAMILY+'quota-lock',
+      {mode:'exclusive',signal:controller.signal},
+      fn,
+    );
+    return Promise.race([operation,deadline]).finally(()=>{if(timer!==null) clearTimeout(timer);});
+  };
+  const run=cacheOps.then(locked,locked);
+  cacheOps=run.catch(()=>{});
+  return run;
+}""",
+        ),
+    ],
+    "drop-persistent-hit-digest": [
+        (
+            "await _blobDigest(blob)===requestedDigest;",
+            "true;",
+        ),
+    ],
+    "drop-persistent-hit-mime": [
+        (
+            "requestedDigest)&&contentType.startsWith('video/')&&",
+            "requestedDigest)&&true&&",
+        ),
+        (
+            "blob.size===declared&&blob.type.toLowerCase().startsWith('video/')&&",
+            "blob.size===declared&&true&&",
+        ),
+    ],
+    "stale-scope-finalizer-clears-successor": [
+        (
+            "if(scopeRequest===request) scopeRequest=null;",
+            "scopeRequest=null;",
+        ),
+    ],
+    "drop-mounted-video-reobserve": [
+        (
+            "if(reobserve) for(const video of mounted) _observe(video);",
+            "if(false) for(const video of mounted) _observe(video);",
+        ),
+    ],
+    "drop-reduced-data-fallback": [
+        (
+            "if(!_cacheStorage()||_prefersReducedData()){",
+            "if(!_cacheStorage()){",
+        ),
+    ],
+    "drop-loading-affordance": [
+        (
+            "  _showLoading(record);",
+            "  void record;",
+        ),
+    ],
+    "hide-integrity-error-status": [
+        (
+            "_showProgressLabel(record,typeof t==='function'?t('file_open_failed'):'Could not open file',{alert:true});",
+            "void record;",
         ),
     ],
     "drop-pagehide-teardown": [
@@ -107,8 +207,23 @@ MUTATIONS = {
             "if(false) record.task.controller.abort();",
         ),
     ],
-    "drop-stream-byte-cap": [
-        ("if(received>PER_FILE_BYTES){", "if(false){"),
+    "drop-cached-read-byte-cap": [
+        (
+            "Number.isFinite(declared)&&declared>=0&&declared<=PER_FILE_BYTES&&",
+            "Number.isFinite(declared)&&declared>=0&&",
+        ),
+        (
+            "if(received>PER_FILE_BYTES){\n        controller.error(new MediaCacheLimitError('cached video exceeds persistent cache limit'));",
+            "if(false){\n        controller.error(new MediaCacheLimitError('cached video exceeds persistent cache limit'));",
+        ),
+        (
+            "if(blob.size!==received||blob.size>PER_FILE_BYTES) throw new MediaCacheLimitError('invalid cached video size');",
+            "if(blob.size!==received) throw new MediaCacheLimitError('invalid cached video size');",
+        ),
+        ("blob.size===declared&&blob.type.toLowerCase().startsWith('video/')&&", "blob.type.toLowerCase().startsWith('video/')&&"),
+    ],
+    "drop-fresh-stream-byte-cap": [
+        ("_broadcast(task,received,declared);\n      if(received>PER_FILE_BYTES){", "_broadcast(task,received,declared);\n      if(false){"),
         ("if(blob.size>PER_FILE_BYTES) throw new MediaCacheLimitError('video exceeds persistent cache limit');", "if(false) throw new MediaCacheLimitError('video exceeds persistent cache limit');"),
     ],
     "drop-global-lru": [

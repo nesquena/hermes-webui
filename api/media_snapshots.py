@@ -217,15 +217,24 @@ def is_valid_digest(digest: str) -> bool:
         return False
 
 
-def snapshot_path_for_digest(digest: str) -> Path | None:
-    """Return the on-disk path for a digest, or None if absent/invalid.
+def snapshot_candidate_for_digest(digest: str) -> Path | None:
+    """Return a regular digest-named snapshot without reading its body."""
+    import stat as stat_mod
 
-    Never creates anything; serving uses this to decide snapshot vs live-file
-    fallback.
-    """
     if not is_valid_digest(digest):
         return None
     candidate = get_snapshot_dir() / f"{digest}.snap"
+    try:
+        return candidate if stat_mod.S_ISREG(candidate.lstat().st_mode) else None
+    except OSError:
+        return None
+
+
+def snapshot_path_for_digest(digest: str) -> Path | None:
+    """Return a byte-verified snapshot path, or None if absent/invalid."""
+    candidate = snapshot_candidate_for_digest(digest)
+    if candidate is None:
+        return None
     return candidate if _snapshot_bytes_match_digest(candidate, digest) else None
 
 
