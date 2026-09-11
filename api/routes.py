@@ -15436,6 +15436,121 @@ def handle_post(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/session/truncate-before":
+        # Restore-checkpoint primitive: keep messages [0..index_of_target) and
+        # drop everything from the target message onward. Mirrors the
+        # Desktop "Restore Checkpoint" feature where every user message is a
+        # checkpoint the conversation can be rewound to (see
+        # apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts in the
+        # Desktop repo: `restoreToMessage` + `truncate_before_user_ordinal`).
+        # WebUI does NOT auto-resubmit the checkpoint message after truncation
+        # (Desktop does — that part of the parity is deliberately deferred so
+        # this endpoint is a small, reviewable slice).
+        try:
+            require(body, "session_id", "message_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        message_id = body["message_id"]
+        try:
+            s = get_session(body["session_id"])
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        # Resolve message_id -> index in the current transcript. We do this
+        # outside the lock so the lookup is cheap; the index is revalidated
+        # against the post-lock snapshot below.
+        ids = [m.get("id") for m in (s.messages or [])]
+        try:
+            target_index = next(i for i, mid in enumerate(ids) if mid == message_id)
+        except StopIteration:
+            return bad(handler, f"Message {message_id!r} not found in session", 404)
+        with _get_session_agent_lock(body["session_id"]):
+            from api.session_ops import truncate_session_at_keep
+            # Re-resolve the index under the lock — another truncate/delete
+            # could have shifted the list between our lookup and the mutation.
+            live_ids = [m.get("id") for m in (s.messages or [])]
+            try:
+                live_index = next(i for i, mid in enumerate(live_ids) if mid == message_id)
+            except StopIteration:
+                return bad(handler, f"Message {message_id!r} not found in session", 404)
+            old_msg_count, old_ctx_count = truncate_session_at_keep(s, live_index)
+            s.save()
+            logger.info(
+                "truncate_before %s: target_message_id=%s at index=%d, "
+                "messages %d->%d, context_messages %d->%d, watermark=%.2f",
+                body["session_id"], message_id, live_index,
+                old_msg_count, len(s.messages or []),
+                old_ctx_count, len(getattr(s, 'context_messages', None) or []),
+                s.truncation_watermark or 0,
+            )
+        from api.config import _evict_session_agent
+        _evict_session_agent(body["session_id"])
+        return j(
+            handler,
+            {
+                "ok": True,
+                "restored_to_message_id": message_id,
+                "deleted_message_count": old_msg_count - len(s.messages or []),
+                "session": public_session_projection(
+                    s.compact() | {"messages": s.messages}
+                ),
+            },
+        )
+
+    if parsed.path == "/api/session/checkpoint/restore":
+        # Restore-checkpoint primitive (parity with Hermes Desktop's
+        # `restoreToMessage` in apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts).
+        # Accepts the durable ``row_id`` (integer state.db primary key) of a user
+        # message and rewinds the conversation to the strict prefix preceding it.
+        # See api/session_ops.py:restore_checkpoint_at_row_id for the locked
+        # mutation + validation. The endpoint surfaces ValueError as 400
+        # (unknown row, non-user row), KeyError as 404, PermissionError as 403.
+        try:
+            require(body, "session_id", "row_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        if _session_is_subagent_view_only(body["session_id"]):
+            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
+        raw_row_id = body["row_id"]
+        if isinstance(raw_row_id, bool) or not isinstance(raw_row_id, int):
+            return bad(handler, "row_id must be an integer", 400)
+        try:
+            from api.session_ops import restore_checkpoint_at_row_id
+            result = restore_checkpoint_at_row_id(body["session_id"], raw_row_id)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except PermissionError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        from api.config import _evict_session_agent
+        _evict_session_agent(body["session_id"])
+        try:
+            s = get_session(body["session_id"])
+        except KeyError:
+            return bad(handler, "Session not found after restore", 404)
+        logger.info(
+            "checkpoint_restore %s: row_id=%d, messages %d->%d, survivor_count=%d",
+            body["session_id"], raw_row_id,
+            result["old_message_count"], result["new_message_count"],
+            len(result["survivor_user_row_ids"]),
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "restored_to_row_id": result["restored_to_row_id"],
+                "old_message_count": result["old_message_count"],
+                "new_message_count": result["new_message_count"],
+                "survivor_user_row_ids": result["survivor_user_row_ids"],
+                "survivor_row_id_map": result["survivor_row_id_map"],
+                "session": public_session_projection(
+                    s.compact() | {"messages": s.messages}
+                ),
+            },
+        )
+
     if parsed.path == "/api/session/branch":
         # Fork a conversation from any message point (#465).
         # Accepts: {session_id, keep_count?, title?}
