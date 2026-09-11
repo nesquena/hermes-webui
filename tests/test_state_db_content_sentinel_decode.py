@@ -94,9 +94,13 @@ def test_unsupported_part_shapes_fall_back_to_raw_string():
         assert _decode_state_db_content(raw) == raw, payload
 
 
-def test_image_only_list_is_supported():
+def test_image_only_list_stays_raw_because_it_would_not_render():
+    """msgContent() discards image parts and this projection supplies no
+    attachments, so an image-only row would decode to nothing visible and
+    _messageIsRenderable() would hide it. It must stay a raw string instead."""
     payload = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]
-    assert _decode_state_db_content(_sentinel(json.dumps(payload))) == payload
+    raw = _sentinel(json.dumps(payload))
+    assert _decode_state_db_content(raw) == raw
 
 
 # --- passthrough / malformed ---------------------------------------------
@@ -277,3 +281,136 @@ def test_unsupported_sentinel_shape_survives_the_read_path_as_text(tmp_path, mon
     messages = models.get_state_db_session_messages(sid)
     assert messages
     assert messages[0]["content"] == raw
+
+
+# --- re-gate finding 2: only decode what will actually render --------------
+
+def test_whitespace_only_text_with_an_image_stays_raw():
+    payload = [
+        {"type": "text", "text": "   \n\t "},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+    ]
+    raw = _sentinel(json.dumps(payload))
+    assert _decode_state_db_content(raw) == raw
+
+
+def test_malformed_image_parts_stay_raw():
+    text = {"type": "text", "text": "caption"}
+    malformed = [
+        {"type": "image_url", "payload": "invalid"},
+        {"type": "image_url", "image_url": {"url": ""}},
+        {"type": "image_url", "image_url": {"href": "x"}},
+        {"type": "input_image"},
+        {"type": "image", "source": {"type": "base64", "data": "AA"}},  # no media_type
+        {"type": "image", "source": {"type": "url"}},
+        {"type": "image", "source": "not-a-dict"},
+    ]
+    for bad in malformed:
+        raw = _sentinel(json.dumps([text, bad]))
+        assert _decode_state_db_content(raw) == raw, bad
+
+
+def test_text_with_each_valid_image_payload_shape_decodes():
+    text = {"type": "text", "text": "caption"}
+    valid = [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+        {"type": "image_url", "image_url": "https://example.test/a.png"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AA"},
+        {"type": "input_image", "file_id": "file-123"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}},
+        {"type": "image", "source": {"type": "url", "url": "https://example.test/a.png"}},
+    ]
+    for good in valid:
+        payload = [text, good]
+        assert _decode_state_db_content(_sentinel(json.dumps(payload))) == payload, good
+
+
+def test_image_only_row_stays_visible_through_the_read_path(tmp_path, monkeypatch):
+    from api import models
+
+    sid = "imageonly"
+    db = tmp_path / "state.db"
+    raw = _sentinel(json.dumps([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]))
+    _make_state_db(db, sid, [{"role": "user", "content": raw, "timestamp": 1000.0}])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db, raising=False)
+    messages = models.get_state_db_session_messages(sid)
+    assert messages and messages[0]["content"] == raw
+
+
+# --- re-gate finding 1: out-of-band identity, consistent across every key ---
+
+from api.models import (  # noqa: E402
+    _matching_visible_duplicate,
+    _session_message_content_key,
+    merge_session_messages_append_only,
+)
+
+# Exactly what the previous in-band tag produced for TEXT_AND_IMAGE.
+_OLD_INBAND_TOKEN = "\x00list:" + json.dumps(TEXT_AND_IMAGE, sort_keys=True, default=str)
+
+
+def test_structured_identity_is_not_a_string():
+    """Out of band: no message body can equal it, whatever it contains."""
+    assert not isinstance(_content_identity_for_key(TEXT_AND_IMAGE), str)
+
+
+def test_scalar_imitating_a_structured_identity_collides_with_no_key():
+    rich = {"role": "user", "content": TEXT_AND_IMAGE, "timestamp": 1.0}
+    forged = {"role": "user", "content": _OLD_INBAND_TOKEN, "timestamp": 1.0}
+    assert _session_message_merge_key(rich) != _session_message_merge_key(forged)
+    assert _session_message_dedup_key(rich) != _session_message_dedup_key(forged)
+    assert _session_message_content_key(rich) != _session_message_content_key(forged)
+    assert _session_message_visible_key(rich) != _session_message_visible_key(forged)
+
+
+def test_merge_keeps_the_rich_row_when_a_scalar_imitates_its_identity():
+    rich = {"role": "user", "content": TEXT_AND_IMAGE, "timestamp": 1000.0}
+    forged = {"role": "user", "content": _OLD_INBAND_TOKEN, "timestamp": 1000.0}
+    merged = merge_session_messages_append_only([forged], [rich])
+    assert any(m.get("content") == TEXT_AND_IMAGE for m in merged), merged
+
+
+def test_non_list_scalars_key_exactly_as_on_master():
+    """No silent dedup change for ordinary non-string content."""
+    assert _content_identity_for_key(42) == "42"
+    assert _content_identity_for_key(3.5) == "3.5"
+    assert _content_identity_for_key(True) == "True"
+    assert _content_identity_for_key({"a": 1}) == str({"a": 1})
+    assert _content_identity_for_key([]) == ""
+    msg = {"role": "user", "content": 42, "timestamp": 1.0}
+    assert "42" in _session_message_merge_key(msg)
+
+
+def test_structured_visible_key_never_fuzzy_matches_a_scalar():
+    rich_key = _session_message_visible_key({"role": "user", "content": TEXT_AND_IMAGE})
+    canonical = _content_identity_for_key(TEXT_AND_IMAGE)[1]
+    for text in (canonical, "prefix " + canonical + " suffix", str(TEXT_AND_IMAGE)):
+        scalar_key = _session_message_visible_key({"role": "user", "content": text})
+        assert _matching_visible_duplicate(rich_key, {scalar_key}) is None
+        assert _matching_visible_duplicate(scalar_key, {rich_key}) is None
+
+
+def test_merge_never_writes_an_identity_into_message_content():
+    rich = {"role": "user", "content": TEXT_AND_IMAGE, "timestamp": 1000.0}
+    reply = {"role": "assistant", "content": "ok", "timestamp": 1001.0}
+    merged = merge_session_messages_append_only([rich], [rich, reply])
+    for message in merged:
+        assert isinstance(message.get("content"), (str, list))
+        assert not isinstance(message.get("content"), tuple)
+    assert any(m.get("content") == TEXT_AND_IMAGE for m in merged)
+
+
+def test_structured_content_is_serialised_once_per_merge_call(monkeypatch):
+    from api import models
+
+    calls = {"n": 0}
+    real = models._canonical_structured_content
+
+    def counting(content):
+        calls["n"] += 1
+        return real(content)
+
+    monkeypatch.setattr(models, "_canonical_structured_content", counting)
+    rich = {"role": "user", "content": list(TEXT_AND_IMAGE), "timestamp": 1000.0}
+    merge_session_messages_append_only([rich, rich], [rich])
+    assert calls["n"] == 1

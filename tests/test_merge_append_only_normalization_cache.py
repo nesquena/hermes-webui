@@ -37,14 +37,16 @@ def _count_content_normalizations(monkeypatch):
     passthrough calls where content has already been reduced to a string.
     """
     counts = {"count": 0}
-    original = models._content_identity_for_key
+    original = models._canonical_structured_content
 
     def _wrapped(content):
-        if not isinstance(content, str):
-            counts["count"] += 1
+        counts["count"] += 1
         return original(content)
 
-    monkeypatch.setattr(models, "_content_identity_for_key", _wrapped)
+    # Observe the serialisation itself, not the identity lookups: every key
+    # derivation asks for the identity, but a list must be serialised only once
+    # per merge call.
+    monkeypatch.setattr(models, "_canonical_structured_content", _wrapped)
     return counts
 
 
