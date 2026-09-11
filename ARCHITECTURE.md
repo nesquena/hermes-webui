@@ -119,11 +119,16 @@ Only same-origin `/api/media` video URLs with a concrete conversation session,
 canonical media path, and 64-hex `snap` digest are eligible. The session authorizes
 each path consumption but is not part of the persistent resource identity. Before
 persistence, the server rejects snapshot objects above the shared 16 MiB cache ceiling
-from regular-file metadata without hashing their bodies. For eligible objects it opens
-the snapshot once, hashes into one bounded byte buffer, serves a zero-copy view with
-`X-Hermes-Media-Snapshot` and the precomputed digest ETag, and the browser independently
-hashes the bounded Blob. Larger snapshot videos keep the native Range path and never
-enter persistent Cache Storage. A missing snapshot or canonical binding failure may use
+from regular-file metadata without hashing their bodies. For a persistent-cache fetch or
+a complete eligible-object response, it opens the snapshot once, rechecks that the opened
+descriptor is a regular file, hashes into one bounded byte buffer, serves a zero-copy view
+with `X-Hermes-Media-Snapshot` and the precomputed digest ETag, and the browser independently
+hashes the bounded Blob. Native Range playback, for both small and larger snapshots, never
+hashes the whole object: the snapshot leaf is opened non-blocking, checked by `fstat`, and
+only a capped 1 MiB window of the requested range is captured before response headers
+commit. Because that path is not whole-object-attested, it is `no-store` and never emits
+an immutable snapshot header.
+Larger snapshot videos never enter persistent Cache Storage. A missing snapshot or canonical binding failure may use
 the ordinary live-file fallback, which is never persisted. A response whose attested
 body fails the browser digest check is rejected fail-closed: those bytes are neither
 played nor cached.

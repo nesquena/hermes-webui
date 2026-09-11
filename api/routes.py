@@ -19480,6 +19480,41 @@ def _open_file_read_fd(target: Path, anchor_root: Path | None = None) -> int:
     return open_anchored_fd(anchor_root, target.resolve(), want_dir=False)
 
 
+def _open_snapshot_read_fd(target: Path, anchor_root: Path) -> int:
+    """Open one snapshot without blocking on a raced-in FIFO/special file."""
+    import stat as stat_mod
+
+    root = anchor_root.resolve()
+    if target.parent.resolve() != root or target.name in {"", ".", ".."}:
+        raise ValueError("snapshot path is outside its store")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    root_fd = None
+    try:
+        if os.open in getattr(os, "supports_dir_fd", set()):
+            root_fd = os.open(
+                str(root),
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            fd = os.open(target.name, flags, dir_fd=root_fd)
+        else:
+            fd = os.open(str(root / target.name), flags)
+        if not stat_mod.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("snapshot object is not a regular file")
+        return fd
+    except BaseException:
+        _close_fd_quietly(locals().get("fd"))
+        raise
+    finally:
+        _close_fd_quietly(root_fd)
+
+
 def _open_verified_snapshot_fd(
     target: Path, anchor_root: Path, digest: str
 ) -> tuple[int, bytearray] | None:
@@ -19490,7 +19525,7 @@ def _open_verified_snapshot_fd(
     """
     fd = None
     try:
-        fd = _open_file_read_fd(target, anchor_root)
+        fd = _open_snapshot_read_fd(target, anchor_root)
         st = os.fstat(fd)
         if st.st_size > _PERSISTENT_VIDEO_CACHE_MAX_BYTES:
             _close_fd_quietly(fd)
@@ -19529,6 +19564,7 @@ def _close_fd_quietly(fd: int | None) -> None:
 # this cap (and all HTML with no-store) are served without ETag to avoid
 # hashing every byte of large media / Range requests.
 _ETAG_SIZE_CAP = 10 * 1024 * 1024  # 10 MB
+_NATIVE_SNAPSHOT_RANGE_MAX_BYTES = 1024 * 1024
 
 
 def _bytes_etag(data: bytes) -> str:
@@ -19582,7 +19618,7 @@ def _etag_and_snapshot(fd, *, file_size: int) -> tuple[str | None, bytes | None,
     return _bytes_etag(data), data, actual_size
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None, extra_headers: dict[str, str] | None = None, opened_fd: int | None = None, opened_snapshot: bytes | bytearray | None = None, opened_etag: str | None = None):
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None, download_name: str | None = None, extra_headers: dict[str, str] | None = None, opened_fd: int | None = None, opened_snapshot: bytes | bytearray | None = None, opened_etag: str | None = None, bind_range_before_headers: bool = False):
     """Serve a file with correct MIME/disposition and optional byte-range support.
 
     Supports conditional GET via If-None-Match (ETag) — when the ETag matches,
@@ -19679,7 +19715,24 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
             return True
 
         start, end = byte_range if byte_range else (0, max(0, file_size - 1))
+        if bind_range_before_headers and byte_range:
+            end = min(end, start + _NATIVE_SNAPSHOT_RANGE_MAX_BYTES - 1)
         content_length = end - start + 1 if file_size else 0
+        bound_range = None
+        if bind_range_before_headers and byte_range and content_length:
+            try:
+                os.lseek(fd, start, os.SEEK_SET)
+                captured = bytearray()
+                while len(captured) < content_length:
+                    chunk = os.read(fd, min(1024 * 1024, content_length - len(captured)))
+                    if not chunk:
+                        break
+                    captured.extend(chunk)
+                if len(captured) != content_length:
+                    return bad(handler, "Could not serve file", 500)
+                bound_range = captured
+            except OSError:
+                return bad(handler, "Could not serve file", 500)
         handler.send_response(206 if byte_range else 200)
         handler.send_header("Content-Type", mime)
         handler.send_header("Content-Length", str(content_length))
@@ -19713,7 +19766,9 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         # as _safe_write(). Never emit a 500 after headers are out.
         if content_length:
             try:
-                if snapshot is not None:
+                if bound_range is not None:
+                    handler.wfile.write(memoryview(bound_range))
+                elif snapshot is not None:
                     handler.wfile.write(memoryview(snapshot)[start:start + content_length])
                 else:
                     with os.fdopen(fd, "rb", closefd=True) as f:
@@ -20865,7 +20920,8 @@ def _handle_media(handler, parsed):
             snapshot_size = snapshot_file.stat().st_size
         except OSError:
             snapshot_size = -1
-        if 0 <= snapshot_size <= _PERSISTENT_VIDEO_CACHE_MAX_BYTES:
+        verify_snapshot_body = cache_fetch_requested or not handler.headers.get("Range")
+        if verify_snapshot_body and 0 <= snapshot_size <= _PERSISTENT_VIDEO_CACHE_MAX_BYTES:
             verified_snapshot = _open_verified_snapshot_fd(snapshot_file, snap_dir, snap_digest)
             if verified_snapshot is not None:
                 snapshot_fd, snapshot_bytes = verified_snapshot
@@ -20883,9 +20939,9 @@ def _handle_media(handler, parsed):
                     opened_snapshot=snapshot_bytes,
                     opened_etag=f'W/"{snap_digest}"',
                 )
-        elif snapshot_size > _PERSISTENT_VIDEO_CACHE_MAX_BYTES and not cache_fetch_requested:
+        elif snapshot_size >= 0 and not cache_fetch_requested:
             try:
-                snapshot_fd = _open_file_read_fd(snapshot_file, snap_dir)
+                snapshot_fd = _open_snapshot_read_fd(snapshot_file, snap_dir)
             except (OSError, ValueError):
                 snapshot_fd = None
             if snapshot_fd is not None:
@@ -20894,11 +20950,12 @@ def _handle_media(handler, parsed):
                     snapshot_file,
                     mime,
                     disposition,
-                    "private, max-age=31536000, immutable",
+                    "private, no-store",
                     csp=csp,
                     download_name=target.name,
                     anchor_root=snap_dir,
                     opened_fd=snapshot_fd,
+                    bind_range_before_headers=True,
                 )
 
     if not target.exists() or not target.is_file():

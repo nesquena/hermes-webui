@@ -409,6 +409,161 @@ def test_oversize_video_snapshot_range_streams_without_hashing(monkeypatch, tmp_
     assert bytes(handler.body) == b"S"
     assert ("Content-Length", "1") in handler.sent_headers
     assert not any(name == "X-Hermes-Media-Snapshot" for name, _ in handler.sent_headers)
+    assert ("Cache-Control", "private, no-store") in handler.sent_headers
+
+
+def test_native_snapshot_tiny_range_does_not_hash_full_object(monkeypatch, tmp_path):
+    """A native one-byte Range does only range-sized work, even below the cache cap."""
+    from api import media_snapshots, routes
+
+    store = tmp_path / "snapshots"
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    target = tmp_path / "small.mp4"
+    target.write_bytes(b"S" + b"x" * (2 * 1024 * 1024 - 1))
+    digest = media_snapshots.capture_snapshot(target)
+    assert digest
+    target.write_bytes(b"live")
+
+    def forbidden_verify(*_args, **_kwargs):
+        raise AssertionError("native Range path hashed the complete snapshot")
+
+    monkeypatch.setattr(routes, "_open_verified_snapshot_fd", forbidden_verify)
+    handler = Handler()
+    handler.headers["Range"] = "bytes=0-0"
+    routes._handle_media(
+        handler,
+        SimpleNamespace(
+            path="/api/media",
+            query=f"path={urllib.parse.quote(str(target))}&inline=1&snap={digest}",
+        ),
+    )
+
+    assert handler.status == 206
+    assert bytes(handler.body) == b"S"
+    assert ("Content-Length", "1") in handler.sent_headers
+    assert ("Cache-Control", "private, no-store") in handler.sent_headers
+    assert not any(name == "X-Hermes-Media-Snapshot" for name, _ in handler.sent_headers)
+
+
+def test_large_tampered_snapshot_range_is_not_immutable(monkeypatch, tmp_path):
+    """An unverified native snapshot response cannot claim immutable identity."""
+    from api import routes
+
+    store = tmp_path / "snapshots"
+    store.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    target = tmp_path / "large.mp4"
+    target.write_bytes(b"live")
+    digest = "c" * 64
+    snapshot = store / f"{digest}.snap"
+    with snapshot.open("wb") as handle:
+        handle.write(b"T")
+        handle.seek(routes._PERSISTENT_VIDEO_CACHE_MAX_BYTES)
+        handle.write(b"x")
+    (store / f"{digest}.src.json").write_text(
+        json.dumps({"digest": digest, "sources": [str(target.resolve())]}),
+        encoding="utf-8",
+    )
+
+    handler = Handler()
+    handler.headers["Range"] = "bytes=0-0"
+    routes._handle_media(
+        handler,
+        SimpleNamespace(
+            path="/api/media",
+            query=f"path={urllib.parse.quote(str(target))}&inline=1&snap={digest}",
+        ),
+    )
+
+    assert handler.status == 206
+    assert bytes(handler.body) == b"T"
+    assert ("Cache-Control", "private, no-store") in handler.sent_headers
+    assert not any("immutable" in value for name, value in handler.sent_headers if name == "Cache-Control")
+
+
+def test_large_snapshot_range_binds_body_before_committing_headers(monkeypatch, tmp_path):
+    """A native Range response captures its exact bytes before headers commit."""
+    from api import routes
+
+    store = tmp_path / "snapshots"
+    store.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    target = tmp_path / "large.mp4"
+    target.write_bytes(b"live")
+    digest = "d" * 64
+    snapshot = store / f"{digest}.snap"
+    with snapshot.open("wb") as handle:
+        handle.write(b"B")
+        handle.seek(routes._PERSISTENT_VIDEO_CACHE_MAX_BYTES)
+        handle.write(b"x")
+    (store / f"{digest}.src.json").write_text(
+        json.dumps({"digest": digest, "sources": [str(target.resolve())]}),
+        encoding="utf-8",
+    )
+
+    class TruncatingHandler(Handler):
+        def end_headers(self):
+            if self.status == 206:
+                snapshot.write_bytes(b"")
+
+    handler = TruncatingHandler()
+    handler.headers["Range"] = "bytes=0-0"
+    routes._handle_media(
+        handler,
+        SimpleNamespace(
+            path="/api/media",
+            query=f"path={urllib.parse.quote(str(target))}&inline=1&snap={digest}",
+        ),
+    )
+
+    assert handler.status == 206
+    assert ("Content-Length", "1") in handler.sent_headers
+    assert bytes(handler.body) == b"B"
+
+
+def test_large_snapshot_open_ended_range_is_bounded(monkeypatch, tmp_path):
+    """An open-ended native Range never becomes a whole-object memory copy."""
+    from api import routes
+
+    store = tmp_path / "snapshots"
+    store.mkdir()
+    monkeypatch.setenv("HERMES_WEBUI_MEDIA_SNAPSHOT_DIR", str(store))
+    monkeypatch.setenv("MEDIA_ALLOWED_ROOTS", str(tmp_path))
+    target = tmp_path / "large.mp4"
+    target.write_bytes(b"live")
+    digest = "e" * 64
+    snapshot = store / f"{digest}.snap"
+    with snapshot.open("wb") as handle:
+        handle.write(b"R")
+        handle.seek(routes._PERSISTENT_VIDEO_CACHE_MAX_BYTES)
+        handle.write(b"x")
+    (store / f"{digest}.src.json").write_text(
+        json.dumps({"digest": digest, "sources": [str(target.resolve())]}),
+        encoding="utf-8",
+    )
+
+    handler = Handler()
+    handler.headers["Range"] = "bytes=0-"
+    routes._handle_media(
+        handler,
+        SimpleNamespace(
+            path="/api/media",
+            query=f"path={urllib.parse.quote(str(target))}&inline=1&snap={digest}",
+        ),
+    )
+
+    assert handler.status == 206
+    assert len(handler.body) == routes._NATIVE_SNAPSHOT_RANGE_MAX_BYTES
+    assert (
+        "Content-Length", str(routes._NATIVE_SNAPSHOT_RANGE_MAX_BYTES)
+    ) in handler.sent_headers
+    assert (
+        "Content-Range",
+        f"bytes 0-{routes._NATIVE_SNAPSHOT_RANGE_MAX_BYTES - 1}/{snapshot.stat().st_size}",
+    ) in handler.sent_headers
 
 
 def test_persistent_video_scope_does_not_rehash_eligible_body(monkeypatch, tmp_path):

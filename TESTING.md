@@ -133,8 +133,12 @@ authority. The cache-operation deadline row holds one acquired lock callback pen
 then enqueues several distinct successors and requires all of them to fall back within
 one enqueue-time deadline window; its mutant moves deadline creation behind the queue
 and must fail specifically at that timing assertion. The server scope suite also proves
-an over-cache-ceiling snapshot serves a one-byte native Range without hashing the full
-object. Service-worker tests execute
+small and over-cache-ceiling one-byte native Range requests avoid whole-object hashing,
+open-ended snapshot ranges are capped to one 1 MiB response window, unverified native
+responses are `no-store`, the requested range body is bound
+before headers commit, and a raced-in FIFO/non-regular opened descriptor is rejected before
+any read. Independent cache-hit mutants cover stream cancellation at the byte ceiling,
+actual-versus-declared length, MIME, and SHA-256. Service-worker tests execute
 install/activate's shared cleanup and prove only obsolete `hermes-shell-*` caches are
 deleted.
 

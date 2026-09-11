@@ -16,6 +16,8 @@ overwritten AND deleted, while a request WITHOUT a snap keeps serving the live
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -137,6 +139,7 @@ def test_anchored_file_leaf_uses_binary_open_flag(monkeypatch, tmp_path):
     assert fd == 123
     assert seen["path"] == str(source)
     assert seen["flags"] & workspace._O_BINARY
+
 
 
 def test_anchored_directory_does_not_use_binary_open_flag(monkeypatch, tmp_path):
@@ -476,6 +479,63 @@ def test_preverified_snapshot_reuses_digest_etag_without_second_hash(routes, mon
     assert handler.status == 200
     assert bytes(handler.body) == bytes(payload)
     assert handler.header("ETag") == 'W/"preverified"'
+
+
+def test_open_verified_snapshot_fd_rejects_non_regular_opened_fd(
+    monkeypatch, routes, snap_dir
+):
+    """The opened object, not pre-open path metadata, decides eligibility."""
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    candidate = snap_dir / f"{'0' * 64}.snap"
+    read_fd, write_fd = os.pipe()
+    routes._close_fd_quietly(write_fd)
+    monkeypatch.setattr(routes.os, "supports_dir_fd", set())
+    monkeypatch.setattr(routes.os, "open", lambda *_args, **_kwargs: read_fd)
+    with pytest.raises(ValueError, match="not a regular file"):
+        routes._open_snapshot_read_fd(candidate, snap_dir)
+
+
+def test_snapshot_open_requests_nonblocking_leaf(monkeypatch, routes, snap_dir, tmp_path):
+    """The final snapshot component cannot block a worker if raced into a FIFO."""
+    nonblocking = 0x08000000
+    source = snap_dir / "regular.snap"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"x")
+    seen = []
+    original_open = os.open
+
+    def tracked_open(path, flags, *args, **kwargs):
+        seen.append(flags)
+        return original_open(source, os.O_RDONLY)
+
+    monkeypatch.setattr(routes.os, "supports_dir_fd", set())
+    monkeypatch.setattr(routes.os, "O_NONBLOCK", nonblocking, raising=False)
+    monkeypatch.setattr(routes.os, "open", tracked_open)
+    fd = routes._open_snapshot_read_fd(source, snap_dir)
+    try:
+        assert seen[-1] & nonblocking
+    finally:
+        routes._close_fd_quietly(fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO behavior")
+def test_snapshot_fifo_open_never_blocks_worker(routes, snap_dir, tmp_path):
+    """A raced-in FIFO is opened non-blocking and rejected by opened-fd type."""
+    fifo = tmp_path / "raced.snap"
+    os.mkfifo(fifo)
+    code = (
+        "from pathlib import Path; from api import routes; "
+        f"routes._open_snapshot_read_fd(Path({str(fifo)!r}), Path({str(tmp_path)!r}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=2,
+        check=False,
+    )
+    assert result.returncode != 0
 
 
 def test_handle_media_snapshot_range_request(routes, monkeypatch, snap_dir, tmp_path):

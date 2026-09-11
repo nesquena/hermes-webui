@@ -2,6 +2,7 @@
 """Mutation gate for server-owned persistent media cache eligibility/integrity."""
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -71,7 +72,45 @@ MUTATIONS = {
         "etag = _bytes_etag(snapshot)",
         "tests/test_media_message_snapshots.py::test_preverified_snapshot_reuses_digest_etag_without_second_hash",
     ),
+    "hash-native-small-range": (
+        "api/routes.py",
+        "verify_snapshot_body = cache_fetch_requested or not handler.headers.get(\"Range\")\n        if verify_snapshot_body and 0 <= snapshot_size <= _PERSISTENT_VIDEO_CACHE_MAX_BYTES:",
+        "verify_snapshot_body = True\n        if verify_snapshot_body and 0 <= snapshot_size <= _PERSISTENT_VIDEO_CACHE_MAX_BYTES:",
+        "tests/test_persistent_video_cache_scope.py::test_native_snapshot_tiny_range_does_not_hash_full_object",
+    ),
+    "mark-unverified-native-snapshot-immutable": (
+        "api/routes.py",
+        '                    "private, no-store",\n                    csp=csp,\n                    download_name=target.name,\n                    anchor_root=snap_dir,\n                    opened_fd=snapshot_fd,',
+        '                    "private, max-age=31536000, immutable",\n                    csp=csp,\n                    download_name=target.name,\n                    anchor_root=snap_dir,\n                    opened_fd=snapshot_fd,',
+        "tests/test_persistent_video_cache_scope.py::test_large_tampered_snapshot_range_is_not_immutable",
+    ),
+    "stream-native-range-after-headers": (
+        "api/routes.py",
+        "                    opened_fd=snapshot_fd,\n                    bind_range_before_headers=True,",
+        "                    opened_fd=snapshot_fd,",
+        "tests/test_persistent_video_cache_scope.py::test_large_snapshot_range_binds_body_before_committing_headers",
+    ),
+    "drop-native-snapshot-range-cap": (
+        "api/routes.py",
+        "        if bind_range_before_headers and byte_range:\n            end = min(end, start + _NATIVE_SNAPSHOT_RANGE_MAX_BYTES - 1)",
+        "        if False:\n            end = min(end, start + _NATIVE_SNAPSHOT_RANGE_MAX_BYTES - 1)",
+        "tests/test_persistent_video_cache_scope.py::test_large_snapshot_open_ended_range_is_bounded",
+    ),
+    "trust-opened-nonregular-snapshot": (
+        "api/routes.py",
+        "        if not stat_mod.S_ISREG(os.fstat(fd).st_mode):",
+        "        if False:",
+        "tests/test_media_message_snapshots.py::test_open_verified_snapshot_fd_rejects_non_regular_opened_fd",
+    ),
 }
+
+if getattr(os, "O_NONBLOCK", 0):
+    MUTATIONS["drop-snapshot-nonblocking-open"] = (
+        "api/routes.py",
+        '        | getattr(os, "O_NONBLOCK", 0)',
+        "        | 0",
+        "tests/test_media_message_snapshots.py::test_snapshot_fifo_open_never_blocks_worker",
+    )
 
 
 def _ignore(_directory: str, names: list[str]) -> set[str]:

@@ -139,10 +139,6 @@ MUTATIONS = {
             "requestedDigest)&&contentType.startsWith('video/')&&",
             "requestedDigest)&&true&&",
         ),
-        (
-            "blob.size===declared&&blob.type.toLowerCase().startsWith('video/')&&",
-            "blob.size===declared&&true&&",
-        ),
     ],
     "stale-scope-finalizer-clears-successor": [
         (
@@ -207,20 +203,15 @@ MUTATIONS = {
             "if(false) record.task.controller.abort();",
         ),
     ],
-    "drop-cached-read-byte-cap": [
-        (
-            "Number.isFinite(declared)&&declared>=0&&declared<=PER_FILE_BYTES&&",
-            "Number.isFinite(declared)&&declared>=0&&",
-        ),
+    "drop-cached-stream-byte-cap": [
         (
             "if(received>PER_FILE_BYTES){\n        controller.error(new MediaCacheLimitError('cached video exceeds persistent cache limit'));",
             "if(false){\n        controller.error(new MediaCacheLimitError('cached video exceeds persistent cache limit'));",
         ),
-        (
-            "if(blob.size!==received||blob.size>PER_FILE_BYTES) throw new MediaCacheLimitError('invalid cached video size');",
-            "if(blob.size!==received) throw new MediaCacheLimitError('invalid cached video size');",
-        ),
-        ("blob.size===declared&&blob.type.toLowerCase().startsWith('video/')&&", "blob.type.toLowerCase().startsWith('video/')&&"),
+    ],
+
+    "drop-persistent-hit-size-match": [
+        ("blob.size===declared&&await _blobDigest(blob)===requestedDigest;", "await _blobDigest(blob)===requestedDigest;"),
     ],
     "drop-fresh-stream-byte-cap": [
         ("_broadcast(task,received,declared);\n      if(received>PER_FILE_BYTES){", "_broadcast(task,received,declared);\n      if(false){"),

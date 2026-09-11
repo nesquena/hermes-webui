@@ -278,8 +278,7 @@ async function _cachedBlob(cacheKey,sourceUrl,currentScope){
     if(valid){
       try{
         blob=await _boundedCachedBlob(response);
-        valid=blob.size===declared&&blob.type.toLowerCase().startsWith('video/')&&
-          await _blobDigest(blob)===requestedDigest;
+        valid=blob.size===declared&&await _blobDigest(blob)===requestedDigest;
       }catch(_){valid=false;}
     }
     if(!valid){
