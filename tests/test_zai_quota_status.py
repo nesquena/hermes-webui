@@ -37,7 +37,7 @@ def isolate_zai_state(monkeypatch):
     """Isolate env overrides and any module-level zai caches per test."""
     for name in ("ZAI_PEAK_TZ", "ZAI_PEAK_MULTIPLIER", "ZAI_OFFPEAK_MULTIPLIER"):
         monkeypatch.delenv(name, raising=False)
-    for attr in ("_zai_quota_cache", "_zai_quota_flights"):
+    for attr in ("_zai_quota_cache", "_zai_quota_flights", "_zai_quota_transport_locks"):
         cache = getattr(providers, attr, None)
         if isinstance(cache, dict):
             with getattr(providers, "_zai_quota_cache_lock", _NULL_LOCK):
@@ -45,7 +45,7 @@ def isolate_zai_state(monkeypatch):
     if hasattr(providers, "_zai_quota_epoch"):
         providers._zai_quota_epoch = 0
     yield
-    for attr in ("_zai_quota_cache", "_zai_quota_flights"):
+    for attr in ("_zai_quota_cache", "_zai_quota_flights", "_zai_quota_transport_locks"):
         cache = getattr(providers, attr, None)
         if isinstance(cache, dict):
             with getattr(providers, "_zai_quota_cache_lock", _NULL_LOCK):

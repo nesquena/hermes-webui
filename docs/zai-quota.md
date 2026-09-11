@@ -37,7 +37,13 @@ Failures are shared, bounded, and never resurrect stale success:
   only the completed cache, so simultaneous forced refreshes share one
   credentialed request instead of fanning out. If an owner stalls past the
   join timeout, exactly one waiter is elected replacement owner (bounded
-  steal).
+  steal). The single-flight guarantee is *physical*: each key has a
+  transport lock the live request body holds until it returns, so even a
+  steal cannot start a second live request for that key — the replacement
+  waits (bounded) for the prior body to exit, or fails soft. And before any
+  request starts, the caller re-checks the flight epoch and the *live*
+  credential/origin, so a caller that began before a credential mutation
+  never sends the retired key or origin.
 - A failed fetch publishes a short-lived (15 s) sanitized failure marker
   that absorbs immediate retries — an outage does not become one request
   per caller.

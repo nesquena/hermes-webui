@@ -105,12 +105,20 @@ def isolate_zai(monkeypatch):
     with providers._zai_quota_cache_lock:
         providers._zai_quota_cache.clear()
         providers._zai_quota_flights.clear()
+        for attr in ("_zai_quota_transport_locks",):
+            table = getattr(providers, attr, None)
+            if isinstance(table, dict):
+                table.clear()
     providers._zai_quota_epoch = 0
     monkeypatch.setattr(config, "_get_provider_base_url", lambda pid: None, raising=False)
     yield
     with providers._zai_quota_cache_lock:
         providers._zai_quota_cache.clear()
         providers._zai_quota_flights.clear()
+        for attr in ("_zai_quota_transport_locks",):
+            table = getattr(providers, attr, None)
+            if isinstance(table, dict):
+                table.clear()
 
 
 def _set_key(monkeypatch):
@@ -467,6 +475,7 @@ def test_waiter_cannot_return_success_after_newer_refresh_fails(monkeypatch):
     the bounded steal; its failure is then the shared terminal truth."""
     import threading as _th
     monkeypatch.setattr(providers, "_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS", 0.25)
+    monkeypatch.setattr(providers, "_ZAI_QUOTA_TRANSPORT_WAIT_SECONDS", 0.25)
     old_release = _th.Event()
 
     def old_owner(api_key, monitor_url=None):
@@ -624,6 +633,7 @@ def test_superseded_owner_caller_also_unavailable(monkeypatch):
     closes the pop→assign race window)."""
     import threading as _th
     monkeypatch.setattr(providers, "_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS", 0.25)
+    monkeypatch.setattr(providers, "_ZAI_QUOTA_TRANSPORT_WAIT_SECONDS", 0.25)
     old_release = _th.Event()
 
     def old_owner(api_key, monitor_url=None):
@@ -657,6 +667,135 @@ def test_superseded_owner_caller_also_unavailable(monkeypatch):
     # The old owner was superseded: its caller must NOT report its stale
     # success even though the fetch itself succeeded.
     assert owner_result["r"]["status"] == "unavailable"
+
+
+# ── Re-gate round 2: physical single-flight in the bounded-steal path ───────
+
+
+def test_two_successive_steals_keep_peak_transport_concurrency_at_one(monkeypatch):
+    """Maintainer-required regression (review 5176373527).
+
+    Two successive join timeouts with each old body held open must never
+    produce more than ONE live credentialed transport per cache key. The
+    steal path must wait for the prior physical owner to acknowledge exit
+    (or fail soft) before starting a replacement transport.
+    """
+    monkeypatch.setattr(providers, "_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS", 0.25)
+    live = {"n": 0}
+    peak = {"n": 0}
+    lock = threading.Lock()
+    releases = [threading.Event() for _ in range(3)]
+    calls = {"n": 0}
+
+    def held_open_fetch(api_key, monitor_url=None):
+        with lock:
+            calls["n"] += 1
+            idx = calls["n"] - 1
+        with lock:
+            live["n"] += 1
+            peak["n"] = max(peak["n"], live["n"])
+        try:
+            # Hold every body open past any join timeout so steal after
+            # steal stacks up if the implementation allows it.
+            releases[idx].wait(timeout=10)
+            return _payload(30)
+        finally:
+            with lock:
+                live["n"] -= 1
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", held_open_fetch)
+    _set_key(monkeypatch)
+    results = {}
+
+    def call(refresh):
+        results.setdefault(len(results), providers.get_provider_quota("zai", refresh=refresh))
+
+    t_owner = threading.Thread(target=call, args=(False,))
+    t_owner.start()
+    for _ in range(400):
+        with providers._zai_quota_cache_lock:
+            if providers._zai_quota_flights:
+                break
+        time.sleep(0.005)
+    # Steal #1: a waiter times out on the owner's flight and elects itself.
+    t_w1 = threading.Thread(target=call, args=(True,))
+    t_w1.start()
+    time.sleep(0.6)  # > join timeout (0.25 s): the steal decision is made
+    # Steal #2: a third caller times out on the (now replaced) flight and
+    # would repeat the operation under the old implementation.
+    t_w2 = threading.Thread(target=call, args=(True,))
+    t_w2.start()
+    time.sleep(0.6)
+    # No matter how the election lands, at most one transport body is live.
+    with lock:
+        assert peak["n"] <= 1, f"peak live transports hit {peak['n']}"
+    # Drain: release every body and join all callers.
+    for ev in releases:
+        ev.set()
+    for t in (t_owner, t_w1, t_w2):
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in (t_owner, t_w1, t_w2))
+    with lock:
+        assert peak["n"] <= 1, f"peak live transports hit {peak['n']} (after drain)"
+    assert calls["n"] >= 1  # at least the original owner ran
+
+
+def test_invalidation_before_timeout_launches_no_retired_credential(monkeypatch):
+    """Maintainer-required regression (review 5176373527).
+
+    A waiter that retains the pre-invalidation key/origin while waiting must
+    not start that retired credentialed request after an epoch change: the
+    epoch and the live key/origin must be re-checked immediately before the
+    transport side effect.
+    """
+    monkeypatch.setattr(providers, "_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS", 0.25)
+    owner_release = threading.Event()
+    seen = {"key": None, "url": None}
+
+    def held_open_owner(api_key, monitor_url=None):
+        seen["key"] = api_key
+        seen["url"] = monitor_url
+        owner_release.wait(timeout=10)
+        return _payload(30)
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", held_open_owner)
+    _set_key(monkeypatch)
+    _set_base(monkeypatch, "https://good.example/api")
+    results = {}
+
+    t_owner = threading.Thread(target=lambda: results.setdefault(
+        "owner", providers.get_provider_quota("zai")))
+    t_owner.start()
+    for _ in range(400):
+        with providers._zai_quota_cache_lock:
+            if providers._zai_quota_flights:
+                break
+        time.sleep(0.005)
+    # A second caller joins the owner's flight and will time out on it.
+    t_waiter = threading.Thread(target=lambda: results.setdefault(
+        "waiter", providers.get_provider_quota("zai")))
+    t_waiter.start()
+    time.sleep(0.1)  # parked on the flight event
+    # Credential mutation lands while the waiter is parked: epoch moves.
+    providers.invalidate_zai_quota_cache("zai")
+    # Let the waiter time out and (if allowed) steal. Any transport the
+    # waiter starts must carry the CURRENT live credential, not the one
+    # captured before the wait — and none may fire the retired origin.
+    fired = {"n": 0}
+
+    def recorder(api_key, monitor_url=None):
+        fired["n"] += 1
+        return _payload(30)
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", recorder)
+    time.sleep(0.5)  # past the join timeout
+    owner_release.set()
+    t_owner.join(timeout=10)
+    t_waiter.join(timeout=10)
+    assert not t_waiter.is_alive()
+    # The waiter observed the epoch change: it must not have launched the
+    # retired credential/origin at all.
+    assert fired["n"] == 0, "a post-invalidation transport fired"
 
 
 def test_monitor_url_rejects_ipv6_scope_ids():

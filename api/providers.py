@@ -2128,8 +2128,17 @@ _ZAI_QUOTA_CACHE_MAX_ENTRIES = 64
 # How long a joining caller waits for the in-flight owner before electing a
 # bounded replacement (the "steal" path). Tracks the transport budget.
 _ZAI_QUOTA_JOIN_TIMEOUT_SECONDS = _PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0
+# How long a replacement owner waits for the per-key PHYSICAL transport lock
+# (the prior owner's body owns it until its transport returns). Failing soft
+# after this bound is the documented contract: one live body per key.
+_ZAI_QUOTA_TRANSPORT_WAIT_SECONDS = _PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0
 _zai_quota_cache: dict[str, tuple[float, Any, Any]] = {}
 _zai_quota_flights: dict[str, "_ZaiFlight"] = {}
+# Per-key physical transport locks: the live transport body holds its key's
+# lock until the body returns, so a replacement owner cannot START while the
+# prior body is still live (logical flight identity is not enough — a stolen
+# flight's old body may still be mid-read).
+_zai_quota_transport_locks: dict[str, threading.Lock] = {}
 _zai_quota_epoch = 0
 _zai_quota_cache_lock = threading.Lock()
 
@@ -2558,7 +2567,14 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
     refresh skips the completed cache but JOINS any in-flight request for
     the same key — it never registers a second concurrent transport owner;
     a replacement owner is elected only through the bounded steal path when
-    an owner exceeds the join timeout.
+    an owner exceeds the join timeout. The single-flight guarantee is
+    PHYSICAL, not just logical: each cache key has a transport lock the
+    live request body holds until it returns, so a replacement owner cannot
+    START a second body while the prior one is still live (it fails soft
+    after a bounded wait). Before any transport starts, the caller
+    re-validates the flight epoch, current ownership, and the LIVE key and
+    origin — a caller that waited (or a waiter from before a credential
+    mutation) can never launch a retired credential or origin.
     """
     from api.config import _resolve_provider_alias
 
@@ -2668,26 +2684,84 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
                     "unavailable", "Z.AI quota status is temporarily unavailable.")
 
     if my_flight is not None:
+        transport_lock: threading.Lock | None = None
+        transport_acquired = False
         try:
-            payload = _zai_fetch_quota_payload(api_key, monitor_url)
-            fetched_at = datetime.now(timezone.utc)
-        except urllib.error.HTTPError as exc:
-            if 300 <= exc.code < 400:
-                failure = _ZaiQuotaFailure(
-                    "unavailable",
-                    "Z.AI quota endpoint redirected the request; "
-                    "refusing to follow redirects.")
-            elif exc.code in (401, 403):
-                failure = _ZaiQuotaFailure(
-                    "invalid_key", "Z.AI rejected the configured API key.")
-            else:
+            with _zai_quota_cache_lock:
+                existing_lock = _zai_quota_transport_locks.get(cache_key)
+                if existing_lock is None:
+                    existing_lock = threading.Lock()
+                    _zai_quota_transport_locks[cache_key] = existing_lock
+                transport_lock = existing_lock
+            # PHYSICAL single-flight: the live transport body owns this
+            # per-key lock until the body returns. A replacement owner
+            # (bounded steal) or a fresh owner may not START a second body
+            # while the prior one is still live — logical flight identity
+            # alone does not bound live network bodies. If the prior body
+            # has not acknowledged exit within the bounded wait, fail soft
+            # (unavailable) instead of stacking transports.
+            transport_acquired = transport_lock.acquire(
+                timeout=_ZAI_QUOTA_TRANSPORT_WAIT_SECONDS)
+            if not transport_acquired:
                 failure = _ZaiQuotaFailure(
                     "unavailable", "Z.AI quota status is temporarily unavailable.")
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError,
-                OSError, ValueError, http.client.HTTPException):
-            failure = _ZaiQuotaFailure(
-                "unavailable", "Z.AI quota status is temporarily unavailable.")
+            else:
+                # Re-validate immediately BEFORE the transport side effect:
+                # a caller that captured its key/origin before a wait can be
+                # holding a RETIRED credential or origin by now. The flight
+                # epoch, current ownership, and the live key/origin must all
+                # still match, or no request is made at all.
+                live_key = _get_provider_api_key("zai")
+                live_url: str | None = None
+                live_key_ok = False
+                if live_key:
+                    try:
+                        live_url = _zai_monitor_url(_zai_configured_origin())
+                    except Exception:
+                        live_url = None
+                    if live_url is not None:
+                        live_fp = hashlib.sha256(
+                            live_key.encode("utf-8", "replace")).hexdigest()
+                        live_key_ok = (
+                            f"{_resolve_provider_alias(provider)}|{home}|{live_fp}|"
+                            f"{_zai_cache_origin_id(live_url)}" == cache_key
+                        )
+                with _zai_quota_cache_lock:
+                    preflight_ok = (
+                        _zai_quota_epoch == epoch_at_start
+                        and _zai_quota_flights.get(cache_key) is my_flight
+                    )
+                if not (preflight_ok and live_key_ok):
+                    # Stand down: a credential mutation (epoch change), a
+                    # newer registered owner, or a changed key/origin retired
+                    # this transport before it started. No request is made.
+                    failure = _ZaiQuotaFailure(
+                        "unavailable",
+                        "Z.AI quota status is temporarily unavailable.")
+                else:
+                    api_key, monitor_url = live_key, live_url
+                    try:
+                        payload = _zai_fetch_quota_payload(api_key, monitor_url)
+                        fetched_at = datetime.now(timezone.utc)
+                    except urllib.error.HTTPError as exc:
+                        if 300 <= exc.code < 400:
+                            failure = _ZaiQuotaFailure(
+                                "unavailable",
+                                "Z.AI quota endpoint redirected the request; "
+                                "refusing to follow redirects.")
+                        elif exc.code in (401, 403):
+                            failure = _ZaiQuotaFailure(
+                                "invalid_key", "Z.AI rejected the configured API key.")
+                        else:
+                            failure = _ZaiQuotaFailure(
+                                "unavailable", "Z.AI quota status is temporarily unavailable.")
+                    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError,
+                            OSError, ValueError, http.client.HTTPException):
+                        failure = _ZaiQuotaFailure(
+                            "unavailable", "Z.AI quota status is temporarily unavailable.")
         finally:
+            if transport_acquired and transport_lock is not None:
+                transport_lock.release()
             # Publish decision, flight removal, result assignment, and the
             # waiter signal all happen atomically under ONE lock hold: there
             # is never a state where the flight is gone but its result is
