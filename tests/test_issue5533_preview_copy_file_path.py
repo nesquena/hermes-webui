@@ -120,3 +120,93 @@ def test_preview_copy_button_is_accessible_and_icon_only_on_narrow_pane():
         r"\.preview-path\s+#btnCopyPreviewRelPath\s+\.preview-btn-label\s*\{\s*display:\s*none",
         STYLE,
     ), "expected a @container rightpanel query hiding the copy-button label on a narrow pane"
+
+
+def test_preview_toolbar_has_copy_content_button():
+    assert 'id="btnCopyPreviewContent"' in INDEX
+    assert 'onclick="copyPreviewContent()"' in INDEX
+    assert 'data-i18n="copy_file_contents"' in INDEX
+    assert "Copy file contents" in INDEX
+
+
+def test_preview_copy_content_uses_current_preview_raw_content():
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    compact = _compact(body)
+
+    assert "_previewCurrentPath" in body
+    assert "_previewRawContent" in body
+    assert "typeof_previewRawContent!=='string'" in compact
+    assert "constcontent=_previewRawContent;" in compact
+
+
+def test_preview_copy_content_fails_when_content_not_available():
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    compact = _compact(body)
+
+    guard = "if(typeof_previewRawContent!=='string'){"
+    fallback_toast = "showToast(t('content_not_available'));"
+    assert guard in compact
+    assert fallback_toast in compact
+    guard_idx = compact.index(guard)
+    assert compact.index(fallback_toast, guard_idx) == guard_idx + len(guard)
+    assert compact.index(fallback_toast) < compact.index("constcontent=_previewRawContent;")
+    assert "return;" in compact[compact.index(fallback_toast):compact.index(fallback_toast) + len(fallback_toast) + 10]
+
+
+def test_preview_copy_content_disables_button_while_request_is_in_flight():
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    compact = _compact(body)
+
+    guard = "if(btn&&btn.disabled)return;"
+    disable = "if(btn)btn.disabled=true;"
+    enable = "finally{if(btn)btn.disabled=false;}"
+    assert "$('btnCopyPreviewContent')" in body
+    assert guard in compact
+    assert disable in compact
+    assert enable in compact
+    assert compact.index(guard) < compact.index(disable)
+    assert compact.index(disable) < compact.index("_previewRawContent")
+
+
+def test_preview_copy_content_reuses_clipboard_fallback_and_toasts():
+    body = _function_body(WORKSPACE_JS, "copyPreviewContent")
+    assert "typeof _copyTextWithFallback==='function'" in body
+    assert "_copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'))" in body
+    assert "navigator.clipboard.writeText(content)" in body
+    assert "document.execCommand('copy')" in body
+    assert "t('content_copied')" in body
+    assert "t('content_copy_failed')" in body
+
+
+def test_preview_toolbar_keeps_copy_content_button_from_shrinking_path_layout():
+    assert ".preview-path #btnCopyPreviewContent" in STYLE
+    selector_start = STYLE.index(".preview-path #btnCopyPreviewContent")
+    selector_block = STYLE[selector_start : STYLE.index("}", selector_start) + 1]
+    assert "flex-shrink:0" in selector_block
+    assert "white-space:nowrap" in selector_block
+
+
+def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane():
+    """The preview-header copy-content button must stay accessible when its text
+    label is hidden on a narrow pane (#5548 icon-only fold-in): it carries an
+    aria-label, its label span is class-tagged, and a narrow-width media query
+    hides that label.
+    """
+    import re
+    # The button carries an explicit aria-label (screen-reader name survives label-hide).
+    assert 'id="btnCopyPreviewContent"' in INDEX
+    btn = INDEX[INDEX.index('id="btnCopyPreviewContent"'):]
+    btn = btn[: btn.index("</button>")]
+    assert 'aria-label="Copy file contents"' in btn
+    assert 'class="preview-btn-label"' in btn
+    # Localized tooltip + accessible name (WCAG 2.5.3): the icon-only state must not
+    # leave a Russian/German user with an English tooltip/screen-reader name.
+    assert 'data-i18n-title="copy_file_contents"' in btn
+    assert 'data-i18n-aria-label="copy_file_contents"' in btn
+    # A narrow-PANE container query (right panel, not viewport) hides the label
+    # (icon-only), keeping the glyph — so it fires on pane resize even on desktop.
+    assert re.search(
+        r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[\s\S]*?"
+        r"\.preview-path\s+#btnCopyPreviewContent\s+\.preview-btn-label\s*\{\s*display:\s*none",
+        STYLE,
+    ), "expected a @container rightpanel query hiding the copy-content-button label on a narrow pane"

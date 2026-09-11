@@ -975,6 +975,8 @@ function showPreview(mode){
   // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
+  const copyContentBtn=$('btnCopyPreviewContent');
+  if(copyContentBtn) copyContentBtn.style.display = (mode==='md'||mode==='code'||mode==='csv')?'inline-flex':'none';
   setLargeMarkdownForceRenderVisible(false);
 }
 
@@ -1314,6 +1316,43 @@ async function copyPreviewRelativePath(){
     }
   }catch(err){
     showToast(t('path_copy_failed')+(err.message||err));
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
+async function copyPreviewContent(){
+  if(!_previewCurrentPath) return;
+  const btn=$('btnCopyPreviewContent');
+  if(btn&&btn.disabled) return;
+  if(btn) btn.disabled=true;
+  try{
+    if(typeof _previewRawContent!=='string'){
+      showToast(t('content_not_available'));
+      return;
+    }
+    const content=_previewRawContent;
+    if(typeof _copyTextWithFallback==='function'){
+      await _copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'));
+      return;
+    }
+    try{
+      await navigator.clipboard.writeText(content);
+      showToast(t('content_copied'));
+    }catch(clipErr){
+      const ta=document.createElement('textarea');
+      ta.value=content;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) showToast(t('content_copied'));
+      else showToast(t('content_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+    }
+  }catch(err){
+    showToast(t('content_copy_failed')+(err.message||err));
   }finally{
     if(btn) btn.disabled=false;
   }
