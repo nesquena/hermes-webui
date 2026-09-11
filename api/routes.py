@@ -4010,15 +4010,16 @@ def _ensure_full_session_before_mutation(sid: str, session):
     metadata must upgrade the cached stub first so they do not trip that guard
     or risk writing an incomplete object.
     """
-    if getattr(session, "_loaded_metadata_only", False) or not getattr(session, "messages", None):
-        full_session = Session.load(sid)
-        if full_session is not None:
-            with LOCK:
-                SESSIONS[sid] = full_session
-                SESSIONS.move_to_end(sid)
-                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-            return full_session
-    return session
+    if not getattr(session, "_loaded_metadata_only", False):
+        return session
+    full_session = Session.load(sid)
+    if full_session is None:
+        raise KeyError(sid)
+    with LOCK:
+        SESSIONS[sid] = full_session
+        SESSIONS.move_to_end(sid)
+        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
+    return full_session
 
 
 _ANCHOR_ACTIVITY_SCENE_MAX_BYTES = 256_000
@@ -5501,8 +5502,17 @@ def _resolve_share_session_pair(sid: str, handler):
     share_token/share_created_at persistence; it may be absent for pure external
     sessions that have not yet created local metadata.
     """
+    if _is_isolated_profile_mode():
+        _raw_meta = _lookup_cli_session_metadata(sid)
+        if _is_profile_agnostic_foreign_session(_raw_meta):
+            raise KeyError(sid)
+
     try:
         stored_session = get_session(sid, metadata_only=True)
+    except KeyError:
+        stored_session = None
+
+    if stored_session is not None:
         cli_meta = (
             _lookup_cli_session_metadata(sid)
             if _session_requires_cli_metadata_lookup(stored_session)
@@ -5513,28 +5523,31 @@ def _resolve_share_session_pair(sid: str, handler):
             or getattr(stored_session, "profile", None)
             or None
         )
-        if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
+        _check_meta = cli_meta or (stored_session.compact() if hasattr(stored_session, "compact") else {})
+        _is_agnostic = _is_profile_agnostic_foreign_session(_check_meta)
+        if _is_isolated_profile_mode() and _is_agnostic:
             raise KeyError(sid)
-        if not _session_visible_to_active_profile(effective_profile, handler):
+        if not _is_agnostic and not _session_visible_to_active_profile(effective_profile, handler):
             raise KeyError(sid)
-        stored_session = _ensure_full_session_before_mutation(sid, stored_session)
+        stored_session = get_session(sid, metadata_only=False)
         snapshot_session = copy.copy(stored_session)
         snapshot_session.messages = _share_snapshot_messages_for_session(
             stored_session,
             cli_meta=cli_meta,
         )
         return snapshot_session, stored_session, cli_meta or {}
-    except KeyError:
-        cli_meta = _lookup_cli_session_metadata(sid) or {}
-        effective_profile = cli_meta.get("profile") or None
-        if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
-            raise KeyError(sid) from None
-        if not _session_visible_to_active_profile(effective_profile, handler):
-            raise KeyError(sid) from None
-        synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
-        if reason == "was_webui" or synth is None:
-            raise KeyError(sid) from None
-        return synth, None, cli_meta
+
+    cli_meta = _lookup_cli_session_metadata(sid) or {}
+    effective_profile = cli_meta.get("profile") or None
+    _is_agnostic = _is_profile_agnostic_foreign_session(cli_meta)
+    if _is_isolated_profile_mode() and _is_agnostic:
+        raise KeyError(sid)
+    if not _is_agnostic and not _session_visible_to_active_profile(effective_profile, handler):
+        raise KeyError(sid)
+    synth, reason = _claim_or_synthesize_cli_session(sid, cli_meta=cli_meta)
+    if reason == "was_webui" or synth is None:
+        raise KeyError(sid)
+    return synth, None, cli_meta
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -8553,13 +8566,20 @@ def _load_branch_source_or_refuse(handler, sid: str):
 
 
 def _resolve_cli_import_metadata(session_id: str, *, requested_profile=None, allow_all_profiles: bool = False) -> dict:
+    is_isolated = _is_isolated_profile_mode()
     cli_meta = _lookup_cli_session_metadata(session_id)
-    if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile)):
+    if is_isolated and _is_profile_agnostic_foreign_session(cli_meta):
+        return {}
+    if cli_meta and (not requested_profile or _profiles_match(cli_meta.get("profile"), requested_profile) or (not is_isolated and _is_profile_agnostic_foreign_session(cli_meta))):
         return cli_meta
     if not allow_all_profiles:
+        if not is_isolated and _is_profile_agnostic_foreign_session(cli_meta):
+            return cli_meta
         return {}
     cli_meta = _lookup_cli_session_metadata(session_id, all_profiles=True)
-    if cli_meta and requested_profile and not _profiles_match(cli_meta.get("profile"), requested_profile):
+    if is_isolated and _is_profile_agnostic_foreign_session(cli_meta):
+        return {}
+    if cli_meta and requested_profile and not _profiles_match(cli_meta.get("profile"), requested_profile) and not (not is_isolated and _is_profile_agnostic_foreign_session(cli_meta)):
         return {}
     return cli_meta or {}
 
@@ -12945,14 +12965,19 @@ def _handle_session_get(handler, parsed) -> bool:
         # Only CLI/foreign rows can be profile-agnostic: the predicate requires
         # read_only, which is itself one of the markers that puts a session on
         # the CLI lookup path — so a WebUI-native session can never match.
-        if _is_isolated_profile_mode() and _session_requires_cli_metadata_lookup(s):
-            if _is_profile_agnostic_foreign_session(_lookup_cli_session_metadata(sid)):
-                if _diag: _diag.finish()
-                return bad(handler, "Session not found", 404)
-        if not _session_visible_to_active_profile(_session_profile, handler):
+        cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
+        _check_meta = cli_meta or (s.compact() if hasattr(s, "compact") else {})
+        _is_agnostic = _is_profile_agnostic_foreign_session(_check_meta)
+        if _is_agnostic and _is_isolated_profile_mode():
+            if _diag: _diag.finish()
+            return bad(handler, "Session not found", 404)
+        if not _is_agnostic and not _session_visible_to_active_profile(_session_profile, handler):
             if _session_profile:
                 # Valid session owned by a KNOWN other profile: 409 so the
                 # client can offer to switch to it (#5419).
+                if _is_isolated_profile_mode():
+                    if _diag: _diag.finish()
+                    return bad(handler, "Session not found", 404)
                 if _diag: _diag.finish()
                 return j(handler, {
                     "error": "Session belongs to a different profile",
@@ -12971,7 +12996,6 @@ def _handle_session_get(handler, parsed) -> bool:
             s = get_session(sid, metadata_only=False)
         original_stream_id = getattr(s, "active_stream_id", None)
         _clear_stale_stream_state(s)
-        cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
         is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
         cli_messages = []
         state_db_messages = []
@@ -13399,7 +13423,7 @@ def _handle_session_get(handler, parsed) -> bool:
         # _session_index_marks_was_webui) and the #4911 source ownership
         # gate (via _is_claimable_cli_source) so the two endpoints can't
         # drift on foreign-session semantics.
-        cli_meta = _lookup_cli_session_metadata(sid)
+        cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
         _session_profile = (cli_meta or {}).get("profile") or None
         # Claude Code rows are profile-less by construction (they come from
         # ~/.claude/projects, not from any profile's state.db), so the gate
@@ -28311,7 +28335,7 @@ def _handle_session_import_cli(handler, body):
         return bad(handler, "profile is required for all_profiles import", 400)
 
     if _is_isolated_profile_mode():
-        _initial_cli_meta = _resolve_cli_import_metadata(
+        _initial_cli_meta = _lookup_cli_session_metadata(sid) or _resolve_cli_import_metadata(
             sid,
             requested_profile=requested_profile,
             allow_all_profiles=allow_all_profiles,
@@ -28329,10 +28353,14 @@ def _handle_session_import_cli(handler, body):
         # An explicit all_profiles import is still allowed, but only when the request's
         # profile matches the stored session's profile.
         existing_profile = getattr(existing, "profile", None)
+        _existing_meta = getattr(existing, "__dict__", {}) or {}
+        _existing_agnostic = _is_profile_agnostic_foreign_session(_existing_meta)
         if allow_all_profiles:
             if requested_profile and not _profiles_match(existing_profile, requested_profile):
                 return bad(handler, "Session not found in CLI store", 404)
-        elif not _session_visible_to_active_profile(existing_profile, handler):
+        elif _existing_agnostic and _is_isolated_profile_mode():
+            return bad(handler, "Session not found in CLI store", 404)
+        elif not _existing_agnostic and not _session_visible_to_active_profile(existing_profile, handler):
             return bad(handler, "Session not found in CLI store", 404)
         refresh_profile = requested_profile or existing_profile
         cli_meta = _resolve_cli_import_metadata(
@@ -28340,7 +28368,7 @@ def _handle_session_import_cli(handler, body):
             requested_profile=refresh_profile,
             allow_all_profiles=allow_all_profiles,
         )
-        if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
+        if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta or _lookup_cli_session_metadata(sid)):
             return bad(handler, "Session not found in CLI store", 404)
         fresh_msgs = get_cli_session_messages(
             sid,
@@ -28423,7 +28451,7 @@ def _handle_session_import_cli(handler, body):
         requested_profile=requested_profile,
         allow_all_profiles=allow_all_profiles,
     )
-    if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta):
+    if _is_isolated_profile_mode() and _is_profile_agnostic_foreign_session(cli_meta or _lookup_cli_session_metadata(sid)):
         return bad(handler, "Session not found in CLI store", 404)
     profile = cli_meta.get("profile") if cli_meta else (requested_profile if allow_all_profiles else None)
     msgs = get_cli_session_messages(sid, profile=profile)

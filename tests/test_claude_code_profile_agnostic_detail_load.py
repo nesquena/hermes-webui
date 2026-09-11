@@ -209,6 +209,33 @@ def test_isolated_profile_mode_blocks_claude_code_sharing(monkeypatch):
             routes._resolve_share_session_pair(CLAUDE_SID, handler)
 
 
+def test_isolated_profile_mode_blocks_stored_claude_code_sharing(monkeypatch):
+    row = _claude_code_row()
+    handler = MagicMock()
+    mock_stored = MagicMock()
+    mock_stored.profile = None
+    mock_stored.read_only = True
+    mock_stored.is_cli_session = True
+    mock_stored.session_source = "external_agent"
+    mock_stored.source_tag = "claude_code"
+    mock_stored.compact.return_value = row
+
+    mock_ensure = MagicMock()
+
+    with (
+        patch("api.routes.get_session", return_value=mock_stored),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=True),
+        patch("api.routes._ensure_full_session_before_mutation", mock_ensure),
+    ):
+        import pytest
+
+        with pytest.raises(KeyError):
+            routes._resolve_share_session_pair(CLAUDE_SID, handler)
+
+    assert mock_ensure.call_count == 0
+
+
 def test_isolated_profile_mode_blocks_claude_code_import(monkeypatch):
     row = _claude_code_row()
     cap = _capture(monkeypatch)
@@ -222,7 +249,7 @@ def test_isolated_profile_mode_blocks_claude_code_import(monkeypatch):
 
     with (
         patch("api.routes.Session.load", mock_load),
-        patch("api.routes._resolve_cli_import_metadata", return_value=row),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
         patch("api.routes.get_cli_session_messages", mock_get_msgs),
         patch("api.routes._is_isolated_profile_mode", return_value=True),
     ):
@@ -234,6 +261,35 @@ def test_isolated_profile_mode_blocks_claude_code_import(monkeypatch):
     # Ensure that neither sidecar load nor get_cli_session_messages were ever called
     assert mock_load.call_count == 0
     assert mock_get_msgs.call_count == 0
+
+
+def test_isolated_profile_mode_blocks_stored_claude_code_detail_load(monkeypatch):
+    row = _claude_code_row()
+    cap = _capture(monkeypatch)
+
+    mock_stored = MagicMock()
+    mock_stored.profile = None
+    mock_stored.read_only = True
+    mock_stored.is_cli_session = True
+    mock_stored.session_source = "external_agent"
+    mock_stored.source_tag = "claude_code"
+    mock_stored.compact.return_value = row
+
+    handler = MagicMock()
+    parsed = urlparse(
+        "/api/session?session_id=%s&messages=1&resolve_model=0" % CLAUDE_SID
+    )
+
+    with (
+        patch("api.routes.get_session", return_value=mock_stored),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=True),
+    ):
+        assert routes.handle_get(handler, parsed) is True
+
+    assert cap["status"] == 404
+    assert cap.get("error") == "Session not found"
 
 
 def test_isolated_profile_mode_filters_gateway_sse_snapshot():
@@ -262,3 +318,156 @@ def test_isolated_profile_mode_filters_gateway_sse_snapshot():
         rows, "default", is_isolated=True
     )
     assert {r["session_id"] for r in default_isolated_scoped} == set()
+
+
+def test_isolated_profile_mode_gateway_sse_stream_handler(monkeypatch):
+    claude_row = _claude_code_row()
+    active_row = {"session_id": "active-1", "profile": "feng-family"}
+    other_row = {"session_id": "other-1", "profile": "other-profile"}
+    initial_rows = [claude_row, active_row, other_row]
+
+    sent_events = []
+
+    def mock_sse(handler, event_type, data):
+        sent_events.append((event_type, data))
+        if len(sent_events) >= 2:
+            raise ConnectionResetError("test stop after loop event")
+
+    handler = MagicMock()
+    mock_queue = MagicMock()
+    shared_event = {"type": "sessions_changed", "sessions": [claude_row, active_row, other_row]}
+    mock_queue.get.return_value = shared_event
+    mock_watcher = MagicMock()
+    mock_watcher.is_alive.return_value = True
+    mock_watcher.subscribe.return_value = mock_queue
+
+    with (
+        patch("api.routes.load_settings", return_value={"show_cli_sessions": True}),
+        patch("api.gateway_watcher.get_watcher", return_value=mock_watcher),
+        patch("api.routes._is_isolated_profile_mode", return_value=True),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.models.get_cli_sessions", return_value=initial_rows),
+        patch("api.routes._sse", side_effect=mock_sse),
+        patch("api.routes.end_sse_headers"),
+        patch("api.routes._sse_set_write_deadline"),
+    ):
+        routes._handle_gateway_sse_stream(handler, urlparse("/api/sessions/gateway/stream"))
+
+    assert len(sent_events) == 2
+    # Snapshot:
+    assert sent_events[0][0] == "sessions_changed"
+    assert {r["session_id"] for r in sent_events[0][1]["sessions"]} == {"active-1"}
+    # Stream event:
+    assert sent_events[1][0] == "sessions_changed"
+    assert {r["session_id"] for r in sent_events[1][1]["sessions"]} == {"active-1"}
+    # Original shared event dictionary was not mutated in place:
+    assert len(shared_event["sessions"]) == 3
+
+
+def test_stored_claude_code_detail_load_survives_named_profile(monkeypatch):
+    row = _claude_code_row()
+    cap = _capture(monkeypatch)
+
+    mock_stored = MagicMock()
+    mock_stored.session_id = CLAUDE_SID
+    mock_stored.profile = None
+    mock_stored.read_only = True
+    mock_stored.is_cli_session = True
+    mock_stored.session_source = "external_agent"
+    mock_stored.source_tag = "claude_code"
+    mock_stored.messages = []
+    mock_stored.active_stream_id = None
+    mock_stored.compact.return_value = row
+
+    handler = MagicMock()
+    parsed = urlparse(
+        "/api/session?session_id=%s&messages=0&resolve_model=0" % CLAUDE_SID
+    )
+
+    with (
+        patch("api.routes.get_session", return_value=mock_stored),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=False),
+    ):
+        assert routes.handle_get(handler, parsed) is True
+
+    assert cap.get("error") is None
+    assert cap.get("status") == 200
+
+
+def test_stored_claude_code_sharing_survives_named_profile(monkeypatch):
+    row = _claude_code_row()
+    handler = MagicMock()
+    mock_stored = MagicMock()
+    mock_stored.session_id = CLAUDE_SID
+    mock_stored.profile = None
+    mock_stored.read_only = True
+    mock_stored.is_cli_session = True
+    mock_stored.session_source = "external_agent"
+    mock_stored.source_tag = "claude_code"
+    mock_stored.messages = [{"role": "user", "content": "hello"}]
+    mock_stored.compact.return_value = row
+
+    with (
+        patch("api.routes.get_session", return_value=mock_stored),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=False),
+        patch("api.routes._ensure_full_session_before_mutation", side_effect=lambda sid, s: s),
+    ):
+        snap, stored, meta = routes._resolve_share_session_pair(CLAUDE_SID, handler)
+        assert snap is not None
+        assert stored is mock_stored
+
+
+def test_synthesized_claude_code_sharing_survives_named_profile(monkeypatch):
+    row = _claude_code_row()
+    handler = MagicMock()
+    synth = _synth_for(row)
+
+    with (
+        patch("api.routes.get_session", side_effect=KeyError(CLAUDE_SID)),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=False),
+        patch("api.routes._claim_or_synthesize_cli_session", return_value=(synth, "not_claimable")),
+    ):
+        snap, stored, meta = routes._resolve_share_session_pair(CLAUDE_SID, handler)
+        assert snap is synth
+        assert stored is None
+
+
+def test_reimport_existing_claude_code_session_survives_named_profile(monkeypatch):
+    row = _claude_code_row()
+    cap = _capture(monkeypatch)
+    body = {"session_id": CLAUDE_SID, "profile": "feng-family"}
+
+    existing = MagicMock()
+    existing.session_id = CLAUDE_SID
+    existing.profile = None
+    existing.read_only = True
+    existing.is_cli_session = True
+    existing.session_source = "external_agent"
+    existing.source_tag = "claude_code"
+    existing.messages = [{"role": "user", "content": "original"}]
+    existing.compact.return_value = row
+
+    fresh_messages = [
+        {"role": "user", "content": "original"},
+        {"role": "assistant", "content": "reply"},
+    ]
+
+    handler = MagicMock()
+    with (
+        patch("api.routes.Session.load", return_value=existing),
+        patch("api.routes._get_active_profile_name", return_value="feng-family"),
+        patch("api.routes._lookup_cli_session_metadata", return_value=row),
+        patch("api.routes._is_isolated_profile_mode", return_value=False),
+        patch("api.routes.get_cli_session_messages", return_value=fresh_messages),
+    ):
+        assert routes._handle_session_import_cli(handler, body) is True
+
+    assert cap.get("error") is None
+    assert cap.get("status") == 200
+    assert existing.messages == fresh_messages
