@@ -1989,11 +1989,11 @@ async function loadSession(sid){
   }
   S.session=data.session;
   if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
-  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
-  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+  if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
