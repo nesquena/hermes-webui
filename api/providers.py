@@ -17,7 +17,6 @@ import json
 import logging
 import math
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -2197,6 +2196,10 @@ def _zai_host_is_loopback(host: str) -> bool:
     """
     if host == "localhost" or host.endswith(".localhost"):
         return True
+    if "%" in host:
+        # IPv6 zone/scope IDs (::1%eth0) are interface-local but not a
+        # stable destination origin — never treated as loopback here.
+        return False
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
@@ -2636,14 +2639,6 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
                 epoch_moved = _zai_quota_epoch != epoch_at_start
             if result[0] is not None and epoch_moved:
                 payload, fetched_at = None, None
-            # A successful flight publishes BEFORE signaling, so the cache is
-            # authoritative: if our joined result was somehow lost (e.g. a
-            # superseding refresh already replaced it), serve the cache.
-            if payload is None and result[0] is not None and not epoch_moved:
-                with _zai_quota_cache_lock:
-                    cached = _zai_quota_cache.get(cache_key)
-                if cached is not None and not isinstance(cached[1], _ZaiQuotaFailure):
-                    payload, fetched_at = cached[1], cached[2]
         else:
             # Owner superseded or hung. Elect ONE bounded replacement owner:
             # claim the registration so at most one waiter fetches.

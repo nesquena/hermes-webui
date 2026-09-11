@@ -570,3 +570,10 @@ def test_superseded_owner_caller_also_unavailable(monkeypatch):
     # The old owner was superseded: its caller must NOT report its stale
     # success even though the fetch itself succeeded.
     assert owner_result["r"]["status"] == "unavailable"
+
+
+def test_monitor_url_rejects_ipv6_scope_ids():
+    # Zone IDs are interface-local, not a stable destination origin
+    # (round-3 finding).
+    assert providers._zai_monitor_url("http://[::1%eth0]/v1") is None
+    assert providers._zai_monitor_url("http://[::ffff:127.0.0.1%eth0]/v1") is None
