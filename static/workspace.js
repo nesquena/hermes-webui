@@ -898,10 +898,16 @@ function renderCodePreviewContent(path, content){
   showPreview('code');
   // Preserve the raw text (mirroring renderCsvPreviewContent) so the Copy file
   // contents button reads the currently-previewed file rather than stale text
-  // left over from a previously-opened md/csv file.
+  // left over from a previously-opened md/csv file. The claim below is what
+  // makes the cache usable: it binds the text to this file AND this preview
+  // generation, and gates binary/undecodable text (see
+  // claimPreviewRawContent).
   if(typeof content==='string'){
     _previewRawContent = content;
     _previewRawContentPath = path;
+    claimPreviewRawContent(path);
+  }else{
+    invalidatePreviewRawContent();
   }
   const codeEl=document.createElement('code');
   codeEl.textContent=content;
@@ -934,6 +940,9 @@ function renderCsvPreviewContent(path, content){
   if(typeof content==='string'){
     _previewRawContent = content;
     _previewRawContentPath = path;
+    claimPreviewRawContent(path);
+  }else{
+    invalidatePreviewRawContent();
   }
   if(preview.html){
     $('previewMd').innerHTML=preview.html;
@@ -970,6 +979,83 @@ function previewGenerationIsStale(previewGen){
   return (typeof _previewGen === 'number') && previewGen !== _previewGen;
 }
 
+// ── Preview raw-content ownership ─────────────────────────────────────────
+// _previewRawContent is what the "Copy file contents" button copies, so its
+// owner has to be provable: the file the panel currently displays AND the
+// preview generation that produced the text. Path equality alone is not
+// ownership — openFile() assigns _previewCurrentPath synchronously, so a
+// delayed writer (a save landing after the panel moved on, a renamed path) can
+// re-read that global and "prove" it owns a file it never read. That is how a
+// delayed save relabelled file A's text as file B and the button copied it
+// (maintainer review PR #6957).
+let _previewRawContentGen = -1;        // preview generation that claimed the cache
+let _previewRawContentBinary = false;  // cached text is binary / lossily decoded
+
+function previewTextLooksBinary(text){
+  if(typeof text!=='string') return true;
+  // NUL never occurs in a text file, and U+FFFD means the backend already
+  // substituted undecodable bytes: api/workspace.py read_file_content() decodes
+  // every non-Office file with errors='replace' and sets no `binary` flag, so
+  // an unknown-type file arrives here as lossy replacement text. That text is
+  // not the file's content, so it must never be offered as copyable.
+  return text.indexOf('\u0000')!==-1 || text.indexOf('\uFFFD')!==-1;
+}
+
+function claimPreviewRawContent(path, previewGen){
+  const gen = (typeof previewGen === 'number') ? previewGen : _previewGen;
+  if(typeof _previewRawContent!=='string' || !path
+     || path!==_previewCurrentPath || previewGenerationIsStale(gen)){
+    // Fail closed: this writer does not own the panel, so drop the cache rather
+    // than let its text be copied under the current file's label.
+    invalidatePreviewRawContent();
+    return false;
+  }
+  _previewRawContentPath = path;
+  _previewRawContentGen = gen;
+  _previewRawContentBinary = previewTextLooksBinary(_previewRawContent);
+  syncPreviewCopyContentBtn();
+  return true;
+}
+
+function invalidatePreviewRawContent(){
+  _previewRawContent = '';
+  _previewRawContentPath = '';
+  _previewRawContentGen = -1;
+  _previewRawContentBinary = false;
+  syncPreviewCopyContentBtn();
+}
+
+function previewRawContentIsBinaryForCurrentPreview(){
+  return _previewRawContentBinary
+    && _previewRawContentPath===_previewCurrentPath
+    && _previewRawContentGen===_previewGen;
+}
+
+function previewRawContentIsCopyable(){
+  return typeof _previewRawContent==='string'
+    && !!_previewRawContentPath
+    && _previewRawContentPath===_previewCurrentPath
+    && _previewRawContentGen===_previewGen
+    && !_previewRawContentBinary;
+}
+
+function syncPreviewCopyContentBtn(){
+  // Single place that decides whether copying the preview text is offered: only
+  // for content this generation actually owns, and never for binary text.
+  const btn=$('btnCopyPreviewContent');
+  if(!btn) return;
+  btn.style.display = previewRawContentIsCopyable()?'inline-flex':'none';
+  if(previewRawContentIsBinaryForCurrentPreview()){
+    btn.setAttribute('aria-disabled','true');
+    btn.title=t('content_binary_not_copyable');
+    btn.setAttribute('aria-label',t('content_binary_not_copyable'));
+  }else{
+    btn.removeAttribute('aria-disabled');
+    btn.title=t('copy_file_contents');
+    btn.setAttribute('aria-label',t('copy_file_contents'));
+  }
+}
+
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'csv' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
@@ -996,8 +1082,7 @@ function showPreview(mode){
   // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
-  const copyContentBtn=$('btnCopyPreviewContent');
-  if(copyContentBtn) copyContentBtn.style.display = (mode==='md'||mode==='code'||mode==='csv')?'inline-flex':'none';
+  syncPreviewCopyContentBtn();
   setLargeMarkdownForceRenderVisible(false);
 }
 
@@ -1012,10 +1097,7 @@ function resetTextPreviewCopyState(ownerPath, previewGen){
   // review PR #6957 comment 5272907466).
   if(previewGenerationIsStale(previewGen)) return;
   if(typeof _previewRawContent!=='string') return;
-  _previewRawContent = '';
-  _previewRawContentPath = '';
-  const btn=$('btnCopyPreviewContent');
-  if(btn) btn.style.display='none';
+  invalidatePreviewRawContent();
 }
 
 function updateEditBtn(){
@@ -1047,11 +1129,17 @@ async function toggleEditMode(){
     // Save
     if(!S.session||!_previewCurrentPath)return;
     const content=$('previewEditArea').value;
+    // Hold the identity of the file being saved across the await: everything
+    // below re-renders the preview and re-labels the raw-content cache from the
+    // live globals, and a save can land after the panel moved to another file.
+    const savePath=_previewCurrentPath;
+    const saveGen=_previewGen;
     try{
       const saved=await api(_previewSaveRoute||'/api/file/save',{method:'POST',body:JSON.stringify({
-        session_id:S.session.session_id, path:_previewCurrentPath, content
+        session_id:S.session.session_id, path:savePath, content
       })});
       const savedContent=saved&&typeof saved.content==='string'?saved.content:content;
+      if(previewGenerationIsStale(saveGen)||_previewCurrentPath!==savePath){showToast(t('saved'));return;}
       if(saved && typeof saved.editable==='boolean') _previewServerEditable = saved.editable;
       if(saved && saved.preview_kind) _previewPreviewKind = saved.preview_kind;
       if(saved && saved.office_format) _previewOfficeFormat = saved.office_format;
@@ -1064,6 +1152,7 @@ async function toggleEditMode(){
       // (not the stale pre-edit fetch). #3378 review (Codex).
       _previewRawContent = savedContent;
       _previewRawContentPath = _previewCurrentPath;
+      claimPreviewRawContent(savePath,saveGen);
       if(_previewCurrentMode==='code') $('previewCode').textContent=savedContent;
       else if(_previewCurrentMode==='csv') renderCsvPreviewContent(_previewCurrentPath, savedContent);
       else renderMarkdownPreviewContent({content:savedContent});
@@ -1203,6 +1292,7 @@ async function openFile(path, opts={}){
       if(previewGenerationIsStale(previewGen)) return;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
+      claimPreviewRawContent(path,previewGen);
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
         showPreview('code');
         $('previewCode').textContent=data.content;
@@ -1377,14 +1467,20 @@ async function copyPreviewContent(){
   if(btn&&btn.disabled) return;
   if(btn) btn.disabled=true;
   try{
-    if(typeof _previewRawContent!=='string' || _previewRawContentPath!==_previewCurrentPath){
-      showToast(t('content_not_available'));
+    if(previewRawContentIsBinaryForCurrentPreview()){
+      // Binary/undecodable: the preview text is lossy replacement output, not
+      // the file's bytes, so there is nothing honest to put on the clipboard.
+      showToast(t('content_binary_not_copyable'),null,'error');
+      return;
+    }
+    if(!previewRawContentIsCopyable()){
+      showToast(t('content_not_available'),null,'error');
       return;
     }
     const content=_previewRawContent;
     await _copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'));
   }catch(err){
-    showToast(t('content_copy_failed')+(err.message||err));
+    showToast(t('content_copy_failed')+(err&&err.message?err.message:String(err||'')),null,'error');
   }finally{
     if(btn) btn.disabled=false;
   }
