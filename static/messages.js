@@ -7787,15 +7787,33 @@ function dismissApprovalCard() {
         if (code === "gateway_run_unavailable") {
           // The exact mirror may be gone (another actor settled it) or merely
           // out of the current head while still pending. Re-fetch the
-          // authoritative pending state before deciding: restore only when
-          // the captured tuple is still pending; keep the dismissal hidden
-          // when it is authoritatively absent/settled.
+          // authoritative pending state before deciding: restore when the
+          // captured tuple is still pending, render a live successor head,
+          // and keep the dismissal hidden ONLY when the re-fetch positively
+          // shows the captured tuple is absent/settled. A re-fetch that
+          // fails or answers without a pending field is not authoritative,
+          // so it must never be read as "settled".
           void (async () => {
             let pending = null;
+            let pendingCount = 1;
+            let fetched = false;
             try {
               const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(ownerSid), {timeoutToast: false});
-              pending = data && data.pending;
+              if (data && typeof data === "object" && "pending" in data) {
+                pending = data.pending;
+                pendingCount = data.pending_count || 1;
+                fetched = true;
+              }
             } catch (_) { /* re-fetch failed: not authoritative either way */ }
+            if (!fetched) {
+              // Fail closed: a rejected, 5xx or malformed re-fetch proves
+              // nothing about the captured tuple, so the untouched
+              // `pending === null` must never be read as "settled". Restore
+              // the retry affordance — the restore is a no-op when our owner
+              // is no longer current, but dropping the marker is not.
+              restoreAfterFailure(errMsg + " Try again.");
+              return;
+            }
             if (!_approvalResponseOwnerIsCurrent(owner)) {
               // A successor or a parallel poll took over while we re-fetched
               // — that flow owns the card now; just release our owner.
@@ -7811,7 +7829,23 @@ function dismissApprovalCard() {
               restoreAfterFailure(errMsg);
               return;
             }
-            // Authoritatively absent/settled — the dismissal stands hidden.
+            if (pending && pending.approval_id === ownerApprovalId) {
+              // Same approval_id under a DIFFERENT run/mirror ownership: the
+              // server reused the id for another tuple, so the marker we just
+              // set (keyed by session + approval_id) would suppress a
+              // successor the user never dismissed. Drop it before rendering.
+              _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+            }
+            if (pending) {
+              // A different queue head is live now: render it so the deny
+              // affordance survives. The captured tuple stays dismissed by
+              // its own marker, which this branch never clears.
+              showApprovalForSession(ownerSid, pending, pendingCount);
+              _releaseApprovalResponseOwner(owner);
+              return;
+            }
+            // Fetched and authoritatively absent/settled — the dismissal
+            // stands hidden.
             _releaseApprovalResponseOwner(owner);
           })();
           return;

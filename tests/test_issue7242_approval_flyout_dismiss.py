@@ -781,3 +781,249 @@ async function main() {
 }
 ''')
     assert out["calls"] == 2
+
+
+def test_node_dismiss_409_run_unavailable_refetch_rejected_5xx_restores_card():
+    """A rejected/5xx re-fetch is NOT an authoritative absence: the untouched
+    `pending === null` must not settle the dismissal, so the card comes back
+    and the user can deny again."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "Gateway approval could not be relayed because the active run is unavailable." });
+  const boom = new Error("bad gateway");
+  boom.status = 503;
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) throw boom;
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "failed re-fetch restores the card (fail closed)");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "unproven dismissal marker dropped");
+  assertEq(els.approvalBtnDeny.disabled, false, "restored controls are usable");
+  assertTrue(toasts.length >= 1, "retry toast shown");
+  assertEq(_approvalResponding, null, "response owner released");
+  assertEq(apiCalls.length, 2, "deny POST + attempted re-fetch");
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls.length, 3, "the restored card can be denied again");
+  assertEq(apiCalls[2].body.approval_id, "a1", "retry denies the same approval");
+  assertEq(apiCalls[2].body.run_id, "r1", "retry keeps the captured run ownership");
+  assertTrue(!cardVisible(), "retry settles hidden");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is False
+
+
+def test_node_dismiss_409_run_unavailable_refetch_without_pending_field_restores_card():
+    """A re-fetch that resolves to `undefined`, or to a payload without a
+    `pending` field, carries no authority over the dismissal either."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  let variant = 0;
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      variant += 1;
+      return variant === 1 ? undefined : { ok: true, pending_count: 1 };
+    }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "an undefined re-fetch payload restores the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "marker dropped for an undefined payload");
+  assertEq(_approvalResponding, null, "response owner released");
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "a re-fetch without a pending field restores the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "marker dropped for a missing pending field");
+  assertEq(apiCalls.length, 4, "two deny POSTs + two non-authoritative re-fetches");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is True
+
+
+def test_node_dismiss_409_run_unavailable_moved_session_failed_refetch_stays_fail_closed():
+    """Session/generation movement during the await must not leak a restore
+    into the new view — but the unproven dismissal still cannot stand, so the
+    card returns when the user goes back to the dismissed session."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  let releaseFetch;
+  const gate = new Promise((r) => { releaseFetch = r; });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) { await gate; throw err; }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  // the user switches session while the deny's re-fetch is still in flight
+  S.session = { session_id: "sidB" };
+  _loadSessionGeneration += 1;
+  releaseFetch();
+  await flush();
+  assertTrue(!cardVisible(), "no card is restored into the moved-away view");
+  assertTrue(!_approvalPendingBySession.has("sidB"), "the new session projection is untouched");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "unproven dismissal marker dropped after movement");
+  assertEq(_approvalResponding, null, "response owner released after movement");
+  // back on sidA the still-unsettled approval is actionable again
+  S.session = { session_id: "sidA" };
+  _renderPendingApprovalForActiveSession();
+  assertTrue(cardVisible(), "returning to sidA re-shows the still-pending approval");
+  assertEq(els.approvalBtnDeny.disabled, false, "the re-shown card stays usable");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is True
+
+
+def test_node_dismiss_409_run_unavailable_moved_session_authoritative_absence_stays_terminal():
+    """Control: a successfully decoded authoritative absence still settles the
+    dismissal (hidden, marker kept) even when the view moved on."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  let releaseFetch;
+  const gate = new Promise((r) => { releaseFetch = r; });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) { await gate; return { pending: null, pending_count: 0 }; }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  S.session = { session_id: "sidB" };
+  _loadSessionGeneration += 1;
+  releaseFetch();
+  await flush();
+  assertTrue(_isApprovalDismissed("sidA", "a1"), "authoritative absence keeps the marker");
+  assertEq(toasts.length, 0, "no restore toast for a settled dismissal");
+  assertEq(_approvalResponding, null, "response owner released");
+  S.session = { session_id: "sidA" };
+  _renderPendingApprovalForActiveSession();
+  assertTrue(!cardVisible(), "the settled approval never re-renders");
+  return { visible: cardVisible() };
+}
+''')
+    assert out["visible"] is False
+
+
+def test_node_dismiss_409_run_unavailable_successor_rendered_during_refetch_is_preserved():
+    """A successor head rendered by a parallel poll while the re-fetch is in
+    flight owns the card: it must stay visible and interactive."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  let releaseFetch;
+  const gate = new Promise((r) => { releaseFetch = r; });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) { await gate; throw err; }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  showApproval({ approval_id: "b2", description: "cmd B" }, "sidA");
+  assertTrue(cardVisible(), "successor B renders during the in-flight re-fetch");
+  releaseFetch();
+  await flush();
+  assertTrue(cardVisible(), "the successor survives the failed re-fetch");
+  assertEq(els.approvalDesc.textContent, "cmd B", "the successor still owns the card");
+  assertEq(els.approvalBtnAlways.disabled, false, "successor controls stay enabled");
+  assertTrue(!_isApprovalDismissed("sidA", "b2"), "the successor is never suppressed");
+  assertEq(_approvalResponding, null, "our response owner released");
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls[2].body.approval_id, "b2", "the successor is denied by its own id");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 3
+
+
+def test_node_dismiss_409_run_unavailable_different_head_renders_successor():
+    """A different queue head returned by an authoritative re-fetch must be
+    rendered and usable, while the dismissed tuple keeps its own marker."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd A" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: { approval_id: "b2", description: "cmd B" }, pending_count: 2 };
+    }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "the live successor head is rendered");
+  assertEq(els.approvalDesc.textContent, "cmd B", "the successor head owns the card");
+  assertEq(els.approvalBtnAlways.disabled, false, "successor controls enabled");
+  assertTrue(_isApprovalDismissed("sidA", "a1"), "the dismissed tuple keeps its marker");
+  assertTrue(!_isApprovalDismissed("sidA", "b2"), "the successor is never suppressed");
+  assertEq(_approvalResponding, null, "response owner released");
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls[2].body.approval_id, "b2", "the successor is denied by its own id");
+  assertTrue(!cardVisible(), "successor settles hidden");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 3
+
+
+def test_node_dismiss_409_run_unavailable_same_id_reowned_tuple_renders():
+    """The server may reuse an approval_id under a different run/mirror
+    ownership: the stale marker must not suppress that tuple, and the deny
+    must carry the new ownership."""
+    out = _run_node_scenario(r'''
+async function main() {
+  showApproval({ approval_id: "a1", run_id: "r1", _gateway_mirror_token: "t1", description: "cmd run1" }, "sidA");
+  const err = new Error("conflict");
+  err.status = 409;
+  err.body = JSON.stringify({ ok: false, code: "gateway_run_unavailable", error: "unavailable" });
+  apiImpl = async (path) => {
+    if (path.indexOf("/approval/pending") !== -1) {
+      return { pending: { approval_id: "a1", run_id: "r2", _gateway_mirror_token: "t2", description: "cmd run2" }, pending_count: 1 };
+    }
+    throw err;
+  };
+  dismissApprovalCard();
+  await flush();
+  assertTrue(cardVisible(), "the re-owned tuple is rendered");
+  assertEq(els.approvalDesc.textContent, "cmd run2", "the re-owned tuple owns the card");
+  assertTrue(!_isApprovalDismissed("sidA", "a1"), "the stale marker no longer suppresses the id");
+  assertEq(_approvalDisplayedOwner && _approvalDisplayedOwner.runId, "r2", "displayed owner is the new run");
+  assertEq(_approvalResponding, null, "response owner released");
+  apiImpl = async () => ({ ok: true });
+  dismissApprovalCard();
+  await flush();
+  assertEq(apiCalls[2].body.approval_id, "a1", "the re-owned tuple is denied by the same id");
+  assertEq(apiCalls[2].body.run_id, "r2", "the deny carries the new run ownership");
+  assertEq(apiCalls[2].body.mirror_token, "t2", "the deny carries the new mirror ownership");
+  return { calls: apiCalls.length };
+}
+''')
+    assert out["calls"] == 3
