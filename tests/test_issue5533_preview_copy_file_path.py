@@ -136,6 +136,10 @@ def test_preview_copy_content_uses_current_preview_raw_content():
     assert "_previewCurrentPath" in body
     assert "_previewRawContent" in body
     assert "typeof_previewRawContent!=='string'" in compact
+    # The staleness guard must compare the cached content's path against the
+    # currently-previewed path so opening file B after file A cannot copy A's
+    # stale text (finding #1). Both operands must appear in the same guard.
+    assert "_previewRawContentPath!==_previewCurrentPath" in compact
     assert "constcontent=_previewRawContent;" in compact
 
 
@@ -143,7 +147,7 @@ def test_preview_copy_content_fails_when_content_not_available():
     body = _function_body(WORKSPACE_JS, "copyPreviewContent")
     compact = _compact(body)
 
-    guard = "if(typeof_previewRawContent!=='string'){"
+    guard = "if(typeof_previewRawContent!=='string'||_previewRawContentPath!==_previewCurrentPath){"
     fallback_toast = "showToast(t('content_not_available'));"
     assert guard in compact
     assert fallback_toast in compact
@@ -170,12 +174,22 @@ def test_preview_copy_content_disables_button_while_request_is_in_flight():
 
 def test_preview_copy_content_reuses_clipboard_fallback_and_toasts():
     body = _function_body(WORKSPACE_JS, "copyPreviewContent")
-    assert "typeof _copyTextWithFallback==='function'" in body
+    # copyPreviewContent must delegate to the shared clipboard helper and NOT
+    # carry its own duplicated inline navigator.clipboard/execCommand fallback
+    # (finding #4 — the helper always exists, so the inline block was dead code).
     assert "_copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'))" in body
-    assert "navigator.clipboard.writeText(content)" in body
-    assert "document.execCommand('copy')" in body
+    assert "navigator.clipboard.writeText(content)" not in body
+    assert "document.execCommand('copy')" not in body
     assert "t('content_copied')" in body
     assert "t('content_copy_failed')" in body
+
+    # renderCodePreviewContent must cache the raw text + its path so the button
+    # copies the currently-previewed code file rather than stale md/csv text
+    # (finding #1).
+    render = _function_body(WORKSPACE_JS, "renderCodePreviewContent")
+    render_compact = _compact(render)
+    assert "_previewRawContent=content;" in render_compact
+    assert "_previewRawContentPath=path;" in render_compact
 
 
 def test_preview_toolbar_keeps_copy_content_button_from_shrinking_path_layout():

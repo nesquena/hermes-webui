@@ -896,6 +896,13 @@ function renderMarkdownPreviewContent(data){
 
 function renderCodePreviewContent(path, content){
   showPreview('code');
+  // Preserve the raw text (mirroring renderCsvPreviewContent) so the Copy file
+  // contents button reads the currently-previewed file rather than stale text
+  // left over from a previously-opened md/csv file.
+  if(typeof content==='string'){
+    _previewRawContent = content;
+    _previewRawContentPath = path;
+  }
   const codeEl=document.createElement('code');
   codeEl.textContent=content;
   const lang=_prismLanguageForPath(path);
@@ -1327,30 +1334,12 @@ async function copyPreviewContent(){
   if(btn&&btn.disabled) return;
   if(btn) btn.disabled=true;
   try{
-    if(typeof _previewRawContent!=='string'){
+    if(typeof _previewRawContent!=='string' || _previewRawContentPath!==_previewCurrentPath){
       showToast(t('content_not_available'));
       return;
     }
     const content=_previewRawContent;
-    if(typeof _copyTextWithFallback==='function'){
-      await _copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'));
-      return;
-    }
-    try{
-      await navigator.clipboard.writeText(content);
-      showToast(t('content_copied'));
-    }catch(clipErr){
-      const ta=document.createElement('textarea');
-      ta.value=content;
-      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
-      document.body.appendChild(ta);
-      ta.select();
-      let copied=false;
-      try{copied=document.execCommand('copy');}catch(_){}
-      ta.remove();
-      if(copied) showToast(t('content_copied'));
-      else showToast(t('content_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
-    }
+    await _copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'));
   }catch(err){
     showToast(t('content_copy_failed')+(err.message||err));
   }finally{
