@@ -5711,7 +5711,13 @@ def _csrf_rejection_error(handler) -> str:
 
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
-    if not _check_same_origin_browser_request(handler):
+    origin = handler.headers.get("Origin", "")
+    opaque_null_origin = origin == "null" and not handler.headers.get("Referer")
+    if opaque_null_origin:
+        _clear_csrf_failure_reason(handler)
+        if handler.headers.get("Sec-Fetch-Site", "").strip().lower() == "cross-site":
+            return _set_csrf_failure_reason(handler, "origin_mismatch")
+    elif not _check_same_origin_browser_request(handler):
         return False
     if not _is_browser_unsafe_request(handler):
         return True  # non-browser clients (curl, MCP, agent) have no Origin/Referer
@@ -5719,6 +5725,8 @@ def _check_csrf(handler) -> bool:
     from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
 
     if not is_auth_enabled():
+        if opaque_null_origin:
+            return _set_csrf_failure_reason(handler, "origin_mismatch")
         return True
     cookie_val = parse_cookie(handler)
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
@@ -18059,7 +18067,9 @@ def _read_json_request_body(handler, *, max_bytes: int = 4096) -> dict:
 def _handle_escape_authorize(handler, parsed, body: dict | None = None):
     if handler.command != "POST":
         return bad(handler, "method not allowed", 405)
-    if not handler.headers.get("Origin"):
+    if not handler.headers.get("Origin") or not _check_same_origin_browser_request(
+        handler, require_provenance=True
+    ):
         return bad(handler, "browser origin required", 403)
     if not _check_csrf(handler):
         return bad(handler, _csrf_rejection_error(handler), 403)
