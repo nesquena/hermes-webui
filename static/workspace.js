@@ -956,6 +956,20 @@ function forceRenderMarkdownPreview(){
   setStatus('Markdown rendered for this file.');
 }
 
+// Preview-open generation. openFile() captures this at call time and discards
+// every awaited read/render/cache/status write if a newer openFile() started
+// meanwhile. A path-equality guard alone cannot tell apart two overlapping
+// opens of the SAME file, and a stale success can render after navigating
+// elsewhere (maintainer review PR #6957 comment 5272907466).
+let _previewGen = 0;
+function bumpPreviewGeneration(){
+  _previewGen = (typeof _previewGen === 'number' ? _previewGen : 0) + 1;
+  return _previewGen;
+}
+function previewGenerationIsStale(previewGen){
+  return (typeof _previewGen === 'number') && previewGen !== _previewGen;
+}
+
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'csv' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
@@ -987,11 +1001,16 @@ function showPreview(mode){
   setLargeMarkdownForceRenderVisible(false);
 }
 
-function resetTextPreviewCopyState(ownerPath){
+function resetTextPreviewCopyState(ownerPath, previewGen){
   // Ownership guard: if the preview has moved to a different file since this
   // openFile() request started, this is a stale request — do NOT clobber the
   // newer file's cached content or button state (Greptile P1 r3768442266).
   if(ownerPath && _previewCurrentPath!==ownerPath) return;
+  // Generation guard: a path-equality check alone can't tell apart two
+  // overlapping opens of the SAME path — this additionally rejects a reset
+  // from a request generation that is no longer the current one (maintainer
+  // review PR #6957 comment 5272907466).
+  if(previewGenerationIsStale(previewGen)) return;
   if(typeof _previewRawContent!=='string') return;
   _previewRawContent = '';
   _previewRawContentPath = '';
@@ -1130,6 +1149,8 @@ async function openFile(path, opts={}){
     return;
   }
 
+  const previewGen = bumpPreviewGeneration();
+
   _previewServerEditable = null;
   _previewSaveRoute = '/api/file/save';
   _previewOfficeFormat = '';
@@ -1179,6 +1200,7 @@ async function openFile(path, opts={}){
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
         : await api(_workspaceRouteForPath(path, 'read'));
+      if(previewGenerationIsStale(previewGen)) return;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
@@ -1189,7 +1211,10 @@ async function openFile(path, opts={}){
         return;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){resetTextPreviewCopyState(path);setStatus(t('file_open_failed'));}
+    }catch(e){
+      if(previewGenerationIsStale(previewGen)) return;
+      resetTextPreviewCopyState(path,previewGen);setStatus(t('file_open_failed'));
+    }
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1209,6 +1234,7 @@ async function openFile(path, opts={}){
   } else if(ext==='.csv'){
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(previewGenerationIsStale(previewGen)) return;
       if(data.binary){
         downloadFile(path);
         return;
@@ -1216,13 +1242,15 @@ async function openFile(path, opts={}){
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      resetTextPreviewCopyState(path);
+      if(previewGenerationIsStale(previewGen)) return;
+      resetTextPreviewCopyState(path,previewGen);
       downloadFile(path);
     }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(previewGenerationIsStale(previewGen)) return;
       if(data.binary){
         // Server flagged this as binary content
         downloadFile(path);
@@ -1238,7 +1266,8 @@ async function openFile(path, opts={}){
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){
-      resetTextPreviewCopyState(path);
+      if(previewGenerationIsStale(previewGen)) return;
+      resetTextPreviewCopyState(path,previewGen);
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);

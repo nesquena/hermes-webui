@@ -225,18 +225,58 @@ def test_reset_text_preview_copy_state_guards_against_stale_request_ownership():
     body = _function_body(WORKSPACE_JS, "resetTextPreviewCopyState")
     compact = _compact(body)
 
-    assert "resetTextPreviewCopyState(ownerPath)" in compact
+    assert "resetTextPreviewCopyState(ownerPath,previewGen)" in compact
     guard = "if(ownerPath&&_previewCurrentPath!==ownerPath)return;"
     assert guard in compact
     # The guard must run before the cache/button are cleared.
     assert compact.index(guard) < compact.index("_previewRawContent=''")
 
 
+def test_reset_text_preview_copy_state_guards_against_stale_generation():
+    """Maintainer review (PR #6957 comment 5272907466): a path-equality guard alone
+    cannot distinguish two overlapping openFile() calls for the SAME path — request
+    A for notes.md, request B for notes.md, B succeeds, A then fails must not clear
+    B's fresh cache/button. resetTextPreviewCopyState() must additionally reject a
+    stale generation via previewGenerationIsStale(), and that check must run before
+    the cache/button are cleared.
+    """
+    body = _function_body(WORKSPACE_JS, "resetTextPreviewCopyState")
+    compact = _compact(body)
+
+    guard = "if(previewGenerationIsStale(previewGen))return;"
+    assert guard in compact
+    assert compact.index(guard) < compact.index("_previewRawContent=''")
+
+
+def test_preview_generation_counter_exists_and_openfile_captures_it():
+    """The preview-open generation counter mirrors the existing workspace-tree
+    generation pattern (_wsTreeGen / bumpWorkspaceTreeGen, used by loadDir()) so
+    that overlapping openFile() calls can be told apart. openFile() must capture
+    the generation immediately after the DOWNLOAD_EXTS early return, before any
+    other state is touched.
+    """
+    assert "let _previewGen = 0;" in WORKSPACE_JS
+    assert "function bumpPreviewGeneration(){" in WORKSPACE_JS
+    assert "function previewGenerationIsStale(previewGen){" in WORKSPACE_JS
+
+    compact = _compact(WORKSPACE_JS)
+    assert "constpreviewGen=bumpPreviewGeneration();" in compact
+
+    download_guard = "if(DOWNLOAD_EXTS.has(ext)){downloadFile(path);return;}"
+    assert download_guard in compact
+    capture = "constpreviewGen=bumpPreviewGeneration();"
+    capture_idx = compact.index(capture)
+    assert compact.index(download_guard) < capture_idx
+    # Nothing else in openFile() writes preview state before the generation is captured.
+    assert capture_idx < compact.index("_previewServerEditable=null;", capture_idx)
+
+
 def test_markdown_open_file_failure_resets_copy_state_with_request_owner():
-    """The markdown branch of openFile() must call resetTextPreviewCopyState(path)
-    on load failure, passing its own request's path as the owner, so a stale
-    failure can't clobber a newer file's copy-button state (Greptile P1 PR #6957
-    finding r3768442266).
+    """The markdown branch of openFile() must call resetTextPreviewCopyState(path,
+    previewGen) on load failure, passing its own request's path and generation as
+    the owner, so a stale failure can't clobber a newer file's copy-button state
+    (Greptile P1 PR #6957 finding r3768442266; generation guard added per
+    maintainer review comment 5272907466).
     """
     # openFile()'s default-parameter signature (`opts={}`) breaks the brace-matching
     # _function_body() helper (its own `{}` closes before the real body opens), so
@@ -244,7 +284,12 @@ def test_markdown_open_file_failure_resets_copy_state_with_request_owner():
     # markdown branch's render call and failure catch.
     compact = _compact(WORKSPACE_JS)
 
-    catch_marker = "}catch(e){resetTextPreviewCopyState(path);setStatus(t('file_open_failed'));}"
+    catch_marker = (
+        "}catch(e){"
+        "if(previewGenerationIsStale(previewGen))return;"
+        "resetTextPreviewCopyState(path,previewGen);setStatus(t('file_open_failed'));"
+        "}"
+    )
     assert catch_marker in compact
     assert "renderMarkdownPreviewContent(data);" in compact
     assert compact.index("renderMarkdownPreviewContent(data);") < compact.index(catch_marker)
@@ -254,15 +299,68 @@ def test_markdown_open_file_failure_resets_copy_state_with_request_owner():
 
 def test_csv_and_code_open_file_failures_also_pass_request_owner():
     """The CSV and plain-code/text branches of openFile() must likewise pass their
-    own path as the owner to resetTextPreviewCopyState(), so stale failures in
-    those branches can't clobber a newer preview either (Greptile P1 PR #6957
-    finding r3768442266). All three text-preview failure branches (markdown,
-    csv, plain code/text) call resetTextPreviewCopyState(path).
+    own path and generation as the owner to resetTextPreviewCopyState(), so stale
+    failures in those branches can't clobber a newer preview either (Greptile P1
+    PR #6957 finding r3768442266; generation guard added per maintainer review
+    comment 5272907466). All three text-preview failure branches (markdown, csv,
+    plain code/text) call resetTextPreviewCopyState(path, previewGen), each guarded
+    by an immediately-preceding stale-generation return.
     """
     compact = _compact(WORKSPACE_JS)
-    assert compact.count("resetTextPreviewCopyState(path);") == 3
-    # No call site still uses the old ownerless signature.
+    assert compact.count("resetTextPreviewCopyState(path,previewGen);") == 3
+    # No call site still uses the old ownerless or generation-less signatures.
     assert "resetTextPreviewCopyState();" not in compact
+    assert "resetTextPreviewCopyState(path);" not in compact
+    # Every catch block that resets copy state bails out first when stale.
+    stale_return_before_reset = (
+        "if(previewGenerationIsStale(previewGen))return;"
+        "resetTextPreviewCopyState(path,previewGen);"
+    )
+    assert compact.count(stale_return_before_reset) == 3
+
+
+def test_openfile_checks_staleness_immediately_after_each_awaited_read():
+    """Each of the markdown, csv, and plain-code/text branches must reject a stale
+    response immediately after its awaited /api read and before any cache/render
+    write, mirroring loadDir()'s `if(...||treeGen!==_wsTreeGen)return;` pattern
+    (maintainer review PR #6957 comment 5272907466). This closes the race where
+    an old file-A success could render after the user navigated to file B, or a
+    stale SUCCESS could overwrite a newer same-path response.
+    """
+    compact = _compact(WORKSPACE_JS)
+    stale_check = "if(previewGenerationIsStale(previewGen))return;"
+    # markdown, csv, and plain-code/text branches each have one post-await check
+    # in the try body, plus one in the catch — six total, plus one more inside
+    # resetTextPreviewCopyState() itself (defense in depth) — seven total.
+    assert compact.count(stale_check) == 7
+
+    read_call = "awaitapi(_workspaceRouteForPath(path,'read'));"
+    idx = 0
+    found = 0
+    while True:
+        idx = compact.find(read_call, idx)
+        if idx == -1:
+            break
+        after = compact[idx + len(read_call): idx + len(read_call) + len(stale_check)]
+        assert after == stale_check, f"expected staleness check immediately after read at {idx}"
+        found += 1
+        idx += len(read_call)
+    assert found == 3
+
+
+def test_bump_workspace_tree_gen_pattern_is_mirrored_by_preview_generation():
+    """Sanity check that the preview generation guard follows the same shape as
+    the pre-existing workspace-tree generation guard used by loadDir(), rather
+    than diverging into a different mechanism.
+    """
+    ws_gen = _function_body(WORKSPACE_JS, "bumpWorkspaceTreeGen")
+    preview_gen = _function_body(WORKSPACE_JS, "bumpPreviewGeneration")
+    normalized_ws_gen = (
+        _compact(ws_gen)
+        .replace("bumpWorkspaceTreeGen", "bumpPreviewGeneration")
+        .replace("_wsTreeGen", "_previewGen")
+    )
+    assert normalized_ws_gen == _compact(preview_gen)
 
 
 def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane():
