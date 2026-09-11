@@ -13,6 +13,7 @@ WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 requires_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
@@ -47,7 +48,10 @@ def test_preview_copy_relative_path_uses_current_preview_path():
     assert "_previewCurrentPath" in body
     assert "_normalizeWorkspaceRelPath(_previewCurrentPath)" in body
     assert "api('/api/file/path'" not in body
-    assert "constrel=_normalizeWorkspaceRelPath(_previewCurrentPath)||_previewCurrentPath" in compact
+    assert (
+        "constrel=_normalizeWorkspaceRelPath(_previewCurrentPath)||_previewCurrentPath"
+        in compact
+    )
 
 
 def test_preview_copy_relative_path_disables_button_while_request_is_in_flight():
@@ -96,9 +100,10 @@ def test_preview_copy_button_is_accessible_and_icon_only_on_narrow_pane():
     its label span is class-tagged, and a narrow-width media query hides that label.
     """
     import re
+
     # The button carries an explicit aria-label (screen-reader name survives label-hide).
     assert 'id="btnCopyPreviewRelPath"' in INDEX
-    btn = INDEX[INDEX.index('id="btnCopyPreviewRelPath"'):]
+    btn = INDEX[INDEX.index('id="btnCopyPreviewRelPath"') :]
     btn = btn[: btn.index("</button>")]
     assert 'aria-label="Copy relative path"' in btn
     assert 'class="preview-btn-label"' in btn
@@ -112,7 +117,9 @@ def test_preview_copy_button_is_accessible_and_icon_only_on_narrow_pane():
         r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[^}]*"
         r"\.preview-path\s+#btnCopyPreviewRelPath\s+\.preview-btn-label\s*\{\s*display:\s*none",
         STYLE,
-    ), "expected a @container rightpanel query hiding the copy-button label on a narrow pane"
+    ), (
+        "expected a @container rightpanel query hiding the copy-button label on a narrow pane"
+    )
 
 
 def test_preview_toolbar_has_copy_content_button():
@@ -159,8 +166,17 @@ def test_preview_copy_content_fails_when_content_not_available():
     assert fallback_toast in compact
     guard_idx = compact.index(guard)
     assert compact.index(fallback_toast, guard_idx) == guard_idx + len(guard)
-    assert compact.index(fallback_toast) < compact.index("constcontent=_previewRawContent;")
-    assert "return;" in compact[compact.index(fallback_toast):compact.index(fallback_toast) + len(fallback_toast) + 10]
+    assert compact.index(fallback_toast) < compact.index(
+        "constcontent=_previewRawContent;"
+    )
+    assert (
+        "return;"
+        in compact[
+            compact.index(fallback_toast) : compact.index(fallback_toast)
+            + len(fallback_toast)
+            + 10
+        ]
+    )
 
 
 def test_preview_copy_content_disables_button_while_request_is_in_flight():
@@ -183,7 +199,10 @@ def test_preview_copy_content_reuses_clipboard_fallback_and_toasts():
     # copyPreviewContent must delegate to the shared clipboard helper and NOT
     # carry its own duplicated inline navigator.clipboard/execCommand fallback
     # (finding #4 — the helper always exists, so the inline block was dead code).
-    assert "_copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'))" in body
+    assert (
+        "_copyTextWithFallback(content,t('content_copied'),t('content_copy_failed'))"
+        in body
+    )
     assert "navigator.clipboard.writeText(content)" not in body
     assert "document.execCommand('copy')" not in body
     assert "t('content_copied')" in body
@@ -227,7 +246,9 @@ def test_reset_text_preview_copy_state_hides_button_and_clears_cache():
     assert "syncPreviewCopyContentBtn()" in invalidate
     sync = _compact(_function_body(WORKSPACE_JS, "syncPreviewCopyContentBtn"))
     assert "$('btnCopyPreviewContent')" in sync
-    assert "btn.style.display=previewRawContentIsCopyable()?'inline-flex':'none'" in sync
+    assert (
+        "btn.style.display=previewRawContentIsCopyable()?'inline-flex':'none'" in sync
+    )
 
 
 def test_reset_text_preview_copy_state_guards_against_stale_request_ownership():
@@ -307,7 +328,9 @@ def test_markdown_open_file_failure_resets_copy_state_with_request_owner():
     )
     assert catch_marker in compact
     assert "renderMarkdownPreviewContent(data);" in compact
-    assert compact.index("renderMarkdownPreviewContent(data);") < compact.index(catch_marker)
+    assert compact.index("renderMarkdownPreviewContent(data);") < compact.index(
+        catch_marker
+    )
     assert "MD_EXTS.has(ext)" in compact
     assert compact.index("MD_EXTS.has(ext)") < compact.index(catch_marker)
 
@@ -356,8 +379,10 @@ def test_openfile_checks_staleness_immediately_after_each_awaited_read():
         idx = compact.find(read_call, idx)
         if idx == -1:
             break
-        after = compact[idx + len(read_call): idx + len(read_call) + len(stale_check)]
-        assert after == stale_check, f"expected staleness check immediately after read at {idx}"
+        after = compact[idx + len(read_call) : idx + len(read_call) + len(stale_check)]
+        assert after == stale_check, (
+            f"expected staleness check immediately after read at {idx}"
+        )
         found += 1
         idx += len(read_call)
     assert found == 3
@@ -385,9 +410,10 @@ def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane(
     hides that label.
     """
     import re
+
     # The button carries an explicit aria-label (screen-reader name survives label-hide).
     assert 'id="btnCopyPreviewContent"' in INDEX
-    btn = INDEX[INDEX.index('id="btnCopyPreviewContent"'):]
+    btn = INDEX[INDEX.index('id="btnCopyPreviewContent"') :]
     btn = btn[: btn.index("</button>")]
     assert 'aria-label="Copy file contents"' in btn
     assert 'class="preview-btn-label"' in btn
@@ -401,7 +427,9 @@ def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane(
         r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[\s\S]*?"
         r"\.preview-path\s+#btnCopyPreviewContent\s+\.preview-btn-label\s*\{\s*display:\s*none",
         STYLE,
-    ), "expected a @container rightpanel query hiding the copy-content-button label on a narrow pane"
+    ), (
+        "expected a @container rightpanel query hiding the copy-content-button label on a narrow pane"
+    )
 
 
 # ── Behavioural harness: real production functions driven in Node ────────────
@@ -484,12 +512,17 @@ def _js_functions(src: str, names) -> str:
 def _run_node(script: str) -> dict:
     result = subprocess.run(
         [NODE, "--input-type=commonjs", "-e", script],
-        cwd=ROOT, capture_output=True, text=True, timeout=30,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if result.returncode != 0:
         raise AssertionError(
-            "node harness failed\nstdout:\n" + (result.stdout or "<empty>")
-            + "\nstderr:\n" + (result.stderr or "<empty>")
+            "node harness failed\nstdout:\n"
+            + (result.stdout or "<empty>")
+            + "\nstderr:\n"
+            + (result.stderr or "<empty>")
         )
     return json.loads(result.stdout.strip().splitlines()[-1])
 
@@ -507,7 +540,7 @@ function _mkEl(id){
     setAttribute(k,v){this._attrs[k]=String(v);},
     getAttribute(k){return Object.prototype.hasOwnProperty.call(this._attrs,k)?this._attrs[k]:null;},
     removeAttribute(k){delete this._attrs[k];},
-    appendChild(c){this._children.push(c);return c;},
+    appendChild(c){this._children.push(c);if(c&&c.textContent)this.textContent+=c.textContent;return c;},
     removeChild(c){this._children=this._children.filter(x=>x!==c);return c;},
     remove(){}, select(){}, focus(){}, click(){},
   };
@@ -529,7 +562,28 @@ function _workspacePathIsReadOnly(){return false;}
 function updateEditBtn(){}
 function setLargeMarkdownForceRenderVisible(){}
 function _prismLanguageForPath(){return '';}
-function renderMarkdownPreviewContent(){}
+function renderMd(content){return '<p>'+String(content||'')+'</p>';}
+function renderKatexBlocks(){}
+const MD_EXTS = new Set(['.md','.markdown','.mdown']);
+const DOWNLOAD_EXTS = new Set(['.bin','.exe','.zip']);
+const IMAGE_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
+const AUDIO_EXTS = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
+const VIDEO_EXTS = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
+const PDF_EXTS = new Set(['.pdf']);
+const HTML_EXTS = new Set(['.html','.htm']);
+function renderBreadcrumb(){}
+function renderFileBreadcrumb(){}
+function closeWorkspacePanel(){}
+function openWorkspacePanel(){}
+function syncWorkspacePanelUI(){}
+let _workspacePanelMode='preview';
+function _workspaceRouteForPath(path,kind,opts){return '/api/file/read?path='+encodeURIComponent(path);}
+function shouldRenderMarkdownPreviewAsPlainText(){return false;}
+function largeMarkdownPlainTextStatus(){return '';}
+function _workspaceEscapeGrantForPath(){return null;}
+function _clearWorkspaceEscapeGrant(){}
+const downloads=[];
+function downloadFile(p){downloads.push(p);}
 function buildCsvTablePreview(){return {html:'<table></table>'};}
 const tick=()=>new Promise(r=>setImmediate(r));
 
@@ -567,18 +621,25 @@ _PREVIEW_FNS = (
     "syncPreviewCopyContentBtn",
     "resetTextPreviewCopyState",
     "showPreview",
+    "renderMarkdownPreviewContent",
     "renderCodePreviewContent",
     "renderCsvPreviewContent",
+    "openFile",
     "copyPreviewContent",
     "toggleEditMode",
 )
 
 
-def _run_preview_scenario(scenario: str) -> dict:
+def _run_preview_scenario(scenario: str, boot_source: str = None) -> dict:
+    boot = boot_source if boot_source is not None else BOOT_JS
     script = (
         _DOM_STUB
         + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
-        + "\n(async()=>{\n" + scenario + "\n})().catch(e=>{console.error(e);process.exit(1);});\n"
+        + "\n"
+        + _js_functions(boot, ("clearPreview",))
+        + "\n(async()=>{\n"
+        + scenario
+        + "\n})().catch(e=>{console.error(e);process.exit(1);});\n"
     )
     return _run_node(script)
 
@@ -661,7 +722,9 @@ def test_delayed_save_cannot_relabel_previous_file_content_as_current_file():
         f"the copy button must copy the displayed file's own content: {out}"
     )
     assert out["rawContent"] == "B CONTENT", f"stale save clobbered b.md's cache: {out}"
-    assert out["rawPath"] == "notes/b.md", f"cache label no longer matches its text: {out}"
+    assert out["rawPath"] == "notes/b.md", (
+        f"cache label no longer matches its text: {out}"
+    )
 
 
 @requires_node
@@ -711,7 +774,9 @@ def test_preview_copy_content_still_copies_the_freshly_loaded_file():
 _LOSSY_UNKNOWN_TYPE = "PK\\u0003\\u0004\\u0000\\u0000\\uFFFD\\uFFFD\\uFFFDjunk"
 
 
-def _binary_gate_scenario(render_call: str, content_js: str, mode_hint: str = "") -> dict:
+def _binary_gate_scenario(
+    render_call: str, content_js: str, mode_hint: str = ""
+) -> dict:
     return _run_preview_scenario(
         """
   _previewCurrentPath='PATH';
@@ -824,9 +889,10 @@ def test_markdown_branch_routes_its_cache_write_through_the_ownership_chokepoint
     """The three text-preview branches must all reach the SAME chokepoint, so the
     binary gate and the (path, generation) ownership stamp cannot drift apart."""
     compact = _compact(WORKSPACE_JS)
-    assert "_previewRawContent=data.content;_previewRawContentPath=path;claimPreviewRawContent(path,previewGen);" in compact, (
-        "the markdown branch must hand its cache write to claimPreviewRawContent()"
-    )
+    assert (
+        "_previewRawContent=data.content;_previewRawContentPath=path;claimPreviewRawContent(path,previewGen);"
+        in compact
+    ), "the markdown branch must hand its cache write to claimPreviewRawContent()"
     for renderer in ("renderCodePreviewContent", "renderCsvPreviewContent"):
         body = _compact(_function_body(WORKSPACE_JS, renderer))
         assert "claimPreviewRawContent(path)" in body, (
@@ -840,14 +906,20 @@ def test_markdown_branch_routes_its_cache_write_through_the_ownership_chokepoint
 # ── Defect 3: localized copy failures are error-level, long-lived toasts ─────
 
 
-_TOAST_FNS = ("clearToastDismissTimer", "setToastDismissTimer", "dismissToast",
-              "showToast", "copyToastText", "_copyTextWithFallback")
+_TOAST_FNS = (
+    "clearToastDismissTimer",
+    "setToastDismissTimer",
+    "dismissToast",
+    "showToast",
+    "copyToastText",
+    "_copyTextWithFallback",
+)
 
 
 def _locale_string(locale: str, key: str) -> str:
     """Pull one locale's literal string for `key` out of static/i18n.js."""
     start = I18N_JS.index("\n  " + locale + ": {")
-    block = I18N_JS[start:start + 200000]
+    block = I18N_JS[start : start + 200000]
     m = re.search(r"\n\s+" + re.escape(key) + r": '((?:[^'\\]|\\.)*)'", block)
     assert m, f"{key} missing from the {locale} locale"
     return m.group(1)
@@ -855,12 +927,18 @@ def _locale_string(locale: str, key: str) -> str:
 
 def _run_copy_failure_scenario(failure_prefix: str, clipboard: str) -> dict:
     toast_consts = "\n".join(
-        line for line in UI_JS.splitlines()
-        if line.startswith("const TOAST_DEFAULT_MS=") or line.startswith("const TOAST_ERROR_DEFAULT_MS=")
+        line
+        for line in UI_JS.splitlines()
+        if line.startswith("const TOAST_DEFAULT_MS=")
+        or line.startswith("const TOAST_ERROR_DEFAULT_MS=")
     )
-    assert "TOAST_DEFAULT_MS=" in toast_consts and "TOAST_ERROR_DEFAULT_MS=" in toast_consts
+    assert (
+        "TOAST_DEFAULT_MS=" in toast_consts
+        and "TOAST_ERROR_DEFAULT_MS=" in toast_consts
+    )
     script = (
-        r"""
+        (
+            r"""
 const ELS={};
 function _mkEl(id){
   return {id:id, style:{display:'',cssText:''}, value:'', textContent:'', innerHTML:'',
@@ -881,9 +959,11 @@ const setTimeout=(cb,ms)=>{delays.push(ms);return delays.length;};
 const clearTimeout=()=>{};
 const navigator=CLIPBOARD;
 """
-        + toast_consts + "\n"
-        + _js_functions(UI_JS, _TOAST_FNS) + "\n"
-        + r"""
+            + toast_consts
+            + "\n"
+            + _js_functions(UI_JS, _TOAST_FNS)
+            + "\n"
+            + r"""
 (async()=>{
   await _copyTextWithFallback('payload','ok-message',FAILURE_PREFIX);
   await new Promise(r=>setImmediate(r));
@@ -894,7 +974,10 @@ const navigator=CLIPBOARD;
   }));
 })().catch(e=>{console.error(e);process.exit(1);});
 """
-    ).replace("CLIPBOARD", clipboard).replace("FAILURE_PREFIX", json.dumps(failure_prefix))
+        )
+        .replace("CLIPBOARD", clipboard)
+        .replace("FAILURE_PREFIX", json.dumps(failure_prefix))
+    )
     return _run_node(script)
 
 
@@ -908,7 +991,9 @@ def _rejecting_clipboard(reason_js: str) -> str:
 # ("blocked due to lack of user activation") and an empty-message rejection both
 # carry no English keyword, so a localized prefix left the user with a 2.8s
 # info toast and no Copy/Dismiss affordance.
-_FIREFOX_REJECTION = "new Error('Clipboard write was blocked due to lack of user activation.')"
+_FIREFOX_REJECTION = (
+    "new Error('Clipboard write was blocked due to lack of user activation.')"
+)
 _NO_REASON_REJECTION = "undefined"
 _NO_CLIPBOARD = "{}"
 
@@ -925,7 +1010,9 @@ def test_localized_copy_failure_is_an_error_level_long_lived_toast():
     Copy/Dismiss affordance. The level must not depend on the locale.
     """
     ru_prefix = _locale_string("ru", "content_copy_failed")
-    out = _run_copy_failure_scenario(ru_prefix, _rejecting_clipboard(_FIREFOX_REJECTION))
+    out = _run_copy_failure_scenario(
+        ru_prefix, _rejecting_clipboard(_FIREFOX_REJECTION)
+    )
 
     assert "error" in out["className"].split(), (
         f"a localized copy failure was downgraded to {out['className']!r}: {out}"
@@ -944,7 +1031,9 @@ def test_english_copy_failure_stays_error_level():
     """Control case: the English path already produced an error toast and must
     keep doing so (the fix must not flip the level for any locale)."""
     en_prefix = _locale_string("en", "content_copy_failed")
-    out = _run_copy_failure_scenario(en_prefix, _rejecting_clipboard(_FIREFOX_REJECTION))
+    out = _run_copy_failure_scenario(
+        en_prefix, _rejecting_clipboard(_FIREFOX_REJECTION)
+    )
     assert "error" in out["className"].split(), out
     assert max(out["delays"]) >= 20000, out
 
@@ -956,7 +1045,9 @@ def test_copy_failure_with_no_reason_text_is_still_error_level():
     from the call site, not from sniffing the message."""
     for locale in ("ru", "ja", "de"):
         prefix = _locale_string(locale, "content_copy_failed")
-        out = _run_copy_failure_scenario(prefix, _rejecting_clipboard(_NO_REASON_REJECTION))
+        out = _run_copy_failure_scenario(
+            prefix, _rejecting_clipboard(_NO_REASON_REJECTION)
+        )
         assert "error" in out["className"].split(), (locale, out)
         assert max(out["delays"]) >= 20000, (locale, out)
 
@@ -987,3 +1078,358 @@ def test_new_copy_state_strings_exist_in_every_locale_that_ships_the_feature():
         assert I18N_JS.count(key + ":") == baseline, (
             f"{key} ships in {I18N_JS.count(key + ':')} locales, expected {baseline}"
         )
+
+
+# ── Defect 4: clearPreview() lifecycle transition & in-flight response guard ──
+
+
+def test_clear_preview_advances_generation_and_invalidates_raw_content_authority():
+    """Maintainer review PR #6957 (re-gate blocker).
+
+    clearPreview() must be a real preview-lifecycle transition: it must advance
+    the preview generation before clearing state, and invalidate raw-content
+    ownership through the shared invalidation function. This ensures that any
+    in-flight openFile() request or delayed save treats its awaited response as
+    stale and cannot repopulate DOM, preview mode, or copy controls after the
+    user closed the preview.
+    """
+    body = _function_body(BOOT_JS, "clearPreview")
+    compact = _compact(body)
+
+    bump_call = "bumpPreviewGeneration()"
+    invalidate_call = "invalidatePreviewRawContent()"
+    clear_path = "_previewCurrentPath='';"
+
+    assert bump_call in compact, "clearPreview() must call bumpPreviewGeneration()"
+    assert invalidate_call in compact, (
+        "clearPreview() must call invalidatePreviewRawContent()"
+    )
+    assert compact.index(bump_call) < compact.index(clear_path), (
+        "clearPreview() must advance the generation BEFORE clearing preview state"
+    )
+    assert compact.index(invalidate_call) < compact.index(clear_path), (
+        "clearPreview() must invalidate raw content authority BEFORE clearing preview state"
+    )
+
+
+def _deferred_preview_scenario(
+    file_path: str, content: str, boot_src: str = None
+) -> dict:
+    return _run_preview_scenario(
+        """
+  let release = null;
+  api = (route) => new Promise(res => { release = () => res({content: CONTENT_JSON}); });
+
+  const openPromise = openFile(PATH_JSON);
+  await tick();
+
+  const preClearGen = _previewGen;
+  clearPreview();
+  const postClearGen = _previewGen;
+
+  release();
+  await openPromise;
+  await tick();
+
+  console.log(JSON.stringify({
+    preClearGen, postClearGen,
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    areaVisible: $('previewArea').classList.contains('visible'),
+    mdHtml: $('previewMd').innerHTML,
+    codeText: $('previewCode').textContent,
+    pathText: $('previewPathText').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    rawContentGen: _previewRawContentGen,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    statuses,
+    toasts,
+  }));
+""".replace("PATH_JSON", json.dumps(file_path)).replace(
+            "CONTENT_JSON", json.dumps(content)
+        ),
+        boot_source=boot_src,
+    )
+
+
+@requires_node
+def test_deferred_markdown_preview_closed_by_clear_preview_drops_stale_response():
+    """Maintainer review PR #6957: a deferred markdown preview where clearPreview()
+    is called before /api/file/read resolves must NOT restore preview mode,
+    rendered DOM, raw-content authority, status, or copy controls when the read lands.
+    """
+    out = _deferred_preview_scenario("notes/doc.md", "# Heading\nMarkdown body")
+
+    assert out["postClearGen"] > out["preClearGen"], (
+        f"clearPreview() must advance the generation: {out}"
+    )
+    assert out["mode"] == "", (
+        f"preview mode was repopulated after clearPreview: {out['mode']}"
+    )
+    assert out["path"] == "", (
+        f"preview path was restored after clearPreview: {out['path']}"
+    )
+    assert out["areaVisible"] is False, f"previewArea remained visible: {out}"
+    assert out["mdHtml"] == "", f"previewMd rendered DOM was restored: {out['mdHtml']}"
+    assert out["codeText"] == "", f"previewCode text was restored: {out['codeText']}"
+    assert out["pathText"] == "", f"previewPathText was restored: {out['pathText']}"
+    assert out["rawContent"] == "", (
+        f"raw content authority was restored: {out['rawContent']}"
+    )
+    assert out["rawContentPath"] == "", (
+        f"raw content path was restored: {out['rawContentPath']}"
+    )
+    assert out["rawContentGen"] == -1, (
+        f"raw content generation was restored: {out['rawContentGen']}"
+    )
+    assert out["copyable"] is False, f"raw content was marked copyable: {out}"
+    assert out["copyBtnDisplay"] == "none", (
+        f"copy button display was restored: {out['copyBtnDisplay']}"
+    )
+    assert out["statuses"] == [], (
+        f"status was restored after clearPreview: {out['statuses']}"
+    )
+
+
+@requires_node
+def test_deferred_code_preview_closed_by_clear_preview_drops_stale_response():
+    """Sibling branch: plain code/text preview must fail closed the same way
+    when closed while in flight.
+    """
+    out = _deferred_preview_scenario("src/app.py", "def main():\n    print('hi')\n")
+
+    assert out["postClearGen"] > out["preClearGen"], (
+        f"clearPreview() must advance the generation: {out}"
+    )
+    assert out["mode"] == "", f"code preview mode was restored: {out['mode']}"
+    assert out["codeText"] == "", f"code DOM was restored: {out['codeText']}"
+    assert out["rawContent"] == "", (
+        f"raw content authority was restored: {out['rawContent']}"
+    )
+    assert out["copyable"] is False, f"raw content was marked copyable: {out}"
+    assert out["copyBtnDisplay"] == "none", (
+        f"copy button display was restored: {out['copyBtnDisplay']}"
+    )
+    assert out["statuses"] == [], f"status was restored: {out['statuses']}"
+
+
+@requires_node
+def test_deferred_text_preview_different_path_open_rejects_stale_first_response():
+    """Maintainer review PR #6957: different-path open case.
+
+    User opens file A (deferred), closes preview via clearPreview(), and opens
+    file B (different path). When file A's read lands, it must be rejected as
+    stale and must not corrupt file B's panel mode, DOM, or raw-content authority.
+    When file B's read lands, file B is displayed and its own content is copyable.
+    """
+    out = _run_preview_scenario(
+        """
+  let releaseA = null;
+  let releaseB = null;
+  api = (route) => {
+    if (route.includes("notes%2Fa.md") || route.includes("notes/a.md")) {
+      return new Promise(res => { releaseA = () => res({content: "# Doc A Content"}); });
+    }
+    return new Promise(res => { releaseB = () => res({content: "def util(): return 42"}); });
+  };
+
+  // 1. Open A (deferred)
+  const pA = openFile("notes/a.md");
+  await tick();
+
+  // 2. Clear preview
+  clearPreview();
+
+  // 3. Open B (different path, deferred)
+  const pB = openFile("src/utils.py");
+  await tick();
+
+  // 4. Release A (stale)
+  releaseA();
+  await pA;
+  await tick();
+
+  const stateAfterStaleA = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    mdHtml: $('previewMd').innerHTML,
+    codeText: $('previewCode').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+  };
+
+  // 5. Release B (fresh)
+  releaseB();
+  await pB;
+  await tick();
+
+  await copyPreviewContent();
+
+  const stateAfterFreshB = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    codeText: $('previewCode').textContent,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copied,
+  };
+
+  console.log(JSON.stringify({ stateAfterStaleA, stateAfterFreshB }));
+"""
+    )
+
+    stale_a = out["stateAfterStaleA"]
+    assert stale_a["path"] == "src/utils.py", (
+        f"stale A corrupted current path: {stale_a}"
+    )
+    assert stale_a["mode"] != "md", f"stale A repopulated markdown mode: {stale_a}"
+    assert stale_a["mdHtml"] == "", f"stale A rendered its markdown into DOM: {stale_a}"
+    assert stale_a["rawContentPath"] != "notes/a.md", (
+        f"stale A claimed raw content path: {stale_a}"
+    )
+    assert stale_a["rawContent"] != "# Doc A Content", (
+        f"stale A claimed raw content: {stale_a}"
+    )
+
+    fresh_b = out["stateAfterFreshB"]
+    assert fresh_b["mode"] == "code", f"fresh B mode expected code, got: {fresh_b}"
+    assert fresh_b["path"] == "src/utils.py", f"fresh B path unexpected: {fresh_b}"
+    assert fresh_b["codeText"] == "def util(): return 42", (
+        f"fresh B DOM unexpected: {fresh_b}"
+    )
+    assert fresh_b["rawContent"] == "def util(): return 42", (
+        f"fresh B raw content unexpected: {fresh_b}"
+    )
+    assert fresh_b["rawContentPath"] == "src/utils.py", (
+        f"fresh B raw path unexpected: {fresh_b}"
+    )
+    assert fresh_b["copyable"] is True, f"fresh B was not marked copyable: {fresh_b}"
+    assert fresh_b["copied"] == ["def util(): return 42"], (
+        f"copied wrong content: {fresh_b}"
+    )
+
+
+@requires_node
+def test_deferred_text_preview_same_path_reopen_rejects_stale_first_response():
+    """Maintainer review PR #6957: same-path/reopen generation case.
+
+    User opens file A (deferred read 1), closes preview via clearPreview(), and
+    reopens file A (deferred read 2). When read 1 resolves, its stale generation
+    must cause it to be discarded without populating DOM or raw-content cache.
+    When read 2 resolves, read 2's content is rendered and copyable.
+    """
+    out = _run_preview_scenario(
+        """
+  let release1 = null;
+  let release2 = null;
+  let callCount = 0;
+  api = (route) => {
+    callCount++;
+    if (callCount === 1) {
+      return new Promise(res => { release1 = () => res({content: "VERSION 1 (STALE)"}); });
+    }
+    return new Promise(res => { release2 = () => res({content: "VERSION 2 (FRESH)"}); });
+  };
+
+  // 1. Open notes/readme.md (request 1, deferred)
+  const p1 = openFile("notes/readme.md");
+  await tick();
+
+  // 2. Clear preview
+  clearPreview();
+
+  // 3. Reopen notes/readme.md (request 2, deferred)
+  const p2 = openFile("notes/readme.md");
+  await tick();
+
+  // 4. Release request 1 (stale generation)
+  release1();
+  await p1;
+  await tick();
+
+  const stateAfterStale1 = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    mdHtml: $('previewMd').innerHTML,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+  };
+
+  // 5. Release request 2 (current generation)
+  release2();
+  await p2;
+  await tick();
+
+  await copyPreviewContent();
+
+  const stateAfterFresh2 = {
+    mode: _previewCurrentMode,
+    path: _previewCurrentPath,
+    mdHtml: $('previewMd').innerHTML,
+    rawContent: _previewRawContent,
+    rawContentPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copied,
+  };
+
+  console.log(JSON.stringify({ stateAfterStale1, stateAfterFresh2 }));
+"""
+    )
+
+    stale_1 = out["stateAfterStale1"]
+    assert "VERSION 1 (STALE)" not in stale_1["mdHtml"], (
+        f"stale first read rendered into DOM: {stale_1}"
+    )
+    assert stale_1["rawContent"] != "VERSION 1 (STALE)", (
+        f"stale first read claimed raw content authority: {stale_1}"
+    )
+
+    fresh_2 = out["stateAfterFresh2"]
+    assert fresh_2["mode"] == "md", f"fresh 2 mode expected md, got {fresh_2}"
+    assert fresh_2["path"] == "notes/readme.md", f"fresh 2 path unexpected: {fresh_2}"
+    assert "<p>VERSION 2 (FRESH)</p>" in fresh_2["mdHtml"], (
+        f"fresh 2 DOM unexpected: {fresh_2}"
+    )
+    assert fresh_2["rawContent"] == "VERSION 2 (FRESH)", (
+        f"fresh 2 raw content unexpected: {fresh_2}"
+    )
+    assert fresh_2["copyable"] is True, f"fresh 2 was not copyable: {fresh_2}"
+    assert fresh_2["copied"] == ["VERSION 2 (FRESH)"], f"copied wrong text: {fresh_2}"
+
+
+@requires_node
+def test_clear_preview_regression_fails_when_generation_bump_removed():
+    """Maintainer review PR #6957 requirement:
+    'The test must fail when the clear-time generation bump is removed.'
+
+    Simulates pre-fix clearPreview() by removing the generation bump. Without
+    advancing the generation, openFile()'s post-await check fails to detect staleness,
+    repopulating preview mode and rendered DOM after clearPreview().
+    """
+    boot_no_bump = BOOT_JS.replace(
+        "if(typeof bumpPreviewGeneration==='function') bumpPreviewGeneration();",
+        "// no bump",
+    )
+    # Sanity check that the replacement actually occurred
+    assert "// no bump" in boot_no_bump, (
+        "failed to simulate clearPreview without generation bump"
+    )
+
+    out = _deferred_preview_scenario(
+        "notes/doc.md", "# Heading\nBody text", boot_src=boot_no_bump
+    )
+
+    # Without the generation bump, the race reproduces: preview state repopulates
+    assert out["postClearGen"] == out["preClearGen"], (
+        f"generation should not advance without the bump: {out}"
+    )
+    assert out["mode"] == "md", (
+        "expected reproduction of stale repopulation bug when generation bump is missing"
+    )
+    assert out["mdHtml"] == "<p># Heading\nBody text</p>", (
+        "expected stale markdown render in DOM when generation bump is missing"
+    )
