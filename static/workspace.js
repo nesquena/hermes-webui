@@ -1144,17 +1144,9 @@ async function toggleEditMode(){
     // Save
     if(!S.session||!_previewCurrentPath)return;
     const content=$('previewEditArea').value;
-    // Hold the identity of the file being saved across the await: everything
-    // below re-renders the preview and re-labels the raw-content cache from the
-    // live globals, and a save can land after the panel moved to another file.
-    const savePath=_previewCurrentPath;
-    const saveGen=_previewGen;
-    // Same reasoning for identity: `savePath` only names this file inside the
-    // session/workspace the save was issued from, so a save landing after a
-    // session or workspace switch must not re-label the cache under the new
-    // identity's file of the same name (maintainer review PR #6957, blocker 1).
-    const saveSid=S?.session?.session_id || '';
-    const saveWs=S?.session?.workspace || '';
+    // Hold file, gen, and session/workspace identity across await.
+    const savePath=_previewCurrentPath, saveGen=_previewGen;
+    const saveSid=S?.session?.session_id || '', saveWs=S?.session?.workspace || '';
     try{
       const saved=await api(_previewSaveRoute||'/api/file/save',{method:'POST',body:JSON.stringify({
         session_id:S.session.session_id, path:savePath, content
@@ -1170,9 +1162,7 @@ async function toggleEditMode(){
         _previewSaveRoute = '/api/file/office-save';
       }
       _previewDirty=false;
-      // Update read-only views AND the cached raw content so a later
-      // "Render as markdown anyway" force-render reflects the just-saved text
-      // (not the stale pre-edit fetch). #3378 review (Codex).
+      // Update read-only views and raw cache so force-render reflects just-saved text (#3378).
       _previewRawContent = savedContent;
       _previewRawContentPath = _previewCurrentPath;
       claimPreviewRawContent(savePath,saveGen,saveSid,saveWs);
