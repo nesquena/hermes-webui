@@ -6577,9 +6577,9 @@ function _openProfileDropdownShell(){
   dd.classList.add('open');
   _positionProfileDropdown();
   const chip=$('profileChip');
-  if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
+  if(chip && _profileDropdownTrigger===chip){ chip.classList.add('active'); chip.setAttribute('aria-expanded','true'); }
   const tbtn=$('titlebarProfileBtn');
-  if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
+  if(tbtn && _profileDropdownTrigger===tbtn){ tbtn.classList.add('active'); tbtn.setAttribute('aria-expanded','true'); }
 }
 
 async function _profileSwitchPanelLoad(){
@@ -6852,6 +6852,12 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
+  // ARIA listbox contract: the menu is a keyboard-navigable list of options
+  // (ArrowUp/Down/Home/End move focus, Enter/Space selects, Escape closes).
+  // Options get role="option" + tabindex="-1" + aria-selected so screen readers
+  // and keyboard users see the same structure mouse users see.
+  dd.setAttribute('role','listbox');
+  dd.setAttribute('aria-label', t('tab_profiles') || 'Profiles');
   const allProfiles = (Array.isArray(data.profiles) ? data.profiles : []).filter(p => p && typeof p.name === 'string');
   const active = (S.activeProfile && allProfiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
@@ -6860,6 +6866,9 @@ function renderProfileDropdown(data) {
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
+    opt.setAttribute('role','option');
+    opt.setAttribute('tabindex','-1');
+    opt.setAttribute('aria-selected', p.name === active ? 'true' : 'false');
     const meta = [];
     if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
@@ -6869,7 +6878,7 @@ function renderProfileDropdown(data) {
     opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
     opt.onclick = async () => {
-      closeProfileDropdown();
+      closeProfileDropdown({restore:true});
       if (p.name === active) return;
       await switchToProfile(p.name);
     };
@@ -6879,13 +6888,20 @@ function renderProfileDropdown(data) {
   if (!data.single_profile_mode) {
     const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
     const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
+    mgmt.setAttribute('role','option');
+    mgmt.setAttribute('tabindex','-1');
+    mgmt.setAttribute('aria-label', t('manage_profiles'));
     mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
-    mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
+    mgmt.onclick = () => { closeProfileDropdown({restore:true}); mobileSwitchPanel('profiles'); };
     dd.appendChild(mgmt);
   }
   // Sync titlebar label to the resolved active profile
   const tbl = $('titlebarProfileLabel');
   if (tbl) tbl.textContent = active;
+  // Keyboard users: move focus into the just-rendered menu so ArrowUp/Down +
+  // Enter work immediately without an extra click (matches the session action
+  // menu focus-on-open behavior).
+  _focusProfileDropdownOption();
 }
 
 function toggleProfileDropdown(e) {
@@ -6900,8 +6916,11 @@ function toggleProfileDropdown(e) {
   const cached = _profileDropdownBestCachedData();
 
   if(cached && !cached.single_profile_mode){
-    renderProfileDropdown(cached);
+    // Open the shell BEFORE rendering: _focusProfileDropdownOption() only acts
+    // while the menu is open, so render-while-closed would silently drop the
+    // focus-on-open behavior.
     _openProfileDropdownShell();
+    renderProfileDropdown(cached);
   }else{
     _renderProfileDropdownLoading();
     _openProfileDropdownShell();
@@ -6914,8 +6933,8 @@ function toggleProfileDropdown(e) {
       closeProfileDropdown();
       return;
     }
-    renderProfileDropdown(data);
     _openProfileDropdownShell();
+    renderProfileDropdown(data);
   }).catch(e => {
     if(openGen !== _profileDropdownOpenGeneration) return;
     if(cached && !cached.single_profile_mode){
@@ -6927,14 +6946,24 @@ function toggleProfileDropdown(e) {
   });
 }
 
-function closeProfileDropdown() {
+function closeProfileDropdown(opts) {
+  const restore = !!(opts && opts.restore === true);
   _profileDropdownOpenGeneration++;
   const dd = $('profileDropdown');
   if (dd) dd.classList.remove('open');
   const chip=$('profileChip');
-  if(chip) chip.classList.remove('active');
+  if(chip){ chip.classList.remove('active'); chip.setAttribute('aria-expanded','false'); }
   const tbtn=$('titlebarProfileBtn');
-  if(tbtn) tbtn.classList.remove('active');
+  if(tbtn){ tbtn.classList.remove('active'); tbtn.setAttribute('aria-expanded','false'); }
+  if(restore){
+    // Only yank focus back when the keyboard asked for it (Escape / selection).
+    // Click-outside closes must not steal focus from wherever the user moved.
+    const trigger=_profileDropdownTrigger||chip;
+    const focusInside=dd && document.activeElement && dd.contains(document.activeElement);
+    if(trigger && trigger.isConnected && focusInside && typeof trigger.focus==='function'){
+      try{trigger.focus({preventScroll:true});}catch(_){trigger.focus();}
+    }
+  }
 }
 document.addEventListener('click', e => {
   if (!e.target.closest('#profileChipWrap') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
@@ -6942,6 +6971,77 @@ document.addEventListener('click', e => {
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
   if(dd&&dd.classList.contains('open')) _positionProfileDropdown();
+});
+
+// ── Profile dropdown keyboard navigation ─────────────────────────────────────
+// The dropdown is a plain-div menu, so it previously had NO keyboard support:
+// opening it (click or Enter) left focus on the trigger and ArrowUp/Down did
+// nothing, forcing mouse-only selection. Mirror the session action menu pattern
+// (sessions.js _mountSessionActionMenu): options are focusable, arrow keys move
+// focus, Enter/Space select, Escape closes and returns focus to the trigger.
+
+function _profileDropdownOptions(){
+  const dd=$('profileDropdown');
+  return dd ? Array.from(dd.querySelectorAll('.profile-opt')) : [];
+}
+
+function _focusProfileDropdownOption(){
+  const dd=$('profileDropdown');
+  if(!dd || !dd.classList.contains('open')) return;
+  const items=_profileDropdownOptions();
+  if(!items.length) return;
+  let idx=items.findIndex(o=>o.getAttribute('aria-selected')==='true');
+  if(idx<0) idx=0;
+  const target=items[idx];
+  if(target && target!==document.activeElement){
+    try{target.focus({preventScroll:true});}catch(_){target.focus();}
+  }
+}
+
+function _profileDropdownKeydownHandler(e){
+  const dd=$('profileDropdown');
+  if(!dd || !dd.classList.contains('open')) return;
+  const items=_profileDropdownOptions();
+  if(e.key==='Escape'){
+    e.preventDefault();
+    e.stopPropagation();
+    closeProfileDropdown({restore:true});
+    return;
+  }
+  if(!items.length) return;
+  const current=items.indexOf(document.activeElement);
+  let next=-1;
+  if(e.key==='ArrowDown') next=(current+1)%items.length;
+  else if(e.key==='ArrowUp') next=(current-1+items.length)%items.length;
+  else if(e.key==='Home') next=0;
+  else if(e.key==='End') next=items.length-1;
+  if(next>=0 && next!==current){
+    e.preventDefault();
+    const target=items[next];
+    try{target.focus({preventScroll:true});}catch(_){target.focus();}
+    return;
+  }
+  if((e.key==='Enter'||e.key===' ') && current>=0){
+    // Only activate when an option (or the manage row) actually holds focus;
+    // otherwise let the key pass through (e.g. Tab moved focus to the composer).
+    e.preventDefault();
+    items[current].click();
+  }
+}
+document.addEventListener('keydown', _profileDropdownKeydownHandler);
+
+// ArrowUp/Down on the trigger opens the menu and moves focus onto the first
+// option (native Enter/Space on a button already opens it via click).
+['profileChip','titlebarProfileBtn'].forEach(id=>{
+  const el=$(id);
+  if(!el) return;
+  el.addEventListener('keydown', e=>{
+    if(e.key!=='ArrowDown' && e.key!=='ArrowUp') return;
+    const dd=$('profileDropdown');
+    if(dd && dd.classList.contains('open')) return; // menu handler moves focus
+    e.preventDefault();
+    toggleProfileDropdown(e);
+  });
 });
 
 function _openProfileSwitchSessionBrowser(){

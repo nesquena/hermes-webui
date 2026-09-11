@@ -1,0 +1,279 @@
+"""
+Keyboard accessibility guards for the profile dropdown menu.
+
+User-visible failure: the composer/titlebar profile dropdown was a plain-div
+menu with no keyboard support — opening it (click or Enter) left focus on the
+trigger button, ArrowUp/ArrowDown did nothing, and there was no way to select a
+profile without a mouse. This pins the listbox contract (roles, tabindex,
+aria-selected), the arrow/Home/End/Enter/Escape key handler, focus-on-open, and
+focus-restore-on-close.
+"""
+import json
+import subprocess
+import textwrap
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).parent.parent.resolve()
+PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, marker: str) -> str:
+    start = src.index(marker)
+    depth = 0
+    opened = False
+    for idx, ch in enumerate(src[start:], start):
+        if ch == "{":
+            depth += 1
+            opened = True
+        elif ch == "}":
+            depth -= 1
+            if opened and depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"Could not extract function body for {marker}")
+
+
+# ── Source-level guards (no node required) ───────────────────────────────────
+
+
+def test_render_augments_profile_options_with_listbox_aria():
+    body = _function_body(PANELS_JS, "function renderProfileDropdown(data) {")
+    assert "setAttribute('role','listbox')" in body, "menu container must be a listbox"
+    assert "setAttribute('aria-label'," in body, "listbox needs an accessible name"
+    assert "opt.setAttribute('role','option')" in body, "options must be role=option"
+    assert "opt.setAttribute('tabindex','-1')" in body, "options must be programmatically focusable"
+    assert "opt.setAttribute('aria-selected'" in body, "options must expose selection state"
+    assert "_focusProfileDropdownOption();" in body, "focus must move into the menu on render"
+
+
+def test_keydown_handler_moves_and_selects_with_keys():
+    assert "_profileDropdownKeydownHandler" in PANELS_JS
+    body = _function_body(PANELS_JS, "function _profileDropdownKeydownHandler(e){")
+    for branch in ("'Escape'", "'ArrowDown'", "'ArrowUp'", "'Home'", "'End'", "'Enter'||e.key===' '"):
+        assert branch in body, f"keydown handler must handle {branch}"
+    assert "closeProfileDropdown({restore:true});" in body, "Escape must close and restore focus"
+    assert "items[current].click();" in body, "Enter/Space must activate the focused option"
+    assert "current>=0" in body, "Enter/Space must require focus inside the menu"
+
+
+def test_focus_restore_only_on_keyboard_requested_close():
+    body = _function_body(PANELS_JS, "function closeProfileDropdown(opts) {")
+    assert "const restore = !!(opts && opts.restore === true);" in body, "focus restore must be opt-in"
+    assert "dd.contains(document.activeElement)" in body, "restore must not steal focus from outside the menu"
+
+
+def test_keydown_handler_registered_and_triggers_open_on_arrow():
+    assert "document.addEventListener('keydown', _profileDropdownKeydownHandler);" in PANELS_JS
+    body = PANELS_JS[PANELS_JS.index("['profileChip','titlebarProfileBtn'].forEach(id=>{") :]
+    assert "toggleProfileDropdown(e);" in body
+    assert "e.key!=='ArrowDown' && e.key!=='ArrowUp'" in body
+
+
+def test_triggers_declare_listbox_relationship_in_html():
+    assert 'aria-haspopup="listbox"' in INDEX_HTML, "titlebar/composer triggers must declare the popup"
+    assert 'aria-controls="profileDropdown"' in INDEX_HTML
+    assert INDEX_HTML.count('aria-haspopup="listbox"') >= 2
+
+
+def test_focus_ring_stylesheet_for_menu_rows():
+    assert ".profile-opt:focus-visible" in STYLE_CSS
+
+
+# ── Behavioral guards (node execution of the real source) ─────────────────────
+
+
+def _dropdown_module_snippets():
+    return [
+        PANELS_JS[
+            PANELS_JS.index("let _profilesCache = null;")
+            : PANELS_JS.index("function _openProfileSwitchSessionBrowser(){")
+        ],
+    ]
+
+
+def test_keyboard_can_open_navigate_select_escape():
+    snippets = _dropdown_module_snippets()
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        const snippets = {json.dumps(snippets)};
+
+        class ClassList {{
+          constructor() {{ this.values = new Set(); }}
+          add(name) {{ this.values.add(name); }}
+          remove(name) {{ this.values.delete(name); }}
+          contains(name) {{ return this.values.has(name); }}
+        }}
+        class Element {{
+          constructor(tag, id) {{
+            this.tagName = tag;
+            this.id = id || '';
+            this.children = [];
+            this.className = '';
+            this.classList = new ClassList();
+            this.dataset = {{}};
+            this.style = {{}};
+            this.onclick = null;
+            this.textContent = '';
+            this.isConnected = true;
+            this._innerHTML = '';
+            this._attrs = {{}};
+            this._keydowns = [];
+          }}
+          set innerHTML(value) {{
+            this._innerHTML = String(value || '');
+            if (this._innerHTML === '') this.children = [];
+          }}
+          get innerHTML() {{ return this._innerHTML; }}
+          appendChild(child) {{ this.children.push(child); return child; }}
+          setAttribute(key, value) {{ this._attrs[key] = String(value); }}
+          getAttribute(key) {{ return this._attrs[key] !== undefined ? this._attrs[key] : null; }}
+          addEventListener(type, fn) {{ if (type === 'keydown') this._keydowns.push(fn); }}
+          querySelectorAll(selector) {{
+            if (selector === '.profile-opt') return this.children.filter((child) => String(child.className).split(/\\s+/).includes('profile-opt'));
+            return [];
+          }}
+          contains(child) {{ return child === this || !!this.children.find((c) => typeof c.contains === 'function' && c.contains(child)); }}
+          focus() {{ document.activeElement = this; }}
+          click() {{ return typeof this.onclick === 'function' ? this.onclick() : undefined; }}
+        }}
+        const elements = new Map();
+        for (const id of ['profileDropdown', 'profileChip', 'titlebarProfileBtn', 'titlebarProfileLabel']) {{
+          elements.set(id, new Element('div', id));
+        }}
+        globalThis.document = {{
+          hidden: false,
+          activeElement: null,
+          createElement: (tag) => new Element(tag),
+          getElementById: (id) => elements.get(id) || null,
+          addEventListener: (type, fn) => {{ if (type !== 'keydown') return; (document._keydowns || (document._keydowns = [])).push(fn); }},
+          _keydowns: [],
+        }};
+        globalThis.window = {{ addEventListener: () => {{}} }};
+        const store = new Map();
+        globalThis.localStorage = {{
+          getItem: (key) => store.has(key) ? store.get(key) : null,
+          setItem: (key, value) => store.set(key, String(value)),
+          removeItem: (key) => store.delete(key),
+        }};
+        globalThis.$ = (id) => elements.get(id) || null;
+        globalThis.S = {{ activeProfile: 'default' }};
+        globalThis.t = (key, n) => key === 'profile_skill_count' ? `${{n}} skills` : key;
+        globalThis.esc = (value) => String(value == null ? '' : value)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
+        globalThis.li = () => '';
+        globalThis.closeWsDropdown = () => {{}};
+        globalThis.closeModelDropdown = () => {{}};
+        globalThis._positionProfileDropdown = () => {{}};
+        globalThis.showToast = () => {{}};
+        globalThis.mobileSwitchPanel = () => {{}};
+        let switchedTo = null;
+        globalThis.switchToProfile = async (name) => {{ switchedTo = name; S.activeProfile = name; }};
+        const multiProfileResponse = {{
+          active: 'default',
+          single_profile_mode: false,
+          profiles: [
+            {{ name: 'default', visible: true, is_default: true }},
+            {{ name: 'other', visible: true }},
+          ],
+        }};
+        globalThis.api = () => Promise.resolve(multiProfileResponse);
+
+        // Export a test API from INSIDE the eval: the snippet's `let` bindings
+        // (e.g. _profilesCache) are scoped to the eval, so the runner must reach
+        // them through a closure created in the same eval, not through globals.
+        eval(snippets.join(String.fromCharCode(10)) + String.fromCharCode(10) + `;globalThis.__kbTest={{
+          reset() {{
+            _profilesCache = null;
+            _profileDropdownFetchPromise = null;
+            _profileDropdownCacheLoadedFromStorage = false;
+            _profileDropdownOpenGeneration = 0;
+            switchedTo = null;
+            S.activeProfile = 'default';
+            const dd = document.getElementById('profileDropdown');
+            dd.children = [];
+            dd.innerHTML = '';
+            dd.classList.remove('open');
+          }},
+          seedCache(data) {{ _profilesCache = data; }},
+          toggle(triggerId) {{ toggleProfileDropdown({{ currentTarget: document.getElementById(triggerId) }}); }},
+          isOpen() {{ return document.getElementById('profileDropdown').classList.contains('open'); }},
+          options() {{ return document.getElementById('profileDropdown').querySelectorAll('.profile-opt'); }},
+          active() {{ return document.activeElement; }},
+          chipExpanded() {{ return document.getElementById('profileChip').getAttribute('aria-expanded'); }},
+          dispatchKey(key) {{
+            const ev = {{ key, preventDefault() {{}}, stopPropagation() {{}} }};
+            document._keydowns.forEach((fn) => fn(ev));
+          }},
+          triggerKeydown(triggerId, key) {{
+            document.getElementById(triggerId)._keydowns.forEach((fn) => fn({{ key, preventDefault() {{}} }}));
+          }},
+          switched() {{ return switchedTo; }},
+        }};`);
+        if (document._keydowns.length !== 1) throw new Error('keydown handler must be registered exactly once');
+
+        async function runOpenNavigationEnter() {{
+          __kbTest.reset();
+          __kbTest.seedCache(multiProfileResponse);
+          __kbTest.toggle('profileChip');
+          assert.strictEqual(__kbTest.isOpen(), true, 'dropdown should open');
+          const items = __kbTest.options();
+          assert.strictEqual(items.length, 3, 'two profiles + manage row should be rendered');
+          assert.strictEqual(__kbTest.active(), items[0], 'focus should land on the active profile option on open');
+          assert.strictEqual(items[0].getAttribute('aria-selected'), 'true');
+          assert.strictEqual(__kbTest.chipExpanded(), 'true');
+
+          __kbTest.dispatchKey('ArrowDown');
+          assert.strictEqual(__kbTest.active(), items[1], 'ArrowDown moves to the next profile');
+          __kbTest.dispatchKey('ArrowDown');
+          assert.strictEqual(__kbTest.active(), items[2], 'ArrowDown wraps to manage option');
+          __kbTest.dispatchKey('End');
+          assert.strictEqual(__kbTest.active(), items[2], 'End should go to the last option');
+          __kbTest.dispatchKey('Home');
+          assert.strictEqual(__kbTest.active(), items[0], 'Home should go to the first option');
+          __kbTest.dispatchKey('ArrowUp');
+          assert.strictEqual(__kbTest.active(), items[2], 'ArrowUp wraps backwards');
+
+          // Enter on the 'other' profile selects it, closes the menu, and restores focus.
+          __kbTest.dispatchKey('ArrowUp'); // items[1]
+          assert.strictEqual(__kbTest.active(), items[1]);
+          __kbTest.dispatchKey('Enter');
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.strictEqual(__kbTest.switched(), 'other', 'Enter on an option must switch profiles');
+          assert.strictEqual(__kbTest.isOpen(), false, 'selecting must close the dropdown');
+          assert.strictEqual(__kbTest.active(), document.getElementById('profileChip'), 'focus must return to the trigger after selection');
+          assert.strictEqual(__kbTest.chipExpanded(), 'false');
+        }}
+
+        async function runEscapeClosesAndRestores() {{
+          __kbTest.reset();
+          __kbTest.seedCache(multiProfileResponse);
+          __kbTest.toggle('profileChip');
+          assert.strictEqual(__kbTest.isOpen(), true);
+          assert.strictEqual(__kbTest.active(), __kbTest.options()[0]);
+          __kbTest.dispatchKey('Escape');
+          assert.strictEqual(__kbTest.isOpen(), false, 'Escape must close the dropdown');
+          assert.strictEqual(__kbTest.active(), document.getElementById('profileChip'), 'Escape must restore focus to the trigger');
+          assert.strictEqual(__kbTest.switched(), null, 'Escape must not switch profiles');
+        }}
+
+        async function runArrowDownOnTriggerOpens() {{
+          __kbTest.reset();
+          __kbTest.seedCache(multiProfileResponse);
+          // Menu closed: ArrowDown on the composer chip should open the menu.
+          assert.strictEqual(__kbTest.isOpen(), false);
+          __kbTest.triggerKeydown('profileChip', 'ArrowDown');
+          assert.strictEqual(__kbTest.isOpen(), true, 'ArrowDown on the trigger chip should open the menu');
+          assert.strictEqual(__kbTest.active(), __kbTest.options()[0], 'opening via arrow should focus the first option');
+        }}
+
+        (async () => {{
+          await runOpenNavigationEnter();
+          await runEscapeClosesAndRestores();
+          await runArrowDownOnTriggerOpens();
+        }})().catch((err) => {{ console.error(err && err.stack || err); process.exit(1); }});
+        """
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True, text=True, capture_output=True)
