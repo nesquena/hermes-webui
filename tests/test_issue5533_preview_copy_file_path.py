@@ -215,10 +215,28 @@ def test_reset_text_preview_copy_state_hides_button_and_clears_cache():
     assert "btn.style.display='none'" in compact
 
 
-def test_markdown_open_file_failure_resets_copy_state():
-    """The markdown branch of openFile() must call resetTextPreviewCopyState()
-    on load failure so the copy-content button doesn't inherit its visibility
-    from the previously-previewed file (Greptile PR #6957 finding).
+def test_reset_text_preview_copy_state_guards_against_stale_request_ownership():
+    """Greptile P1 (PR #6957, r3768442266): if file A's request fails after file B
+    has already become the current preview, A's stale catch must not clobber B's
+    cached content or hide B's copy button. resetTextPreviewCopyState() takes the
+    owning path and skips the reset when that path no longer matches the current
+    preview.
+    """
+    body = _function_body(WORKSPACE_JS, "resetTextPreviewCopyState")
+    compact = _compact(body)
+
+    assert "resetTextPreviewCopyState(ownerPath)" in compact
+    guard = "if(ownerPath&&_previewCurrentPath!==ownerPath)return;"
+    assert guard in compact
+    # The guard must run before the cache/button are cleared.
+    assert compact.index(guard) < compact.index("_previewRawContent=''")
+
+
+def test_markdown_open_file_failure_resets_copy_state_with_request_owner():
+    """The markdown branch of openFile() must call resetTextPreviewCopyState(path)
+    on load failure, passing its own request's path as the owner, so a stale
+    failure can't clobber a newer file's copy-button state (Greptile P1 PR #6957
+    finding r3768442266).
     """
     # openFile()'s default-parameter signature (`opts={}`) breaks the brace-matching
     # _function_body() helper (its own `{}` closes before the real body opens), so
@@ -226,12 +244,25 @@ def test_markdown_open_file_failure_resets_copy_state():
     # markdown branch's render call and failure catch.
     compact = _compact(WORKSPACE_JS)
 
-    catch_marker = "}catch(e){resetTextPreviewCopyState();setStatus(t('file_open_failed'));}"
+    catch_marker = "}catch(e){resetTextPreviewCopyState(path);setStatus(t('file_open_failed'));}"
     assert catch_marker in compact
     assert "renderMarkdownPreviewContent(data);" in compact
     assert compact.index("renderMarkdownPreviewContent(data);") < compact.index(catch_marker)
     assert "MD_EXTS.has(ext)" in compact
     assert compact.index("MD_EXTS.has(ext)") < compact.index(catch_marker)
+
+
+def test_csv_and_code_open_file_failures_also_pass_request_owner():
+    """The CSV and plain-code/text branches of openFile() must likewise pass their
+    own path as the owner to resetTextPreviewCopyState(), so stale failures in
+    those branches can't clobber a newer preview either (Greptile P1 PR #6957
+    finding r3768442266). All three text-preview failure branches (markdown,
+    csv, plain code/text) call resetTextPreviewCopyState(path).
+    """
+    compact = _compact(WORKSPACE_JS)
+    assert compact.count("resetTextPreviewCopyState(path);") == 3
+    # No call site still uses the old ownerless signature.
+    assert "resetTextPreviewCopyState();" not in compact
 
 
 def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane():

@@ -987,7 +987,11 @@ function showPreview(mode){
   setLargeMarkdownForceRenderVisible(false);
 }
 
-function resetTextPreviewCopyState(){
+function resetTextPreviewCopyState(ownerPath){
+  // Ownership guard: if the preview has moved to a different file since this
+  // openFile() request started, this is a stale request — do NOT clobber the
+  // newer file's cached content or button state (Greptile P1 r3768442266).
+  if(ownerPath && _previewCurrentPath!==ownerPath) return;
   if(typeof _previewRawContent!=='string') return;
   _previewRawContent = '';
   _previewRawContentPath = '';
@@ -1185,7 +1189,7 @@ async function openFile(path, opts={}){
         return;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){resetTextPreviewCopyState();setStatus(t('file_open_failed'));}
+    }catch(e){resetTextPreviewCopyState(path);setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1212,7 +1216,7 @@ async function openFile(path, opts={}){
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      resetTextPreviewCopyState();
+      resetTextPreviewCopyState(path);
       downloadFile(path);
     }
   } else {
@@ -1234,7 +1238,7 @@ async function openFile(path, opts={}){
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){
-      resetTextPreviewCopyState();
+      resetTextPreviewCopyState(path);
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
