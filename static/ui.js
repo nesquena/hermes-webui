@@ -8031,13 +8031,13 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22').replace(/ /g,'%20')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)\r\n]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22').replace(/ /g,'%20')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url.replace(/ /g,'%20')));
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\)\r\n]+)\)/g,(_,label,url)=>_markdownAnchor(label,url.replace(/ /g,'%20')));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
