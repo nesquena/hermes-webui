@@ -21155,8 +21155,19 @@ function _remapWorkspaceCachesAfterMove(oldPath,newPath,isDir){
     delete S._dirCache[_workspaceParentDir(newPath)];
   }
   if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
-    if(_previewCurrentPath===oldPath)_previewCurrentPath=newPath;
-    else if(_previewCurrentPath.startsWith(oldPath+'/'))_previewCurrentPath=newPath+_previewCurrentPath.slice(oldPath.length);
+    let remappedPreviewPath='';
+    if(_previewCurrentPath===oldPath)remappedPreviewPath=newPath;
+    else if(_previewCurrentPath.startsWith(oldPath+'/'))remappedPreviewPath=newPath+_previewCurrentPath.slice(oldPath.length);
+    if(remappedPreviewPath){
+      _previewCurrentPath=remappedPreviewPath;
+      // The header path and breadcrumb are what the user reads to know WHICH
+      // file the copy button copies, so they have to move with the rename —
+      // otherwise the panel keeps showing the old name over the new file's
+      // content (maintainer review PR #6957).
+      const previewPathEl=$('previewPathText');
+      if(previewPathEl)previewPathEl.textContent=_previewCurrentPath;
+      if(typeof renderFileBreadcrumb==='function')renderFileBreadcrumb(_previewCurrentPath);
+    }
   }
   if(typeof _previewRawContentPath!=='undefined'&&_previewRawContentPath){
     if(_previewRawContentPath===oldPath)_previewRawContentPath=newPath;
@@ -21333,23 +21344,31 @@ function _renderTreeItems(container, entries, depth){
           const newName=inp.value.trim();
           if(newName&&newName!==item.name){
             try{
-              await api('/api/file/rename',{method:'POST',body:JSON.stringify({
+              // The server owns the resulting path: it sanitizes the name and
+              // may land the file somewhere other than parent+'/'+newName, so
+              // remap the caches (including the open preview) from the response
+              // and only fall back to the locally-computed path when the
+              // response omits it (maintainer review PR #6957).
+              const data=await api('/api/file/rename',{method:'POST',body:JSON.stringify({
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
               showToast(t('renamed_to')+newName);
               const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
-              const newPath=parent==='.'?newName:parent+'/'+newName;
-              _remapWorkspaceCachesAfterMove(item.path,newPath,isDirLike);
+              const canonicalOldPath=(data&&data.old_path)||item.path;
+              const canonicalNewPath=(data&&data.new_path)||(parent==='.'?newName:parent+'/'+newName);
+              _remapWorkspaceCachesAfterMove(canonicalOldPath,canonicalNewPath,isDirLike);
               // Update expanded dirs cache key if renaming a directory
               if(isDirLike&&S._expandedDirs){
-                S._expandedDirs.delete(item.path);
-                S._expandedDirs.add(newPath);
-                if(S._dirCache&&S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+                S._expandedDirs.delete(canonicalOldPath);
+                S._expandedDirs.add(canonicalNewPath);
+                if(S._dirCache&&S._dirCache[canonicalOldPath]){S._dirCache[canonicalNewPath]=S._dirCache[canonicalOldPath];delete S._dirCache[canonicalOldPath];}
                 if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
               }
-              // Invalidate cache and re-render
+              // Invalidate cache and re-render. The rename did not close the
+              // preview, so keep it: a plain loadDir() would clear the panel the
+              // caches were just remapped for.
               if(S._dirCache)delete S._dirCache[S.currentDir];
-              await loadDir(S.currentDir);
+              await loadDir(S.currentDir,{preservePreview:true});
             }catch(err){showToast(t('rename_failed')+err.message);}
           }
         }
@@ -21641,20 +21660,26 @@ async function _inlineRenameFileItem(item){
   });
   if(!newName||newName===item.name)return;
   try{
-    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
+    // Server-authoritative paths: the rename response reports where the entry
+    // actually ended up, which can differ from parent+'/'+newName once the
+    // server sanitizes the name (maintainer review PR #6957).
+    const data=await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
     showToast(t('renamed_to')+newName);
     const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
-    const newPath=parent==='.'?newName:parent+'/'+newName;
-    _remapWorkspaceCachesAfterMove(item.path,newPath,isDirLike);
+    const canonicalOldPath=(data&&data.old_path)||item.path;
+    const canonicalNewPath=(data&&data.new_path)||(parent==='.'?newName:parent+'/'+newName);
+    _remapWorkspaceCachesAfterMove(canonicalOldPath,canonicalNewPath,isDirLike);
     // Update expanded dirs cache key if renaming a directory
     if(isDirLike&&S._expandedDirs){
-      S._expandedDirs.delete(item.path);
-      S._expandedDirs.add(newPath);
-      if(S._dirCache&&S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+      S._expandedDirs.delete(canonicalOldPath);
+      S._expandedDirs.add(canonicalNewPath);
+      if(S._dirCache&&S._dirCache[canonicalOldPath]){S._dirCache[canonicalNewPath]=S._dirCache[canonicalOldPath];delete S._dirCache[canonicalOldPath];}
       if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
     }
     if(S._dirCache)delete S._dirCache[S.currentDir];
-    await loadDir(S.currentDir);
+    // Keep the open preview: the caches (and _previewCurrentPath) were just
+    // remapped onto the new path, and a plain loadDir() would clear them.
+    await loadDir(S.currentDir,{preservePreview:true});
   }catch(err){showToast(t('rename_failed')+err.message);}
 }
 

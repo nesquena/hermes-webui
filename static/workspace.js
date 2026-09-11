@@ -990,6 +990,13 @@ function previewGenerationIsStale(previewGen){
 // (maintainer review PR #6957).
 let _previewRawContentGen = -1;        // preview generation that claimed the cache
 let _previewRawContentBinary = false;  // cached text is binary / lossily decoded
+// A path is only unique inside one session's workspace: sess-A's "notes.md" and
+// sess-B's "notes.md" are different files with the same label. Switching session
+// or workspace therefore changes what the visible path MEANS, so the cache also
+// records the identity it was read under and is only copyable while that
+// identity is still current (maintainer review PR #6957, blocker 1).
+let _previewRawContentSessionId = '';  // session the cached text was read from
+let _previewRawContentWorkspace = '';  // workspace the cached text was read from
 
 function previewTextLooksBinary(text){
   if(typeof text!=='string') return true;
@@ -1001,10 +1008,16 @@ function previewTextLooksBinary(text){
   return text.indexOf('\u0000')!==-1 || text.indexOf('\uFFFD')!==-1;
 }
 
-function claimPreviewRawContent(path, previewGen){
+function claimPreviewRawContent(path, previewGen, sessionId, workspace){
   const gen = (typeof previewGen === 'number') ? previewGen : _previewGen;
+  // Callers that read before an await pass the identity they captured then;
+  // synchronous callers default to the live identity.
+  const sid = (typeof sessionId === 'string') ? sessionId : (S?.session?.session_id || '');
+  const ws = (typeof workspace === 'string') ? workspace : (S?.session?.workspace || '');
   if(typeof _previewRawContent!=='string' || !path
-     || path!==_previewCurrentPath || previewGenerationIsStale(gen)){
+     || path!==_previewCurrentPath || previewGenerationIsStale(gen)
+     || !sid || sid!==(S?.session?.session_id || '')
+     || ws!==(S?.session?.workspace || '')){
     // Fail closed: this writer does not own the panel, so drop the cache rather
     // than let its text be copied under the current file's label.
     invalidatePreviewRawContent();
@@ -1012,6 +1025,8 @@ function claimPreviewRawContent(path, previewGen){
   }
   _previewRawContentPath = path;
   _previewRawContentGen = gen;
+  _previewRawContentSessionId = sid;
+  _previewRawContentWorkspace = ws;
   _previewRawContentBinary = previewTextLooksBinary(_previewRawContent);
   syncPreviewCopyContentBtn();
   return true;
@@ -1021,6 +1036,8 @@ function invalidatePreviewRawContent(){
   _previewRawContent = '';
   _previewRawContentPath = '';
   _previewRawContentGen = -1;
+  _previewRawContentSessionId = '';
+  _previewRawContentWorkspace = '';
   _previewRawContentBinary = false;
   syncPreviewCopyContentBtn();
 }
@@ -1028,7 +1045,9 @@ function invalidatePreviewRawContent(){
 function previewRawContentIsBinaryForCurrentPreview(){
   return _previewRawContentBinary
     && _previewRawContentPath===_previewCurrentPath
-    && _previewRawContentGen===_previewGen;
+    && _previewRawContentGen===_previewGen
+    && _previewRawContentSessionId===(S?.session?.session_id || '')
+    && _previewRawContentWorkspace===(S?.session?.workspace || '');
 }
 
 function previewRawContentIsCopyable(){
@@ -1036,6 +1055,8 @@ function previewRawContentIsCopyable(){
     && !!_previewRawContentPath
     && _previewRawContentPath===_previewCurrentPath
     && _previewRawContentGen===_previewGen
+    && _previewRawContentSessionId===(S?.session?.session_id || '')
+    && _previewRawContentWorkspace===(S?.session?.workspace || '')
     && !_previewRawContentBinary;
 }
 
@@ -1128,12 +1149,20 @@ async function toggleEditMode(){
     // live globals, and a save can land after the panel moved to another file.
     const savePath=_previewCurrentPath;
     const saveGen=_previewGen;
+    // Same reasoning for identity: `savePath` only names this file inside the
+    // session/workspace the save was issued from, so a save landing after a
+    // session or workspace switch must not re-label the cache under the new
+    // identity's file of the same name (maintainer review PR #6957, blocker 1).
+    const saveSid=S?.session?.session_id || '';
+    const saveWs=S?.session?.workspace || '';
     try{
       const saved=await api(_previewSaveRoute||'/api/file/save',{method:'POST',body:JSON.stringify({
         session_id:S.session.session_id, path:savePath, content
       })});
       const savedContent=saved&&typeof saved.content==='string'?saved.content:content;
-      if(previewGenerationIsStale(saveGen)||_previewCurrentPath!==savePath){showToast(t('saved'));return;}
+      if(previewGenerationIsStale(saveGen)||_previewCurrentPath!==savePath
+         ||(S?.session?.session_id || '')!==saveSid
+         ||(S?.session?.workspace || '')!==saveWs){showToast(t('saved'));return;}
       if(saved && typeof saved.editable==='boolean') _previewServerEditable = saved.editable;
       if(saved && saved.preview_kind) _previewPreviewKind = saved.preview_kind;
       if(saved && saved.office_format) _previewOfficeFormat = saved.office_format;
@@ -1146,7 +1175,7 @@ async function toggleEditMode(){
       // (not the stale pre-edit fetch). #3378 review (Codex).
       _previewRawContent = savedContent;
       _previewRawContentPath = _previewCurrentPath;
-      claimPreviewRawContent(savePath,saveGen);
+      claimPreviewRawContent(savePath,saveGen,saveSid,saveWs);
       if(_previewCurrentMode==='code') $('previewCode').textContent=savedContent;
       else if(_previewCurrentMode==='csv') renderCsvPreviewContent(_previewCurrentPath, savedContent);
       else renderMarkdownPreviewContent({content:savedContent});
@@ -1226,11 +1255,36 @@ async function openFile(path, opts={}){
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
   const cacheBust=bustCache?`&_=${Date.now()}`:'';
 
+  // Identity of the session/workspace this request reads under, captured before
+  // any await. A path only names a file relative to one workspace of one
+  // session, so every post-await write below has to prove that identity is
+  // still current — otherwise a read issued in session A repaints (and offers
+  // for copy) under session B's identically-named file (maintainer review
+  // PR #6957, blocker 1).
+  const capturedSid = S?.session?.session_id || '';
+  const capturedWs = S?.session?.workspace || '';
+
+  // Whether a settled text preview is copyable RIGHT NOW, read before the
+  // generation bump below (the bump would make the settled cache look stale).
+  const settledPreviewWasCopyable = (typeof previewRawContentIsCopyable==='function')
+    ? previewRawContentIsCopyable() : false;
+
   const previewGen = (typeof bumpPreviewGeneration==='function') ? bumpPreviewGeneration() : 0;
 
-  // Binary/download-only formats: trigger browser download, don't preview
+  // Binary/download-only formats: trigger browser download, don't preview.
+  // A download does not change what the panel displays. If a settled text
+  // preview is still on screen and copyable, its cached text is still exactly
+  // the text under the visible path, so carry its ownership onto the generation
+  // this call just bumped instead of pulling the copy control out from under a
+  // preview that is still there. With nothing settled to keep, fail closed
+  // (maintainer review PR #6957).
   if(DOWNLOAD_EXTS.has(ext)){
-    if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
+    if(settledPreviewWasCopyable){
+      _previewRawContentGen = previewGen;
+      if(typeof syncPreviewCopyContentBtn==='function') syncPreviewCopyContentBtn();
+    }else if(typeof invalidatePreviewRawContent==='function'){
+      invalidatePreviewRawContent();
+    }
     downloadFile(path);
     return;
   }
@@ -1284,10 +1338,12 @@ async function openFile(path, opts={}){
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
         : await api(_workspaceRouteForPath(path, 'read'));
-      if(previewGenerationIsStale(previewGen)) return;
+      if(previewGenerationIsStale(previewGen)
+         || (S?.session?.session_id || '')!==capturedSid
+         || (S?.session?.workspace || '')!==capturedWs) return;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
-      claimPreviewRawContent(path,previewGen);
+      claimPreviewRawContent(path,previewGen,capturedSid,capturedWs);
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
         showPreview('code');
         $('previewCode').textContent=data.content;
@@ -1297,7 +1353,9 @@ async function openFile(path, opts={}){
       }
       renderMarkdownPreviewContent(data);
     }catch(e){
-      if(previewGenerationIsStale(previewGen)) return;
+      if(previewGenerationIsStale(previewGen)
+         || (S?.session?.session_id || '')!==capturedSid
+         || (S?.session?.workspace || '')!==capturedWs) return;
       resetTextPreviewCopyState(path,previewGen);setStatus(t('file_open_failed'));
     }
   } else if(HTML_EXTS.has(ext)){
@@ -1319,7 +1377,9 @@ async function openFile(path, opts={}){
   } else if(ext==='.csv'){
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
-      if(previewGenerationIsStale(previewGen)) return;
+      if(previewGenerationIsStale(previewGen)
+         || (S?.session?.session_id || '')!==capturedSid
+         || (S?.session?.workspace || '')!==capturedWs) return;
       if(data.binary){
         if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
         downloadFile(path);
@@ -1328,7 +1388,9 @@ async function openFile(path, opts={}){
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      if(previewGenerationIsStale(previewGen)) return;
+      if(previewGenerationIsStale(previewGen)
+         || (S?.session?.session_id || '')!==capturedSid
+         || (S?.session?.workspace || '')!==capturedWs) return;
       resetTextPreviewCopyState(path,previewGen);
       if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
       downloadFile(path);
@@ -1337,7 +1399,9 @@ async function openFile(path, opts={}){
     // Plain code / text -- but fall back to download if server signals binary
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
-      if(previewGenerationIsStale(previewGen)) return;
+      if(previewGenerationIsStale(previewGen)
+         || (S?.session?.session_id || '')!==capturedSid
+         || (S?.session?.workspace || '')!==capturedWs) return;
       if(data.binary){
         // Server flagged this as binary content
         if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
@@ -1354,7 +1418,9 @@ async function openFile(path, opts={}){
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){
-      if(previewGenerationIsStale(previewGen)) return;
+      if(previewGenerationIsStale(previewGen)
+         || (S?.session?.session_id || '')!==capturedSid
+         || (S?.session?.workspace || '')!==capturedWs) return;
       resetTextPreviewCopyState(path,previewGen);
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){

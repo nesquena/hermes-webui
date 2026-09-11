@@ -3493,8 +3493,15 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
    its text label to icon-only when the RIGHT PANEL (not the viewport) is narrow —
    .rightpanel is a named inline-size container, so this fires on pane resize too,
    staying accessible via the button's title + aria-label. */
-@container rightpanel (max-width:760px){
-  .preview-path #btnCopyPreviewContent .preview-btn-label{display:none;}
+/* Copy file contents is icon-only everywhere (no text label), so there is no
+   label left to fold. On a genuinely narrow pane — the right panel's default
+   width is 300px — the whole control drops out instead of crushing the path and
+   the export cluster (maintainer review PR #6957, blocker 2). `!important`
+   because syncPreviewCopyContentBtn() writes an inline `display:inline-flex`
+   when the content is copyable, and an inline style otherwise wins over this
+   container query. */
+@container rightpanel (max-width:340px){
+  .preview-path #btnCopyPreviewContent{display:none !important;}
 }
 @container rightpanel (max-width:520px){
   .preview-path #btnCopyPreviewRelPath .preview-btn-label{display:none;}

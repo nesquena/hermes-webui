@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
@@ -123,10 +125,16 @@ def test_preview_copy_button_is_accessible_and_icon_only_on_narrow_pane():
 
 
 def test_preview_toolbar_has_copy_content_button():
+    """The control exists and is named in every locale.
+
+    Maintainer review PR #6957 (blocker 2) made it icon-only everywhere, so it
+    carries no visible text label: its name reaches the user through the
+    localized tooltip and accessible name instead of a `data-i18n` span.
+    """
     assert 'id="btnCopyPreviewContent"' in INDEX
     assert 'onclick="copyPreviewContent()"' in INDEX
-    assert 'data-i18n="copy_file_contents"' in INDEX
-    assert "Copy file contents" in INDEX
+    assert 'data-i18n-title="copy_file_contents"' in INDEX
+    assert 'data-i18n-aria-label="copy_file_contents"' in INDEX
 
 
 def test_preview_copy_content_uses_current_preview_raw_content():
@@ -291,6 +299,11 @@ def test_preview_generation_counter_exists_and_openfile_captures_it():
     the generation before the DOWNLOAD_EXTS early return, before any
     other state is touched, so selecting a download-only file while a preview
     request is pending advances the generation and invalidates the pending read.
+
+    The early return does not repaint the panel, so a SETTLED text preview that
+    is still on screen keeps its copy control: its ownership stamp is carried
+    onto the freshly bumped generation instead of being dropped. With nothing
+    settled to keep, it still fails closed (maintainer review PR #6957).
     """
     assert "let _previewGen = 0;" in WORKSPACE_JS
     assert "function bumpPreviewGeneration(){" in WORKSPACE_JS
@@ -304,7 +317,12 @@ def test_preview_generation_counter_exists_and_openfile_captures_it():
 
     download_guard = (
         "if(DOWNLOAD_EXTS.has(ext)){"
-        "if(typeofinvalidatePreviewRawContent==='function')invalidatePreviewRawContent();"
+        "if(settledPreviewWasCopyable){"
+        "_previewRawContentGen=previewGen;"
+        "if(typeofsyncPreviewCopyContentBtn==='function')syncPreviewCopyContentBtn();"
+        "}elseif(typeofinvalidatePreviewRawContent==='function'){"
+        "invalidatePreviewRawContent();"
+        "}"
         "downloadFile(path);"
         "return;"
         "}"
@@ -331,7 +349,9 @@ def test_markdown_open_file_failure_resets_copy_state_with_request_owner():
 
     catch_marker = (
         "}catch(e){"
-        "if(previewGenerationIsStale(previewGen))return;"
+        "if(previewGenerationIsStale(previewGen)"
+        "||(S?.session?.session_id||'')!==capturedSid"
+        "||(S?.session?.workspace||'')!==capturedWs)return;"
         "resetTextPreviewCopyState(path,previewGen);setStatus(t('file_open_failed'));"
         "}"
     )
@@ -360,7 +380,9 @@ def test_csv_and_code_open_file_failures_also_pass_request_owner():
     assert "resetTextPreviewCopyState(path);" not in compact
     # Every catch block that resets copy state bails out first when stale.
     stale_return_before_reset = (
-        "if(previewGenerationIsStale(previewGen))return;"
+        "if(previewGenerationIsStale(previewGen)"
+        "||(S?.session?.session_id||'')!==capturedSid"
+        "||(S?.session?.workspace||'')!==capturedWs)return;"
         "resetTextPreviewCopyState(path,previewGen);"
     )
     assert compact.count(stale_return_before_reset) == 3
@@ -375,11 +397,19 @@ def test_openfile_checks_staleness_immediately_after_each_awaited_read():
     stale SUCCESS could overwrite a newer same-path response.
     """
     compact = _compact(WORKSPACE_JS)
-    stale_check = "if(previewGenerationIsStale(previewGen))return;"
+    stale_check = (
+        "if(previewGenerationIsStale(previewGen)"
+        "||(S?.session?.session_id||'')!==capturedSid"
+        "||(S?.session?.workspace||'')!==capturedWs)return;"
+    )
     # markdown, csv, and plain-code/text branches each have one post-await check
-    # in the try body, plus one in the catch — six total, plus one more inside
-    # resetTextPreviewCopyState() itself (defense in depth) — seven total.
-    assert compact.count(stale_check) == 7
+    # in the try body, plus one in the catch — six total. resetTextPreviewCopyState()
+    # carries a seventh, generation-only check of its own (defense in depth); it
+    # runs synchronously from callers that already proved identity, so it does not
+    # re-check the session/workspace pair.
+    assert compact.count(stale_check) == 6
+    # The seventh guard is resetTextPreviewCopyState()'s own generation-only check.
+    assert compact.count("if(previewGenerationIsStale(previewGen))return;") == 1
 
     read_call = "awaitapi(_workspaceRouteForPath(path,'read'));"
     idx = 0
@@ -412,34 +442,32 @@ def test_bump_workspace_tree_gen_pattern_is_mirrored_by_preview_generation():
     assert normalized_ws_gen == _compact(preview_gen)
 
 
-def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane():
-    """The preview-header copy-content button must stay accessible when its text
-    label is hidden on a narrow pane (#5548 icon-only fold-in): it carries an
-    aria-label, its label span is class-tagged, and a narrow-width media query
-    hides that label.
-    """
-    import re
+def test_preview_copy_content_button_is_icon_only_everywhere_and_stays_accessible():
+    """Maintainer review PR #6957 (blocker 2): the copy-content button is
+    icon-only in EVERY state, not only on a narrow pane.
 
-    # The button carries an explicit aria-label (screen-reader name survives label-hide).
+    With no text label there is nothing to fold, so the button must ship without
+    a .preview-btn-label span while keeping its localized tooltip and accessible
+    name (WCAG 2.5.3) — an icon-only control is unusable if its name is
+    English-only or missing.
+    """
     assert 'id="btnCopyPreviewContent"' in INDEX
     btn = INDEX[INDEX.index('id="btnCopyPreviewContent"') :]
     btn = btn[: btn.index("</button>")]
     assert 'aria-label="Copy file contents"' in btn
-    assert 'class="preview-btn-label"' in btn
-    # Localized tooltip + accessible name (WCAG 2.5.3): the icon-only state must not
-    # leave a Russian/German user with an English tooltip/screen-reader name.
+    assert 'title="Copy file contents"' in btn
+    assert "<svg" in btn, "the icon-only button must keep its glyph"
+    assert "preview-btn-label" not in btn, (
+        "the copy-content button must carry no visible text label at any width"
+    )
+    assert ">Copy file contents<" not in btn, (
+        "the copy-content button must not render its name as button text"
+    )
+    # Localized tooltip + accessible name: the icon-only state must not leave a
+    # Russian/German user with an English tooltip/screen-reader name.
     assert 'data-i18n-title="copy_file_contents"' in btn
     assert 'data-i18n-aria-label="copy_file_contents"' in btn
-    # A narrow-PANE container query (right panel, not viewport) hides the label
-    # (icon-only), keeping the glyph — so it fires on pane resize even on desktop.
-    # #btnCopyPreviewContent folds at 760px while #btnCopyPreviewRelPath folds at 520px.
-    assert re.search(
-        r"@container\s+rightpanel[^{]*max-width:\s*760px[^{]*\{[\s\S]*?"
-        r"\.preview-path\s+#btnCopyPreviewContent\s+\.preview-btn-label\s*\{\s*display:\s*none",
-        STYLE,
-    ), (
-        "expected a @container rightpanel query hiding the copy-content-button label at 760px"
-    )
+    # The sibling relative-path button keeps its label-fold rule unchanged.
     assert re.search(
         r"@container\s+rightpanel[^{]*max-width:\s*520px[^{]*\{[^}]*"
         r"\.preview-path\s+#btnCopyPreviewRelPath\s+\.preview-btn-label\s*\{\s*display:\s*none",
@@ -615,8 +643,12 @@ let _previewRawContent='';
 let _previewRawContentPath='';
 let _previewRawContentGen=-1;
 let _previewRawContentBinary=false;
+// A cached preview belongs to one session's workspace, so the stub carries the
+// same identity pair the production cache stamps (maintainer review PR #6957).
+let _previewRawContentSessionId='';
+let _previewRawContentWorkspace='';
 let _previewGen=0;
-let S={session:{session_id:'sess-1'}};
+let S={session:{session_id:'test-session', workspace:'/test/workspace'}};
 let api=async()=>({});
 
 // Shim for the post-fix ownership chokepoint so a PRE-fix tree still runs the
@@ -906,7 +938,8 @@ def test_markdown_branch_routes_its_cache_write_through_the_ownership_chokepoint
     binary gate and the (path, generation) ownership stamp cannot drift apart."""
     compact = _compact(WORKSPACE_JS)
     assert (
-        "_previewRawContent=data.content;_previewRawContentPath=path;claimPreviewRawContent(path,previewGen);"
+        "_previewRawContent=data.content;_previewRawContentPath=path;"
+        "claimPreviewRawContent(path,previewGen,capturedSid,capturedWs);"
         in compact
     ), "the markdown branch must hand its cache write to claimPreviewRawContent()"
     for renderer in ("renderCodePreviewContent", "renderCsvPreviewContent"):
@@ -1622,9 +1655,12 @@ def test_binary_and_download_fallback_invalidates_copy_state():
     rawContentPath: _previewRawContentPath,
   };
 
-  // 2. Open a binary file that returns data.binary: true
+  // 2. Open a file the server flags as binary. The extension must NOT be in
+  //    DOWNLOAD_EXTS — those return from openFile()'s synchronous prologue
+  //    before api() is ever called, which is a different code path (see
+  //    test_settled_text_preview_preserved_on_direct_download).
   api = async (url) => ({ binary: true });
-  await openFile("data.bin");
+  await openFile("data.custom");
   await tick();
   const stateBinary = {
     copyBtnDisplay: $('btnCopyPreviewContent').style.display,
@@ -1645,7 +1681,7 @@ def test_binary_and_download_fallback_invalidates_copy_state():
         f"raw content was not cleared for binary file: {out}"
     )
     assert out["stateBinary"]["rawContentPath"] == ""
-    assert "data.bin" in out["stateBinary"]["downloads"]
+    assert "data.custom" in out["stateBinary"]["downloads"]
 
 
 @requires_node
@@ -1699,3 +1735,402 @@ def test_rename_previewed_file_remaps_raw_content_and_keeps_copyable():
     assert out["afterRename"]["copyable"] is True
     assert out["afterRename"]["copied"] == ["Editable note content"]
     assert not any(t["msg"] == "content_not_available" for t in out["afterRename"]["toasts"])
+
+
+# ── Maintainer feedback regression suite ─────────────────────────────────────
+# Four behaviours the maintainer called out as must-not-regress:
+#   1. a direct download must not tear down the settled text preview behind it,
+#   2. both rename entry points must bind the SERVER's canonical paths,
+#   3. the raw-content cache is only valid inside the session/workspace that
+#      produced it — including across an await inside openFile(),
+#   4. at the 300px default right-panel width the copy control folds away, and
+#      its accessible name is localized everywhere it ships.
+
+
+@requires_node
+def test_settled_text_preview_preserved_on_direct_download():
+    """Maintainer feedback 1: downloading a .zip does not change what the panel
+    DISPLAYS, so a settled, copyable text preview must survive it intact.
+
+    openFile()'s DOWNLOAD_EXTS branch returns from the synchronous prologue —
+    after bumping the preview generation. Without carrying the settled cache's
+    ownership onto the new generation, the copy button would silently vanish
+    (and copying would fail through to content_not_available) from under a
+    preview that is still on screen and still showing the very same bytes.
+    """
+    out = _run_preview_scenario(
+        """
+  api = async () => ({content: 'My notes'});
+  await openFile('notes.txt');
+  await tick();
+
+  const settled = {
+    pathText: $('previewPathText').textContent,
+    curPath: _previewCurrentPath,
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    gen: _previewGen,
+  };
+
+  // A download-only extension: openFile() returns from its synchronous
+  // prologue, so api() is never called for it.
+  api = async () => { throw new Error('download-only file must not be read'); };
+  await openFile('archive.zip');
+  await tick();
+
+  const afterDownload = {
+    pathText: $('previewPathText').textContent,
+    curPath: _previewCurrentPath,
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    gen: _previewGen,
+    downloads: [...downloads],
+  };
+
+  await copyPreviewContent();
+
+  console.log(JSON.stringify({
+    settled, afterDownload, copied, toasts,
+  }));
+"""
+    )
+
+    settled = out["settled"]
+    after = out["afterDownload"]
+
+    # The text preview settled and offered its content for copy.
+    assert settled["pathText"] == "notes.txt"
+    assert settled["curPath"] == "notes.txt"
+    assert settled["rawContent"] == "My notes"
+    assert settled["copyable"] is True, f"text preview never became copyable: {settled}"
+    assert settled["copyBtnDisplay"] == "inline-flex"
+
+    # The download happened...
+    assert "archive.zip" in after["downloads"], (
+        f"download-only file was not downloaded: {after}"
+    )
+
+    # ...and the panel still shows notes.txt, unchanged.
+    assert after["pathText"] == "notes.txt", (
+        f"download repainted the preview header: {after['pathText']}"
+    )
+    assert after["curPath"] == "notes.txt", (
+        f"download moved _previewCurrentPath: {after['curPath']}"
+    )
+    assert after["rawContent"] == "My notes", (
+        f"download dropped the settled raw content: {after['rawContent']!r}"
+    )
+    assert after["rawPath"] == "notes.txt"
+
+    # The copy control stays offered, and still copies the right bytes.
+    assert after["copyable"] is True, (
+        f"settled preview stopped being copyable after a download: {after}"
+    )
+    assert after["copyBtnDisplay"] == "inline-flex", (
+        f"copy button was hidden by an unrelated download: {after['copyBtnDisplay']}"
+    )
+    assert out["copied"] == ["My notes"], (
+        f"copy after download put the wrong bytes on the clipboard: {out['copied']}"
+    )
+    assert not any(
+        tst["msg"] in ("content_not_available", "content_binary_not_copyable")
+        for tst in out["toasts"]
+    ), f"copy after download failed through to an error toast: {out['toasts']}"
+
+
+def _rename_entry_point_sources():
+    """Source of both rename entry points: the prompt-dialog rename and the
+    double-click inline rename inside the tree renderer."""
+    inline = _function_body(UI_JS, "_inlineRenameFileItem")
+    tree = _function_body(UI_JS, "_renderTreeItems")
+    assert "'/api/file/rename'" in tree, (
+        "double-click inline rename not found in _renderTreeItems()"
+    )
+    start = tree.index("'/api/file/rename'")
+    # Back up past `const data=await api(` so the binding itself is in the slice.
+    dblclick = tree[max(0, start - 200) :]
+    dblclick = dblclick[: dblclick.index("inp.replaceWith(")]
+    return {"_inlineRenameFileItem": inline, "_renderTreeItems dblclick": dblclick}
+
+
+@requires_node
+def test_rename_entry_points_bind_server_canonical_path_and_preserve_preview():
+    """Maintainer feedback 2: the SERVER owns the post-rename path.
+
+    Both rename entry points must remap the caches from the /api/file/rename
+    response (data.old_path / data.new_path) rather than from the locally
+    guessed parent+'/'+newName — the server sanitizes the requested name, so a
+    locally-computed path can name a file that does not exist. They must also
+    reload the directory with {preservePreview:true}, since the rename did not
+    close the panel and a plain loadDir() would clear the caches that were just
+    remapped.
+    """
+    for label, src in _rename_entry_point_sources().items():
+        compact = _compact(src)
+        assert "awaitapi('/api/file/rename'" in compact, (
+            f"{label}: rename is not issued through /api/file/rename"
+        )
+        assert "constdata=awaitapi('/api/file/rename'" in compact, (
+            f"{label}: the rename response is not bound to a local `data`"
+        )
+        assert "data.old_path" in compact, (
+            f"{label}: does not read the server's canonical old_path"
+        )
+        assert "data.new_path" in compact, (
+            f"{label}: does not read the server's canonical new_path"
+        )
+        assert "constcanonicalOldPath=(data&&data.old_path)||" in compact, (
+            f"{label}: canonicalOldPath must prefer the server's old_path"
+        )
+        assert "constcanonicalNewPath=(data&&data.new_path)||" in compact, (
+            f"{label}: canonicalNewPath must prefer the server's new_path"
+        )
+        assert (
+            "_remapWorkspaceCachesAfterMove(canonicalOldPath,canonicalNewPath" in compact
+        ), f"{label}: canonical paths are not handed to _remapWorkspaceCachesAfterMove()"
+        assert "loadDir(S.currentDir,{preservePreview:true})" in compact, (
+            f"{label}: the reload after rename must preserve the open preview"
+        )
+
+    script = (
+        _DOM_STUB
+        + "\n"
+        + _js_functions(WORKSPACE_JS, _PREVIEW_FNS)
+        + "\n"
+        + _js_functions(UI_JS, ["_workspaceParentDir", "_remapWorkspaceCachesAfterMove"])
+        + """
+  (async () => {
+    api = async () => ({content: 'Text'});
+    await openFile('docs/old name.md');
+    await tick();
+
+    const before = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      pathText: $('previewPathText').textContent,
+      copyable: previewRawContentIsCopyable(),
+    };
+
+    // The server sanitized 'old name.md' -> 'canonical_new.md'; the UI must
+    // follow the response, not its own guess.
+    _remapWorkspaceCachesAfterMove('docs/old name.md', 'docs/canonical_new.md', false);
+
+    await copyPreviewContent();
+
+    const after = {
+      curPath: _previewCurrentPath,
+      rawPath: _previewRawContentPath,
+      pathText: $('previewPathText').textContent,
+      copyable: previewRawContentIsCopyable(),
+      copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+      copied: [...copied],
+      toasts: [...toasts],
+    };
+
+    console.log(JSON.stringify({before, after}));
+  })().catch(e => {console.error(e); process.exit(1);});
+"""
+    )
+    out = _run_node(script)
+
+    assert out["before"]["copyable"] is True, (
+        f"preview never settled before the rename: {out['before']}"
+    )
+    assert out["before"]["pathText"] == "docs/old name.md"
+
+    after = out["after"]
+    assert after["curPath"] == "docs/canonical_new.md", (
+        f"_previewCurrentPath did not follow the server path: {after['curPath']}"
+    )
+    assert after["rawPath"] == "docs/canonical_new.md", (
+        f"_previewRawContentPath did not follow the server path: {after['rawPath']}"
+    )
+    assert after["pathText"] == "docs/canonical_new.md", (
+        f"the header still shows the pre-rename name: {after['pathText']}"
+    )
+    assert after["copyable"] is True, (
+        f"the preview stopped being copyable after the rename: {after}"
+    )
+    assert after["copyBtnDisplay"] == "inline-flex"
+    assert after["copied"] == ["Text"], (
+        f"copy after rename did not reach the clipboard: {after['copied']}"
+    )
+    assert not any(tst["msg"] == "content_not_available" for tst in after["toasts"]), (
+        f"copy after rename failed through to content_not_available: {after['toasts']}"
+    )
+
+
+@requires_node
+def test_session_and_workspace_identity_isolation_prevents_wrong_bytes():
+    """Maintainer feedback 3 (blocker 1): a relative path only names a file
+    inside ONE session's workspace.
+
+    sess-a's 'README.md' and sess-b's 'README.md' are different files with the
+    same label, so the raw-content cache must record the identity it was read
+    under and stop being copyable the moment that identity changes — both for a
+    settled cache (session switch) and for a read that crosses an await inside
+    openFile() (the post-await race below).
+    """
+    out = _run_preview_scenario(
+        """
+  // 1. Session A reads README.md and settles.
+  S.session = {session_id: 'sess-a', workspace: '/workspace/a'};
+  api = async () => ({content: 'Session A content'});
+  await openFile('README.md');
+  await tick();
+
+  const sessA = {
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+  };
+
+  // 2. Switch to session B (a different workspace). The switch entry points
+  //    call invalidatePreviewRawContent(); do the same here.
+  S.session = {session_id: 'sess-b', workspace: '/workspace/b'};
+  invalidatePreviewRawContent();
+
+  const sessB = {
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+  };
+
+  // 3. Post-await race: a read issued under sess-b resolves only after the
+  //    session moved on to sess-c. The identity captured before the await no
+  //    longer matches, so the bytes must be dropped, not claimed.
+  let release = null;
+  api = () => new Promise(res => { release = () => res({content: 'Session B content'}); });
+  const pending = openFile('README.md');
+  await tick();
+  const inFlightSid = S.session.session_id;
+
+  S.session.session_id = 'sess-c';
+  release();
+  await pending;
+  await tick();
+
+  await copyPreviewContent();
+
+  const race = {
+    inFlightSid,
+    liveSid: S.session.session_id,
+    curPath: _previewCurrentPath,
+    rawContent: _previewRawContent,
+    rawPath: _previewRawContentPath,
+    rawGen: _previewRawContentGen,
+    rawSid: _previewRawContentSessionId,
+    copyable: previewRawContentIsCopyable(),
+    copyBtnDisplay: $('btnCopyPreviewContent').style.display,
+    mdHtml: $('previewMd').innerHTML,
+    copied: [...copied],
+    toasts: [...toasts],
+  };
+
+  console.log(JSON.stringify({sessA, sessB, race}));
+"""
+    )
+
+    assert out["sessA"]["copyable"] is True, (
+        f"session A's own read was not copyable: {out['sessA']}"
+    )
+    assert out["sessA"]["rawContent"] == "Session A content"
+    assert out["sessA"]["copyBtnDisplay"] == "inline-flex"
+
+    assert out["sessB"]["copyable"] is False, (
+        f"session A's bytes stayed copyable under session B: {out['sessB']}"
+    )
+    assert out["sessB"]["rawContent"] == ""
+    assert out["sessB"]["rawPath"] == ""
+    assert out["sessB"]["copyBtnDisplay"] == "none"
+
+    race = out["race"]
+    assert race["inFlightSid"] == "sess-b"
+    assert race["liveSid"] == "sess-c"
+    assert race["rawContent"] == "", (
+        f"a read issued in sess-b claimed the cache under sess-c: {race['rawContent']!r}"
+    )
+    assert race["rawPath"] == ""
+    assert race["rawGen"] == -1
+    assert race["rawSid"] == ""
+    assert race["copyable"] is False, f"stale-session read marked copyable: {race}"
+    assert race["copyBtnDisplay"] == "none"
+    assert "Session B content" not in race["mdHtml"], (
+        f"stale-session read repainted the preview: {race['mdHtml']}"
+    )
+    assert "Session B content" not in race["copied"], (
+        f"stale-session bytes reached the clipboard: {race['copied']}"
+    )
+    assert any(tst["msg"] == "content_not_available" for tst in race["toasts"]), (
+        f"copying after a rejected cross-session read must fail closed: {race['toasts']}"
+    )
+
+    # The identity guard is only real if every switch entry point runs it.
+    for label, src in (
+        ("sessions.js newSession", _function_body(SESSIONS_JS, "newSession")),
+        ("sessions.js loadSession", _function_body(SESSIONS_JS, "loadSession")),
+        ("panels.js switchToWorkspace", _function_body(PANELS_JS, "switchToWorkspace")),
+        ("panels.js switchToProfile", _function_body(PANELS_JS, "switchToProfile")),
+    ):
+        assert "invalidatePreviewRawContent()" in src, (
+            f"{label} does not invalidate the preview raw-content cache on switch"
+        )
+
+
+def test_300px_default_width_container_rule_and_locale_coverage():
+    """Maintainer feedback 4 (blocker 2): at the right panel's 300px default
+    width the copy control must drop out entirely rather than crush the path,
+    it must carry no text label to fold, and its accessible name must be
+    localized in every locale that ships the feature.
+    """
+    # A @container query on the right panel (not a viewport media query) hides
+    # the whole button at the 340px breakpoint, which covers the 300px default.
+    assert re.search(
+        r"@container\s+rightpanel\s*\(\s*max-width:\s*340px\s*\)\s*\{[^}]*"
+        r"\.preview-path\s+#btnCopyPreviewContent\s*\{[^}]*display:\s*none",
+        STYLE,
+    ), (
+        "expected a @container rightpanel (max-width:340px) rule hiding "
+        "#btnCopyPreviewContent with display:none"
+    )
+    rule_start = STYLE.index("@container rightpanel (max-width:340px)")
+    rule = STYLE[rule_start : STYLE.index("}", STYLE.index("{", rule_start)) + 1]
+    assert "#btnCopyPreviewContent" in rule
+    assert "display:none" in rule
+    # syncPreviewCopyContentBtn() writes an inline display, which would beat a
+    # plain container-query declaration.
+    assert "!important" in rule, (
+        "the fold rule must out-rank syncPreviewCopyContentBtn()'s inline display"
+    )
+
+    # Nothing to fold: the button ships icon-only, with no label span.
+    btn = INDEX[INDEX.index('id="btnCopyPreviewContent"') :]
+    btn = btn[: btn.index("</button>")]
+    assert "preview-btn-label" not in btn, (
+        "#btnCopyPreviewContent must not carry a .preview-btn-label span"
+    )
+
+    # Its only accessible name is the localized string, so that string has to
+    # exist in every locale that ships the feature — including de and ru.
+    baseline = I18N_JS.count("content_not_available:")
+    assert baseline >= 15, f"unexpected locale coverage baseline: {baseline}"
+    assert I18N_JS.count("copy_file_contents:") == baseline, (
+        f"copy_file_contents ships in {I18N_JS.count('copy_file_contents:')} locales, "
+        f"expected {baseline}"
+    )
+    english = _locale_string("en", "copy_file_contents")
+    assert english == "Copy file contents"
+    for locale in ("de", "ru", "fr", "es", "ja", "zh"):
+        translated = _locale_string(locale, "copy_file_contents")
+        assert translated, f"copy_file_contents is empty in the {locale} locale"
+        assert translated != english, (
+            f"copy_file_contents is left untranslated (English) in the {locale} locale"
+        )
+    assert _locale_string("de", "copy_file_contents") == "Dateiinhalt kopieren"
+    assert _locale_string("ru", "copy_file_contents") == "Копировать содержимое файла"
