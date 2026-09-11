@@ -76,10 +76,6 @@ def _expected_walked() -> set[str]:
     }
 
 
-def _expected_names(outcome: str) -> set[str]:
-    return {name for name, _, entry_outcome in SKILLS_TREE.values() if entry_outcome == outcome}
-
-
 @pytest.fixture()
 def agent_absent(monkeypatch):
     """Simulate the agent-less deployment: importing anything under ``agent.``
@@ -170,11 +166,16 @@ def test_agent_backed_path_counts_these_shapes_accurately(tmp_path):
     """Positive control (agent source present): the fixture above is a real
     semantic trap, not a tree with nothing to count.
 
-    - the index walk yields exactly the non-pruned SKILL.md files, so the
-      support/dependency/VCS/org-mirror files a naive local ``os.walk`` would
-      pick up are invisible to the count;
+    The fixture's expectations are derived from the paths the agent's index
+    walk actually yields, because that walk (and its exclusion list) belongs to
+    the agent package and differs between deployments. What this asserts:
+
+    - the compatible total stays strictly below the walked file count — the
+      support/dependency/VCS/org-mirror files a naive local ``os.walk`` picks
+      up are either pruned by the walk or, when the walk keeps them, still not
+      enough to reach the walk's file count;
     - the platform-incompatible and duplicate-declared-name files do not add to
-      the compatible total, which therefore stays below the walk's file count;
+      the compatible total;
     - identity comes from frontmatter ``name``: the disabled ``my-skill`` (a
       declared name, not a directory) is compatible but not enabled;
     - dropping that config disable flips it to enabled without changing the
@@ -191,19 +192,35 @@ def test_agent_backed_path_counts_these_shapes_accurately(tmp_path):
     }
     on_disk = {p.relative_to(skills).as_posix() for p in skills.rglob("SKILL.md")}
 
-    expected_walked = _expected_walked()
-    expected_compatible = _expected_names(COUNTED)
+    # The index walk itself belongs to the agent package and its exclusion list
+    # is version-dependent, so this test does not freeze it: every expectation
+    # below is derived from the paths the walk actually yielded. (Removing the
+    # local mirror of that walk is the point of #7305 — the fallback reported
+    # (0, 0) instead of guessing.)
+    assert _expected_walked() <= walked, "the walk must keep the non-pruned skills"
+    assert walked <= on_disk
+
+    expected_compatible = {
+        name
+        for rel, (name, platform, _outcome) in SKILLS_TREE.items()
+        if rel in walked and platform is None
+    }
     expected_enabled = expected_compatible - DISABLED_NAMES
 
-    # The fixture must contain paths a naive scan would over-count...
-    assert on_disk > walked, "fixture must include SKILL.md files the index walk prunes"
-    # ...and the walk must still see exactly the paths it is documented to keep.
-    assert walked == expected_walked
+    # The fixture is a real semantic trap: the compatible total must stay below
+    # the walked file count. If the walk pruned the support/dependency/VCS/org
+    # files the count drops because those files are gone; if it did not, the
+    # count still drops because the platform-incompatible file is filtered out
+    # and the two directories declaring `my-skill` collapse to one logical
+    # skill.
+    assert len(expected_compatible) < len(walked), (
+        "fixture must make the compatible total fall below the walked file count"
+    )
 
     enabled, compatible = profiles._compute_profile_skills_stats(home)
 
-    assert compatible == len(expected_compatible)
-    assert compatible < len(walked)
+    assert compatible == len(expected_compatible), (compatible, expected_compatible)
+    assert compatible < len(on_disk)
     assert enabled == len(expected_enabled)
 
     (home / "config.yaml").write_text(CONFIG_WITHOUT_DISABLE, encoding="utf-8")
