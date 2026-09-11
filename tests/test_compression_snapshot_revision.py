@@ -470,16 +470,28 @@ def test_stale_non_prefix_partial_uses_token_and_stops_at_next_user():
     ]
 
 
+class _ContractAgent:
+    """A contract-v2 callable whose live turn id the envelope must match."""
+
+    TURN_BOUNDARY_CONTRACT = 2
+
+    def __init__(self, turn_id):
+        self._current_turn_id = turn_id
+        self._persist_user_message_idx = None
+
+
 def test_non_prefix_partial_uses_agent_turn_boundary_without_webui_token():
     session = Session(session_id="agent-boundary-partial", messages=[], context_messages=[])
     result = {
         "partial": True,
+        "turn_boundary_contract": 2,
         "turn_id": "agent-turn-42",
+        "messages_projection": "full",
         "current_turn_user_idx": 2,
         "messages": [
             {"role": "user", "content": "repeat prompt"},
             {"role": "assistant", "content": "historical answer"},
-            {"role": "user", "content": "  repeat   prompt  "},
+            {"role": "user", "content": "  repeat   prompt  ", "_turn_id": "agent-turn-42"},
             {"role": "assistant", "content": "current partial"},
             {"role": "user", "content": "later turn"},
             {"role": "assistant", "content": "later answer"},
@@ -488,6 +500,7 @@ def test_non_prefix_partial_uses_agent_turn_boundary_without_webui_token():
     identity = streaming._resolve_active_turn_authority(
         {"token": "webui-token", "text": "repeat prompt", "turn_id": "", "current_turn_user_idx": None},
         result=result,
+        agent=_ContractAgent("agent-turn-42"),
     )
 
     appended = streaming._append_result_partial_on_error(
@@ -502,12 +515,14 @@ def test_non_prefix_partial_uses_agent_turn_boundary_without_webui_token():
 def test_non_prefix_self_heal_accepts_agent_turn_boundary_without_webui_token(terminal):
     result = {
         "completed": True,
+        "turn_boundary_contract": 2,
         "turn_id": "agent-turn-43",
+        "messages_projection": "full",
         "current_turn_user_idx": 2,
         "messages": [
             {"role": "user", "content": "repeat prompt"},
             {"role": "assistant", "content": "historical answer"},
-            {"role": "user", "content": " repeat\n prompt "},
+            {"role": "user", "content": " repeat\n prompt ", "_turn_id": "agent-turn-43"},
             {"role": "assistant", "content": f"healed after {terminal}"},
             {"role": "user", "content": "later turn"},
             {"role": "assistant", "content": "later answer"},
@@ -516,6 +531,7 @@ def test_non_prefix_self_heal_accepts_agent_turn_boundary_without_webui_token(te
     identity = streaming._resolve_active_turn_authority(
         {"token": "webui-token", "text": "repeat prompt", "turn_id": "", "current_turn_user_idx": None},
         result=result,
+        agent=_ContractAgent("agent-turn-43"),
     )
 
     assert streaming._self_heal_result_succeeded(
@@ -670,11 +686,13 @@ def test_differing_live_and_result_snapshots_are_exact_once(
     )
     result = {
         "partial": True,
+        "turn_boundary_contract": 2,
         "turn_id": "agent-current-turn",
+        "messages_projection": "full",
         "current_turn_user_idx": 1,
         "messages": [
             {"role": "assistant", "content": "[compacted] history"},
-            {"role": "user", "content": " current\n prompt "},
+            {"role": "user", "content": " current\n prompt ", "_turn_id": "agent-current-turn"},
             {"role": "assistant", "content": result_snapshot},
             {"role": "user", "content": "later turn"},
             {"role": "assistant", "content": "later wrong"},
@@ -683,6 +701,7 @@ def test_differing_live_and_result_snapshots_are_exact_once(
     identity = streaming._resolve_active_turn_authority(
         {"token": token, "text": "current prompt"},
         result=result,
+        agent=_ContractAgent("agent-current-turn"),
     )
     monkeypatch.setitem(streaming.STREAM_PARTIAL_TEXT, stream_id, live_snapshot)
     monkeypatch.setitem(streaming.STREAM_REASONING_TEXT, stream_id, "")
@@ -897,6 +916,10 @@ def test_webui_run_missing_explicit_profile_passes_no_foreign_revision(
                 "completed": True,
                 "final_response": "ok",
                 "messages": [
+                    # Like the real Agent, return the full history plus this turn's rows: a
+                    # rewritten history without an exported turn boundary fails closed (no
+                    # text-based current-turn inference), which is not this test's subject.
+                    *list(kwargs.get("conversation_history") or []),
                     {"role": "user", "content": kwargs["persist_user_message"]},
                     {"role": "assistant", "content": "ok"},
                 ],
@@ -1297,7 +1320,7 @@ def _repeated_prompt_collision_result_messages(prompt, *, current_answer):
         {"role": "assistant", "content": "[compacted] summary of earlier context"},
         {"role": "user", "content": prompt},  # shifted probe target (historical)
         {"role": "assistant", "content": "historical answer"},  # historical-only prose
-        {"role": "user", "content": prompt},  # exact Agent index target (current)
+        {"role": "user", "content": prompt, "_turn_id": "agent-heal-turn"},  # exact target (current, marked)
     ]
     if current_answer is not None:
         rows.append({"role": "assistant", "content": current_answer})
@@ -1350,6 +1373,8 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
 
     class RepeatedPromptAgent:
         runs = 0
+        TURN_BOUNDARY_CONTRACT = 2
+        _current_turn_id = "agent-heal-turn"
 
         def __init__(self, session_id=None, **_kwargs):
             self.session_id = session_id
@@ -1382,7 +1407,9 @@ def test_self_heal_repeated_prompt_never_accepts_shifted_historical_row(
             # Heal retry: the 2-row refreshed baseline makes the legacy
             # shifted probe (3 - 2 = 1) collide with the historical user row.
             heal = {
+                "turn_boundary_contract": 2,
                 "turn_id": "agent-heal-turn",
+                "messages_projection": "full",
                 "current_turn_user_idx": 3,
                 "messages": _repeated_prompt_collision_result_messages(
                     prompt,
