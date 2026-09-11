@@ -7046,10 +7046,19 @@ function _focusProfileDropdownOption(){
 function _profileDropdownKeydownHandler(e){
   const dd=$('profileDropdown');
   if(!dd || !dd.classList.contains('open')) return;
-  // Scope the handler to the menu: once focus has left the listbox (e.g. Tab),
-  // Arrow/Home/End/Enter/Escape must keep working in the rest of the app, not
-  // be hijacked by an open menu the user has moved away from.
-  if(dd.contains(document.activeElement)===false) return;
+  // Menu-button contract: Tab / Shift+Tab moves focus out of the menu and
+  // dismisses it. Do NOT preventDefault (the native Tab must advance focus),
+  // do not restore focus to the trigger — the browser already moved it — and
+  // close deferred so the refresh-preservation logic cannot mistake this for a
+  // real focus exit.
+  if(e.key==='Tab' && dd.contains(document.activeElement)){
+    setTimeout(()=>{ closeProfileDropdown(); },0);
+    return;
+  }
+  // Scope the rest of the handler to the menu: once focus has left it by any
+  // non-Tab path, Arrow/Home/End/Enter/Escape must keep working in the rest of
+  // the app, not be hijacked by an open menu the user has moved away from.
+  if(dd.contains(document.activeElement)===false || document.activeElement===null) return;
   const items=_profileDropdownOptions();
   if(e.key==='Escape'){
     e.preventDefault();

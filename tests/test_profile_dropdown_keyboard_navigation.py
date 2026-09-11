@@ -161,8 +161,8 @@ def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
           active() {{ return document.activeElement; }},
           chipExpanded() {{ return document.getElementById('profileChip').getAttribute('aria-expanded'); }},
           focusOn(id) {{ document.activeElement = document.getElementById(id); }},
-          dispatchKey(key) {{
-            const ev = {{ key, preventDefault() {{ this._pd = true; }}, stopPropagation() {{}} }};
+          dispatchKey(key, opts) {{
+            const ev = Object.assign({{ key, preventDefault() {{ this._pd = true; }}, stopPropagation() {{}} }}, opts || {{}});
             document._keydowns.forEach((fn) => fn(ev));
             return ev;
           }},
@@ -315,6 +315,37 @@ def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
             'focus must land on the Profiles panel heading, not the (possibly hidden on mobile) opener');
         }}
 
+        async function runTabDismissal() {{
+          // Menu-button contract: Tab / Shift+Tab moves focus out of the menu
+          // and dismisses it — from the first AND last menuitem. Native Tab is
+          // not prevented; focus stays on the outside control; both triggers
+          // report aria-expanded=false; no profile switch occurs.
+          const cases = [
+            {{ from: 'first', key: 'Tab', opts: {{}} }},
+            {{ from: 'first', key: 'Tab', opts: {{ shiftKey: true }} }},
+            {{ from: 'last', key: 'Tab', opts: {{}} }},
+            {{ from: 'last', key: 'Tab', opts: {{ shiftKey: true }} }},
+          ];
+          for (const c of cases) {{
+            __kbTest.reset();
+            __kbTest.seedCache(multiProfileResponse);
+            __kbTest.toggle('profileChip');
+            const items = __kbTest.options();
+            if (c.from === 'last') __kbTest.dispatchKey('End');
+            assert.strictEqual(__kbTest.active(), c.from === 'first' ? items[0] : items[items.length - 1], `start on ${{c.from}} menuitem`);
+            __kbTest.dispatchKey(c.key, c.opts);
+            // Mirror the browser: the native Tab advance lands focus outside
+            // the menu; the deferred close runs after it.
+            __kbTest.focusOn('msg');
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            assert.strictEqual(__kbTest.isOpen(), false, `Tab (${{c.from}}, shift=${{!!c.opts.shiftKey}}) must dismiss the menu`);
+            assert.strictEqual(__kbTest.active(), document.getElementById('msg'), 'focus stays on the outside control');
+            assert.strictEqual(__kbTest.chipExpanded(), 'false');
+            assert.strictEqual(document.getElementById('titlebarProfileBtn').getAttribute('aria-expanded'), 'false');
+            assert.strictEqual(__kbTest.switched(), null, 'no profile switch on Tab dismissal');
+          }}
+        }}
+
         (async () => {{
           await runOpenNavigationEnter();
           await runEscapeClosesAndRestores();
@@ -322,6 +353,7 @@ def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
           await runHandlerInertWhenFocusLeftMenu();
           await runRefreshPreservesInProgressSelection();
           await runManageRowActivation();
+          await runTabDismissal();
         }})().catch((err) => {{ console.error(err && err.stack || err); process.exit(1); }});
         """
     )
