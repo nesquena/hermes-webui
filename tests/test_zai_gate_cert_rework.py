@@ -385,13 +385,88 @@ def test_unverified_origin_falls_back_to_pool(monkeypatch):
     assert opener.calls == []
 
 
+# ── Re-gate round: forced refresh joins the in-flight request ───────────────
+
+
+def _thread_parked_in_wait(thread):
+    """True when the thread is blocked inside an Event/Condition .wait()."""
+    import sys
+    frame = sys._current_frames().get(thread.ident)
+    return frame is not None and frame.f_code.co_name == "wait"
+
+
+def _wait_until_parked(threads, timeout=10.0):
+    """Block until every thread is parked inside a .wait() call."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if all(_thread_parked_in_wait(t) for t in threads):
+            return True
+        time.sleep(0.005)
+    return False
+
+
+def test_concurrent_forced_refreshes_share_one_transport(monkeypatch):
+    """Several simultaneous refresh=True callers must share ONE in-flight
+    request (re-gate finding: each forced refresh registered its own flight
+    and made its own credentialed transport call — 4 calls instead of 1)."""
+    calls = {"n": 0}
+    release = threading.Event()
+
+    def owner_fetch(api_key, monitor_url=None):
+        calls["n"] += 1
+        release.wait(timeout=10)
+        return _LITE
+
+    monkeypatch.setattr(providers, "_zai_fetch_quota_payload", owner_fetch)
+    _set_key(monkeypatch)
+    start = threading.Barrier(5)  # four callers + the main-thread releaser
+    results = []
+    lock = threading.Lock()
+
+    def caller():
+        start.wait(timeout=10)
+        r = providers.get_provider_quota("zai", refresh=True)
+        with lock:
+            results.append(r)
+
+    threads = [threading.Thread(target=caller) for _ in range(4)]
+    for t in threads:
+        t.start()
+    start.wait(timeout=10)  # release all four callers together
+    for _ in range(400):
+        with providers._zai_quota_cache_lock:
+            if providers._zai_quota_flights:
+                break
+        time.sleep(0.005)
+    with providers._zai_quota_cache_lock:
+        assert len(providers._zai_quota_flights) == 1, \
+            "concurrent forced refreshes registered more than one flight"
+    # Every caller must be parked (owner inside the gated fetch, the other
+    # three on the flight event) before the single transport completes.
+    assert _wait_until_parked(threads), "a caller never reached a wait point"
+    release.set()
+    for t in threads:
+        t.join(timeout=10)
+    assert calls["n"] == 1  # exactly one transport call, not four
+    assert len(results) == 4
+    assert all(r["status"] == "available" for r in results)
+    # One shared terminal result: every caller got the identical payload.
+    assert len({r["account_limits"]["fetched_at"] for r in results}) == 1
+    assert len({r["account_limits"]["windows"][0]["used_percent"]
+                for r in results}) == 1
+
+
 # ── Verification-review round 2 findings ────────────────────────────────────
 
 def test_waiter_cannot_return_success_after_newer_refresh_fails(monkeypatch):
     """A waiter joined to an older flight must not return its success after a
-    newer forced refresh failed (review finding: refresh=unavailable,
-    waiter=available)."""
+    newer forced refresh failed. Distinct old-owner and waiter threads are
+    started BEFORE the newer refresh (re-gate repair: the previous version
+    started only one thread, which was the old owner, not a joined waiter).
+    The newer refresh joins the older flight, times out, and takes over via
+    the bounded steal; its failure is then the shared terminal truth."""
     import threading as _th
+    monkeypatch.setattr(providers, "_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS", 0.25)
     old_release = _th.Event()
 
     def old_owner(api_key, monitor_url=None):
@@ -400,19 +475,26 @@ def test_waiter_cannot_return_success_after_newer_refresh_fails(monkeypatch):
 
     monkeypatch.setattr(providers, "_zai_fetch_quota_payload", old_owner)
     _set_key(monkeypatch)
+    owner_result = {}
     waiter_result = {}
 
-    def run_waiter():
-        waiter_result["r"] = providers.get_provider_quota("zai")
-
-    t_waiter = _th.Thread(target=run_waiter)
-    t_waiter.start()
+    t_owner = _th.Thread(
+        target=lambda: owner_result.setdefault(
+            "r", providers.get_provider_quota("zai")))
+    t_owner.start()
     for _ in range(400):
         with providers._zai_quota_cache_lock:
             if providers._zai_quota_flights:
                 break
         time.sleep(0.005)
-    # Newer forced refresh fails immediately.
+    # A genuine WAITER: joins the older owner's flight while it is gated.
+    t_waiter = _th.Thread(
+        target=lambda: waiter_result.setdefault(
+            "r", providers.get_provider_quota("zai")))
+    t_waiter.start()
+    assert _wait_until_parked([t_waiter]), \
+        "waiter never joined the older flight"
+    # Newer forced refresh: joins the older flight, times out, steals, fails.
     def failing(api_key, monitor_url=None):
         raise urllib.error.URLError("down")
 
@@ -420,7 +502,9 @@ def test_waiter_cannot_return_success_after_newer_refresh_fails(monkeypatch):
     refresh = providers.get_provider_quota("zai", refresh=True)
     assert refresh["status"] == "unavailable"
     old_release.set()
+    t_owner.join(timeout=10)
     t_waiter.join(timeout=10)
+    assert owner_result["r"]["status"] == "unavailable"
     assert waiter_result["r"]["status"] == "unavailable"
 
 
@@ -534,10 +618,12 @@ def test_monitor_url_accepts_ipv6_mapped_loopback():
 
 
 def test_superseded_owner_caller_also_unavailable(monkeypatch):
-    """When a newer refresh supersedes an older flight mid-fetch, the older
-    owner's own caller must also report unavailable (no stale success from
-    either side of the flight — closes the pop→assign race window)."""
+    """When a newer refresh takes over an older flight mid-fetch (bounded
+    steal after the join timeout), the older owner's own caller must also
+    report unavailable (no stale success from either side of the flight —
+    closes the pop→assign race window)."""
     import threading as _th
+    monkeypatch.setattr(providers, "_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS", 0.25)
     old_release = _th.Event()
 
     def old_owner(api_key, monitor_url=None):
@@ -558,7 +644,8 @@ def test_superseded_owner_caller_also_unavailable(monkeypatch):
             if providers._zai_quota_flights:
                 break
         time.sleep(0.005)
-    # Newer forced refresh supersedes (registers its own flight) and fails.
+    # Newer forced refresh joins the older flight, times out, steals
+    # ownership, and fails.
     def failing(api_key, monitor_url=None):
         raise urllib.error.URLError("down")
 

@@ -33,6 +33,11 @@ closed (no quota data) rather than risking the credential or the process.
 Failures are shared, bounded, and never resurrect stale success:
 
 - One transport call in flight per cache key; concurrent callers join it.
+  A forced refresh also joins an in-flight request for its key — it skips
+  only the completed cache, so simultaneous forced refreshes share one
+  credentialed request instead of fanning out. If an owner stalls past the
+  join timeout, exactly one waiter is elected replacement owner (bounded
+  steal).
 - A failed fetch publishes a short-lived (15 s) sanitized failure marker
   that absorbs immediate retries — an outage does not become one request
   per caller.

@@ -558,35 +558,45 @@ class TestZaiConcurrencyRegressions:
             {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": pct,
              "nextResetTime": 1787281782649}]}}
 
-    def test_older_fetch_cannot_overwrite_newer_refresh(self, monkeypatch):
-        monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
-        # T0: slow older miss starts (will return 80)
-        gates = [threading.Event()]
+    def test_forced_refresh_joins_in_flight_older_fetch(self, monkeypatch):
+        # Join contract: a forced refresh skips only the COMPLETED cache. It
+        # shares the in-flight request — one credentialed call, one shared
+        # terminal result for every caller (re-gate review change).
+        calls = {"n": 0}
+        release = threading.Event()
 
         def slow_old(api_key, monitor_url=None):
-            gates[0].wait(timeout=10)
+            calls["n"] += 1
+            release.wait(timeout=10)
             return self._payload(80)
 
         monkeypatch.setattr(providers, "_zai_fetch_quota_payload", slow_old)
-        t_old = threading.Thread(target=lambda: providers.get_provider_quota("zai"))
+        monkeypatch.setattr(providers, "_get_provider_api_key", lambda p: "k")
+        results = {}
+        t_old = threading.Thread(target=lambda: results.setdefault(
+            "old", providers.get_provider_quota("zai")))
         t_old.start()
         for _ in range(200):
             with providers._zai_quota_cache_lock:
                 if providers._zai_quota_flights:
                     break
             time.sleep(0.005)
-        # T1: newer refresh supersedes, returns quickly with 10
-        monkeypatch.setattr(providers, "_zai_fetch_quota_payload", lambda k, monitor_url=None: self._payload(10))
-        newer = providers.get_provider_quota("zai", refresh=True)
-        assert newer["account_limits"]["windows"][0]["used_percent"] == 10.0
-        # T2: release the old fetch; it must NOT publish its older payload
-        gates[0].set()
-        t_old.join(timeout=10)
+        t_new = threading.Thread(target=lambda: results.setdefault(
+            "new", providers.get_provider_quota("zai", refresh=True)))
+        t_new.start()
+        time.sleep(0.1)  # let the forced refresh join the older flight
         with providers._zai_quota_cache_lock:
-            entries = list(providers._zai_quota_cache.values())
-        assert len(entries) == 1
+            assert len(providers._zai_quota_flights) == 1, \
+                "forced refresh registered a second concurrent flight"
+        release.set()
+        t_old.join(timeout=10)
+        t_new.join(timeout=10)
+        assert calls["n"] == 1  # one transport call, not one per caller
+        assert results["old"]["status"] == "available"
+        assert results["new"]["status"] == "available"
+        assert results["new"]["account_limits"]["windows"][0]["used_percent"] == 80.0
         used = providers.get_provider_quota("zai")["account_limits"]["windows"][0]["used_percent"]
-        assert used == 10.0  # stale 80 must not overwrite the fresh 10
+        assert used == 80.0  # the single shared result is what got published
 
     def test_waiter_never_sees_empty_cache_after_owner_success(self, monkeypatch):
         calls = {"n": 0}
@@ -620,9 +630,13 @@ class TestZaiConcurrencyRegressions:
         assert calls["n"] == 1, f"extra fetches beyond the owner: {calls['n'] - 1}"
 
     def test_superseded_owner_cannot_evict_newer_flight(self, monkeypatch):
-        # Older refresh holds flight A; newer refresh registers flight B.
-        # The newer owner is gated so flight B is still REGISTERED when the
-        # older owner finishes — asserting A's cleanup cannot remove B.
+        # Join contract + bounded steal: an older refresh owns flight A; a
+        # newer forced refresh first JOINS A, then — after the join timeout —
+        # elects itself replacement owner (flight B). The newer owner is
+        # gated so flight B is still REGISTERED when the older owner
+        # finishes — asserting A's cleanup cannot remove B, and B's payload
+        # wins over A's stale one.
+        monkeypatch.setattr(providers, "_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS", 0.25)
         old_release = threading.Event()
         new_release = threading.Event()
 
@@ -648,7 +662,7 @@ class TestZaiConcurrencyRegressions:
             time.sleep(0.005)
         assert old_event is not None, "older refresh never registered a flight"
         monkeypatch.setattr(providers, "_zai_fetch_quota_payload", new_refresh)
-        # Newer refresh registers its own flight while still gated.
+        # Newer forced refresh joins A, times out, steals into flight B.
         newer_result = {}
 
         def run_newer():
@@ -656,14 +670,6 @@ class TestZaiConcurrencyRegressions:
 
         t_new = threading.Thread(target=run_newer)
         t_new.start()
-        for _ in range(200):
-            with providers._zai_quota_cache_lock:
-                flights_now = list(providers._zai_quota_flights.values())
-                if len(flights_now) == 1:
-                    newer_event = flights_now[0]
-                    if newer_event is not None:
-                        break
-            time.sleep(0.005)
         # Wait until the newer flight object actually REPLACED the older one
         # (identity change, not mere presence — robust on free-threaded builds).
         cache_key = (
@@ -678,7 +684,7 @@ class TestZaiConcurrencyRegressions:
                     newer_event = current
                     break
             time.sleep(0.005)
-        assert newer_event is not None, "newer refresh never superseded the older flight"
+        assert newer_event is not None, "newer refresh never took over the flight"
         # Old owner completes while the newer flight is still registered.
         old_release.set()
         t_old.join(timeout=10)

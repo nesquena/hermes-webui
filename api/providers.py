@@ -2125,6 +2125,9 @@ _ZAI_DEFAULT_OFFPEAK_MULTIPLIER = 2
 
 _ZAI_QUOTA_CACHE_TTL_SECONDS = 60.0
 _ZAI_QUOTA_CACHE_MAX_ENTRIES = 64
+# How long a joining caller waits for the in-flight owner before electing a
+# bounded replacement (the "steal" path). Tracks the transport budget.
+_ZAI_QUOTA_JOIN_TIMEOUT_SECONDS = _PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0
 _zai_quota_cache: dict[str, tuple[float, Any, Any]] = {}
 _zai_quota_flights: dict[str, "_ZaiFlight"] = {}
 _zai_quota_epoch = 0
@@ -2551,7 +2554,11 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
     atomically publishes either a success payload (60 s TTL) or a sanitized
     failure marker (short TTL) *before* signaling waiters, so a failed
     forced refresh evicts the stale success instead of resurrecting it, and
-    waiters share one terminal result instead of fanning out.
+    waiters share one terminal result instead of fanning out. A forced
+    refresh skips the completed cache but JOINS any in-flight request for
+    the same key — it never registers a second concurrent transport owner;
+    a replacement owner is elected only through the bounded steal path when
+    an owner exceeds the join timeout.
     """
     from api.config import _resolve_provider_alias
 
@@ -2617,17 +2624,22 @@ def _provider_zai_quota_status(provider: str, display_name: str, *, refresh: boo
                 payload, fetched_at = cached_payload, cached_at
         if payload is None and failure is None:
             flight = _zai_quota_flights.get(cache_key)
-            if flight is None or refresh:
-                # Registering a NEW flight supersedes any older in-flight
-                # fetch: the old owner's publish/cleanup is identity-checked
-                # against this registration.
+            if flight is None:
                 my_flight = _ZaiFlight()
                 _zai_quota_flights[cache_key] = my_flight
             else:
+                # refresh=True bypasses only the COMPLETED cache above. An
+                # in-flight request is already newer than any cached entry,
+                # so a forced refresh JOINS it — exactly one transport owner
+                # exists per cache key at a time (the documented single-flight
+                # contract). A replacement owner is elected only through the
+                # bounded steal path below, when an owner hangs past the wait
+                # timeout.
                 join_target = flight
 
     if join_target is not None:
-        join_target.event.wait(timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS + 2.0)
+        join_timeout = _ZAI_QUOTA_JOIN_TIMEOUT_SECONDS
+        join_target.event.wait(timeout=join_timeout)
         result = join_target.result
         if isinstance(result, _ZaiQuotaFailure):
             failure = result
