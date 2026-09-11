@@ -178,6 +178,34 @@ def test_gateway_lifecycle_env_overrides_stale_home_on_default_path(monkeypatch,
     assert kwargs["env"]["HERMES_HOME"] != str(stale_named_home)
 
 
+def test_gateway_lifecycle_fails_closed_when_home_unresolved(monkeypatch, tmp_path):
+    """#6857 re-gate: when the active home cannot be resolved, the lifecycle
+    command must fail closed (500) instead of silently inheriting a possibly
+    stale/deleted HERMES_HOME from the process env."""
+    from api import config, profiles, routes
+
+    agent_dir = _fake_agent(tmp_path)
+    monkeypatch.setattr(config, "_AGENT_DIR", agent_dir)
+    monkeypatch.setattr(config, "PYTHON_EXE", sys.executable)
+    stale_named_home = tmp_path / "hermes" / "profiles" / "deleted"
+    monkeypatch.setenv("HERMES_HOME", str(stale_named_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    def _unresolvable():
+        raise RuntimeError("profile state unavailable")
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", _unresolvable)
+    spawned = []
+    monkeypatch.setattr(routes.subprocess, "run", lambda *a, **k: spawned.append((a, k)))
+
+    handler, data = _call_post(monkeypatch, "/api/gateway/start")
+
+    assert handler.status == 500
+    assert data["ok"] is False
+    assert "HERMES_HOME" in data["error"]
+    assert spawned == []  # no gateway process spawned against a stale home
+
+
 def test_gateway_action_contention_returns_409_without_spawning(monkeypatch, tmp_path):
     """A second lifecycle action while one holds the lock returns 409 and does
     NOT spawn an overlapping `hermes gateway` subprocess (server-side

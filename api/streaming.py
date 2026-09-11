@@ -2776,6 +2776,23 @@ def _resolve_streaming_hermes_home_override():
     return None
 
 
+def _publish_turn_hermes_home(profile_home, *, override_installed: bool) -> bool:
+    """#6857: mirror this turn's profile home into the process env, or not.
+
+    ``os.environ`` is process-global, so writing the turn's home there leaks it
+    into every concurrent turn / thread in the same process. When the
+    context-local home override is installed (hermes-agent >= 0.18) it is the
+    sole in-process home resolver, and the env write is redundant — skip it.
+
+    Returns True when the env var was written (the caller must restore the
+    previous value when the turn ends), False when the env was left untouched.
+    """
+    if not profile_home or override_installed:
+        return False
+    os.environ['HERMES_HOME'] = profile_home
+    return True
+
+
 def _set_streaming_hermes_home_override(profile_home: str):
     """Install the context-local home override if available.
 
@@ -9023,6 +9040,10 @@ def _run_agent_streaming(
     old_session_id = None
     old_session_platform = None
     old_hermes_home = None
+    # #6857: only restore HERMES_HOME when this turn mirrored it into the env
+    # (legacy path). With a ContextVar override installed the turn never writes
+    # the env var, so a restore would clobber a concurrent turn's value.
+    _mirror_hermes_home_env = False
     old_profile_env = {}
     result = None
     _result_partial_pre_call_context = []
@@ -9634,7 +9655,12 @@ def _run_agent_streaming(
             old_session_id = os.environ.get('HERMES_SESSION_ID')
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
-            old_hermes_home = os.environ.get('HERMES_HOME')
+            # #6857: mirror HERMES_HOME into the process env only on the legacy
+            # path (no ContextVar override installed for this turn). With the
+            # override active the env write is redundant and leaks this
+            # session's profile home into concurrent turns/threads.
+            _mirror_hermes_home_env = not _streaming_override_installed
+            old_hermes_home = os.environ.get('HERMES_HOME') if _mirror_hermes_home_env else None
             os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
@@ -9645,7 +9671,11 @@ def _run_agent_streaming(
             # _build_agent_thread_env above.
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
-                os.environ['HERMES_HOME'] = _profile_home
+                # #6857: publish to the process env only on the legacy path; the
+                # ContextVar override is the sole home resolver when installed.
+                _mirror_hermes_home_env = _publish_turn_hermes_home(
+                    _profile_home, override_installed=_streaming_override_installed
+                )
                 # Prefer context-local Hermes-home overrides when available.
                 # In that mode, tools.skills_tool._skills_dir() and
                 # tools.skill_manager_tool._skills_dir() can resolve the active
@@ -12653,8 +12683,9 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
                 if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
                 else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
-                if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-                else: os.environ['HERMES_HOME'] = old_hermes_home
+                if _mirror_hermes_home_env:
+                    if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
+                    else: os.environ['HERMES_HOME'] = old_hermes_home
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)

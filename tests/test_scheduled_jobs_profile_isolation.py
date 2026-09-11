@@ -568,11 +568,16 @@ def test_sessiondb_on_threadpool_executor_in_cron_scope(tmp_path, monkeypatch):
     from api import profiles as p
     monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", default_home)
     
-    # Helper to run SessionDB() in a thread and return the db_path
+    # Helper to run SessionDB() in a thread and return the db_path. The armed
+    # context must be copied explicitly: production executors (cron / agent
+    # tool-call boundaries) enter the worker via copy_context().run(), which is
+    # what makes the ContextVar override — not os.environ — the transport.
     def get_sessiondb_path_via_thread():
         from concurrent.futures import ThreadPoolExecutor
+        import contextvars
+        ctx = contextvars.copy_context()
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(lambda: SessionDB().db_path)
+            future = executor.submit(ctx.run, lambda: SessionDB().db_path)
             return future.result()
     
     # Test 1: Inside a named-profile cron scope (TLS set to named), SessionDB should use the named profile
@@ -582,6 +587,11 @@ def test_sessiondb_on_threadpool_executor_in_cron_scope(tmp_path, monkeypatch):
             db_path = get_sessiondb_path_via_thread()
             expected = named_home / "state.db"
             assert db_path == expected, f"Expected {expected}, got {db_path}"
+            # #6857 re-gate: the cron scope must not publish its home to the
+            # process env — that is the channel that leaked to other threads.
+            assert os.environ.get("HERMES_HOME") == str(default_home), (
+                "cron scope leaked its profile home into os.environ"
+            )
     finally:
         p.clear_request_profile()
     
@@ -592,5 +602,6 @@ def test_sessiondb_on_threadpool_executor_in_cron_scope(tmp_path, monkeypatch):
             db_path = get_sessiondb_path_via_thread()
             expected = default_home / "state.db"
             assert db_path == expected, f"Expected {expected}, got {db_path}"
+            assert os.environ.get("HERMES_HOME") == str(default_home)
     finally:
         p.clear_request_profile()

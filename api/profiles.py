@@ -684,9 +684,6 @@ class cron_profile_context_for_home:
             self._home_override_mod = _resolve_hermes_home_override()
             self._home_override_token = None
             self._home_override_installed = False
-            # Always mirror to env var for cron scopes (fix for #6857)
-            self._prev_env = os.environ.get('HERMES_HOME')
-            os.environ['HERMES_HOME'] = str(self._home)
             if self._home_override_mod is not None:
                 try:
                     self._home_override_token = self._home_override_mod.set_hermes_home_override(
@@ -696,8 +693,14 @@ class cron_profile_context_for_home:
                 except Exception:
                     self._home_override_token = None
                     self._home_override_installed = False
-            # Note: _env_mirrored is no longer used; we always restore env var below
-            self._env_mirrored = True  # kept for compatibility but not used
+            # #6857: mirror to the process env only on the legacy path. With the
+            # ContextVar override installed it is the sole in-process home
+            # resolver for this scope; writing os.environ here would leak this
+            # profile's home to unrelated threads and requests.
+            self._env_mirrored = not self._home_override_installed
+            self._prev_env = os.environ.get('HERMES_HOME') if self._env_mirrored else None
+            if self._env_mirrored:
+                os.environ['HERMES_HOME'] = str(self._home)
 
             # Re-patch cron.jobs module-level constants (see main context manager
             # below for the rationale).
@@ -744,11 +747,12 @@ class cron_profile_context_for_home:
                     )
                 except Exception:
                     pass
-            # Always restore env var mirror for cron scopes
-            if self._prev_env is None:
-                os.environ.pop('HERMES_HOME', None)
-            else:
-                os.environ['HERMES_HOME'] = self._prev_env
+            # Restore the env mirror only when this scope installed it (#6857).
+            if self._env_mirrored:
+                if self._prev_env is None:
+                    os.environ.pop('HERMES_HOME', None)
+                else:
+                    os.environ['HERMES_HOME'] = self._prev_env
             if self._prev_cj is not None:
                 try:
                     import cron.jobs as _cj
@@ -791,9 +795,6 @@ class cron_profile_context:
             self._home_override_mod = _resolve_hermes_home_override()
             self._home_override_token = None
             self._home_override_installed = False
-            # Always mirror to env var for cron scopes (fix for #6857)
-            self._prev_env = os.environ.get('HERMES_HOME')
-            os.environ['HERMES_HOME'] = str(home)
             if self._home_override_mod is not None:
                 try:
                     self._home_override_token = self._home_override_mod.set_hermes_home_override(
@@ -803,8 +804,12 @@ class cron_profile_context:
                 except Exception:
                     self._home_override_token = None
                     self._home_override_installed = False
-            # Note: _env_mirrored is no longer used; we always restore env var below
-            self._env_mirrored = True  # kept for compatibility but not used
+            # #6857: mirror to the process env only on the legacy path (see
+            # cron_profile_context_for_home above for the rationale).
+            self._env_mirrored = not self._home_override_installed
+            self._prev_env = os.environ.get('HERMES_HOME') if self._env_mirrored else None
+            if self._env_mirrored:
+                os.environ['HERMES_HOME'] = str(home)
 
             # Re-patch cron.jobs module-level constants. They are snapshot at
             # import time (line 68-71 of cron/jobs.py) and don't participate in
@@ -850,11 +855,12 @@ class cron_profile_context:
                     )
                 except Exception:
                     pass
-            # Always restore env var mirror for cron scopes
-            if self._prev_env is None:
-                os.environ.pop('HERMES_HOME', None)
-            else:
-                os.environ['HERMES_HOME'] = self._prev_env
+            # Restore the env mirror only when this scope installed it (#6857).
+            if self._env_mirrored:
+                if self._prev_env is None:
+                    os.environ.pop('HERMES_HOME', None)
+                else:
+                    os.environ['HERMES_HOME'] = self._prev_env
             if self._prev_cj is not None:
                 try:
                     import cron.jobs as _cj
@@ -1638,7 +1644,7 @@ def profile_scope_for_detached_worker(
         clear_request_profile()
 
 
-def _set_hermes_home(home: Path):
+def _set_hermes_home(home: Path, *, publish_env: bool = False):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths.
 
     The process-global env write is skipped when the context-local home
@@ -1647,8 +1653,15 @@ def _set_hermes_home(home: Path):
     request time is a residual cross-profile write vector (#6857). Module
     patching is kept as harmless belt-and-braces. Pre-v0.18 agents (resolver
     returns None) keep the legacy env-mirror behavior.
+
+    ``publish_env=True`` marks a deliberate *process-wide publication* (the
+    supported ``switch_profile(..., process_wide=True)`` path). The env write
+    must happen there: otherwise the process baseline keeps advertising the
+    previous home and every unscoped reader (gateway lifecycle, subprocesses,
+    default-path helpers) follows a stale — possibly deleted — profile home
+    after a named→default switch (#6857 re-gate).
     """
-    if not _home_override_active():
+    if publish_env or not _home_override_active():
         os.environ['HERMES_HOME'] = str(home)
 
     patch_skill_home_modules(home)
@@ -1815,7 +1828,11 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         if process_wide:
             global _active_profile
             _active_profile = name
-            _set_hermes_home(home)
+            # #6857 re-gate: a deliberate process-wide switch must publish the
+            # new home to the process env (legacy/unscoped readers, subprocess
+            # spawns). Omitting it left a named→default switch advertising the
+            # previous — possibly deleted — profile home process-wide.
+            _set_hermes_home(home, publish_env=True)
             _reload_dotenv(home)
 
     if process_wide:
