@@ -72,15 +72,26 @@ only accept shapes the rest of its pipeline already renders:
 
 | Input | Result | Why |
 | --- | --- | --- |
-| Sentinel + list of supported parts | decoded `list` | the shape `msgContent`, `_messageIsRenderable`, and `renderMessages()` already handle |
+| Sentinel + list with non-whitespace text and only valid image parts | decoded `list` | `msgContent()` joins the text parts, so the row renders its text |
+| Sentinel + image-only list, or text that is empty/whitespace | unchanged string | `msgContent()` discards image parts, so `_messageIsRenderable()` would hide the row with no error |
+| Sentinel + list containing a malformed image part | unchanged string | a part must carry a valid per-type payload, not just a matching `type` |
 | Sentinel + dict or scalar root | unchanged string | a dict reaches `_getCachedRender()`, and `_renderCacheKey()` calls `text.slice()` on it, blanking the turn |
 | Sentinel + `NaN`/`Infinity`/overflowed float | unchanged string | Python emits them, browser `JSON.parse()` rejects the whole `/api/session` payload |
 | Sentinel + unsupported part shapes | unchanged string | `input_text`, `output_text`, scalar and unknown parts are dropped by the JS readers, so decoding them would silently lose content that is visible today |
 | Anything without the sentinel | unchanged | non-sentinel content is not this contract's concern |
 
-Supported parts are `{"type": "text", "text": <str>}` plus the image types in
-`_SESSION_MESSAGE_IMAGE_PART_TYPES` (`image`, `image_url`, `input_image`), which
-render from the `attachments` reference rather than from the inline payload.
+Supported parts are `{"type": "text", "text": <str>}` plus image parts whose
+payload validates for their type: `image_url` with a non-empty URL (string or
+`{"url": ...}`), `input_image` with a URL or `file_id`, and `image` with a
+`base64` source carrying `data` and `media_type` or a `url` source. At least one
+text part must contain non-whitespace text.
+
+**Image parts do not render from this projection.** The shared JS readers drop
+them, and the state.db projection supplies no `attachments`. Decoding a
+text-and-image row shows its text and keeps the base64 payload out of the DOM;
+it does not display the image. Rendering images from state.db rows would need a
+shared inline-image projection first, at which point image-only lists could be
+accepted too.
 
 Widening the accepted schema requires teaching every shared content reader
 through one extractor first; until then unsupported shapes must keep falling
@@ -91,11 +102,19 @@ back to the raw string.
 Decoding changes the runtime type of `content`, so every consumer that derives
 an identity from it must agree on one representation:
 
-- Merge, dedup, and visible-key paths use type-namespaced serialization.
-  Scalar content keys exactly as before; structured content is tagged, so a
-  structured message cannot collide with a scalar matching its `repr()`, and two
-  rich turns sharing visible text and timestamp stay distinct when their images
-  differ.
+- Every key -- merge, dedup, content, visible and the fuzzy fallback -- derives
+  content identity through `_content_identity_for_key()`. Non-list values key
+  exactly as on master, `str(content or "")`. Non-empty lists get an
+  **out-of-band** tuple identity, so no message body can compare equal to one:
+  an in-band string marker would be forgeable by a scalar that contains it.
+  Two rich turns sharing visible text and timestamp stay distinct when their
+  images differ.
+- Fuzzy duplicate matching is text-only. Structured identities match by exact
+  identity or not at all, so a rich row can never fuzzy-match a scalar.
+- The merge key cache never writes a key component back into message content.
+  To avoid re-serialising large payloads for every key it instead memoises the
+  canonical serialisation per content object, scoped to one
+  `merge_session_messages_append_only()` call.
 - The multimodal mirror bridge pairs one rich image-bearing row with one scalar
   mirror only. `require_image_parts` and `require_scalar_mirror` are mutually
   exclusive so rich-to-rich pairing cannot occur.
