@@ -745,8 +745,19 @@ class TestMediaEndpointUnit(unittest.TestCase):
             self.assertIn(b"Report", handler.body)
 
     def test_handle_media_session_authorizes_markdown_artifact_outside_roots(self):
-        """An out-of-root .md path succeeds for preview and download=1 when the
-        matching session_id grant exists, and stays denied without that grant."""
+        """An out-of-root .md path is denied without a session grant and served
+        only with the matching `session_id`: both the `inline=1` preview and the
+        `download=1` attachment require that grant, and an unrelated session's
+        token is not enough.
+
+        The target deliberately does not assume `Path.home()` is outside every
+        allowed root: a sandbox can host $HOME under /tmp, which *is* an allowed
+        root, so the "no token -> 403" baseline would silently become 200 and the
+        grant would prove nothing. The target directory is probed at runtime
+        against the same root list `_handle_media` builds, and the baseline
+        denial is asserted first, before any grant is exercised.
+        """
+        import contextlib
         import shutil
         from api import routes
 
@@ -772,61 +783,82 @@ class TestMediaEndpointUnit(unittest.TestCase):
             def wfile(self):
                 return self._W(self)
 
+        def _out_of_root_dir(roots):
+            """First writable temp dir that is genuinely outside every root."""
+            for base in (pathlib.Path.home(), pathlib.Path("/var/tmp"), pathlib.Path("/dev/shm")):
+                try:
+                    if not base.is_dir() or not os.access(str(base), os.W_OK):
+                        continue
+                    cand = pathlib.Path(
+                        tempfile.mkdtemp(prefix=".hermes-outside-test-", dir=str(base))
+                    ).resolve()
+                except OSError:
+                    continue
+                if not any(routes._path_is_within_root(cand, r) for r in roots if r.exists()):
+                    return cand
+                shutil.rmtree(cand, ignore_errors=True)
+            return None
+
+        def _deny_only(target):
+            """Narrow fallback allowed by the re-gate review: report this single
+            target as out-of-root, delegate every other path to the real helper."""
+            real = routes._path_is_within_root
+            resolved = pathlib.Path(target).resolve()
+
+            def _patched(child, root):
+                if pathlib.Path(child).resolve() == resolved:
+                    return False
+                return real(child, root)
+
+            return _patched
+
+        def _serve(query):
+            handler = _Handler()
+            routes._handle_media(handler, SimpleNamespace(query=query, path="/api/media"))
+            return handler
+
         with tempfile.TemporaryDirectory() as home:
             hermes_home = pathlib.Path(home) / ".hermes"
             hermes_home.mkdir(parents=True)
             ws = hermes_home / "workspace"
             ws.mkdir()
-            # Genuinely out-of-root location: sibling of ~/.hermes (not under
-            # /tmp, HERMES_HOME, ~/.hermes, or the active workspace) so only
-            # the session-token grant can authorize it.
-            outside = pathlib.Path(tempfile.mkdtemp(
-                prefix=".hermes-outside-test-", dir=str(pathlib.Path.home())
-            ))
+            # The same roots _handle_media builds per request (HERMES_HOME and ~
+            # are read at call time; the workspace getter is patched below).
+            roots = [
+                hermes_home.resolve(),
+                pathlib.Path("/tmp").resolve(),
+                (pathlib.Path.home() / ".hermes").resolve(),
+                ws.resolve(),
+            ]
+            outside = _out_of_root_dir(roots)
+            if outside is None:
+                outside = pathlib.Path(tempfile.mkdtemp(prefix=".hermes-outside-test-")).resolve()
+                guard = mock.patch.object(routes, "_path_is_within_root", _deny_only(outside))
+            else:
+                guard = contextlib.nullcontext()
             md = outside / "notes.md"
             md.write_text("# Notes\n\nsecret markdown", encoding="utf-8")
-            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{md}"}])
-            quoted = urllib.parse.quote(str(md.resolve()))
+            resolved_md = str(md.resolve())
+            quoted = urllib.parse.quote(resolved_md)
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f"MEDIA:{resolved_md}"}]
+            )
             try:
-                with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                with guard, \
+                     mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
                      mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
                      mock.patch.object(routes, "get_session", return_value=session), \
                      mock.patch("api.auth.is_auth_enabled", lambda: False):
-                    # Preview with the session grant
-                    handler = _Handler()
-                    routes._handle_media(
-                        handler,
-                        SimpleNamespace(
-                            query=f"path={quoted}&session_id=s-media&inline=1",
-                            path="/api/media",
-                        ),
+                    # Baseline denial first: without a session token the target —
+                    # which is outside every allowed root — is 403. That is what
+                    # makes the grant, and not the path, the authorizer.
+                    handler = _serve(f"path={quoted}&inline=1")
+                    self.assertEqual(
+                        handler.status,
+                        403,
+                        f"out-of-root markdown must be denied without a grant (target={resolved_md})",
                     )
-                    self.assertEqual(handler.status, 200)
-                    self.assertIn("text/markdown", handler.headers.get("content-type", ""))
-                    self.assertIn(b"secret markdown", handler.body)
-
-                    # download=1 with the session grant
-                    handler = _Handler()
-                    routes._handle_media(
-                        handler,
-                        SimpleNamespace(
-                            query=f"path={quoted}&session_id=s-media&download=1",
-                            path="/api/media",
-                        ),
-                    )
-                    self.assertEqual(handler.status, 200)
-                    self.assertIn("text/markdown", handler.headers.get("content-type", ""))
-                    self.assertIn("attachment", handler.headers.get("content-disposition", ""))
-
-                    # Denied without the session grant
-                    handler = _Handler()
-                    routes._handle_media(
-                        handler,
-                        SimpleNamespace(
-                            query=f"path={quoted}&inline=1",
-                            path="/api/media",
-                        ),
-                    )
+                    handler = _serve(f"path={quoted}&download=1")
                     self.assertEqual(handler.status, 403)
 
                     # Denied when the session never emitted the MEDIA: token
@@ -834,15 +866,21 @@ class TestMediaEndpointUnit(unittest.TestCase):
                         messages=[{"role": "assistant", "content": "MEDIA:/tmp/unrelated.md"}]
                     )
                     with mock.patch.object(routes, "get_session", return_value=other):
-                        handler = _Handler()
-                        routes._handle_media(
-                            handler,
-                            SimpleNamespace(
-                                query=f"path={quoted}&session_id=s-other&inline=1",
-                                path="/api/media",
-                            ),
-                        )
-                        self.assertEqual(handler.status, 403)
+                        handler = _serve(f"path={quoted}&session_id=s-other&inline=1")
+                    self.assertEqual(handler.status, 403)
+
+                    # Preview with the matching session grant
+                    handler = _serve(f"path={quoted}&session_id=s-media&inline=1")
+                    self.assertEqual(handler.status, 200)
+                    self.assertIn("text/markdown", handler.headers.get("content-type", ""))
+                    self.assertIn(b"secret markdown", handler.body)
+
+                    # download=1 with the matching session grant
+                    handler = _serve(f"path={quoted}&session_id=s-media&download=1")
+                    self.assertEqual(handler.status, 200)
+                    self.assertIn("text/markdown", handler.headers.get("content-type", ""))
+                    self.assertIn("attachment", handler.headers.get("content-disposition", ""))
+                    self.assertIn(b"secret markdown", handler.body)
             finally:
                 shutil.rmtree(outside, ignore_errors=True)
 

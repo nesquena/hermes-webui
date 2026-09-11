@@ -169,25 +169,19 @@ def test_cancel_session_stream_closes_local_eventsource_on_failure_path():
 
 
 def test_sessions_resume_handler_cleans_up_in_finally_and_returns_before_agent_lookup():
-    """#6224 regression: the /sessions & /resume slash handlers must clear the
-    composer/dropdown in a finally block — so when the browser opener or
-    renderSessionList() rejects, cleanup still runs and the rejection
-    propagates out of send() (send() still rejects). The success path must
-    return before the agent-command lookup."""
-    messages = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    """#6224 regression (historical test id kept): the invariant is now proven
+    *behaviourally* by the node runtime harness in
+    tests/test_6224_sessions_command_runtime.py, which executes the real
+    /sessions & /resume branch from static/messages.js instead of slicing its
+    source text. Source shape cannot show that a opener or renderSessionList()
+    rejection runs the composer/dropdown cleanup and still rejects send().
+    """
+    import importlib
 
-    start = messages.index("_parsedCmd.name==='sessions'")
-    end = messages.index("const _agentCmd=")
-    block = messages[start:end]
-
-    # The handler is wrapped in try/finally; composer + dropdown cleanup
-    # live inside the finally block.
-    assert "try {" in block
-    assert "} finally {" in block
-    assert "$('msg').value='';autoResize();hideCmdDropdown();" in block
-    # The return sits AFTER the finally closes, so an exception from the
-    # browser opener / renderSessionList() runs the cleanup and then keeps
-    # propagating (send() rejects) — the finally must not swallow it.
-    assert "finally {\n          $('msg').value='';autoResize();hideCmdDropdown();\n        }\n        return;" in block
-    # Success path returns before the agent-command lookup below.
-    assert "getAgentCommandMetadata" not in block
+    harness = importlib.import_module("tests.test_6224_sessions_command_runtime")
+    if harness.NODE is None:
+        pytest.skip("node not on PATH")
+    harness.test_sessions_and_resume_short_circuit_before_agent_lookup("sessions")
+    harness.test_sessions_and_resume_short_circuit_before_agent_lookup("resume")
+    harness.test_sessions_runs_cleanup_and_still_rejects_when_opener_throws()
+    harness.test_sessions_runs_cleanup_and_still_rejects_when_render_session_list_rejects()
