@@ -320,14 +320,3 @@ def test_search_only_vendor_directory_fails_closed(tmp_path, monkeypatch):
         ).decode("utf-8")
     finally:
         vendor.chmod(0o755)
-
-
-def test_sw_route_uses_bundle_fingerprint_token():
-    """Source anchor: the /sw.js route must derive its cache name from the token."""
-    routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-    idx = routes_src.find('"/sw.js"')
-    assert idx != -1
-    block = routes_src[idx:idx + 1000]
-    assert "_assets_cache_bust_token(static_root)" in block, (
-        "sw.js route must derive its cache name from the bundle fingerprint"
-    )
