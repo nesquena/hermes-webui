@@ -24707,10 +24707,23 @@ def _handle_cron_create(handler, body):
 
 def _handle_cron_delivery_options(handler):
     """Return available delivery platforms for cron jobs."""
-    try:
-        from cron.scheduler import _KNOWN_DELIVERY_PLATFORMS
-    except Exception:
-        _KNOWN_DELIVERY_PLATFORMS = frozenset()
+    # The Agent moved this authority from ``cron.scheduler`` to
+    # ``cron.scheduler_delivery``. Try the current location first and fall back
+    # to the legacy one so the picker keeps working across Agent versions.
+    # Without the fallback chain a bare ImportError silently degraded this
+    # endpoint to local/origin only, dropping every messaging platform from the
+    # cron delivery picker (telegram, discord, slack, feishu, ...).
+    _KNOWN_DELIVERY_PLATFORMS = frozenset()
+    import importlib
+    for _module_name in ("cron.scheduler_delivery", "cron.scheduler"):
+        try:
+            _mod = importlib.import_module(_module_name)
+        except Exception:
+            continue
+        _known = getattr(_mod, "_KNOWN_DELIVERY_PLATFORMS", None)
+        if _known:
+            _KNOWN_DELIVERY_PLATFORMS = frozenset(_known)
+            break
     platforms = [
         {"value": "local", "label": "Local (save output only)"},
         {"value": "origin", "label": "Origin (reply to creator)"}
