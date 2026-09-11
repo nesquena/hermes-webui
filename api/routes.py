@@ -15692,6 +15692,20 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.enabled_toolsets = toolsets
             s.save()
+
+            # Changing the session toolset changes both the resolved tools[]
+            # snapshot and the assembled system prompt. Clear Hermes' persisted
+            # cache pins so the next AIAgent rebuild reflects the new toolset.
+            from hermes_state import SessionDB
+            from api.models import _active_state_db_path
+
+            _state_db = SessionDB(_active_state_db_path())
+            try:
+                _state_db.update_session_tool_names(sid, None)
+                _state_db.update_system_prompt(sid, None)
+            finally:
+                _state_db.close()
+
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
 
     if parsed.path == "/api/session/draft":
