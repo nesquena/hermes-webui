@@ -3524,6 +3524,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // ?test_updates=1 in URL forces banner display for testing (bypasses dismissed guard)
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   let _updateCheckInFlight=null;
+  let _updateCheckTimer=null;
   const _checkUpdates=()=>{
     if(_bootSettings.check_for_updates===false||sessionStorage.getItem('hermes-update-dismissed')) return;
     if(_updateCheckInFlight) return _updateCheckInFlight;
@@ -3543,8 +3544,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // Re-check when a background tab becomes visible again (visibilitychange);
     // a tab that was closed and re-opened is handled by the normal boot path.
     document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible') _checkUpdates();});
-    // Periodic re-check every 30 minutes for always-open tabs (1,800,000 ms)
-    setInterval(_checkUpdates,1800000);
+    // Periodic re-check every 30 minutes for always-open tabs (1,800,000 ms).
+    // The handle is kept in a boot-scope binding so the poll can be torn down;
+    // when check_for_updates is turned off the callback short-circuits, so an
+    // idle timer costs nothing until it is cleared.
+    _updateCheckTimer=setInterval(_checkUpdates,1800000);
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';

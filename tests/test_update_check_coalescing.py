@@ -18,7 +18,8 @@ in-memory `sessionStorage`, proving the deferred-promise lifecycle:
 - disabled and already-dismissed states issue no request;
 - `?test_updates=1` keeps its separate GET simulation path (one GET, no POST,
   no listener/timer registration), while the normal boot path issues one POST
-  and registers the visibilitychange listener plus the 30-minute timer.
+  and registers the visibilitychange listener plus the 30-minute timer, whose
+  handle is stored in a boot-scope binding so the poll can be torn down.
 """
 
 import json
@@ -101,7 +102,7 @@ _DRIVER = textwrap.dedent(
       return src.slice(start + marker.length, semi);
     }
 
-    const result = { calls: [], postCalls: 0, getCalls: 0, bannerCalls: 0, listeners: [], intervals: [], returnedNull: false, firstReturned: false, secondReturned: false, sharedPromise: false };
+    const result = { calls: [], postCalls: 0, getCalls: 0, bannerCalls: 0, listeners: [], intervals: [], returnedNull: false, firstReturned: false, secondReturned: false, sharedPromise: false, intervalHandleStored: false };
     const store = {};
     global.sessionStorage = {
       getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
@@ -132,6 +133,7 @@ _DRIVER = textwrap.dedent(
 
     let _bootSettings = { check_for_updates: true };
     let _updateCheckInFlight = null;
+    let _updateCheckTimer = null;
     const _checkUpdates = eval('(' + checkUpdatesSrc + ')');
     const _testUpdates = eval(testUpdatesRhs);
 
@@ -171,6 +173,8 @@ _DRIVER = textwrap.dedent(
         result.returnedNull = r1 === null || r1 === undefined;
       } else if (action === 'test-mode' || action === 'boot-mode') {
         eval(bootBlock);
+        // The interval handle must be captured (not discarded) on the real path.
+        result.intervalHandleStored = (_updateCheckTimer === 42);
         if (action === 'boot-mode' && pending.length) {
           pending[0].resolve({ webui: { behind: 1 }, agent: { behind: 0 } });
           await flush();
@@ -243,6 +247,7 @@ class TestUpdateCheckCoalescing:
         assert r["calls"][0]["method"] == "GET"
         assert r["listeners"] == [], "simulation mode must not register lifecycle triggers"
         assert r["intervals"] == []
+        assert r["intervalHandleStored"] is False
 
     def test_normal_boot_registers_one_post_visibility_listener_and_timer(self):
         r = _run("boot-mode")
@@ -250,3 +255,6 @@ class TestUpdateCheckCoalescing:
         assert r["getCalls"] == 0
         assert r["listeners"] == ["visibilitychange"]
         assert r["intervals"] == [1800000], "periodic re-check must stay at 30 minutes"
+        assert r["intervalHandleStored"] is True, (
+            "the periodic poll must keep its setInterval handle so it can be torn down"
+        )
