@@ -907,3 +907,65 @@ class TestBareFileUrlMediaRendering:
         # Labeled anchors keep the normal link path (routed to /api/media as a link,
         # not auto-loaded as an <img>).
         assert "<img" not in out
+
+
+class TestPlainParagraphMediaDestinationLineBoundaries:
+    """#6580 follow-up: the *outer* plain-paragraph image/link passes must not
+    let a Markdown destination run past a line ending.
+
+    ``inlineMd()`` (table/list cells) already terminates destinations at CR/LF
+    via ``[^\\)\\r\\n]+``, but the two outer ``renderMd()`` passes still used an
+    unbounded ``[^\\)]+``, so ``![alt](url<newline>rest)`` — or the link form —
+    swallowed the following source line before a later ``)`` closed the match.
+    That produced a media/anchor node built from a multi-line "path" that never
+    exists (the newline even got percent-encoded into the ``api/media`` href).
+
+    Exercised through the real ``renderMd()`` so a revert to the unbounded
+    class fails these tests immediately.
+    """
+
+    @pytest.mark.parametrize("sep", ["\n", "\r", "\r\n"], ids=["LF", "CR", "CRLF"])
+    def test_markdown_image_destination_does_not_span_lines(self, driver_path, sep):
+        out = _render(driver_path, f"![shot](https://example.com/a{sep}b.png) tail")
+        # The unterminated image stays literal prose, on the line it started on.
+        assert "![shot](" in out, f"literal markdown must survive: {out!r}"
+        assert "b.png) tail" in out, f"following line must stay prose: {out!r}"
+        # ...and is never handed to the media renderer.
+        assert "msg-media-img" not in out, f"no media node expected: {out!r}"
+
+    @pytest.mark.parametrize("sep", ["\n", "\r", "\r\n"], ids=["LF", "CR", "CRLF"])
+    def test_markdown_link_destination_does_not_span_lines(self, driver_path, sep):
+        out = _render(driver_path, f"[doc](file:///tmp/a{sep}b.txt) tail")
+        assert "[doc](" in out, f"literal markdown must survive: {out!r}"
+        assert "b.txt) tail" in out, f"following line must stay prose: {out!r}"
+        # No anchor is built from a destination that crossed a line ending —
+        # pre-fix the swallowed newline was encoded into the media href (%0A).
+        assert "<a " not in out, f"no anchor expected: {out!r}"
+        assert "api/media" not in out, f"no media link expected: {out!r}"
+        assert "%0A" not in out, f"swallowed newline must not be encoded: {out!r}"
+
+    def test_same_line_markdown_image_still_renders_media(self, driver_path):
+        """Regression control: the same-line form must still become media."""
+        out = _render(driver_path, "![shot](https://example.com/shot.png) tail")
+        assert (
+            '<img class="msg-media-img" src="https://example.com/shot.png" '
+            'alt="shot" loading="lazy">' in out
+        ), f"same-line markdown image must still render: {out!r}"
+        assert "tail" in out
+
+    def test_same_line_markdown_image_with_space_still_renders_media(self, driver_path):
+        """Regression control for the filename-with-spaces support this PR adds."""
+        out = _render(driver_path, "![shot](https://example.com/my shot.png) tail")
+        assert 'class="msg-media-img"' in out, f"media node expected: {out!r}"
+        assert 'src="https://example.com/my%20shot.png"' in out, (
+            f"same-line space must still be percent-encoded, not treated as a "
+            f"line boundary: {out!r}"
+        )
+
+    def test_same_line_markdown_link_with_space_still_renders_anchor(self, driver_path):
+        """Regression control: link destinations keep the space normalization."""
+        out = _render(driver_path, "[doc](file:///tmp/my file.txt) tail")
+        assert 'href="api/media?path=%2Ftmp%2Fmy%20file.txt&amp;inline=1"' in out, (
+            f"same-line link with space must still render: {out!r}"
+        )
+        assert ">doc</a>" in out
