@@ -6488,6 +6488,10 @@ const PROFILE_DROPDOWN_CACHE_TTL_MS = 5 * 60 * 1000;
 let _profileSwitchGeneration = 0;
 let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 let _profileDropdownOpenGeneration = 0;
+// data-profile of the option that currently holds keyboard focus inside the
+// open menu. Survives re-renders (the focused node is detached by innerHTML='',
+// so identity must be tracked by name) and is null until the first focus lands.
+let _profileDropdownFocusedName = null;
 
 function _profileDropdownClearStoredCache(){
   try{localStorage.removeItem(PROFILE_DROPDOWN_CACHE_KEY);}catch(_){}
@@ -6869,6 +6873,7 @@ function renderProfileDropdown(data) {
     opt.setAttribute('role','option');
     opt.setAttribute('tabindex','-1');
     opt.setAttribute('aria-selected', p.name === active ? 'true' : 'false');
+    opt.setAttribute('data-profile', p.name);
     const meta = [];
     if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
@@ -6891,6 +6896,7 @@ function renderProfileDropdown(data) {
     mgmt.setAttribute('role','option');
     mgmt.setAttribute('tabindex','-1');
     mgmt.setAttribute('aria-label', t('manage_profiles'));
+    mgmt.setAttribute('data-profile', '__manage__');
     mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
     mgmt.onclick = () => { closeProfileDropdown({restore:true}); mobileSwitchPanel('profiles'); };
     dd.appendChild(mgmt);
@@ -6949,6 +6955,7 @@ function toggleProfileDropdown(e) {
 function closeProfileDropdown(opts) {
   const restore = !!(opts && opts.restore === true);
   _profileDropdownOpenGeneration++;
+  _profileDropdownFocusedName = null;
   const dd = $('profileDropdown');
   if (dd) dd.classList.remove('open');
   const chip=$('profileChip');
@@ -6990,10 +6997,30 @@ function _focusProfileDropdownOption(){
   if(!dd || !dd.classList.contains('open')) return;
   const items=_profileDropdownOptions();
   if(!items.length) return;
-  let idx=items.findIndex(o=>o.getAttribute('aria-selected')==='true');
+  const fe=document.activeElement;
+  // Is focus attached to this menu interaction? Inside the menu, on one of the
+  // trigger buttons (the user just opened it), or a recently-focused option the
+  // refresh just detached (innerHTML='') — which is inside by the user's last
+  // interaction.
+  const focusAttached=!!(fe && (
+    fe===dd || dd.contains(fe)
+    || fe===$('profileChip') || fe===$('titlebarProfileBtn')
+    || (typeof fe.getAttribute==='function' && fe.getAttribute('data-profile') && fe.isConnected===false)
+  ));
+  // Never steal focus from the rest of the app: if the user Tabbed out of the
+  // menu, a background refresh must not yank focus back into it.
+  if(fe && fe!==document.body && !focusAttached) return;
+  let idx=-1;
+  // Preserve an in-progress keyboard selection across a background refresh:
+  // re-focus the rebuilt row with the same data-profile instead of jumping
+  // back to the active one.
+  if(focusAttached) idx=items.findIndex(o=>o.getAttribute('data-profile')===_profileDropdownFocusedName);
+  if(idx<0) idx=items.findIndex(o=>o.getAttribute('aria-selected')==='true');
   if(idx<0) idx=0;
   const target=items[idx];
-  if(target && target!==document.activeElement){
+  if(target && target!==fe){
+    const profileName=target.getAttribute('data-profile');
+    if(profileName) _profileDropdownFocusedName=profileName;
     try{target.focus({preventScroll:true});}catch(_){target.focus();}
   }
 }
@@ -7001,6 +7028,10 @@ function _focusProfileDropdownOption(){
 function _profileDropdownKeydownHandler(e){
   const dd=$('profileDropdown');
   if(!dd || !dd.classList.contains('open')) return;
+  // Scope the handler to the menu: once focus has left the listbox (e.g. Tab),
+  // Arrow/Home/End/Enter/Escape must keep working in the rest of the app, not
+  // be hijacked by an open menu the user has moved away from.
+  if(dd.contains(document.activeElement)===false) return;
   const items=_profileDropdownOptions();
   if(e.key==='Escape'){
     e.preventDefault();
@@ -7018,6 +7049,8 @@ function _profileDropdownKeydownHandler(e){
   if(next>=0 && next!==current){
     e.preventDefault();
     const target=items[next];
+    const profileName=target.getAttribute('data-profile');
+    if(profileName) _profileDropdownFocusedName=profileName;
     try{target.focus({preventScroll:true});}catch(_){target.focus();}
     return;
   }

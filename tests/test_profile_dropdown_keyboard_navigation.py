@@ -5,8 +5,15 @@ User-visible failure: the composer/titlebar profile dropdown was a plain-div
 menu with no keyboard support — opening it (click or Enter) left focus on the
 trigger button, ArrowUp/ArrowDown did nothing, and there was no way to select a
 profile without a mouse. This pins the listbox contract (roles, tabindex,
-aria-selected), the arrow/Home/End/Enter/Escape key handler, focus-on-open, and
-focus-restore-on-close.
+aria-selected), the arrow/Home/End/Enter/Escape key handler, focus-on-open,
+focus-restore-on-close, and the two focus-lifecycle guarantees demanded by
+review: the handler only acts while focus is inside the menu, and a background
+refresh preserves an in-progress keyboard selection.
+
+All guards are behavioral: they execute the real dropdown module from
+static/panels.js in node under a minimal DOM shim and assert on observable
+state (focused element, aria attributes, open/close, switch target), never on
+source text.
 """
 import json
 import subprocess
@@ -15,72 +22,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
-STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-
-
-def _function_body(src: str, marker: str) -> str:
-    start = src.index(marker)
-    depth = 0
-    opened = False
-    for idx, ch in enumerate(src[start:], start):
-        if ch == "{":
-            depth += 1
-            opened = True
-        elif ch == "}":
-            depth -= 1
-            if opened and depth == 0:
-                return src[start : idx + 1]
-    raise AssertionError(f"Could not extract function body for {marker}")
-
-
-# ── Source-level guards (no node required) ───────────────────────────────────
-
-
-def test_render_augments_profile_options_with_listbox_aria():
-    body = _function_body(PANELS_JS, "function renderProfileDropdown(data) {")
-    assert "setAttribute('role','listbox')" in body, "menu container must be a listbox"
-    assert "setAttribute('aria-label'," in body, "listbox needs an accessible name"
-    assert "opt.setAttribute('role','option')" in body, "options must be role=option"
-    assert "opt.setAttribute('tabindex','-1')" in body, "options must be programmatically focusable"
-    assert "opt.setAttribute('aria-selected'" in body, "options must expose selection state"
-    assert "_focusProfileDropdownOption();" in body, "focus must move into the menu on render"
-
-
-def test_keydown_handler_moves_and_selects_with_keys():
-    assert "_profileDropdownKeydownHandler" in PANELS_JS
-    body = _function_body(PANELS_JS, "function _profileDropdownKeydownHandler(e){")
-    for branch in ("'Escape'", "'ArrowDown'", "'ArrowUp'", "'Home'", "'End'", "'Enter'||e.key===' '"):
-        assert branch in body, f"keydown handler must handle {branch}"
-    assert "closeProfileDropdown({restore:true});" in body, "Escape must close and restore focus"
-    assert "items[current].click();" in body, "Enter/Space must activate the focused option"
-    assert "current>=0" in body, "Enter/Space must require focus inside the menu"
-
-
-def test_focus_restore_only_on_keyboard_requested_close():
-    body = _function_body(PANELS_JS, "function closeProfileDropdown(opts) {")
-    assert "const restore = !!(opts && opts.restore === true);" in body, "focus restore must be opt-in"
-    assert "dd.contains(document.activeElement)" in body, "restore must not steal focus from outside the menu"
-
-
-def test_keydown_handler_registered_and_triggers_open_on_arrow():
-    assert "document.addEventListener('keydown', _profileDropdownKeydownHandler);" in PANELS_JS
-    body = PANELS_JS[PANELS_JS.index("['profileChip','titlebarProfileBtn'].forEach(id=>{") :]
-    assert "toggleProfileDropdown(e);" in body
-    assert "e.key!=='ArrowDown' && e.key!=='ArrowUp'" in body
-
-
-def test_triggers_declare_listbox_relationship_in_html():
-    assert 'aria-haspopup="listbox"' in INDEX_HTML, "titlebar/composer triggers must declare the popup"
-    assert 'aria-controls="profileDropdown"' in INDEX_HTML
-    assert INDEX_HTML.count('aria-haspopup="listbox"') >= 2
-
-
-def test_focus_ring_stylesheet_for_menu_rows():
-    assert ".profile-opt:focus-visible" in STYLE_CSS
-
-
-# ── Behavioral guards (node execution of the real source) ─────────────────────
 
 
 def _dropdown_module_snippets():
@@ -92,7 +33,7 @@ def _dropdown_module_snippets():
     ]
 
 
-def test_keyboard_can_open_navigate_select_escape():
+def test_keyboard_can_open_navigate_select_escape_and_is_focus_scoped():
     snippets = _dropdown_module_snippets()
     script = textwrap.dedent(
         f"""
@@ -123,7 +64,11 @@ def test_keyboard_can_open_navigate_select_escape():
           }}
           set innerHTML(value) {{
             this._innerHTML = String(value || '');
-            if (this._innerHTML === '') this.children = [];
+            if (this._innerHTML === '') {{
+              // Mirror the DOM: clearing innerHTML detaches the old children.
+              this.children.forEach((c) => {{ c.isConnected = false; }});
+              this.children = [];
+            }}
           }}
           get innerHTML() {{ return this._innerHTML; }}
           appendChild(child) {{ this.children.push(child); return child; }}
@@ -139,7 +84,7 @@ def test_keyboard_can_open_navigate_select_escape():
           click() {{ return typeof this.onclick === 'function' ? this.onclick() : undefined; }}
         }}
         const elements = new Map();
-        for (const id of ['profileDropdown', 'profileChip', 'titlebarProfileBtn', 'titlebarProfileLabel']) {{
+        for (const id of ['profileDropdown', 'profileChip', 'titlebarProfileBtn', 'titlebarProfileLabel', 'msg']) {{
           elements.set(id, new Element('div', id));
         }}
         globalThis.document = {{
@@ -176,7 +121,8 @@ def test_keyboard_can_open_navigate_select_escape():
           single_profile_mode: false,
           profiles: [
             {{ name: 'default', visible: true, is_default: true }},
-            {{ name: 'other', visible: true }},
+            {{ name: 'alpha', visible: true }},
+            {{ name: 'beta', visible: true }},
           ],
         }};
         globalThis.api = () => Promise.resolve(multiProfileResponse);
@@ -190,8 +136,10 @@ def test_keyboard_can_open_navigate_select_escape():
             _profileDropdownFetchPromise = null;
             _profileDropdownCacheLoadedFromStorage = false;
             _profileDropdownOpenGeneration = 0;
+            _profileDropdownFocusedName = null;
             switchedTo = null;
             S.activeProfile = 'default';
+            document.activeElement = null;
             const dd = document.getElementById('profileDropdown');
             dd.children = [];
             dd.innerHTML = '';
@@ -199,13 +147,17 @@ def test_keyboard_can_open_navigate_select_escape():
           }},
           seedCache(data) {{ _profilesCache = data; }},
           toggle(triggerId) {{ toggleProfileDropdown({{ currentTarget: document.getElementById(triggerId) }}); }},
+          render(data) {{ renderProfileDropdown(data); }},
           isOpen() {{ return document.getElementById('profileDropdown').classList.contains('open'); }},
           options() {{ return document.getElementById('profileDropdown').querySelectorAll('.profile-opt'); }},
+          ddRole() {{ return document.getElementById('profileDropdown').getAttribute('role'); }},
           active() {{ return document.activeElement; }},
           chipExpanded() {{ return document.getElementById('profileChip').getAttribute('aria-expanded'); }},
+          focusOn(id) {{ document.activeElement = document.getElementById(id); }},
           dispatchKey(key) {{
-            const ev = {{ key, preventDefault() {{}}, stopPropagation() {{}} }};
+            const ev = {{ key, preventDefault() {{ this._pd = true; }}, stopPropagation() {{}} }};
             document._keydowns.forEach((fn) => fn(ev));
+            return ev;
           }},
           triggerKeydown(triggerId, key) {{
             document.getElementById(triggerId)._keydowns.forEach((fn) => fn({{ key, preventDefault() {{}} }}));
@@ -219,29 +171,40 @@ def test_keyboard_can_open_navigate_select_escape():
           __kbTest.seedCache(multiProfileResponse);
           __kbTest.toggle('profileChip');
           assert.strictEqual(__kbTest.isOpen(), true, 'dropdown should open');
+          assert.strictEqual(__kbTest.ddRole(), 'listbox', 'menu container must be a listbox');
           const items = __kbTest.options();
-          assert.strictEqual(items.length, 3, 'two profiles + manage row should be rendered');
+          assert.strictEqual(items.length, 4, 'three profiles + manage row should be rendered');
+          // Listbox option contract, asserted on the live DOM.
+          for (const o of items) {{
+            assert.strictEqual(o.getAttribute('role'), 'option');
+            assert.strictEqual(o.getAttribute('tabindex'), '-1');
+          }}
+          assert.strictEqual(items[0].getAttribute('aria-selected'), 'true', 'active profile selected');
+          assert.strictEqual(items[1].getAttribute('aria-selected'), 'false');
+          assert.strictEqual(items[0].getAttribute('data-profile'), 'default');
           assert.strictEqual(__kbTest.active(), items[0], 'focus should land on the active profile option on open');
-          assert.strictEqual(items[0].getAttribute('aria-selected'), 'true');
           assert.strictEqual(__kbTest.chipExpanded(), 'true');
 
           __kbTest.dispatchKey('ArrowDown');
           assert.strictEqual(__kbTest.active(), items[1], 'ArrowDown moves to the next profile');
           __kbTest.dispatchKey('ArrowDown');
-          assert.strictEqual(__kbTest.active(), items[2], 'ArrowDown wraps to manage option');
+          assert.strictEqual(__kbTest.active(), items[2], 'ArrowDown moves again');
+          __kbTest.dispatchKey('ArrowDown');
+          assert.strictEqual(__kbTest.active(), items[3], 'ArrowDown wraps to manage option');
           __kbTest.dispatchKey('End');
-          assert.strictEqual(__kbTest.active(), items[2], 'End should go to the last option');
+          assert.strictEqual(__kbTest.active(), items[3], 'End should go to the last option');
           __kbTest.dispatchKey('Home');
           assert.strictEqual(__kbTest.active(), items[0], 'Home should go to the first option');
           __kbTest.dispatchKey('ArrowUp');
-          assert.strictEqual(__kbTest.active(), items[2], 'ArrowUp wraps backwards');
+          assert.strictEqual(__kbTest.active(), items[3], 'ArrowUp wraps backwards');
+          __kbTest.dispatchKey('ArrowUp');
+          __kbTest.dispatchKey('ArrowUp');
+          assert.strictEqual(__kbTest.active(), items[1], 'ArrowUp lands on alpha');
 
-          // Enter on the 'other' profile selects it, closes the menu, and restores focus.
-          __kbTest.dispatchKey('ArrowUp'); // items[1]
-          assert.strictEqual(__kbTest.active(), items[1]);
+          // Enter on the 'alpha' profile selects it, closes the menu, and restores focus.
           __kbTest.dispatchKey('Enter');
           await new Promise((resolve) => setImmediate(resolve));
-          assert.strictEqual(__kbTest.switched(), 'other', 'Enter on an option must switch profiles');
+          assert.strictEqual(__kbTest.switched(), 'alpha', 'Enter on an option must switch profiles');
           assert.strictEqual(__kbTest.isOpen(), false, 'selecting must close the dropdown');
           assert.strictEqual(__kbTest.active(), document.getElementById('profileChip'), 'focus must return to the trigger after selection');
           assert.strictEqual(__kbTest.chipExpanded(), 'false');
@@ -269,10 +232,66 @@ def test_keyboard_can_open_navigate_select_escape():
           assert.strictEqual(__kbTest.active(), __kbTest.options()[0], 'opening via arrow should focus the first option');
         }}
 
+        async function runHandlerInertWhenFocusLeftMenu() {{
+          __kbTest.reset();
+          __kbTest.seedCache(multiProfileResponse);
+          __kbTest.toggle('profileChip');
+          assert.strictEqual(__kbTest.isOpen(), true);
+          // Simulate Tab leaving the listbox: focus moves to an unrelated
+          // control (the composer textarea).
+          __kbTest.focusOn('msg');
+          const evDown = __kbTest.dispatchKey('ArrowDown');
+          assert.ok(!evDown._pd, 'ArrowDown outside the menu must not be swallowed');
+          assert.strictEqual(__kbTest.active(), document.getElementById('msg'), 'focus must not move while outside the menu');
+          const evEnter = __kbTest.dispatchKey('Enter');
+          assert.ok(!evEnter._pd, 'Enter outside the menu must not be swallowed');
+          assert.strictEqual(__kbTest.switched(), null, 'Enter outside the menu must not switch profiles');
+          const evEsc = __kbTest.dispatchKey('Escape');
+          assert.ok(!evEsc._pd, 'Escape outside the menu must not be swallowed');
+          assert.strictEqual(__kbTest.isOpen(), true, 'menu stays open (click-outside still dismisses it); keys pass through to the app');
+          // And a background refresh while focus is elsewhere must not yank it
+          // back into the menu.
+          __kbTest.render({{
+            active: 'default',
+            single_profile_mode: false,
+            profiles: [
+              {{ name: 'default', visible: true, is_default: true, model: 'openai/gpt-5.4-mini' }},
+              {{ name: 'alpha', visible: true, model: 'google/gemini-2.5-pro' }},
+              {{ name: 'beta', visible: true, model: 'anthropic/claude-sonnet-4-6' }},
+            ],
+          }});
+          assert.strictEqual(__kbTest.active(), document.getElementById('msg'), 'refresh must not steal focus from the composer');
+        }}
+
+        async function runRefreshPreservesInProgressSelection() {{
+          __kbTest.reset();
+          __kbTest.seedCache(multiProfileResponse);
+          __kbTest.toggle('profileChip');
+          __kbTest.dispatchKey('ArrowDown'); // alpha holds focus
+          assert.strictEqual(__kbTest.active(), __kbTest.options()[1]);
+          // Background /api/profiles refresh re-renders the menu (same names,
+          // different model text) — the in-progress selection must survive.
+          __kbTest.render({{
+            active: 'default',
+            single_profile_mode: false,
+            profiles: [
+              {{ name: 'default', visible: true, is_default: true, model: 'openai/gpt-5.4-mini' }},
+              {{ name: 'alpha', visible: true, model: 'google/gemini-2.5-pro' }},
+              {{ name: 'beta', visible: true, model: 'anthropic/claude-sonnet-4-6' }},
+            ],
+          }});
+          assert.strictEqual(__kbTest.isOpen(), true, 'refresh keeps the menu open');
+          const items = __kbTest.options();
+          assert.strictEqual(__kbTest.active(), items[1], 'focus must stay on alpha after the refresh rebuild');
+          assert.strictEqual(items[1].getAttribute('data-profile'), 'alpha');
+        }}
+
         (async () => {{
           await runOpenNavigationEnter();
           await runEscapeClosesAndRestores();
           await runArrowDownOnTriggerOpens();
+          await runHandlerInertWhenFocusLeftMenu();
+          await runRefreshPreservesInProgressSelection();
         }})().catch((err) => {{ console.error(err && err.stack || err); process.exit(1); }});
         """
     )
