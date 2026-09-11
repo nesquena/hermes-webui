@@ -13,10 +13,51 @@ REPO = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 
 
+def _compute_agent_cache_signature_source() -> str:
+    """Return the source of the `_compute_agent_cache_signature()` helper.
+
+    The signature blob used to be inlined in the streaming send path; it now
+    lives in this helper so the initial send and both self-heal retry paths
+    derive the signature from the same final runtime bundle.
+    """
+    start = STREAMING_PY.index("def _compute_agent_cache_signature(")
+    end = STREAMING_PY.index("\ndef ", start)
+    return STREAMING_PY[start:end]
+
+
 def _signature_block() -> str:
-    sig_start = STREAMING_PY.index("_sig_blob = _json.dumps")
-    sig_end = STREAMING_PY.index("], sort_keys=True)", sig_start)
-    return STREAMING_PY[sig_start:sig_end]
+    """Return the `_json.dumps([...])` field list the signature hashes."""
+    helper = _compute_agent_cache_signature_source()
+    sig_start = helper.index("_sig_blob = _json.dumps")
+    sig_end = helper.index("], sort_keys=True)", sig_start)
+    return helper[sig_start:sig_end]
+
+
+def _production_signature_calls() -> list[tuple[int, str]]:
+    """Return `(offset, source)` for every production signature call site.
+
+    Paren-balanced so the whole multi-line keyword-argument list is captured,
+    and every call site is returned so a retry path cannot silently drop a
+    field that the initial send still passes.
+    """
+    marker = "_agent_sig = _compute_agent_cache_signature("
+    calls: list[tuple[int, str]] = []
+    pos = STREAMING_PY.find(marker)
+    while pos != -1:
+        depth = 0
+        for idx in range(pos + len(marker) - 1, len(STREAMING_PY)):
+            char = STREAMING_PY[idx]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append((pos, STREAMING_PY[pos:idx + 1]))
+                    break
+        else:
+            raise AssertionError("unterminated _compute_agent_cache_signature( call")
+        pos = STREAMING_PY.find(marker, pos + 1)
+    return calls
 
 
 def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path, monkeypatch):
@@ -225,22 +266,43 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
 
 def test_cache_signature_includes_profile_home():
     block = _signature_block()
-    assert "_profile_home" in block, (
-        "SESSION_AGENT_CACHE signature is missing `_profile_home`. Without this, "
+    assert "profile_home" in block, (
+        "SESSION_AGENT_CACHE signature is missing `profile_home`. Without this, "
         "same-session profile switches reuse the cached agent built under the "
         "previous profile's HERMES_HOME, leaking the old SOUL.md into new turns."
     )
 
+    calls = _production_signature_calls()
+    assert calls, "streaming.py no longer calls _compute_agent_cache_signature()"
+    for _offset, call in calls:
+        assert "profile_home=_profile_home" in call, (
+            "every signature call site (initial send and both self-heal "
+            "retries) must pass the resolved profile home, or a retry re-caches "
+            "the agent under a signature that ignores the active profile:\n" + call
+        )
+
 
 def test_profile_home_resolved_before_cache_signature():
     profile_home_assignment = STREAMING_PY.index("_profile_home = str(_profile_home_path)")
-    sig_start = STREAMING_PY.index("_sig_blob = _json.dumps")
-    assert profile_home_assignment < sig_start
+
+    calls = _production_signature_calls()
+    assert calls, "streaming.py no longer calls _compute_agent_cache_signature()"
+    for offset, call in calls:
+        assert profile_home_assignment < offset, (
+            "`_profile_home` must be resolved before the cache signature is "
+            "computed, otherwise the signature hashes a stale/unbound home."
+        )
+        assert "profile_home=_profile_home" in call, call
+        assert "max_iterations_cfg=_max_iterations_cfg" in call, call
+        assert "max_tokens_cfg=_max_tokens_cfg" in call, call
 
 
 def test_signature_uses_profile_home_with_fallback():
     block = _signature_block()
-    assert "_profile_home or ''" in block, (
-        "Signature should use `_profile_home or ''` so empty-home deployments get "
+    assert "profile_home or ''" in block, (
+        "Signature should use `profile_home or ''` so empty-home deployments get "
         "a stable cache key rather than unnecessary cache churn."
     )
+
+    for _offset, call in _production_signature_calls():
+        assert "profile_home=_profile_home" in call, call
