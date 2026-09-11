@@ -8987,6 +8987,33 @@ def _display_merge_session_is_active(session) -> bool:
     )
 
 
+def _display_merge_streaming_state_signature():
+    """Return the streaming hold-down key for the display-merge cache, or None.
+
+    Mirrors the freeze-marker pattern used by the route session-list cache
+    (#4808) and the CLI/cron projection (#4842): keyed only on the *set* of
+    in-process active stream ids, so it is constant while the same turn(s)
+    stream and changes the moment a stream starts or stops. Entries stored
+    under this marker are accepted by ``_display_merge_cache_entry_usable``
+    only within ``_DISPLAY_MERGE_STREAMING_TTL_SECONDS``, bounding any live-tail
+    staleness to that window; a sidecar checkpoint save, a new in-memory
+    message row, or the stream's own start/stop invalidates sooner. Streams
+    that this process cannot see (cross-process gateway/CLI turns) leave the
+    active set empty and therefore the marker None — those sessions stay on
+    the uncached path (fail closed).
+    """
+    try:
+        active = _active_stream_ids()
+    except Exception:
+        return None
+    if not active:
+        return None
+    try:
+        return ("streaming", tuple(sorted(str(x) for x in active)))
+    except Exception:
+        return ("streaming",)
+
+
 def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
@@ -8996,12 +9023,29 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
     than a fingerprint computed FROM the loaded rows -- otherwise the key could
     not be built without paying exactly the cost we are trying to avoid.
 
-    Fail-closed by construction: returns None whenever the session is active,
-    the key cannot be built, or the cached entry does not match, and the caller
-    then performs the normal full load + merge.
+    Inactive sessions key on that exact state.db revision. Active sessions
+    (in-process stream registered) probe under the streaming freeze marker
+    instead, whose entries expire after ``_DISPLAY_MERGE_STREAMING_TTL_SECONDS``
+    — the live tail can therefore lag by at most the TTL and self-heals on the
+    next request, while a sidecar checkpoint save or a new message row still
+    invalidates immediately through the other key components.
+
+    Fail-closed by construction: returns None for ``msg_before`` paging, for an
+    active session without a registered in-process stream (cross-process
+    gateway/CLI turn — the in-memory tail cannot be verified against anything
+    this process can see), when the key cannot be built, or when the cached
+    entry does not match, and the caller then performs the normal full load +
+    merge.
     """
-    if msg_before is not None or _display_merge_session_is_active(session):
+    if msg_before is not None:
         return None
+    if _display_merge_session_is_active(session):
+        streaming_marker = _display_merge_streaming_state_signature()
+        if streaming_marker is None:
+            return None
+        state_sig = streaming_marker
+    else:
+        state_sig = _DISPLAY_STATE_SIGNATURE_UNSET
     sid = str(getattr(session, "session_id", "") or "")
     if not sid:
         return None
@@ -9020,7 +9064,9 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
     # Building the key requires the sidecar rows (cheap: already in memory or
     # served from the lineage cache) but not the state.db rows -- that
     # asymmetry is the whole point.
-    cache_key = _display_merge_cache_key(session, sidecar_messages, None)
+    cache_key = _display_merge_cache_key(
+        session, sidecar_messages, None, state_db_signature=state_sig
+    )
     if cache_key is None:
         return None
     with _display_merge_cache_lock:
@@ -9062,39 +9108,60 @@ def _limited_webui_messages_for_display_with_sidecar(
     # historical transcripts (~2-3s per request: json.dumps merge keys +
     # loose-content probes per row), and GET /api/session re-runs it on every
     # open/poll. Memoize per session id. Validity is fail-closed:
-    #   - only INACTIVE sessions (no active stream, no pending user message):
-    #     an active session's in-memory tail can be ahead of its disk
-    #     signature, so it always recomputes;
-    #   - the child sidecar's exact stat signature plus every lineage parent
+    #   - INACTIVE sessions (no active stream, no pending user message) key on:
+    #     the child sidecar's exact stat signature plus every lineage parent
     #     signature recorded by _webui_sidecar_lineage_messages_for_display;
-    #   - the sidecar row count and last timestamp (guards unsaved in-memory
-    #     appends that have not reached disk yet);
-    #   - a content fingerprint of the (bounded) state.db rows.
-    # Any uncertainty (missing signature, fingerprint failure) skips caching.
+    #     the sidecar row count and last timestamp (guards unsaved in-memory
+    #     appends that have not reached disk yet); and a content fingerprint
+    #     (or commit-reliable revision) of the (bounded) state.db rows.
+    #   - ACTIVE sessions with an in-process registered stream key on the
+    #     streaming freeze marker instead: an exact per-delta state.db key
+    #     would churn on every streamed row and force the O(history) merge on
+    #     every request, so the marker holds the entry steady for the same
+    #     turn(s) and _display_merge_cache_entry_usable expires it after
+    #     _DISPLAY_MERGE_STREAMING_TTL_SECONDS. A sidecar checkpoint save, a
+    #     new in-memory message row, or the stream's own start/stop still
+    #     invalidates immediately through the other key components, and a
+    #     cross-process (gateway/CLI) turn leaves the marker None — those stay
+    #     on the uncached path.
+    # Any uncertainty (missing signature, fingerprint failure, unregistered
+    # stream) skips caching.
     cache_key = None
     # A msg_before request deliberately reads a different (uncapped) state.db
     # scope than the initial tail request.  It must bypass both cache layers:
     # skipping only the pre-load probe still let this inner lookup reuse the
     # initial 50k-row backstop merge and made the oldest row unreachable.
-    if msg_before is None and not _display_merge_session_is_active(session):
-        if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
-            _state_key = _state_db_rows_fingerprint(state_db_messages)
-        else:
-            _state_key = state_db_signature
-            if _state_key is not None:
-                _current_key = _state_db_session_signature(
-                    getattr(session, "session_id", None),
-                    getattr(session, "profile", None) or None,
-                )
-                if _current_key != _state_key:
-                    _state_key = None
-        if _state_key is not None:
+    _display_active = _display_merge_session_is_active(session)
+    _streaming_marker = (
+        _display_merge_streaming_state_signature() if _display_active else None
+    )
+    if msg_before is None and (not _display_active or _streaming_marker is not None):
+        if _display_active:
             cache_key = _display_merge_cache_key(
                 session,
                 sidecar_messages,
                 state_db_messages,
-                state_db_signature=_state_key,
+                state_db_signature=_streaming_marker,
             )
+        else:
+            if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
+                _state_key = _state_db_rows_fingerprint(state_db_messages)
+            else:
+                _state_key = state_db_signature
+                if _state_key is not None:
+                    _current_key = _state_db_session_signature(
+                        getattr(session, "session_id", None),
+                        getattr(session, "profile", None) or None,
+                    )
+                    if _current_key != _state_key:
+                        _state_key = None
+            if _state_key is not None:
+                cache_key = _display_merge_cache_key(
+                    session,
+                    sidecar_messages,
+                    state_db_messages,
+                    state_db_signature=_state_key,
+                )
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
@@ -9145,9 +9212,10 @@ def _limited_webui_messages_for_display_with_sidecar(
 # perf: memoized sidecar↔state.db display merges for GET /api/session.
 # See _limited_webui_messages_for_display_with_sidecar for the validity rules.
 _DISPLAY_MERGE_CACHE_MAX = 16
-# Legacy streaming-freeze keys are still accepted defensively and remain
-# tightly bounded. Production streaming keys now carry an exact target-session
-# digest, so unrelated deltas stay stable without hiding target mutations.
+# Streaming-freeze keys ("streaming", <sorted active stream ids>) are produced
+# by the active-session fill/probe path (RC1) and remain tightly bounded:
+# _display_merge_cache_entry_usable accepts them only within this TTL, so the
+# live tail can lag by at most 5s and self-heals on the next request.
 _DISPLAY_MERGE_STREAMING_TTL_SECONDS = 5.0
 _display_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
 _display_merge_cache_lock = threading.Lock()
@@ -12967,11 +13035,13 @@ def _handle_session_get(handler, parsed) -> bool:
             # falls through to the normal full load, so this can only skip
             # work that would have produced an identical merged result.
             _display_cache_hit = None
-            if (
-                msg_limit is not None
-                and not getattr(s, "active_stream_id", None)
-                and not getattr(s, "pending_user_message", None)
-            ):
+            if msg_limit is not None:
+                # RC1: active sessions probe the display-merge cache too.
+                # _display_merge_cached_messages fails closed for a stream
+                # this process cannot see (cross-process gateway/CLI turn)
+                # and applies the streaming TTL via the freeze-marker key,
+                # so a hit here never hides the live tail for longer than
+                # _DISPLAY_MERGE_STREAMING_TTL_SECONDS.
                 _display_cache_hit = _display_merge_cached_messages(
                     s,
                     limited_sidecar_messages,
