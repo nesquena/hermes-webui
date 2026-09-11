@@ -549,7 +549,12 @@ function _currentMutationOwner(){
 }
 
 function _mutationKey(owner, path){
-  return JSON.stringify([owner.sessionId, owner.profile, owner.workspace, owner.streamId, path]);
+  // #5747 re-gate (F2): keyed by durable pane ownership only. S.activeStreamId is
+  // transient — the stream-done path clears it before the settled replay runs —
+  // so including it orphaned every entry recorded under that stream and the
+  // pending refresh could never fire. streamId stays on the owner record for
+  // logging; it is not part of the identity.
+  return JSON.stringify([owner.sessionId, owner.profile, owner.workspace, path]);
 }
 
 // Stable identity of already-consumed tool events (F3): the live tool_complete
@@ -665,10 +670,21 @@ function noteWorkspaceMutationsFromToolCall(tc){
     const result = (tc && (tc.result || tc.output || tc.snippet)) || '';
     const workdir = (args && typeof args==='object' && args.workdir)
       || (S && S.session && S.session.workspace) || '.';
-    const texts = [
-      typeof args === 'string' ? args : JSON.stringify(args || {}),
-      typeof result === 'string' ? result : (result ? JSON.stringify(result) : '')
-    ];
+    // #5747 re-gate (F1): the write-op parser expects RAW command/code text — its
+    // shell anchors require whitespace before the operator and JSON framing puts a
+    // quote or colon there, while escaping hides the target. Scan the canonical
+    // payload fields instead of JSON.stringify(args); args.workdir stays the
+    // normalization metadata. Result text is a separate source and still goes
+    // through the same strict write-op extractor, so a mere path mention never
+    // counts as a mutation (F2: mention != change).
+    const texts = [];
+    if(typeof args === 'string') texts.push(args);
+    else if(args && typeof args === 'object'){
+      if(typeof args.command === 'string') texts.push(args.command);
+      if(typeof args.code === 'string') texts.push(args.code);
+    }
+    if(typeof result === 'string') texts.push(result);
+    else if(result) texts.push(JSON.stringify(result));
     for(const t of texts){
       for(const p of _textPathTokens(t, workdir)){
         const key=_mutationKey(owner,p);
@@ -740,15 +756,20 @@ async function refreshOpenPreviewIfMutated(){
 function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
-  const push = (path, source) => {
-    path = _normalizeArtifactPath(path);
+  const push = (path, source, structured) => {
+    // #5747 re-gate (F5): structured candidates arrive already normalized by
+    // _artifactCandidatesFromToolCall (which runs the allowBare pass for
+    // extension-less root files), so re-normalizing them here silently discards
+    // `Makefile` / `Dockerfile`. Only text-mined candidates need the strict
+    // normalization — provenance decides, not the path shape.
+    if(!structured) path = _normalizeArtifactPath(path);
     if(!path || seen.has(path)) return;
     seen.add(path); items.push({path, source});
   };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
   for(const tc of (S.toolCalls || [])){
-    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
+    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool', true);
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
@@ -768,7 +789,7 @@ function collectSessionArtifacts(){
         let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
         if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
         const fakeTc = {name, args, result: tc.result || tc.output || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool', true);
       }
     }
     // Structured content array with tool_use blocks (Anthropic format).
@@ -778,7 +799,7 @@ function collectSessionArtifacts(){
         let inp = block.input || {};
         if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
         const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool', true);
       }
     }
   }
@@ -1239,6 +1260,11 @@ async function toggleEditMode(){
         _previewSaveRoute = '/api/file/office-save';
       }
       _previewDirty=false;
+      // #5747 re-gate (F2): clearing the dirty flag makes this pane eligible for
+      // refresh again — a mutation recorded while the user was editing is still
+      // pending (durable key, see _mutationKey) and must drain now, otherwise it
+      // stays orphaned until an unrelated trigger.
+      if(typeof refreshOpenPreviewIfMutated==='function') refreshOpenPreviewIfMutated();
       // Update read-only views AND the cached raw content so a later
       // "Render as markdown anyway" force-render reflects the just-saved text
       // (not the stale pre-edit fetch). #3378 review (Codex).
@@ -1279,6 +1305,9 @@ function cancelEditMode(){
   if(_previewCurrentMode==='code') $('previewCode').style.display='';
   else $('previewMd').style.display='';
   _previewDirty=false;
+  // #5747 re-gate (F2): same drain as the save path — cancel makes the pane
+  // eligible again, so a pending mutation recorded while editing must fire here.
+  if(typeof refreshOpenPreviewIfMutated==='function') refreshOpenPreviewIfMutated();
   updateEditBtn();
 }
 
@@ -1401,7 +1430,12 @@ async function openFile(path, opts={}){
         return;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    // #5747 re-gate (F4): a rejection can land after a newer openFile() call, and
+    // its failure status belongs to a preview that is no longer showing.
+    }catch(e){
+      if(_openFileReadStale(callGen, callSessionId, callProfileId, callWorkspaceId, callStreamId)) return;
+      setStatus(t('file_open_failed'));
+    }
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1429,6 +1463,9 @@ async function openFile(path, opts={}){
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
+      // #5747 re-gate (F4): same stale guard as the markdown catch — a superseded
+      // read must not trigger a download for the pane that moved on.
+      if(_openFileReadStale(callGen, callSessionId, callProfileId, callWorkspaceId, callStreamId)) return;
       downloadFile(path);
     }
   } else {
@@ -1451,6 +1488,11 @@ async function openFile(path, opts={}){
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){
+      // #5747 re-gate (F4): clear-grant/toast/download are rejection-side effects
+      // of THIS read. When a newer openFile() superseded it they would clear the
+      // wrong pane's grant and download a file the user already navigated away
+      // from — bail out first.
+      if(_openFileReadStale(callGen, callSessionId, callProfileId, callWorkspaceId, callStreamId)) return;
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
