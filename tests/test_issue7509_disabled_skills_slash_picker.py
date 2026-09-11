@@ -12,11 +12,17 @@ both surfaces reported in the issue:
 
 State space covered: 0 / 1 / many skills, enabled / disabled / flag-absent
 entries, both surfaces, and a cache-refresh cycle after a skill is disabled.
+
+Profile-switch coverage (#7509 follow-up): a skill that is disabled in the outgoing
+profile and enabled in the incoming one must become visible on the next picker pass,
+including when the outgoing profile's ``/api/skills`` reply is still in flight while
+the switch lands -- that stale reply must not repopulate the caches.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -42,19 +48,36 @@ def _run_commands_js(script_body: str, skills: list) -> dict:
         f"""
         const vm = require('vm');
         let skillsPayload = {json.dumps(skills)};
+        // In-flight control: __holdSkills(true) parks every /api/skills reply until
+        // __releaseHeldSkills(), so a test can land a profile switch mid-request.
+        let skillRequestCount = 0;
+        let holdSkills = false;
+        const heldSkills = [];
         const ctx = {{
           console,
           localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
           t: (key) => key,
           api: async (path) => {{
-            if (path === '/api/skills') return {{ skills: skillsPayload }};
+            if (path === '/api/skills') {{
+              skillRequestCount++;
+              // Snapshot at request time: a reply produced for the outgoing profile
+              // must not be able to read a payload that only exists after the switch.
+              const snapshot = skillsPayload;
+              if (holdSkills) {{
+                await new Promise((resolve) => {{ heldSkills.push(resolve); }});
+              }}
+              return {{ skills: snapshot }};
+            }}
             if (path === '/api/commands') return {{ commands: [] }};
             if (path === '/api/commands/bundles') return {{ bundles: [] }};
             throw new Error('unexpected api path: ' + path);
           }},
           // Test-only knob, same idiom as the other commands.js harnesses: lets the
           // in-context script swap the mocked /api/skills payload mid-run.
-          __setSkills: (next) => {{ skillsPayload = next; }}
+          __setSkills: (next) => {{ skillsPayload = next; }},
+          __holdSkills: (on) => {{ holdSkills = !!on; }},
+          __releaseHeldSkills: () => {{ heldSkills.splice(0).forEach((resolve) => resolve()); }},
+          __skillRequests: () => skillRequestCount
         }};
         vm.createContext(ctx);
         vm.runInContext({json.dumps(COMMANDS_JS)}, ctx);
@@ -182,3 +205,117 @@ def test_newly_disabled_skill_disappears_after_cache_refresh():
 
     assert result["before"] == {"commands": ["zeta-live"], "sub_args": ["zeta-live"]}, result
     assert result["after"] == {"commands": [], "sub_args": []}, result
+
+# A payload shaped like the one the outgoing profile served: the skill the incoming
+# profile enables is present here, flagged disabled, so a stale cache entry (or a
+# stale in-flight reply) keeps it hidden.
+_DISABLED_SHARED_SKILL = [
+    {"name": "shared-skill", "description": "Disabled in the outgoing profile", "disabled": True},
+]
+_ENABLED_SHARED_SKILL = [
+    {"name": "shared-skill", "description": "Enabled in the incoming profile"},
+]
+
+
+def test_skill_enabled_in_new_profile_appears_in_both_surfaces_after_switch():
+    result = _run_commands_js(
+        """
+        await loadPicker();
+        const before = {
+          commands: skillsOffered(await getSlashAutocompleteMatches('/sh')),
+          sub_args: subArgsOffered(await getSlashAutocompleteMatches('/use ')),
+        };
+        // The profile switch drops the caches (invalidateSlashSkillCaches) and
+        // nothing forces a reload afterwards, so the picker's own non-forced load
+        // is what has to serve the incoming profile's payload.
+        __setSkills([{ name: 'shared-skill', description: 'Enabled in the incoming profile' }]);
+        invalidateSlashSkillCaches();
+        await loadSkillCommands();
+        const after = {
+          commands: skillsOffered(await getSlashAutocompleteMatches('/sh')),
+          sub_args: subArgsOffered(await getSlashAutocompleteMatches('/use ')),
+        };
+        return { before, after };
+        """,
+        _DISABLED_SHARED_SKILL,
+    )
+
+    assert result["before"] == {"commands": [], "sub_args": []}, result
+    assert result["after"] == {"commands": ["shared-skill"], "sub_args": ["shared-skill"]}, result
+
+
+def test_inflight_skills_reply_cannot_repopulate_caches_after_switch():
+    result = _run_commands_js(
+        """
+        await loadPicker();
+        const before = {
+          commands: skillsOffered(await getSlashAutocompleteMatches('/sh')),
+          sub_args: subArgsOffered(await getSlashAutocompleteMatches('/use ')),
+        };
+        // The caches are empty (as they are after the picker's own refresh), so the
+        // next picker pass issues one /api/skills request per surface for the
+        // outgoing profile. Park both of them, then land the switch.
+        invalidateSlashSkillCaches();
+        __holdSkills(true);
+        const inflightCommands = loadSkillCommands();
+        const inflightSubArgs = getSlashAutocompleteMatches('/use ');
+        __setSkills([{ name: 'shared-skill', description: 'Enabled in the incoming profile' }]);
+        invalidateSlashSkillCaches();
+        __holdSkills(false);
+        __releaseHeldSkills();
+        await inflightCommands;
+        await inflightSubArgs;
+        await loadSkillCommands();
+        const after = {
+          commands: skillsOffered(await getSlashAutocompleteMatches('/sh')),
+          sub_args: subArgsOffered(await getSlashAutocompleteMatches('/use ')),
+          requests: __skillRequests(),
+        };
+        return { before, after };
+        """,
+        _DISABLED_SHARED_SKILL,
+    )
+
+    assert result["before"] == {"commands": [], "sub_args": []}, result
+    assert result["after"]["commands"] == ["shared-skill"], result
+    assert result["after"]["sub_args"] == ["shared-skill"], result
+    # 1 from loadPicker(), 1 held reply that must be discarded, 1 fresh fetch: a
+    # cache that simply stayed empty would be wrong, the picker has to reload.
+    assert result["after"]["requests"] >= 3, result
+
+
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def _top_level_function_body(source: str, name: str) -> str:
+    """Return the source of a column-0 `function name(...)` declaration."""
+    match = re.search(r"^(?:async\s+)?function\s+" + re.escape(name) + r"\s*\(", source, re.MULTILINE)
+    assert match, f"{name} not found"
+    end = source.find("\n}\n", match.start())
+    assert end != -1, f"{name}: closing brace not found"
+    return source[match.start():end + 3]
+
+
+def test_both_profile_switch_paths_drop_the_slash_skill_caches():
+    """The switch handlers must call the invalidation once the POST has succeeded.
+
+    The handlers cannot be executed in isolation here (they touch most of the app
+    shell), so this is a structural check: the invalidation call has to live inside
+    the switch function, after the /api/profile/switch request -- dropping the
+    caches before the request would let a reply from the outgoing profile commit
+    once the switch is done.
+    """
+    for label, source, function_name in (
+        ("panels.switchToProfile", PANELS_JS, "switchToProfile"),
+        ("sessions._switchProfileForSessionLoad", SESSIONS_JS, "_switchProfileForSessionLoad"),
+    ):
+        body = _top_level_function_body(source, function_name)
+        switch_call = body.find("/api/profile/switch")
+        invalidate_call = body.find("invalidateSlashSkillCaches()")
+        assert switch_call != -1, f"{label}: no /api/profile/switch call in {function_name}"
+        assert invalidate_call != -1, (
+            f"{label}: {function_name} does not drop the slash-skill caches, so the "
+            "previous profile's /api/skills payload keeps hiding the new profile's skills"
+        )
+        assert invalidate_call > switch_call, f"{label}: caches dropped before the switch request"

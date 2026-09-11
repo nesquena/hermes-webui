@@ -7070,6 +7070,15 @@ async function switchToProfile(name) {
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
+    // #7509: the slash-skill caches hold the previous profile's disabled-filtered
+    // /api/skills payload, so drop them once the switch has actually succeeded —
+    // otherwise a skill that is enabled in the new profile stays hidden behind the
+    // old payload. Invalidating here (rather than before the POST) also kills any
+    // response still in flight, so the previous profile's reply can't repopulate
+    // the caches after this point (see invalidateSlashSkillCaches in commands.js).
+    if (typeof window !== 'undefined' && typeof window.invalidateSlashSkillCaches === 'function') {
+      window.invalidateSlashSkillCaches();
+    }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
     if (!sessionInProgress && S.session) {

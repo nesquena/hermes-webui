@@ -250,8 +250,15 @@ let _slashPersonalityCachePromise=null;
 let _bundleCommandCache=[];
 let _bundleCommandLoadPromise=null;
 let _bundleCommandCacheReady=false;
+// Bumped by invalidateSlashSkillCaches(). The two skill-cache loaders below capture
+// it when they issue /api/skills and refuse to commit when it moved while their
+// response was in flight: a reply generated for the previous profile would otherwise
+// land after a profile switch and repopulate the caches with that profile's
+// disabled-filtered payload, keeping a skill that is enabled in the new profile
+// hidden (#7509).
 let _slashSkillCache=null;
 let _slashSkillCachePromise=null;
+let _slashSkillCacheGen=0;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 
@@ -361,6 +368,7 @@ function _isSkillDisabled(skill){
 async function _loadSlashSkillSubArgs(force=false){
   if(_slashSkillCache&&!force) return _slashSkillCache;
   if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
+  const gen=_slashSkillCacheGen;
   _slashSkillCachePromise=(async()=>{
     try{
       const data=await api('/api/skills');
@@ -371,19 +379,26 @@ async function _loadSlashSkillSubArgs(force=false){
         if(name) values.push(name);
       }
       const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      // A profile switch during the request bumped the generation: this payload
+      // belongs to the previous profile, so leave the cache empty for the fresh
+      // read instead of publishing stale names (#7509).
+      if(gen!==_slashSkillCacheGen) return _slashSkillCache||[];
       _slashSkillCache=deduped;
       return deduped;
     }catch(_){
-      _slashSkillCache=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCache=null;
       return [];
     }finally{
-      _slashSkillCachePromise=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCachePromise=null;
     }
   })();
   return _slashSkillCachePromise;
 }
 
 function invalidateSlashSkillCaches(){
+  // Bump before dropping the caches: an /api/skills response still in flight was
+  // generated for the previous profile and must not commit once it lands (#7509).
+  _slashSkillCacheGen++;
   _slashSkillCache=null;
   _slashSkillCachePromise=null;
   _skillCommandCache=[];
@@ -2126,14 +2141,22 @@ function _buildBundleCommandEntry(bundle){
 async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
+  const gen=_slashSkillCacheGen;
   _skillCommandLoadPromise=(async()=>{
     try{
       const data=await api('/api/skills');
       const deduped=new Map();
       for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      // Bumped by a profile switch while we were awaiting: keep the cache empty
+      // (and not "ready") so the composer's next pass loads the new profile (#7509).
+      if(gen!==_slashSkillCacheGen) return _skillCommandCache;
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-    }catch(_){_skillCommandCache=[];}
-    finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+    }catch(_){
+      if(gen===_slashSkillCacheGen)_skillCommandCache=[];
+    }
+    finally{
+      if(gen===_slashSkillCacheGen){_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+    }
     return _skillCommandCache;
   })();
   return _skillCommandLoadPromise;
