@@ -3517,10 +3517,12 @@ def _grok_version(model_id: str | None) -> tuple[int, int | None] | None:
 
       - the major version may be glued to the family name (``grok4``) but a
         separator IS required between major and minor (``grok-4.5`` ok,
-        ``grok-45`` reads as major 45, i.e. not 4.5);
-      - a letter strapped straight onto the minor (``grok-4.5x``) is a DIFFERENT
-        id, not grok-4.5 — the parse is rejected outright rather than falling
-        back to the bare major (which would wrongly cap it);
+        ``grok-45`` is rejected: a multi-digit major is a different/
+        hypothetical id, not a Grok family release);
+      - a letter strapped straight onto the major or the minor (``grok4x``,
+        ``grok-4.5x``) is a DIFFERENT id, not grok-4/4.5 — the parse is
+        rejected outright rather than falling back to the bare major (which
+        would wrongly cap it);
       - delimiter-separated suffixes are fine (``grok-4.5-mini``);
       - date-stamped snapshots (``grok-4-0709``) carry the BASE version, so a
         leading-zero group is a release stamp, not ``minor=709``.
@@ -3544,6 +3546,10 @@ def _grok_version(model_id: str | None) -> tuple[int, int | None] | None:
         if end == cursor:
             # "grok-beta", "grokking-4": no version digits after the family name.
             continue
+        if end - cursor > 1 or (end < len(text) and text[end].isalpha()):
+            # "grok45"/"grok-45": a multi-digit major is not a Grok release.
+            # "grok4x": a letter glued onto the major is a different id.
+            return None
         major = int(text[cursor:end])
         minor: int | None = None
         if end < len(text) and text[end] in "._-":
