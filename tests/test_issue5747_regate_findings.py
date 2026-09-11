@@ -125,6 +125,32 @@ def test_shell_write_op_from_raw_command_is_recorded():
     )
 
 
+def test_relative_redirect_and_sed_targets_are_recorded():
+    """F1 (reviewer's own examples): canonical fields, relative paths."""
+    rel = _mutations(
+        {
+            "tid": "t-raw-3",
+            "name": "terminal",
+            "arguments": {"command": "echo updated > static/style.css"},
+            "result": "",
+        }
+    )
+    assert any(p.endswith("static/style.css") for p in rel), (
+        f"a workspace-relative shell redirect must register a mutation; got {rel}"
+    )
+    sed = _mutations(
+        {
+            "tid": "t-raw-4",
+            "name": "terminal",
+            "arguments": {"command": "sed -i 's/old/new/' static/theme.css"},
+            "result": "",
+        }
+    )
+    assert any(p.endswith("static/theme.css") for p in sed), (
+        f"an in-place sed edit must register a mutation; got {sed}"
+    )
+
+
 def test_merely_mentioned_path_is_not_a_mutation():
     """F1/F2 guard: prose mentions are not write ops."""
     paths = _mutations(
