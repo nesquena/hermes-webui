@@ -16857,17 +16857,23 @@ function renderMessages(options){
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
-    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
-    const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     // Per-message delete (companion to /api/session/message/delete; the
     // truncate-keep counterpart is PR #6740). Available on every user/assistant
     // row that has a stable server-side id. Server-side default scope is "pair"
     // — deleting a user prompt also drops the assistant response on the other
     // side of the turn, preventing the "dangling user turn" pathology some
     // providers reject on next resend (see #6737 context).
-    const _hasDeleteId = !!(m && (typeof m.id === 'string') && m.id);
+    // Declared BEFORE restoreBtn/deleteBtn below so both can read it without
+    // hitting a Temporal Dead Zone on `const`.
+    // Accept both string and integer ids: legacy sessions store id as an
+    // integer rowid (236, 237, …) before #6737 was rolled out; new sessions
+    // store a string uuid. The delete endpoint serialises either form.
+    const _hasDeleteId = !!(m && m.id !== null && m.id !== undefined && m.id !== '' && (typeof m.id === 'string' || typeof m.id === 'number'));
+    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const restoreBtn = (isUser && _hasDeleteId) ? `<button class="msg-action-btn msg-restore-btn" title="${t('restore_from_here')}" onclick="restoreToMessage(this)">${li('rotate-ccw',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const deleteBtn = _hasDeleteId
       ? `<button class="msg-action-btn msg-delete-btn" title="${t('delete_message')}" onclick="deleteMessage(this)">${li('trash-2',13)}</button>`
       : '';
@@ -16895,7 +16901,7 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${deleteBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${restoreBtn}${ttsBtn}${forkBtn}${copyBtn}${deleteBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -19217,7 +19223,7 @@ async function deleteMessage(btn) {
   // Confirmation: deleting a turn is destructive (pair scope drops the
   // follow-up too). Ask before mutating. The native dialog is intentional
   // — we want zero-dependency, zero-css reliance, and the action is rare.
-  if(!window.confirm(t('delete_confirm'))) return;
+  if(!window.confirm(t('msg_delete_confirm'))) return;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
@@ -19251,7 +19257,229 @@ async function deleteMessage(btn) {
     S.messages = S.messages.filter(m => !(m && typeof m.id === 'string' && dropIds.has(m.id)));
     renderMessages();
     setStatus(t('delete_done') + ' ' + (resp && resp.removed_message_ids ? resp.removed_message_ids.length : dropIds.size));
-  } catch(e) { setStatus(t('delete_failed') + e.message); }
+  } catch(e) { setStatus(t('msg_delete_failed') + e.message); }
+}
+
+// Restore Checkpoint — parity with Hermes Desktop's "restoreToMessage". Every
+// user message is treated as a checkpoint: clicking the discard icon on a
+// user message truncates the transcript from that message onward, leaving
+// the prefix intact. The user can then resubmit the original prompt (or a
+// rewritten one) to re-run the turn from scratch. This is the opposite of
+// per-message delete (#6737): delete drops a single row, restore drops the
+// tail of the conversation from the chosen row. Server endpoint:
+// POST /api/session/truncate-before {session_id, message_id}.
+async function restoreToMessage(btn) {
+  // Re-entrancy guard: a stale SSE ack or a double-click must not run
+  // restore twice. We poll S.restoreInFlight so the disabled-button
+  // affordance can also short-circuit without a visible grey-out flicker.
+  if(!S.session || S.busy) return;
+  if(S.restoreInFlight){
+    setStatus(t('restore_already_running'));
+    return;
+  }
+  // Resolve the durable row_id from the clicked button. The row carries
+  // ``data-msg-idx`` for display order and ``m._row_id`` is the state.db
+  // primary key the backend uses (see api/session_ops.py:restore_checkpoint_at_row_id
+  // for the fail-closed contract).
+  //
+  // NOTE: we intentionally do NOT await _ensureAllMessagesLoaded() here.
+  // Restore rewinds the durable transcript to a known durable address; if
+  // the target row isn't in the current paged view, the API will respond
+  // with 400 "row_id not found" and the UI surfaces the error — the same
+  // fail-closed path the gateway takes. This avoids the existing
+  // _ensureAllMessagesLoaded() mutex/lock that can stall when the session
+  // is mid-paging, and keeps the destructive call out of any paged-fetch
+  // race window.
+  const row = btn.closest('.msg-row');
+  if(!row) return;
+  const idx = parseInt(row.getAttribute('data-msg-idx')||'-1', 10);
+  if(idx<0 || !S.messages || !S.messages[idx]) return;
+  const msg = S.messages[idx];
+  if(!msg || msg.role !== 'user') return;  // only user messages are checkpoints
+  // Prefer ``_row_id`` (durable state.db primary key); fall back to integer
+  // ``id`` (legacy pre-#6737 sessions) and only then to renderer string ids.
+  // The endpoint rejects anything non-integer with HTTP 400.
+  let rowId = msg._row_id;
+  if(rowId === undefined || rowId === null) rowId = msg.row_id;
+  if(rowId === undefined || rowId === null) rowId = msg.id;
+  if(typeof rowId !== 'number' || !Number.isInteger(rowId) || rowId <= 0){
+    setStatus(t('restore_no_row_id'));
+    return;
+  }
+  // Confirm: spelled out exactly like Desktop to make the destructive
+  // scope (drop everything from this row onward) obvious. The user can still
+  // Cancel.
+  if(!window.confirm(t('restore_title'))) return;
+  await _doRestoreCheckpoint(rowId, msg);
+}
+
+// === Restore Checkpoint global picker (FAB + modal) ===
+// Long sessions have user turns far above the lazy-load window — the inline
+// restore button on each message is therefore unreachable from the initial
+// scroll position. This FAB opens a modal that lists every user turn in the
+// currently-loaded messages slice (we list what's in S.messages — the
+// restored state will reload on success) so the operator can pick any
+// checkpoint without scrolling.
+function _openRestoreCheckpointPicker() {
+  if(!S.session){ setStatus(t('restore_no_session')); return; }
+  if(S.restoreInFlight){ setStatus(t('restore_already_running')); return; }
+
+  // Collect user turns from the currently loaded slice.
+  const userTurns = [];
+  if(Array.isArray(S.messages)){
+    for(let i=0;i<S.messages.length;i++){
+      const m=S.messages[i];
+      if(m && m.role==='user'){
+        const rid = (typeof m._row_id==='number') ? m._row_id
+                  : (typeof m.row_id==='number') ? m.row_id
+                  : (typeof m.id==='number') ? m.id
+                  : null;
+        if(rid===null){ continue; }
+        const txt = (typeof m.content==='string') ? m.content
+                  : (Array.isArray(m.content)
+                      ? m.content.map(p => (p && p.type==='text') ? (p.text||'') : '').join(' ')
+                      : (typeof m.text==='string' ? m.text : ''));
+        userTurns.push({
+          idx: i,
+          row_id: rid,
+          preview: (txt||'').slice(0, 80).replace(/\s+/g,' ').trim() ||
+                   '[message with no text content]',
+        });
+      }
+    }
+  }
+
+  // Close any existing picker
+  const existing=document.getElementById('restoreCheckpointModal');
+  if(existing) existing.remove();
+
+  // Build modal
+  const wrap=document.createElement('div');
+  wrap.id='restoreCheckpointModal';
+  wrap.className='restore-checkpoint-modal';
+  wrap.innerHTML = `
+    <div class="restore-checkpoint-modal__backdrop"></div>
+    <div class="restore-checkpoint-modal__panel" role="dialog" aria-modal="true">
+      <div class="restore-checkpoint-modal__head">
+        <h3>${esc(t('restore_picker_title')||'Restore checkpoint')}</h3>
+        <button class="restore-checkpoint-modal__close" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="restore-checkpoint-modal__body">
+        ${userTurns.length===0
+          ? `<div class="restore-checkpoint-modal__empty">${esc(t('restore_no_user_turns')||'No user turns with durable checkpoint ids in the loaded transcript. Scroll up to load older messages first.')}</div>`
+          : `<ul class="restore-checkpoint-modal__list">
+              ${userTurns.slice().reverse().map(t => `
+                <li class="restore-checkpoint-modal__item" data-row-id="${t.row_id}" data-idx="${t.idx}" role="button" tabindex="0">
+                  <span class="restore-checkpoint-modal__rowid">#${t.row_id}</span>
+                  <span class="restore-checkpoint-modal__preview">${esc(t.preview)}</span>
+                </li>
+              `).join('')}
+            </ul>
+            <p class="restore-checkpoint-modal__hint">${esc(t('restore_picker_hint')||'Click any user message to rewind the conversation to that point. Messages and agent actions after that point will be removed from the active conversation.')}</p>`
+        }
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const close=()=>{ wrap.remove(); };
+  wrap.querySelector('.restore-checkpoint-modal__backdrop')
+    .addEventListener('click', close);
+  wrap.querySelector('.restore-checkpoint-modal__close')
+    .addEventListener('click', close);
+  wrap.querySelectorAll('.restore-checkpoint-modal__item').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      const rowId = parseInt(el.getAttribute('data-row-id')||'0', 10);
+      const idx = parseInt(el.getAttribute('data-idx')||'-1', 10);
+      const msg = S.messages[idx];
+      if(!rowId || !msg) return;
+      close();
+      if(!window.confirm(t('restore_title'))) return;
+      await _doRestoreCheckpoint(rowId, msg);
+    });
+    el.addEventListener('keydown', async (ev)=>{
+      if(ev.key==='Enter'||ev.key===' '){
+        ev.preventDefault();
+        el.click();
+      }
+    });
+  });
+}
+
+async function _doRestoreCheckpoint(rowId, msg) {
+  S.restoreInFlight = true;
+  try {
+    const body = JSON.stringify({ session_id: S.session.session_id, row_id: rowId });
+    const resp = await fetch('/api/session/checkpoint/restore', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body
+    });
+    if(!resp.ok){
+      const errText = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${errText}`);
+    }
+    const data = await resp.json();
+    if(data && data.session){
+      S.messages = data.session.messages || [];
+      if(typeof S.session === 'object' && S.session){
+        S.session.messages = S.messages;
+        if(typeof data.session.truncation_watermark === 'number'){
+          S.session.truncation_watermark = data.session.truncation_watermark;
+        }
+        if(typeof data.session.truncation_boundary === 'number'){
+          S.session.truncation_boundary = data.session.truncation_boundary;
+        }
+      }
+    }
+    renderMessages();
+    setStatus(t('restore_done') + ' ' + (msg.text || ''));
+  } catch(e) { setStatus(t('restore_failed') + e.message); }
+  S.restoreInFlight = false;
+}
+
+// Wrap renderMessages so the Restore Checkpoint FAB appears whenever a
+// session is active. The FAB itself is idempotent (exits early if the DOM
+// node already exists), so calling it on every render is cheap. We also
+// remove the FAB when no session is active.
+(function _installRestoreFabHook(){
+  if (typeof window.renderMessages !== 'function') return;
+  var _orig = window.renderMessages;
+  var _wrapped = function(){
+    var rv = _orig.apply(this, arguments);
+    try {
+      if (typeof S !== 'undefined' && S && S.session) {
+        _ensureRestoreCheckpointFab();
+      } else {
+        _removeRestoreCheckpointFab();
+      }
+    } catch (_) { /* swallow — UI hook, never crash render */ }
+    return rv;
+  };
+  window.renderMessages = _wrapped;
+})();
+
+function _ensureRestoreCheckpointFab() {
+  if(document.getElementById('restoreCheckpointFab')) return;
+  if(!S.session) return;  // Only show when a session is active
+  const btn = document.createElement('button');
+  btn.id = 'restoreCheckpointFab';
+  btn.type = 'button';
+  btn.className = 'restore-checkpoint-fab';
+  btn.title = t('restore_fab_title') || 'Restore checkpoint';
+  btn.setAttribute('aria-label', btn.title);
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 12a9 9 0 1 0 9-9"/>
+      <path d="M3 4v5h5"/>
+      <path d="M12 7v5l3 2"/>
+    </svg>
+    <span class="restore-checkpoint-fab__label">${esc(t('restore_fab_label') || 'Restore')}</span>
+  `;
+  btn.addEventListener('click', _openRestoreCheckpointPicker);
+  document.body.appendChild(btn);
+}
+
+function _removeRestoreCheckpointFab() {
+  const existing = document.getElementById('restoreCheckpointFab');
+  if(existing) existing.remove();
 }
 
 // postProcessRenderedMessages() runs one frame AFTER the render + JS scroll

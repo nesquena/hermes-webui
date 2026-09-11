@@ -7323,3 +7323,155 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
    from copy/fork without screaming red on the resting state. Reuses the
    .msg-action-btn base so it lines up with the other icon buttons. */
 .msg-delete-btn:hover{color:var(--danger, #c0392b);background:var(--danger-bg, rgba(192,57,43,0.08));}
+
+/* ── Restore Checkpoint FAB (always visible when a session is active) ──
+   Long sessions have user-turn restore buttons above the lazy-load viewport
+   (top:-2125px etc.). The FAB is a fixed bottom-right button that opens a
+   modal listing every user turn in the currently-loaded transcript slice so
+   the operator can pick any checkpoint without scrolling the message list. */
+.restore-checkpoint-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 90px;
+  z-index: 10000;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--accent, #B8860B);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-pill, 999px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25), 0 2px 6px rgba(0, 0, 0, 0.15);
+  font: 600 13px/1 var(--font-ui, sans-serif);
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.restore-checkpoint-fab:hover {
+  background: var(--accent-hover, #996F08);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.3), 0 3px 8px rgba(0, 0, 0, 0.2);
+}
+.restore-checkpoint-fab:active {
+  transform: translateY(0);
+}
+.restore-checkpoint-fab svg {
+  flex-shrink: 0;
+}
+
+/* ── Restore Checkpoint Modal ── */
+.restore-checkpoint-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.restore-checkpoint-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.restore-checkpoint-modal__panel {
+  position: relative;
+  width: min(560px, 92vw);
+  max-height: 80vh;
+  background: var(--bg, #FEFCF7);
+  color: var(--text, #1A1610);
+  border: 1px solid var(--border, #E0D8C8);
+  border-radius: var(--radius-lg, 12px);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.restore-checkpoint-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border, #E0D8C8);
+}
+.restore-checkpoint-modal__head h3 {
+  margin: 0;
+  font: 600 16px/1.2 var(--font-ui, sans-serif);
+}
+.restore-checkpoint-modal__close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--muted, #5C5344);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.restore-checkpoint-modal__close:hover {
+  background: var(--hover-bg, rgba(0,0,0,0.05));
+}
+.restore-checkpoint-modal__body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  max-height: 70vh;
+}
+.restore-checkpoint-modal__empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--muted, #5C5344);
+  font-size: 14px;
+}
+.restore-checkpoint-modal__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.restore-checkpoint-modal__item {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 10px 12px;
+  border-radius: var(--radius-md, 8px);
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: var(--surface-subtle, rgba(0,0,0,0.025));
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+.restore-checkpoint-modal__item:hover,
+.restore-checkpoint-modal__item:focus-visible {
+  background: var(--surface-subtle-hover, rgba(0,0,0,0.045));
+  border-color: var(--accent, #B8860B);
+  outline: none;
+}
+.restore-checkpoint-modal__rowid {
+  flex-shrink: 0;
+  font: 600 11px/1 ui-monospace, monospace;
+  color: var(--accent, #B8860B);
+  background: var(--accent-bg, rgba(184,134,11,0.08));
+  padding: 4px 8px;
+  border-radius: 4px;
+  min-width: 60px;
+  text-align: center;
+}
+.restore-checkpoint-modal__preview {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--strong, #0F0D08);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.restore-checkpoint-modal__hint {
+  margin: 12px 0 0 0;
+  padding: 10px 12px;
+  background: var(--surface, #F3EEE3);
+  border-radius: var(--radius-md, 8px);
+  font-size: 12px;
+  color: var(--muted, #5C5344);
+  line-height: 1.4;
+}

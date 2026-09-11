@@ -158,9 +158,26 @@ const LOCALES = {
     // The confirmation string spells out the pair-scope consequence so the
     // user understands the turn-pair collapse before they click OK.
     delete_message: 'Delete message',
-    delete_confirm: 'Delete this message and its turn-pair? This cannot be undone.',
+    msg_delete_confirm: 'Delete this message and its turn-pair? This cannot be undone.',
     delete_done: 'Deleted messages:',
-    delete_failed: 'Delete failed: ',
+    msg_delete_failed: 'Delete failed: ',
+    // Restore Checkpoint (Desktop parity, #7075 family). Rewinds the
+    // transcript from a user message onward so the user can re-send the
+    // prompt. Unlike delete, restore keeps the prefix intact and the user
+    // resubmits the original text manually (no auto-resubmit in WebUI yet).
+    restore_from_here: 'Restore checkpoint from here',
+    restore_title: 'Restore to this checkpoint?\n\nRestore conversation to this point. Messages and agent actions after this point will be removed from the active conversation.',
+    restore_done: 'Restored to checkpoint:',
+    restore_failed: 'Restore failed: ',
+    restore_already_running: 'Restore already in progress…',
+    restore_no_row_id: 'Cannot restore: message has no durable checkpoint id (legacy message)',
+    restore_no_session: 'Open a session first to restore a checkpoint.',
+    // Floating action button + modal picker (always visible during a session)
+    restore_fab_title: 'Restore checkpoint',
+    restore_fab_label: 'Restore',
+    restore_picker_title: 'Restore checkpoint',
+    restore_picker_hint: 'Click any user message to rewind the conversation to that point. Messages and agent actions after that point will be removed from the active conversation.',
+    restore_no_user_turns: 'No user turns with durable checkpoint ids in the loaded transcript. Scroll up to load older messages first.',
     // approval card
     approval_heading: 'Approval required',
     approval_desc_prefix: 'Dangerous command detected',
