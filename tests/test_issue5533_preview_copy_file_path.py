@@ -200,6 +200,40 @@ def test_preview_toolbar_keeps_copy_content_button_from_shrinking_path_layout():
     assert "white-space:nowrap" in selector_block
 
 
+def test_reset_text_preview_copy_state_hides_button_and_clears_cache():
+    """Greptile auto-review (PR #6957): a failed md/code/csv load must not leave
+    the copy-content button visible in a stale state carried over from the
+    previously-previewed file. resetTextPreviewCopyState() must clear the raw
+    content cache (and its path) and hide the button.
+    """
+    body = _function_body(WORKSPACE_JS, "resetTextPreviewCopyState")
+    compact = _compact(body)
+
+    assert "_previewRawContent=''" in compact
+    assert "_previewRawContentPath=''" in compact
+    assert "$('btnCopyPreviewContent')" in body
+    assert "btn.style.display='none'" in compact
+
+
+def test_markdown_open_file_failure_resets_copy_state():
+    """The markdown branch of openFile() must call resetTextPreviewCopyState()
+    on load failure so the copy-content button doesn't inherit its visibility
+    from the previously-previewed file (Greptile PR #6957 finding).
+    """
+    # openFile()'s default-parameter signature (`opts={}`) breaks the brace-matching
+    # _function_body() helper (its own `{}` closes before the real body opens), so
+    # this checks the whole-file compact source instead, anchored around the
+    # markdown branch's render call and failure catch.
+    compact = _compact(WORKSPACE_JS)
+
+    catch_marker = "}catch(e){resetTextPreviewCopyState();setStatus(t('file_open_failed'));}"
+    assert catch_marker in compact
+    assert "renderMarkdownPreviewContent(data);" in compact
+    assert compact.index("renderMarkdownPreviewContent(data);") < compact.index(catch_marker)
+    assert "MD_EXTS.has(ext)" in compact
+    assert compact.index("MD_EXTS.has(ext)") < compact.index(catch_marker)
+
+
 def test_preview_copy_content_button_is_accessible_and_icon_only_on_narrow_pane():
     """The preview-header copy-content button must stay accessible when its text
     label is hidden on a narrow pane (#5548 icon-only fold-in): it carries an

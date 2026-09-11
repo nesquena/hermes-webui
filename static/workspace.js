@@ -987,6 +987,14 @@ function showPreview(mode){
   setLargeMarkdownForceRenderVisible(false);
 }
 
+function resetTextPreviewCopyState(){
+  if(typeof _previewRawContent!=='string') return;
+  _previewRawContent = '';
+  _previewRawContentPath = '';
+  const btn=$('btnCopyPreviewContent');
+  if(btn) btn.style.display='none';
+}
+
 function updateEditBtn(){
   const btn=$('btnEditFile');
   if(!btn)return;
@@ -1177,7 +1185,7 @@ async function openFile(path, opts={}){
         return;
       }
       renderMarkdownPreviewContent(data);
-    }catch(e){setStatus(t('file_open_failed'));}
+    }catch(e){resetTextPreviewCopyState();setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
     // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
@@ -1204,6 +1212,7 @@ async function openFile(path, opts={}){
       if(renderCsvPreviewContent(path, data.content)) return;
       renderCodePreviewContent(path, data.content);
     }catch(e){
+      resetTextPreviewCopyState();
       downloadFile(path);
     }
   } else {
@@ -1225,6 +1234,7 @@ async function openFile(path, opts={}){
       }
       renderCodePreviewContent(path, data.content);
   }catch(e){
+      resetTextPreviewCopyState();
       const grant = _workspaceEscapeGrantForPath(path);
       if(grant && e && e.status===403){
         _clearWorkspaceEscapeGrant(grant.path);
