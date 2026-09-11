@@ -123,8 +123,8 @@ def test_modified_click_cancels_pending_tap_before_new_tab():
     fast modified double-click fires after the new tab opens and switches the
     current tab anyway — the exact stale-state class the review flagged.
     """
-    idx = SESSIONS_JS.index("if(e.ctrlKey||e.metaKey){")
-    window = SESSIONS_JS[idx:idx + 900]
+    idx = SESSIONS_JS.index("if((e.ctrlKey||e.metaKey)")
+    window = SESSIONS_JS[idx:idx + 1400]
     assert "_consumeSessionNewTabClick(e, s.session_id)" in window
     clear_idx = window.index("clearTimeout(_tapTimer)")
     consume_idx = window.index("_consumeSessionNewTabClick(e, s.session_id)")
@@ -141,6 +141,13 @@ def test_modified_click_cancels_pending_tap_before_new_tab():
     # leave pen-painted offsets displaced and the `dragging` class stuck.
     assert "_clearPointerDragState()" in window
     assert window.index("_clearPointerDragState()") < consume_idx
+    # Select/rename gate: the branch must not touch gesture state when the
+    # new-tab consumer refuses the event (select mode / mid-rename), or the
+    # fall-through _finishSessionGesture early-returns on 'idle' and the row
+    # (de)select toggle never runs.
+    compact = window.replace(" ", "")
+    assert "!_sessionSelectMode" in compact
+    assert "!_renamingSid" in compact
 
 
 # ── Behavioral tests via Node VM ─────────────────────────────────────────────
@@ -194,7 +201,7 @@ def _helpers() -> str:
 
 def _pointerup_branch() -> str:
     """The Ctrl/Cmd branch of the top-level onpointerup, verbatim."""
-    idx = SESSIONS_JS.index("if(e.ctrlKey||e.metaKey){")
+    idx = SESSIONS_JS.index("if((e.ctrlKey||e.metaKey)")
     end = SESSIONS_JS.index(
         "if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType))",
         idx,
@@ -369,6 +376,96 @@ console.log(JSON.stringify(ret));
         assert out["out"]["gestureState"] == "idle"
         assert out["out"]["settleCalls"] >= 1
         assert out["out"]["longPressCleared"] is True
+
+    def test_select_mode_ctrl_click_skips_branch_and_runs_finisher(self):
+        """Select-mode regression: Ctrl+click must NOT mutate gesture state.
+
+        _consumeSessionNewTabClick refuses select mode, so the pointerup
+        branch must be skipped entirely — gesture stays 'pressing' and the
+        fall-through _finishSessionGesture runs (row toggles). Before the
+        select/rename gate, the branch parked state to 'idle' first and the
+        finisher early-returned, breaking Ctrl+click (de)select.
+        """
+        branch = _pointerup_branch()
+        consume = _extract_function(SESSIONS_JS, "_consumeSessionNewTabClick")
+        opener = _extract_function(SESSIONS_JS, "_openSessionUrlInNewTab")
+        urlfn = _extract_function(SESSIONS_JS, "_sessionUrlForSid")
+        # The branch under test runs inside the row's gesture closure, so the
+        # harness must stub every closure free-var the branch touches.
+        # Select mode ON: _consumeSessionNewTabClick refuses the event, so
+        # the branch must be skipped — no choke, no timer touch — and the
+        # appended verbatim finisher tail must run with state intact.
+        assert "_sessionSelectMode" in branch
+        driver = (
+            "const fs = require('fs');\n"
+            "const branchSrc = fs.readFileSync("
+            + json.dumps("BRANCH_FILE") + ", 'utf8');\n"
+            "const params = { urlSrc: fs.readFileSync("
+            + json.dumps("URL_FILE") + ", 'utf8'),\n"
+            "  openSrc: fs.readFileSync("
+            + json.dumps("OPEN_FILE") + ", 'utf8'),\n"
+            "  consumeSrc: fs.readFileSync("
+            + json.dumps("CONSUME_FILE") + ", 'utf8') };\n"
+            + r"""
+const ret = {};
+const ref = { v: null };
+const runnerSrc =
+  'let _tapTimer = null; let _lastTapTime = 0;' +
+  'const clearTimeout = (id) => {};' +
+  'const e = { button: 0, ctrlKey: true, metaKey: false, clientX: 10, clientY: 20, pointerType: "mouse", target: null, preventDefault() {}, stopPropagation() {} };' +
+  'const s = { session_id: "test-session-123" };' +
+  'const _sessionUrlForSid = ' + params.urlSrc + ';' +
+  'const _openSessionUrlInNewTab = ' + params.openSrc + ';' +
+  'const _consumeSessionNewTabClick = ' + params.consumeSrc + ';' +
+  'let opened = null; const window = { open: (u,t,f) => { opened = {u,t,f}; return null; } };' +
+  'window.location = { href: "http://127.0.0.1:8787/", pathname: "/", search: "", hash: "", origin: "http://127.0.0.1:8787" };' +
+  'const doc = { baseURI: "http://127.0.0.1:8787/" };' +
+  'const _sessionSelectMode = true; const _renamingSid = null;' +
+  'const _isSessionActionTarget = () => false;' +
+  'let finisherRan = false;' +
+  'const _finishSessionGesture = () => { finisherRan = true; return true; };' +
+  'let _gestureState = "pressing"; let _swipeTracking = false;' +
+  'let chokeRan = false;' +
+  'const _clearLongPressTimer = () => {};' +
+  'const _settleSessionSwipePaint = () => {};' +
+  'const _clearPointerDragState = () => { chokeRan = true; _gestureState = "idle"; };' +
+  'const el = { classList: { remove(c) {} } };' +
+  // Verbatim branch (ends before the finisher tail), then the real
+  // fall-through tail re-attached so the skip path is exercised for real.
+  branchSrc.replace(/(\W)document(\W)/g, '$1doc$2') +
+  '; if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) { globalThis.__stopCalled = true; }' +
+  '; globalThis.__capture = { opened: opened, finisherRan: finisherRan, gestureState: _gestureState, chokeRan: chokeRan, stopCalled: !!globalThis.__stopCalled };';
+try {
+  new Function('ref', runnerSrc)(ref);
+  ret.out = globalThis.__capture;
+  delete globalThis.__capture;
+  delete globalThis.__stopCalled;
+} catch (err) { ret.error = String(err && err.message || err); }
+console.log(JSON.stringify(ret));
+"""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {
+                "BRANCH_FILE": branch,
+                "URL_FILE": urlfn,
+                "OPEN_FILE": opener,
+                "CONSUME_FILE": consume,
+            }
+            concreto = driver
+            for key, content in files.items():
+                path = str(Path(tmp) / (key.lower() + ".js"))
+                Path(path).write_text(content, encoding="utf-8")
+                concreto = concreto.replace(json.dumps(key), json.dumps(path))
+            r = subprocess.run([NODE, "-e", concreto],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                raise RuntimeError(f"node failed: {r.stderr}")
+            out = json.loads(r.stdout.strip().splitlines()[-1])
+        assert "error" not in out, out.get("error")
+        assert out["out"]["opened"] is None
+        assert out["out"]["finisherRan"] is True
+        assert out["out"]["gestureState"] == "pressing"
+        assert out["out"]["chokeRan"] is False
 
     def test_wirer_opens_on_auxclick_and_swallows_mousedown(self):
         """The shared wirer (single choke point for all row kinds): auxclick

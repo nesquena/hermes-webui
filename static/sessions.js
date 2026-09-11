@@ -9064,8 +9064,12 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
-      if(e.ctrlKey||e.metaKey){
+      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid){
         // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
+        // Gated on select/rename mode: _consumeSessionNewTabClick refuses
+        // those modes, and mutating gesture state first would make the
+        // fall-through _finishSessionGesture early-return on 'idle',
+        // breaking the row (de)select toggle.
         // Settle the gesture machine first via the shared choke point: a pen
         // (or touch-emulated) drag may have painted swipe offsets, and a
         // shaky click may have added the 'dragging' class — parking
