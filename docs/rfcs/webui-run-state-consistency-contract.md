@@ -152,6 +152,57 @@ and 5; it does not mark every run-state boundary implemented.
    still owns a live channel. Staleness is measured from the cancellation
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
+10. **Current-turn ownership is proven by the producer contract or not claimed.**
+   When an Agent result lacks the WebUI's current user row, settlement
+   (`_settle_current_turn_boundary` in `api/streaming.py`) and every consumer
+   that classifies this turn's output (`_assistant_reply_added_after_current_turn`,
+   `_self_heal_result_succeeded`, `_append_result_partial_on_error`,
+   `_merged_transcript_lacks_final_assistant_answer`, the display merge, the
+   replayed-context dedupe) locate the current turn only through a proven
+   coordinate. There is no text search and no role-derived projection guess.
+
+   **Producer contract v2** (hermes-agent `AIAgent.TURN_BOUNDARY_CONTRACT = 2`).
+   The Agent stamps this turn's user row with a `_turn_id` marker at append time
+   (it survives compaction's deep copies, is carried across user-row merges, is
+   never sent to providers and never persisted to `state.db`) and exports on
+   **every** result envelope — success, partial/error, interrupt, retry-exhausted,
+   tool-limit, preflight timeout, durable-lease early return —
+   `turn_boundary_contract`, `turn_id` (this invocation's), `messages_projection`
+   (`"full"`: the exact final `messages` list; the loop never returns an
+   output-only delta) and `current_turn_user_idx`: the marked row, or `None`.
+
+   **Consumer rules.** `_callable_boundary_contract` reads the capability from
+   the Agent callable BEFORE each invocation, including every replacement Agent
+   a self-heal lane constructs; it is never inferred from the keys an envelope
+   happens to carry. `_resolve_active_turn_authority` then binds ONE coherent
+   coordinate:
+   - contract >= 2: the envelope must carry `turn_boundary_contract >= 2`, a
+     `turn_id` equal to the live Agent's `_current_turn_id` (unavailable or
+     different → rejected) and a projection in `{"full", "delta"}`; the index
+     is honoured only when the addressed row is a user row carrying the same
+     `_turn_id` marker, and the WebUI token is stamped on that exact row before
+     marker cleaning shifts indexes. An omitted (`None`) or malformed coordinate
+     leaves the turn capable-but-unproven. The mutable Agent-instance index is
+     never combined with a result `turn_id`;
+   - contract < 2 (legacy callable): result keys are ignored (a text-derived
+     index can address an identical historical prompt); the Agent-instance
+     pair is the only coordinate and is honoured only while `previous_context`
+     is still a prefix of the result.
+   The WebUI token that survived the projection always wins.
+
+   **Fail closed.** Without a proven coordinate on a rewritten (non-prefix)
+   result: the pending prompt stays visible, streamed text is kept as a partial,
+   no historical row receives the live token, no prior answer is settled or
+   classified as current, no `done`, no false tool-limit closure. A full
+   projection holding only historical assistant/tool rows is never a delta;
+   only a bound `messages_projection: "delta"` is inserted at the front after
+   leading compression markers. A full-history result that still carries
+   `previous_context` as a prefix gets the turn right after that prefix;
+   anything else is left unchanged (no `idx - len(previous_context)`, no
+   "before the trailing assistant/tool run", no write at index 0 of a full
+   history — a current turn stored before prior rows is merged into the first
+   user message by the Agent's next repair, rewriting the prompt's leading
+   messages every turn).
 
 ## Review Checklist
 
@@ -175,6 +226,13 @@ context reconstruction, or session metadata:
 - If it introduces or changes a reclamation window, what proves an in-flight
   cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
+- If it touches current-turn settlement or classification: is the producer
+  capability read from the callable (replacement Agents included) rather than
+  from envelope keys; is the coordinate bound to the live `turn_id` and
+  validated by the row's `_turn_id` marker rather than prompt text; is the
+  projection shape taken from the envelope rather than row roles; and does a
+  rewritten result with a repeated historical prompt, a foreign turn id, an
+  omitted index or a malformed projection fail closed?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map
