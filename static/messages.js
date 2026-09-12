@@ -4808,7 +4808,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    // \x60 excluded from the path class (see renderMd in ui.js): an inline-code
+    // MEDIA token must not swallow its closing backtick.
+    const m=/^MEDIA:([^\s\)\]\x60]+)$/.exec(String(chunk));
     const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
     if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
@@ -4856,7 +4858,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
-    const re=/MEDIA:([^\s\)\]]+)/g;
+    const re=/MEDIA:([^\s\)\]\x60]+)/g;  // \x60 excluded — see renderMd in ui.js
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
@@ -4882,7 +4884,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      const tailMatch = /MEDIA:[^\s\)\]\x60]*$/.exec(rest);  // \x60 excluded — see ui.js
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){
