@@ -2322,6 +2322,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
+  function _ownsLiveTransport(source, capability){
+    // #6381: status/side-effect families must be authorized by the transport the
+    // live entry ACTUALLY owns. The generation check alone is not sufficient
+    // here: _transportCapability/_transportGeneration live in the attachLiveStream
+    // closure, so a NEW install (fresh EventSource for the same session+stream
+    // pair) cannot supersede the previous install's capability — the replaced
+    // transport would keep authorizing its own queued callbacks. The shared
+    // authority is the live entry, so require it to own BOTH this exact source
+    // and this exact capability. Unlike _ownsActiveStreamOrBackground() the turn
+    // may already be settled, so status events that legitimately arrive after
+    // `done` (title generation, context status) still paint while the transport
+    // stays current.
+    if(capability&&!_isCurrentCapability(capability)) return false;
+    const live=LIVE_STREAMS[activeSid];
+    return !!(live&&live.streamId===streamId&&live.source===source&&live.capability===capability);
+  }
   function _bailOutOfTerminalEventsFromStaleStream(source, capability){
     // Reject terminal events from a replaced/closed transport FIRST: a stale
     // `done`/`stream_end`/`apperror`/`error`/`cancel` must not settle the
@@ -6125,11 +6141,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title_status',e=>{
-      // #6381: side-effect-only callback must belong to the live transport.
-      // No session-scoped epilogue here (the reviewer's unsupported claim);
-      // this listener mutates shared state only, so an early ownership
-      // return is the correct and complete guard.
-      if(!_isCurrentCapability(_capability)) return;
+      // #6381: requirement is EXACT transport ownership of the live entry (the
+      // generation flag alone is closure-local and cannot cross installs).
+      if(!_ownsLiveTransport(source,_capability)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6145,11 +6159,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('context_status',e=>{
-      // #6381: side-effect-only callback must belong to the live transport.
-      // No session-scoped epilogue here (the reviewer's unsupported claim);
-      // this listener mutates shared state only, so an early ownership
-      // return is the correct and complete guard.
-      if(!_isCurrentCapability(_capability)) return;
+      // #6381: requirement is EXACT transport ownership of the live entry (the
+      // generation flag alone is closure-local and cannot cross installs).
+      if(!_ownsLiveTransport(source,_capability)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6236,11 +6248,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // `_handleBgTaskCompleteEvent` function below is shared between both
     // paths (dedupe only; the wakeup itself is server-side).
     source.addEventListener('bg_task_complete',e=>{
-      // #6381: side-effect-only callback must belong to the live transport.
-      // No session-scoped epilogue here (the reviewer's unsupported claim);
-      // this listener mutates shared state only, so an early ownership
-      // return is the correct and complete guard.
-      if(!_isCurrentCapability(_capability)) return;
+      // #6381: requirement is EXACT transport ownership of the live entry (the
+      // generation flag alone is closure-local and cannot cross installs).
+      if(!_ownsLiveTransport(source,_capability)) return;
       if(typeof _handleBgTaskCompleteEvent==='function'){
         _handleBgTaskCompleteEvent(e, activeSid, {source:'stream'});
       }
@@ -6840,11 +6850,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('warning',e=>{
-      // #6381: side-effect-only callback must belong to the live transport.
-      // No session-scoped epilogue here (the reviewer's unsupported claim);
-      // this listener mutates shared state only, so an early ownership
-      // return is the correct and complete guard.
-      if(!_isCurrentCapability(_capability)) return;
+      // #6381: requirement is EXACT transport ownership of the live entry (the
+      // generation flag alone is closure-local and cannot cross installs).
+      if(!_ownsLiveTransport(source,_capability)) return;
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
