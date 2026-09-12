@@ -88,6 +88,10 @@
     compressed:Object.freeze({classification:'activity',kind:'lifecycle_status',source:'sse'}),
     approval:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     clarify:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
+    // Accepted mid-run Steer is durable run-journal activity.  Live SSE and
+    // journal replay carry the same event_id, so both paths must classify it as
+    // the same user-authored control boundary rather than dropping it as unknown.
+    steer_delivered:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     pending_steer_leftover:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     goal_continue:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     artifact_reference:Object.freeze({classification:'artifact',kind:'artifact_reference',source:'derived'}),
@@ -952,7 +956,10 @@
     });
   }
 
-  function _activityRowRole(kind){
+  function _activityRowRole(kind, sourceType){
+    // Steer stays a control boundary semantically, but it is user-authored and
+    // therefore belongs in the visual timeline as a user message.
+    if(sourceType==='steer_delivered') return 'user';
     if(kind==='process_prose') return 'prose';
     if(kind==='reasoning') return 'thinking';
     if(_isToolActivityKind(kind)) return 'tool';
@@ -962,7 +969,8 @@
     return 'activity';
   }
 
-  function _activityRowDisplayHint(kind, mode){
+  function _activityRowDisplayHint(kind, mode, sourceType){
+    if(sourceType==='steer_delivered') return 'user_message';
     if(mode==='transparent_stream') return 'chronological_activity';
     if(kind==='process_prose') return 'main_prose';
     if(kind==='reasoning') return 'collapsed_thinking';
@@ -973,16 +981,17 @@
     return 'activity_row';
   }
 
-  function _activityRowDisplayHints(kind){
+  function _activityRowDisplayHints(kind, sourceType){
     return Object.freeze({
-      compact_worklog:_activityRowDisplayHint(kind,'compact_worklog'),
-      transparent_stream:_activityRowDisplayHint(kind,'transparent_stream'),
+      compact_worklog:_activityRowDisplayHint(kind,'compact_worklog',sourceType),
+      transparent_stream:_activityRowDisplayHint(kind,'transparent_stream',sourceType),
     });
   }
 
   function _activitySceneRow(event, index, mode){
     const payload=_own(event,'payload');
     const kind=_cleanString(_own(event,'kind'))||'activity';
+    const sourceType=_cleanString(_own(event,'source_event_type'))||null;
     const status=_cleanString(_own(event,'status'))||null;
     const text=_activityRowText(event);
     const toolCallId=_activityRowToolId(event,kind);
@@ -991,10 +1000,10 @@
       row_id:_activityRowId(event,index),
       order_index:index,
       kind,
-      role:_activityRowRole(kind),
-      display_hint:_activityRowDisplayHint(kind,mode),
-      display_hints:_activityRowDisplayHints(kind),
-      source_event_type:_cleanString(_own(event,'source_event_type'))||null,
+      role:_activityRowRole(kind,sourceType),
+      display_hint:_activityRowDisplayHint(kind,mode,sourceType),
+      display_hints:_activityRowDisplayHints(kind,sourceType),
+      source_event_type:sourceType,
       event_id:_cleanString(_own(event,'event_id'))||null,
       local_id:_cleanString(_own(event,'local_id'))||null,
       run_id:_cleanString(_own(event,'run_id'))||null,

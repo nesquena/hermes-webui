@@ -11,8 +11,8 @@ Implementation:
 
   - api/config.py adds `STREAM_LAST_EVENT_ID: dict = {}` module-level dict.
   - api/streaming.py `put()` captures `journaled["event_id"]` from
-    `RunJournalWriter.append_sse_event()` return and writes it to
-    `STREAM_LAST_EVENT_ID[stream_id]`.
+    `RunJournalWriter.append_and_publish_sse_event()` and writes it to
+    `STREAM_LAST_EVENT_ID[stream_id]` only after queue publication succeeds.
   - StreamChannel queue items carry `(event, data, event_id)` so active
     subscribers emit each frame with its own id instead of the latest global id.
   - Legacy plain queues keep `(event, data)` and use `STREAM_LAST_EVENT_ID` as a
@@ -44,8 +44,8 @@ def test_put_writes_event_id_to_side_channel_dict():
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     assert put_def_idx != -1, "put(event, data) not found in api/streaming.py"
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert "journaled = run_journal.append_sse_event(event, data)" in put_body, (
-        "put() must capture append_sse_event return value"
+    assert "run_journal.append_and_publish_sse_event(event, data, _publish_journaled)" in put_body, (
+        "put() must capture the canonical journal event inside the append+publish transaction"
     )
     assert "STREAM_LAST_EVENT_ID[stream_id]" in put_body, (
         "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
