@@ -2021,13 +2021,15 @@ window.renderTranscript=function(container, messages, opts){
     modeBtn.classList.add('active');
     _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
     showToast(t('voice_mode_active'),1500);
+    // Cancel first so it cannot cancel the silent iOS Web Speech unlock.  Prime
+    // before the busy guard as voice mode may be enabled while a turn is running.
+    if(typeof stopTTS==='function') stopTTS();
+    if(typeof _primeBrowserTtsFromGesture==='function') _primeBrowserTtsFromGesture(true);
     // If the agent is busy, wait — state will be 'thinking' and we'll detect completion
     if(typeof S!=='undefined'&&S.busy){
       _setState('thinking');
       return;
     }
-    // Cancel any existing TTS
-    if(typeof stopTTS==='function') stopTTS();
     _startListening();
   }
 
