@@ -189,9 +189,11 @@ let _keyboardVisible=false;
 // Keyboard-occlusion state machine. Writes the --keyboard-bottom-inset variable
 // consumed by the touch-primary composer padding rule, mirrors the same state on
 // `body.keyboard-visible` (the style.css iPad horizontal-shift guard), and
-// returns the transition it just performed: 'shown', 'dismissed', or '' when
-// nothing changed, so callers can react exactly once per transition instead of
-// once per visualViewport event.
+// returns the transition it just performed: 'shown', 'dismissed', or '' (no
+// change, or a "cannot prove" exit). Only the eligible, unzoomed, zero-inset
+// exit reports 'dismissed' — that value is the single trigger for the document
+// horizontal reset — so callers react exactly once per keyboard transition
+// instead of once per visualViewport event.
 // Every exit that cannot prove an unzoomed, occluding on-screen keyboard — no
 // visualViewport, no touch surface, pinch zoom, zero inset — clears BOTH the
 // variable and the class, so the style.css rule keyed off body.keyboard-visible
@@ -207,16 +209,22 @@ function _syncKeyboardBottomInset(){
   };
   const vv=window.visualViewport;
   if(!vv||!_isTouchCapableViewport()){
+    // Cannot prove an occluding keyboard at all (no visualViewport, or a
+    // mouse-only desktop): clear the state, but report no keyboard transition
+    // so nobody treats this as a dismissal.
     clearKeyboardState();
-    return wasVisible?'dismissed':'';
+    return '';
   }
   // A pinch-zoomed viewport (vv.scale != 1) makes innerHeight - vv.height
   // reflect the zoom, not the keyboard — on Chromium touch devices with
   // accessibility "force enable zoom" that yields a large spurious inset that
   // jitters on pan. Treat only the unzoomed state as keyboard occlusion.
   if(Math.abs((vv.scale||1)-1)>0.05){
+    // Same "cannot prove" exit: while pinch-zoomed this geometry says nothing
+    // about the keyboard, and reporting a dismissal here would reset the
+    // document's horizontal offset right after the user pinched or panned.
     clearKeyboardState();
-    return wasVisible?'dismissed':'';
+    return '';
   }
   const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
   if(inset>0){
