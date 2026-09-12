@@ -571,3 +571,93 @@ def test_synthetic_cursor_replays_only_gap_events_after_its_watermark():
         assert replacement.empty()  # pre-connect event was never replayed
     finally:
         channel.unsubscribe(replacement)
+
+
+def test_synthetic_reconnect_with_queued_replay_keeps_incoming_cursor():
+    """Drop between the initial frame and replay delivery must not lose events.
+
+    A synthetic reconnect that has queued replay delivers those events AFTER its
+    `initial` frame. If it advertised the post-replay watermark and the client
+    dropped between the initial frame and the replay loop, the next reconnect
+    would resume past the undelivered events and lose them. The initial frame
+    must therefore keep advertising the client's INCOMING cursor whenever replay
+    is queued, so a drop-before-replay still re-replays.
+    """
+    channel = background_process.SessionChannel("s-preserve")
+
+    tab = channel.subscribe(maxsize=64)
+    cursor = tab._session_channel_initial_event_id
+    channel.unsubscribe(tab)
+
+    channel.emit(
+        "bg_task_complete",
+        {"event_id": "queued-gap", "session_id": "s-preserve"},
+    )
+
+    # Reconnect: replay is queued, so the advertised cursor must equal the
+    # incoming cursor (not an advanced watermark).
+    reconnect = channel.subscribe(maxsize=64, after_event_id=cursor)
+    assert reconnect._session_channel_replay_count == 1
+    assert reconnect._session_channel_initial_event_id == cursor
+    # Simulate a drop AFTER the initial frame but BEFORE the replay loop ran:
+    # the client's Last-Event-ID is still the advertised (== incoming) cursor.
+    channel.unsubscribe(reconnect)
+
+    recovery = channel.subscribe(
+        maxsize=64,
+        after_event_id=reconnect._session_channel_initial_event_id,
+    )
+    try:
+        event, payload = recovery.get_nowait()
+        assert event == "bg_task_complete"
+        assert payload["event_id"] == "queued-gap"  # NOT lost across the drop
+    finally:
+        channel.unsubscribe(recovery)
+
+
+def test_emit_serializes_history_order_with_subscriber_delivery():
+    """Concurrent emits must record and deliver in the SAME order.
+
+    ``emit`` appends to ``_history`` and enqueues to live subscribers under one
+    lock. If delivery happened outside the lock, concurrent emits could record
+    ``A,B`` in history but deliver ``B,A``; a drop after B would resume real-ID
+    replay past B and permanently lose A. This drives many concurrent emits and
+    asserts every subscriber's received order matches history order exactly.
+    """
+    import threading
+
+    channel = background_process.SessionChannel("s-order-race")
+    sub = channel.subscribe(maxsize=10000)
+
+    n = 200
+    barrier = threading.Barrier(n)
+
+    def do_emit(i):
+        barrier.wait()
+        channel.emit("e", {"event_id": f"evt-{i}", "session_id": "s-order-race"})
+
+    threads = [threading.Thread(target=do_emit, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # History order (seq-ordered) is the authoritative order.
+    with channel._lock:
+        history_order = [item[2] for item in channel._history if item[0]]
+
+    delivered_order = []
+    while True:
+        try:
+            _event, data = sub.get_nowait()
+        except queue.Empty:
+            break
+        delivered_order.append(data["event_id"])
+    channel.unsubscribe(sub)
+
+    # Every delivered event that is still in the (bounded) history must appear in
+    # the exact same relative order it was recorded — never transposed.
+    retained = set(history_order)
+    delivered_retained = [e for e in delivered_order if e in retained]
+    # history is capped; compare the tail of delivered against history order
+    assert delivered_retained[-len(history_order):] == history_order
