@@ -9,6 +9,7 @@ cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
 import json
+import contextvars
 import logging
 import os
 import re
@@ -552,14 +553,22 @@ def get_active_hermes_home() -> Path:
 # on exit) are NOT atomic without explicit serialization. The _cron_env_lock
 # below makes the entire context-manager body run-to-completion serially, so
 # all webui access to HERMES_HOME goes through one thread at a time. Any
-# subprocess.Popen() call inside `run_job` inherits the env at fork time,
-# which is also under the lock — so child processes always see a consistent
-# (own-profile) HERMES_HOME, never a half-swapped state.
+# Short metadata operations still need the lock while cached cron module paths
+# and HERMES_HOME are swapped; handle-free lifecycle execution runs in a child,
+# while adapter-backed execution stays parent-side for live delivery.
 _cron_env_lock = threading.Lock()
 
 
 def _cron_profile_context_depth() -> int:
     return int(getattr(_tls, 'cron_profile_depth', 0) or 0)
+
+
+_cron_child_execution = contextvars.ContextVar(
+    "webui_cron_child_execution", default=False
+)
+_cron_context_stack = contextvars.ContextVar(
+    "webui_cron_context_stack", default=()
+)
 
 
 def _push_cron_profile_context_depth() -> None:
@@ -569,6 +578,18 @@ def _push_cron_profile_context_depth() -> None:
 def _pop_cron_profile_context_depth() -> None:
     depth = _cron_profile_context_depth()
     _tls.cron_profile_depth = max(0, depth - 1)
+
+
+def _suspend_active_cron_profile_context_for_child() -> bool:
+    """Release a parent tool-call context before handing execution to a child."""
+    stack = _cron_context_stack.get()
+    if not stack:
+        return False
+    context = stack[-1]
+    context._suspended = True
+    context._restore_and_release()
+    _cron_context_stack.set(stack)
+    return True
 
 
 def _home_for_scheduled_cron_job(job: dict) -> Path:
@@ -590,6 +611,9 @@ def _home_for_scheduled_cron_job(job: dict) -> Path:
             )
         return get_active_hermes_home()
     if not raw:
+        stack = _cron_context_stack.get()
+        if _cron_profile_context_depth() > 0 and stack:
+            return stack[-1]._home
         return get_active_hermes_home()
     if _is_root_profile(raw):
         return _DEFAULT_HERMES_HOME
@@ -610,47 +634,117 @@ def _home_for_scheduled_cron_job(job: dict) -> Path:
 
 
 def install_cron_scheduler_profile_isolation() -> None:
-    """Patch cron.scheduler.run_job for WebUI in-process scheduler safety.
+    """Patch cron.scheduler.run_one_job for profile-pinned scheduler safety.
 
     Standard WebUI deployments do not start the scheduler thread in-process, but
     if a future/single-process deployment calls cron.scheduler.tick() from the
     WebUI worker, tick's background job path has no request TLS context. Wrap
-    run_job so each auto-fired job's persisted ``profile`` field gets the same
-    HERMES_HOME isolation as the manual /api/crons/run path.
+    run_one_job so handle-free Agent lifecycles run in a profile-pinned child;
+    adapter-backed calls retain the parent path for live delivery.
     """
     try:
-        import cron.scheduler as _cs
+        import importlib
+
+        _cs = importlib.import_module("cron.scheduler")
     except ImportError:
         logger.debug("install_cron_scheduler_profile_isolation: cron.scheduler unavailable")
         return
 
-    original = getattr(_cs, 'run_job', None)
-    if original is None or getattr(original, '_webui_profile_isolated', False):
+    operation = 'run_one_job'
+    original = getattr(_cs, operation, None)
+    embedded_legacy_compat = False
+    if original is None:
+        legacy = getattr(_cs, 'run_job', None)
+        # A synthetic module with no file identity is used by the isolated-mode
+        # regression harness. Keep that callback-only shape working there, while
+        # refusing every real file-backed legacy Agent that lacks run_one_job.
+        if (
+            callable(legacy)
+            and not getattr(_cs, '__file__', None)
+            and _is_isolated_profile_mode()
+        ):
+            operation = 'run_job'
+            original = legacy
+            embedded_legacy_compat = True
+        else:
+            raise RuntimeError(
+                "unsupported Agent version: cron.scheduler.run_one_job is unavailable; "
+                "refusing to install scheduled cron profile isolation because legacy "
+                "run_job cannot preserve the scheduler lifecycle"
+            )
+    if getattr(original, '_webui_profile_isolated', False):
         return
 
-    def _webui_profile_isolated_run_job(job, *args, **kwargs):
-        # Manual WebUI runs already enter cron_profile_context_for_home before
-        # calling run_job. Avoid nesting the non-reentrant env lock or changing
-        # the explicitly selected manual execution profile.
-        if _cron_profile_context_depth() > 0:
+    def _webui_profile_isolated_run_one_job(job, *args, **kwargs):
+        if _cron_child_execution.get():
             return original(job, *args, **kwargs)
+        if embedded_legacy_compat:
+            try:
+                with cron_profile_context_for_home(_home_for_scheduled_cron_job(job)):
+                    return original(job, *args, **kwargs)
+            finally:
+                event_profile = str((job or {}).get("profile") or "").strip() or None
+                if _is_isolated_profile_mode():
+                    event_profile = _isolated_profile_name()
+                try:
+                    publish_session_list_changed("cron_complete", profile=event_profile)
+                except TypeError:
+                    publish_session_list_changed("cron_complete")
+        live_gateway_handles = (
+            kwargs.get("adapters") is not None or kwargs.get("loop") is not None
+        )
         try:
-            with cron_profile_context_for_home(_home_for_scheduled_cron_job(job)):
-                return original(job, *args, **kwargs)
+            execution_home = _home_for_scheduled_cron_job(job)
+            if live_gateway_handles:
+                if _cron_profile_context_depth() > 0:
+                    active_context = _cron_context_stack.get()
+                    if not active_context:
+                        raise RuntimeError(
+                            "live cron gateway handles require an active "
+                            "profile context"
+                        )
+                    pinned_home = Path(active_context[-1]._home)
+                    if pinned_home != Path(execution_home):
+                        raise RuntimeError(
+                            "live cron gateway handles cannot run outside the active "
+                            "profile context"
+                        )
+                    return original(job, *args, **kwargs)
+                with cron_profile_context_for_home(execution_home):
+                    return original(job, *args, **kwargs)
+
+            from api.cron_runtime import run_cron_in_profile_subprocess
+
+            if _cron_profile_context_depth() > 0:
+                _suspend_active_cron_profile_context_for_child()
+            child_kwargs = dict(kwargs)
+            child_kwargs.pop("adapters", None)
+            child_kwargs.pop("loop", None)
+            cancel_event = child_kwargs.pop("cancel_event", None)
+            return run_cron_in_profile_subprocess(
+                job,
+                execution_home,
+                "run_one_job",
+                args=args,
+                kwargs=child_kwargs,
+                cancel_event=cancel_event,
+            )
         finally:
+            if _cron_profile_context_depth() == 0:
+                stack = _cron_context_stack.get()
+                if stack and getattr(stack[-1], '_suspended', False):
+                    stack[-1]._resume_after_child()
             event_profile = str((job or {}).get("profile") or "").strip() or None
             if _is_isolated_profile_mode():
                 event_profile = _isolated_profile_name()
             try:
                 publish_session_list_changed("cron_complete", profile=event_profile)
             except TypeError:
-                # Focused tests and older integrations may patch the publisher
-                # with the historical one-argument shape.
                 publish_session_list_changed("cron_complete")
 
-    _webui_profile_isolated_run_job._webui_profile_isolated = True
-    _webui_profile_isolated_run_job._webui_original_run_job = original
-    _cs.run_job = _webui_profile_isolated_run_job
+    _webui_profile_isolated_run_one_job._webui_profile_isolated = True
+    setattr(_webui_profile_isolated_run_one_job, f"_webui_original_{operation}", original)
+    setattr(_cs, operation, _webui_profile_isolated_run_one_job)
 
 
 class cron_profile_context_for_home:
@@ -701,13 +795,14 @@ class cron_profile_context_for_home:
                 _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context_for_home: cron.scheduler unavailable")
+            _cron_context_stack.set((*_cron_context_stack.get(), self))
         except Exception:
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
             raise
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def _restore_and_release(self):
         try:
             if self._prev_env is None:
                 os.environ.pop('HERMES_HOME', None)
@@ -726,8 +821,28 @@ class cron_profile_context_for_home:
                 except (ImportError, AttributeError):
                     pass
         finally:
+            stack = _cron_context_stack.get()
+            if stack and stack[-1] is self:
+                _cron_context_stack.set(stack[:-1])
             _pop_cron_profile_context_depth()
             _cron_env_lock.release()
+
+    def _resume_after_child(self):
+        if not getattr(self, '_suspended', False):
+            return
+        self._suspended = False
+        stack = _cron_context_stack.get()
+        if stack and stack[-1] is self:
+            _cron_context_stack.set(stack[:-1])
+        try:
+            self.__enter__()
+        except Exception:
+            self._suspended = True
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not getattr(self, '_suspended', False):
+            self._restore_and_release()
         return False
 
 
@@ -2666,7 +2781,7 @@ def delete_profile_api(name: str) -> dict:
             raise RuntimeError(
                 f"Cannot delete active profile '{name}' while an agent is running. "
                 "Cancel or wait for it to finish."
-            )
+            ) from None
 
     try:
         from hermes_cli.profiles import delete_profile
@@ -2678,7 +2793,7 @@ def delete_profile_api(name: str) -> dict:
         if profile_dir.is_dir():
             shutil.rmtree(str(profile_dir))
         else:
-            raise ValueError(f"Profile '{name}' does not exist.")
+            raise ValueError(f"Profile '{name}' does not exist.") from None
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _SKILLS_STATS_CACHE.clear()
