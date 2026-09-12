@@ -2201,6 +2201,8 @@
   .skill-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:11px;opacity:.7;}
   .skill-item.disabled{opacity:.5;}
   .skill-item.disabled .skill-name{opacity:.45;}
+  .skill-off-tag{flex-shrink:0;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:1px 5px;border-radius:6px;border:1px solid var(--border2);color:var(--muted);opacity:.9;}
+  .skills-policy-note{font-size:10px;color:var(--muted);padding:6px 8px 2px;letter-spacing:.02em;}
   .skill-toggle{flex-shrink:0;width:28px;height:14px;border-radius:7px;border:1px solid var(--border2);background:var(--border);cursor:pointer;position:relative;transition:all .15s;margin-top:3px;}
   .skill-toggle.enabled{background:var(--accent-bg-strong);border-color:var(--accent);}
   .skill-toggle::after{content:'';position:absolute;top:1px;left:1px;width:10px;height:10px;border-radius:50%;background:var(--muted);transition:transform .15s;}
