@@ -297,6 +297,29 @@ function removeThinking() {}
 function clearInflight() {}
 function clearInflightState() {}
 function _closeSource() {}
+// Real module-scope helpers of the stream-error / reconnect path (messages.js):
+// the offline defer is copied from production (it is the gate that decides
+// whether an error reconnects now or waits), the rest are side-effect hooks the
+// tested ownership invariants do not depend on.
+function isOfflineBannerVisible() { return false; }
+function showOfflineBanner() {}
+function t(key) { return String(key); }
+function _deferStreamErrorIfOffline(){
+  if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
+    setComposerStatus(t('offline_stream_waiting'));
+    return true;
+  }
+  if(typeof showOfflineBanner==='function' && navigator.onLine===false){
+    showOfflineBanner('browser');
+    setComposerStatus(t('offline_stream_waiting'));
+    return true;
+  }
+  return false;
+}
+function recordClientSSEError() {}
+function _handleStreamError() {}
+function _flushReasoningToAnchor() {}
+async function _restoreSettledSession() { return false; }
 function _approvalBelongsToOwner() { return true; }
 function _clarifyBelongsToOwner() { return true; }
 function _clearApprovalPendingForSession() {}
@@ -1401,4 +1424,545 @@ def test_stale_transport_cannot_advance_the_run_journal_cursor():
     )
     assert result["cursorAfterSecondStale"] == "42", (
         "no later stale event may advance the cursor beyond the current transport's seq"
+    )
+
+# ---------------------------------------------------------------------------
+# Matrix rows: post-await continuations and the deferred cleanup (review item 6,
+# remaining families).
+#
+# The stale-callback families above are fenced INSIDE the listener body. These
+# rows cover continuations that resume AFTER an await (or after a timer) — the
+# reconnect retry chain and the deferred hidden-page resume — plus the deferred
+# anchor-registry cleanup. Same rule as the rest of the matrix: a continuation
+# captured from a replaced transport must not act, and the assertions below fail
+# when the ownership check is weakened to the (session_id, stream_id) pair.
+#
+# The timers are captured instead of fired: production arms the reconnect probe
+# at 1500ms, the terminal restore at 8000ms and the registry cleanup at 120000ms.
+# All three are dropped by the recording setTimeout() and invoked explicitly, so
+# each row asserts on the real continuation body rather than on a sleep.
+# ---------------------------------------------------------------------------
+
+_TIMER_CAPTURE_PRELUDE = '''
+var __timers = [];
+var __realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = function(fn, delay){
+  var ms = Number(delay) || 0;
+  if (ms >= 500) { __timers.push({ delay: ms, fn: fn }); return 0; }
+  return __realSetTimeout.apply(globalThis, arguments);
+};
+function __timersAt(delay){ return __timers.filter(function(t){ return t.delay === delay; }); }
+function __fireTimersAt(delay){
+  var fired = 0;
+  for (var t of __timersAt(delay)) { fired += 1; try { t.fn(); } catch (_) { } }
+  return fired;
+}
+var __apiCalls = [];
+var __realApi = api;
+api = async function(url){ __apiCalls.push(String(url)); return __apiResponse; };
+var __statusCalls = [];
+setComposerStatus = function(msg){ __statusCalls.push(String(msg)); };
+function __reconnectedStatuses(){ return __statusCalls.filter(function(m){ return m.indexOf('Reconnected') >= 0; }).length; }
+'''
+
+_RETRY_TIMER_GENERATION_DRIVER = textwrap.dedent('''\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+''' + _TIMER_CAPTURE_PRELUDE + '''
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+const tick = () => new Promise((resolve) => __realSetTimeout(resolve, 0));
+
+(async () => {
+  // Phase 1 — generation A installs through the production listener path.
+  attachLiveStream(SID, STREAM_ID, [], {});
+  await tick();
+  const sourceA = __esCreated[0];
+  __results.errorListenerOnA = (sourceA._handlers['error'] || []).length;
+  const registryA = window._liveAnchorRegistries.get(STREAM_ID);
+
+  // Phase 2 — the transport errors out: production arms the first reconnect
+  // probe on a 1500ms timer while generation A is still the live transport.
+  __apiResponse = { active: false, replay_available: false };
+  sourceA.dispatch('error', { message: 'boom' });
+  await tick();
+  __results.retryTimerArmed = __timersAt(1500).length;
+  __results.statusAfterError = __statusCalls.slice();
+  __results.registryIsA = window._liveAnchorRegistries.get(STREAM_ID) === registryA;
+
+  // Phase 3 — the SAME (session_id, stream_id) pair gets a NEW transport. The
+  // retry timer armed by generation A is still pending at this point: it is the
+  // stale continuation this row is about.
+  sourceA.close();
+  __apiResponse = { active: true };
+  attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+  await tick();
+  const sourceB = __esCreated[1];
+  const registryB = window._liveAnchorRegistries.get(STREAM_ID);
+  __results.generationBInstalled = __esCreated.length === 2 && !!sourceB && sourceB !== sourceA;
+  __results.currentTransportIsB = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+  __results.registryIsB = window._liveAnchorRegistries.get(STREAM_ID) === registryB;
+
+  const creationsBefore = __esCreated.length;
+  const probesBefore = __apiCalls.length;
+  const statusesBefore = __statusCalls.length;
+
+  // Phase 4 — the STALE retry timer fires and its probe resolves active:true,
+  // i.e. the exact input that makes the stale chain re-wire a transport.
+  __results.staleRetryTimersFired = __fireTimersAt(1500);
+  await tick();
+  await tick();
+  await tick();
+
+  __results.sourcesCreatedByStaleRetry = __esCreated.length - creationsBefore;
+  __results.probeCallsFromStaleRetry = __apiCalls.length - probesBefore;
+  __results.reconnectedStatusesFromStaleRetry = __reconnectedStatuses() - __statusCalls.length + statusesBefore;
+  __results.reconnectedStatusesTotal = __reconnectedStatuses();
+  __results.currentTransportIsBAfter = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+  __results.registryIsBAfter = window._liveAnchorRegistries.get(STREAM_ID) === registryB;
+  __results.sourceBOpen = sourceB.readyState === EventSource.OPEN;
+
+  process.stdout.write(JSON.stringify(__results) + String.fromCharCode(10), () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+''')
+
+
+def test_reconnect_retry_timer_from_replaced_transport_cannot_rewire():
+    """A reconnect probe armed by a transport that was replaced meanwhile must
+    not re-wire a new EventSource for the pair the newer transport owns."""
+    result = _run_harness(_RETRY_TIMER_GENERATION_DRIVER)
+
+    assert result["errorListenerOnA"] >= 1, (
+        "the superseded transport must have the error listener registered, "
+        "otherwise the stale-retry assertion would be vacuous"
+    )
+    assert result["retryTimerArmed"] == 1, (
+        "precondition: the error path must arm exactly one 1500ms reconnect "
+        "probe while generation A is the live transport"
+    )
+    assert result["generationBInstalled"] is True, (
+        "the fresh-reconnect path must supersede generation A with a NEW "
+        "EventSource for the same session+stream pair"
+    )
+    assert result["currentTransportIsB"] is True, (
+        "LIVE_STREAMS[activeSid] must own generation B before the stale timer fires"
+    )
+    assert result["registryIsB"] is True, (
+        "the current transport's registry must own the stream key"
+    )
+    assert result["staleRetryTimersFired"] == 1, (
+        "the captured stale retry timer must actually run"
+    )
+    assert result["sourcesCreatedByStaleRetry"] == 0, (
+        "the stale retry probe resolved {active:true} and must NOT re-wire: a "
+        "replaced transport's continuation may not create a second EventSource "
+        "for the pair the live entry already owns"
+    )
+    assert result["probeCallsFromStaleRetry"] == 0, (
+        "a stale retry must be rejected before it even probes the stream status"
+    )
+    assert result["reconnectedStatusesTotal"] == 0, (
+        "no 'Reconnected' status may be issued by a stale retry continuation"
+    )
+    assert result["currentTransportIsBAfter"] is True, (
+        "the stale retry must not steal LIVE_STREAMS ownership from generation B"
+    )
+    assert result["registryIsBAfter"] is True, (
+        "the stale retry must not replace the current transport's registry"
+    )
+    assert result["sourceBOpen"] is True, (
+        "the current transport must stay open"
+    )
+
+
+_HIDDEN_RESUME_GENERATION_DRIVER = textwrap.dedent('''\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+''' + _TIMER_CAPTURE_PRELUDE + '''
+var __docListeners = {};
+var __winListeners = {};
+document.addEventListener = function(type, fn){ (__docListeners[type] = __docListeners[type] || []).push(fn); };
+document.removeEventListener = function(type, fn){
+  const list = __docListeners[type] || [];
+  const idx = list.indexOf(fn);
+  if (idx >= 0) list.splice(idx, 1);
+};
+window.addEventListener = function(type, fn){ (__winListeners[type] = __winListeners[type] || []).push(fn); };
+window.removeEventListener = function(type, fn){
+  const list = __winListeners[type] || [];
+  const idx = list.indexOf(fn);
+  if (idx >= 0) list.splice(idx, 1);
+};
+document.visibilityState = 'hidden';
+
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+const tick = () => new Promise((resolve) => __realSetTimeout(resolve, 0));
+
+(async () => {
+  attachLiveStream(SID, STREAM_ID, [], {});
+  await tick();
+  const sourceA = __esCreated[0];
+  __results.errorListenerOnA = (sourceA._handlers['error'] || []).length;
+
+  // Phase 1 — the transport errors while the page is HIDDEN: production defers
+  // the recovery and binds a resume listener instead of reconnecting now.
+  sourceA.dispatch('error', { message: 'boom' });
+  await tick();
+  __results.pausedStatusIssued = __statusCalls.filter(function(m){ return m.indexOf('Connection paused') >= 0; }).length;
+  __results.visibilityListenersBound = (__docListeners['visibilitychange'] || []).length;
+  __results.focusListenersBound = (__winListeners['focus'] || []).length;
+  __results.sourcesBeforeResume = __esCreated.length;
+
+  // Phase 2 — the page comes back and a NEW transport takes over the same
+  // (session_id, stream_id) pair before the deferred resume is delivered.
+  sourceA.close();
+  __apiResponse = { active: true };
+  attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+  await tick();
+  const sourceB = __esCreated[1];
+  const registryB = window._liveAnchorRegistries.get(STREAM_ID);
+  __results.generationBInstalled = __esCreated.length === 2 && !!sourceB && sourceB !== sourceA;
+  __results.currentTransportIsB = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+
+  const creationsBefore = __esCreated.length;
+  const probesBefore = __apiCalls.length;
+
+  // Phase 3 — the deferred resume fires with the tab visible again.
+  document.visibilityState = 'visible';
+  for (const fn of (__docListeners['visibilitychange'] || []).slice()) fn();
+  await tick();
+  await tick();
+  await tick();
+
+  __results.resumeListenersRemaining = (__docListeners['visibilitychange'] || []).length;
+  __results.sourcesCreatedByResume = __esCreated.length - creationsBefore;
+  __results.probeCallsFromResume = __apiCalls.length - probesBefore;
+  __results.reconnectedStatusesTotal = __reconnectedStatuses();
+  __results.currentTransportIsBAfter = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+  __results.registryIsBAfter = window._liveAnchorRegistries.get(STREAM_ID) === registryB;
+  __results.sourceBOpen = sourceB.readyState === EventSource.OPEN;
+
+  process.stdout.write(JSON.stringify(__results) + String.fromCharCode(10), () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+''')
+
+
+def test_deferred_hidden_page_resume_from_replaced_transport_cannot_rewire():
+    """The deferred hidden-page resume belongs to the transport that armed it:
+    once a newer transport owns the pair, the resume must not re-wire or probe."""
+    result = _run_harness(_HIDDEN_RESUME_GENERATION_DRIVER)
+
+    assert result["errorListenerOnA"] >= 1, (
+        "the deferred transport must have the error listener registered"
+    )
+    assert result["pausedStatusIssued"] >= 1, (
+        "precondition: a hidden-page stream error must defer (status mentions "
+        "the paused connection) instead of reconnecting immediately"
+    )
+    assert result["visibilityListenersBound"] >= 1 and result["focusListenersBound"] >= 1, (
+        "precondition: the deferred resume must bind visibilitychange + focus"
+    )
+    assert result["sourcesBeforeResume"] == 1, (
+        "precondition: the deferred error path must not create a transport"
+    )
+    assert result["generationBInstalled"] is True, (
+        "the fresh-reconnect path must supersede generation A with a NEW "
+        "EventSource for the same session+stream pair"
+    )
+    assert result["currentTransportIsB"] is True, (
+        "LIVE_STREAMS[activeSid] must own generation B before the resume fires"
+    )
+    assert result["resumeListenersRemaining"] == 0, (
+        "the resume callback must actually run (it unbinds itself first)"
+    )
+    assert result["sourcesCreatedByResume"] == 0, (
+        "the deferred resume must NOT re-wire a transport: its generation no "
+        "longer owns the live entry, and re-wiring steals the newer stream"
+    )
+    assert result["probeCallsFromResume"] == 0, (
+        "the deferred resume must not even probe the stream status once the "
+        "transport that armed it was replaced"
+    )
+    assert result["reconnectedStatusesTotal"] == 0, (
+        "no 'Reconnected' status may be issued by a stale deferred resume"
+    )
+    assert result["currentTransportIsBAfter"] is True, (
+        "the stale resume must not steal LIVE_STREAMS ownership from generation B"
+    )
+    assert result["registryIsBAfter"] is True, (
+        "the stale resume must not replace the current transport's registry"
+    )
+    assert result["sourceBOpen"] is True, (
+        "the current transport must stay open"
+    )
+
+
+_IN_PLACE_REWIRE_GENERATION_DRIVER = textwrap.dedent('''\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+''' + _TIMER_CAPTURE_PRELUDE + '''
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+const tick = () => new Promise((resolve) => __realSetTimeout(resolve, 0));
+
+(async () => {
+  attachLiveStream(SID, STREAM_ID, [], {});
+  await tick();
+  const sourceA = __esCreated[0];
+  const capabilityA = LIVE_STREAMS[SID].capability;
+  const registryA = window._liveAnchorRegistries.get(STREAM_ID);
+
+  // Phase 1 — arm the retry chain, then let it find the stream alive: the SAME
+  // closure re-wires a replacement EventSource for the identical pair.
+  __apiResponse = { active: false, replay_available: false };
+  sourceA.dispatch('error', { message: 'boom' });
+  await tick();
+  __results.retryTimerArmed = __timersAt(1500).length;
+  __apiResponse = { active: true };
+  __results.retryTimersFired = __fireTimersAt(1500);
+  await tick();
+  await tick();
+
+  const sourceC = __esCreated[1];
+  __results.inPlaceRewireCreatedNewSource = __esCreated.length === 2 && !!sourceC && sourceC !== sourceA;
+  __results.liveEntryOwnsNewSource = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceC);
+  __results.newGenerationPublished = !!(
+    LIVE_STREAMS[SID] && LIVE_STREAMS[SID].capability && LIVE_STREAMS[SID].capability !== capabilityA
+  );
+  __results.previousCapabilitySuperseded = !!(capabilityA && capabilityA.superseded === true);
+  __results.reconnectedStatusesTotal = __reconnectedStatuses();
+  __results.registryStillEntry = window._liveAnchorRegistries.get(STREAM_ID) === registryA;
+
+  // Phase 2 — a terminal event from the REPLACED source must not settle the
+  // turn the newer generation owns.
+  sourceA.dispatch('apperror', { type: 'error', message: 'boom', session_id: SID });
+  await tick();
+  __results.registeredAppErrorOnA = (sourceA._handlers['apperror'] || []).length;
+  __results.activeStreamIdAfterStaleTerminal = String(S.activeStreamId || '');
+  __results.registryIdentityAfterStaleTerminal = window._liveAnchorRegistries.get(STREAM_ID) === registryA;
+
+  // Phase 3 — the 120s cleanup the STALE generation scheduled must not tear
+  // down the registry the newer generation is still using (same stream key, so
+  // the map identity matches; only the generation guard can reject it).
+  __results.staleCleanupTimersArmed = __timersAt(120000).length;
+  __results.staleCleanupTimersFired = __fireTimersAt(120000);
+  __results.registrySurvivesStaleCleanup = window._liveAnchorRegistries.get(STREAM_ID) === registryA;
+  __results.registryStillUsable = !!(window._liveAnchorRegistries.get(STREAM_ID)
+    && window._liveAnchorRegistries.get(STREAM_ID).anchor);
+  __results.liveEntryOwnsNewSourceAfterCleanup = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceC);
+
+  process.stdout.write(JSON.stringify(__results) + String.fromCharCode(10), () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+''')
+
+
+def test_in_place_rewire_publishes_new_generation_and_survives_stale_cleanup():
+    """When the same closure re-wires its transport, the replacement generation
+    must become the shared authority: the previous one is superseded and the
+    deferred cleanup it scheduled cannot tear down the newer registry."""
+    result = _run_harness(_IN_PLACE_REWIRE_GENERATION_DRIVER)
+
+    assert result["retryTimerArmed"] == 1, (
+        "precondition: the error path must arm the 1500ms probe"
+    )
+    assert result["retryTimersFired"] == 1, (
+        "the live retry chain must be allowed to run (the ownership guard must "
+        "not block a transport that still owns the live entry)"
+    )
+    assert result["inPlaceRewireCreatedNewSource"] is True, (
+        "the retry must re-wire exactly one replacement EventSource for the pair"
+    )
+    assert result["liveEntryOwnsNewSource"] is True, (
+        "LIVE_STREAMS[activeSid] must own the replacement source"
+    )
+    assert result["newGenerationPublished"] is True, (
+        "the in-place re-wire must publish a NEW capability generation into the "
+        "shared live entry (the authority every listener re-checks)"
+    )
+    assert result["previousCapabilitySuperseded"] is True, (
+        "the replaced capability must be marked superseded BEFORE the new one is "
+        "published, so a continuation resuming in between cannot see it as current"
+    )
+    assert result["reconnectedStatusesTotal"] >= 1, (
+        "wiring control: the live retry chain must actually reconnect"
+    )
+    assert result["registeredAppErrorOnA"] >= 1, (
+        "the replaced source must still have its terminal listener registered"
+    )
+    assert result["activeStreamIdAfterStaleTerminal"] == "test-stream", (
+        "a terminal event from the replaced source must not settle the turn the "
+        "newer generation owns"
+    )
+    assert result["staleCleanupTimersArmed"] >= 1, (
+        "the stale terminal path must schedule its 120s registry cleanup"
+    )
+    assert result["staleCleanupTimersFired"] >= 1, (
+        "the captured 120s cleanups must actually run"
+    )
+    assert result["registrySurvivesStaleCleanup"] is True, (
+        "the 120s cleanup scheduled by a SUPERSEDED generation must not delete "
+        "the registry under the same stream key: the newer installation "
+        "re-registers that key and its consumers still read it"
+    )
+    assert result["registryStillUsable"] is True, (
+        "the surviving registry must still be the usable bootstrap entry"
+    )
+    assert result["liveEntryOwnsNewSourceAfterCleanup"] is True, (
+        "the stale cleanup must not touch LIVE_STREAMS ownership"
+    )
+
+
+_CROSS_INSTALL_CLEANUP_DRIVER = textwrap.dedent('''\
+const __results = {};
+const SID = 'test-sid';
+const STREAM_ID = 'test-stream';
+''' + _TIMER_CAPTURE_PRELUDE + '''
+window._liveAnchorRegistries = new Map();
+window._renderLiveAnchorActivitySceneForStream = _renderLiveAnchorActivitySceneForStream;
+window._projectLiveAnchorActivitySceneForStream = _projectLiveAnchorActivitySceneForStream;
+
+INFLIGHT[SID] = {
+  messages: [], uploaded: [], toolCalls: [],
+  streamId: STREAM_ID,
+  activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
+};
+S.session = { session_id: SID };
+S.activeStreamId = STREAM_ID;
+S.messages = [];
+S.toolCalls = [];
+
+const tick = () => new Promise((resolve) => __realSetTimeout(resolve, 0));
+
+(async () => {
+  // Phase 1 — generation A installs its registry under the stream key.
+  attachLiveStream(SID, STREAM_ID, [], {});
+  await tick();
+  const sourceA = __esCreated[0];
+  const registryA = window._liveAnchorRegistries.get(STREAM_ID);
+
+  // Phase 2 — a NEW install re-registers the SAME stream key with its own
+  // registry (this is the legitimate OPEN-transport re-registration the
+  // production comment warns about).
+  sourceA.close();
+  __apiResponse = { active: true };
+  attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+  await tick();
+  const sourceB = __esCreated[1];
+  const registryB = window._liveAnchorRegistries.get(STREAM_ID);
+  __results.freshInstallReplaced = __esCreated.length === 2 && !!sourceB && sourceB !== sourceA;
+  __results.registryReRegistered = !!registryB && registryB !== registryA;
+  __results.currentTransportIsB = !!(LIVE_STREAMS[SID] && LIVE_STREAMS[SID].source === sourceB);
+  __results.registeredAppErrorOnA = (sourceA._handlers['apperror'] || []).length;
+
+  // Phase 3 — the stale transport's terminal event schedules ITS 120s cleanup.
+  sourceA.dispatch('apperror', { type: 'error', message: 'boom', session_id: SID });
+  await tick();
+  __results.staleCleanupTimersArmed = __timersAt(120000).length;
+  __results.registryIsBBeforeCleanup = window._liveAnchorRegistries.get(STREAM_ID) === registryB;
+  __results.staleCleanupTimersFired = __fireTimersAt(120000);
+  __results.registrySurvivesStaleCleanup = window._liveAnchorRegistries.get(STREAM_ID) === registryB;
+
+  // Phase 4 — control: the CURRENT install's own self-expiry timer DOES delete
+  // the key, so the cleanup under test is a real deletion, not a no-op.
+  __results.selfExpiryTimersArmed = __timersAt(600000).length;
+  __results.selfExpiryTimersFired = __fireTimersAt(600000);
+  __results.keyDeletedBySelfExpiry = window._liveAnchorRegistries.get(STREAM_ID) === undefined;
+
+  process.stdout.write(JSON.stringify(__results) + String.fromCharCode(10), () => { process.exit(0); });
+})().catch(err => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(2);
+});
+''')
+
+
+def test_stale_transport_cleanup_cannot_delete_the_newer_registry():
+    """The deferred 120s cleanup belongs to the registry it was created for: a
+    stale transport's timer must not delete the newer install's registry."""
+    result = _run_harness(_CROSS_INSTALL_CLEANUP_DRIVER)
+
+    assert result["freshInstallReplaced"] is True, (
+        "the fresh install must replace generation A for the same pair"
+    )
+    assert result["registryReRegistered"] is True, (
+        "precondition: the newer install must re-register the stream key with "
+        "its own registry object (else the identity guard would be untested)"
+    )
+    assert result["currentTransportIsB"] is True, (
+        "LIVE_STREAMS[activeSid] must own generation B"
+    )
+    assert result["registeredAppErrorOnA"] >= 1, (
+        "the superseded transport must have the terminal listener registered"
+    )
+    assert result["staleCleanupTimersArmed"] >= 1, (
+        "the stale terminal path must schedule the 120s registry cleanup"
+    )
+    assert result["registryIsBBeforeCleanup"] is True, (
+        "precondition: the current transport's registry owns the stream key"
+    )
+    assert result["staleCleanupTimersFired"] >= 1, (
+        "the captured stale cleanup must actually run"
+    )
+    assert result["registrySurvivesStaleCleanup"] is True, (
+        "a stale transport's 120s cleanup must not delete the registry the "
+        "current transport installed under the same stream key (identity guard)"
+    )
+    assert result["selfExpiryTimersArmed"] >= 1, (
+        "precondition: each install arms its own self-expiry cleanup"
+    )
+    assert result["selfExpiryTimersFired"] >= 1, (
+        "the captured self-expiry cleanups must actually run"
+    )
+    assert result["keyDeletedBySelfExpiry"] is True, (
+        "control: the current registry's own self-expiry must still delete the "
+        "key, so the stale-cleanup assertion above proves a real guard"
     )

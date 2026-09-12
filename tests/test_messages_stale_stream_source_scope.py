@@ -48,7 +48,7 @@ def test_no_bare_bailout_call_sites_remain():
 
 def test_bailout_call_sites_pass_source():
     """Positive check: the call sites pass `source`."""
-    calls = re.findall(r"_bailOutOfTerminalEventsFromStaleStream\(\s*source\s*\)", MESSAGES_JS)
+    calls = re.findall(r"_bailOutOfTerminalEventsFromStaleStream\(\s*source\s*[,)]", MESSAGES_JS)
     assert len(calls) >= 5, (
         f"expected >=5 call sites passing `source`, found {len(calls)} — if the SSE "
         "terminal-event wiring changed, update this count, but every call must still "

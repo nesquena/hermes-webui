@@ -2338,6 +2338,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const live=LIVE_STREAMS[activeSid];
     return !!(live&&live.streamId===streamId&&live.source===source&&live.capability===capability);
   }
+  function _ownsLiveTransportForContinuation(source, capability){
+    // #6381: post-await continuations (the reconnect retry chain, the deferred
+    // hidden-page resume) must be authorized by the LIVE entry, not only by this
+    // closure's generation counter. A NEW install for the same session+stream
+    // pair lives in another attachLiveStream() closure and cannot mark this
+    // closure's capability superseded, so a check built only on that counter
+    // would still report the replaced transport as current and let its queued
+    // continuation re-wire over the newer transport (stealing the pane).
+    // Two cases stay authorized:
+    //   - no transport claim at all (legacy session-level continuation);
+    //   - the pair is currently UNOWNED, because this closure's own error path
+    //     released it (closeLiveStream) right before arming the reconnect
+    //     retry — that retry is the recovery path for the pair and must be able
+    //     to re-establish it.
+    // A live entry owned by a DIFFERENT transport always rejects.
+    if(!capability) return true;
+    if(!_isCurrentCapability(capability)) return false;
+    const live=LIVE_STREAMS[activeSid];
+    if(!live) return true;
+    return !!(live.streamId===streamId&&live.source===source&&live.capability===capability);
+  }
   function _bailOutOfTerminalEventsFromStaleStream(source, capability){
     // Reject terminal events from a replaced/closed transport FIRST: a stale
     // `done`/`stream_end`/`apperror`/`error`/`cancel` must not settle the
@@ -2746,7 +2767,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _reattachOrRestoreAfterDeferredStreamError(source, capability=null){
     if(_terminalStateReached||_streamFinalized) return;
     if((S.session&&S.session.session_id)!==activeSid) return;
-    if(capability&&!_isCurrentCapability(capability)) return;
+    if(!_ownsLiveTransportForContinuation(source, capability)) return;
     (async()=>{
       try{
         if(streamId){
@@ -2754,7 +2775,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Post-await ownership re-check: the deferred resume can fire after a
           // reconnect install replaced this transport; re-wiring from a
           // superseded generation would steal the newer stream's pane.
-          if(capability&&!_isCurrentCapability(capability)) return;
+          if(!_ownsLiveTransportForContinuation(source, capability)) return;
           if(st.active){
             setComposerStatus('Reconnected',1000);
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -2764,10 +2785,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
-      if(capability&&!_isCurrentCapability(capability)) return;
+      if(!_ownsLiveTransportForContinuation(source, capability)) return;
       if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true,capability})) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
-      if(capability&&!_isCurrentCapability(capability)) return;
+      if(!_ownsLiveTransportForContinuation(source, capability)) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000, capability);
       _handleStreamError(source);
@@ -6912,12 +6933,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _probeReconnect=async(attempt=0, capability=_capability)=>{
           if(_terminalStateReached || _streamFinalized) return;
           if(!_isSessionCurrentPane(activeSid)) return;
+          if(!_ownsLiveTransportForContinuation(source, capability)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             // #6381 post-await ownership re-check: the transport may have been
             // replaced while the status probe was in flight; a superseded
             // generation must not re-wire (or settle) the newer transport.
-            if(!_isCurrentCapability(capability)) return;
+            if(!_ownsLiveTransportForContinuation(source, capability)) return;
             if(st&&st.active){
               setComposerStatus('Reconnected',1000);
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -6932,7 +6954,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(_deferStreamErrorIfOffline()) return;
           }
           if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true, capability:_capability})) return;
-          if(!_isCurrentCapability(capability)) return;
+          if(!_ownsLiveTransportForContinuation(source, capability)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source,_capability)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -6949,7 +6971,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           setComposerStatus('Restoring session…');
           let _restoreTimedOut=false;
           const _restoreTimer=setTimeout(()=>{
-            if(!_isCurrentCapability(capability)) return;
+            if(!_ownsLiveTransportForContinuation(source, capability)) return;
             // If _restoreSettledSession hangs (flaky Tailscale), don't leave
             // the UI stuck on "Restoring session…" forever. Fall through to
             // _handleStreamError after 8s.
@@ -6959,7 +6981,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(_deferStreamErrorIfPageHidden(source,_capability)) return;
               _flushReasoningToAnchor();
               _scheduleAnchorRegistryCleanup(120000,_capability);
-              _handleStreamError(source,_capability);
+              _handleStreamError(source);
             }
           },8000);
           try{
@@ -6973,7 +6995,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // _handleStreamError was called there; we return below.
             // Otherwise the code below cancels the timer and calls it directly.
           }
-          if(!_isCurrentCapability(capability)) return;
+          if(!_ownsLiveTransportForContinuation(source, capability)) return;
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);
           if(_terminalStateReached||_streamFinalized) return;
@@ -6981,7 +7003,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(_deferStreamErrorIfPageHidden(source,_capability)) return;
           _flushReasoningToAnchor();
           _scheduleAnchorRegistryCleanup(120000,_capability);
-          _handleStreamError(source,_capability);
+          _handleStreamError(source);
         };
         setTimeout(()=>{void _probeReconnect(0,_capability);},_retryDelays[0]);
         return;
@@ -6991,7 +7013,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_deferStreamErrorIfPageHidden(source,_capability)) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000,_capability);
-      _handleStreamError(source,_capability);
+      _handleStreamError(source);
     });
 
     source.addEventListener('cancel',e=>{
