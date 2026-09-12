@@ -77,6 +77,9 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
     return pid in candidates
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+_VENICE_DEFAULT_API_BASE = "https://api.venice.ai/api/v1"
+_VENICE_BILLING_BALANCE_PATH = "/billing/balance"
+_VENICE_ADMIN_KEY_ENV = "VENICE_ADMIN_API_KEY"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
@@ -1544,6 +1547,45 @@ def _sanitize_openrouter_quota(payload: Any) -> dict[str, int | float | None]:
     }
 
 
+def _sanitize_venice_balance(payload: Any) -> dict[str, Any]:
+    """Map the Venice /billing/balance response to the picker quota shape.
+
+    Response (veniceai/api-docs): ``{canConsume, consumptionCurrency,
+    balances{usd, diem}, diemEpochAllocation}``.
+    """
+    if not isinstance(payload, dict):
+        payload = {}
+    balances = payload.get("balances") or {}
+    if not isinstance(balances, dict):
+        balances = {}
+    return {
+        "balances": {
+            "usd": _quota_number(balances.get("usd")),
+            "diem": _quota_number(balances.get("diem")),
+        },
+        "currency": str(payload.get("consumptionCurrency") or "").strip() or None,
+        "can_consume": bool(payload.get("canConsume")),
+    }
+
+
+def _get_venice_admin_api_key() -> str | None:
+    """Return the Venice admin key (balance/usage APIs) without exposing it.
+
+    Reads VENICE_ADMIN_API_KEY from the Hermes .env file or the process
+    environment (mirrors ``_get_provider_api_key`` resolution). The admin key
+    is a separate credential from the inference VENICE_API_KEY.
+    """
+    env_path = _get_hermes_home() / ".env"
+    env_values = _load_env_file(env_path)
+    for source in (
+        env_values.get(_VENICE_ADMIN_KEY_ENV),
+        _thread_local_env_value(_VENICE_ADMIN_KEY_ENV),
+    ):
+        if _provider_value_counts_as_api_key("venice", source):
+            return str(source).strip() or None
+    return None
+
+
 def _isoformat_utc(value: Any) -> str | None:
     if value in (None, ""):
         return None
@@ -2205,6 +2247,76 @@ def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False)
                 "status": "unavailable",
                 "quota": None,
                 "message": "OpenRouter quota status is temporarily unavailable.",
+            }
+
+    if provider == "venice":
+        api_key = _get_venice_admin_api_key()
+        if not api_key:
+            return {
+                "ok": False,
+                "provider": "venice",
+                "display_name": display_name,
+                "supported": True,
+                "status": "no_key",
+                "quota": None,
+                "message": "Venice balance status needs a VENICE_ADMIN_API_KEY configured on the server.",
+            }
+        base_url = _VENICE_DEFAULT_API_BASE
+        try:
+            from api.config import _get_provider_base_url
+
+            configured = str(_get_provider_base_url("venice") or "").strip()
+            if configured:
+                base_url = configured.rstrip("/")
+        except Exception:
+            pass
+        req = urllib.request.Request(
+            base_url + _VENICE_BILLING_BALANCE_PATH,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_PROVIDER_QUOTA_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+            payload = json.loads(raw.decode("utf-8")) if isinstance(raw, (bytes, bytearray)) else json.loads(raw)
+            quota = _sanitize_venice_balance(payload)
+            return {
+                "ok": True,
+                "provider": "venice",
+                "display_name": display_name,
+                "supported": True,
+                "status": "available",
+                "label": "Venice balance",
+                "quota": quota,
+                "message": "Venice balance status loaded.",
+            }
+        except urllib.error.HTTPError as exc:
+            status = "invalid_key" if exc.code in (401, 403) else "unavailable"
+            message = (
+                "Venice rejected the configured admin API key."
+                if status == "invalid_key"
+                else "Venice balance status is temporarily unavailable."
+            )
+            return {
+                "ok": False,
+                "provider": "venice",
+                "display_name": display_name,
+                "supported": True,
+                "status": status,
+                "quota": None,
+                "message": message,
+            }
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+            return {
+                "ok": False,
+                "provider": "venice",
+                "display_name": display_name,
+                "supported": True,
+                "status": "unavailable",
+                "quota": None,
+                "message": "Venice balance status is temporarily unavailable.",
             }
 
     local_snapshot = _local_pool_snapshot(provider)
