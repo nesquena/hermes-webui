@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import api.config as config
 import api.profiles as profiles
+from tests._i18n_bundles import read_i18n_bundles
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1260,7 +1261,7 @@ def test_provider_quota_card_has_manual_refresh_control():
 
 def test_provider_quota_i18n_keys_exist_for_all_locales():
     """Provider quota UI keys must be present in every locale block."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = read_i18n_bundles(ROOT)
     locale_count = len(
         re.findall(r"^  (?:[A-Za-z_][A-Za-z0-9_]*|'[^']+'):\s*\{", i18n, re.MULTILINE)
     )
@@ -1273,7 +1274,7 @@ def test_provider_quota_i18n_keys_exist_for_all_locales():
 
 def test_settings_label_and_description_i18n_keys_exist_for_all_locales():
     """Settings labels/descriptions referenced by the page need every locale."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n = read_i18n_bundles(ROOT)
     index_html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     locale_count = len(
         re.findall(r"^  (?:[A-Za-z_][A-Za-z0-9_]*|'[^']+'):\s*\{", i18n, re.MULTILINE)

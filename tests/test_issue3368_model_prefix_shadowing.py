@@ -31,6 +31,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
@@ -328,7 +329,7 @@ class TestDidYouMeanToastAssembly:
     def test_model_did_you_mean_is_arg_template_in_en_locale(self):
         import pathlib
         root = pathlib.Path(__file__).resolve().parents[1]
-        i18n = (root / "static" / "i18n.js").read_text(encoding="utf-8")
+        i18n = read_i18n_bundles(root)
         # The en template must accept and interpolate an argument.
         assert "model_did_you_mean: (m) =>" in i18n
         assert "${m}" in i18n[i18n.index("model_did_you_mean: (m) =>"):i18n.index("model_did_you_mean: (m) =>") + 120]

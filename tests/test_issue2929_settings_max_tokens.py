@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def _function_block(src: str, name: str) -> str:
@@ -394,7 +395,7 @@ def test_settings_panel_wires_max_tokens_for_dirty_state_and_manual_save():
 
     panels_js = (pathlib.Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
     index_html = (pathlib.Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-    i18n_js = (pathlib.Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n_js = read_i18n_bundles(pathlib.Path(__file__).parent.parent)
 
     load_block = _function_block(panels_js, "loadSettingsPanel")
     load_idx = load_block.find("$('settingsMaxTokens')")

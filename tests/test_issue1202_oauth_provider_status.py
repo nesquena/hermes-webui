@@ -19,6 +19,7 @@ import sys
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -231,7 +232,7 @@ class TestBuildProviderCardJs:
 class TestI18nNewKeys:
     """Verify new i18n keys exist in the English locale."""
 
-    I18N = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    I18N = read_i18n_bundles(REPO_ROOT)
 
     def test_providers_oauth_config_yaml_hint_exists(self):
         assert "providers_oauth_config_yaml_hint" in self.I18N, (

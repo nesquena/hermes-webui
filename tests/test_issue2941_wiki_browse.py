@@ -13,6 +13,7 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import urlparse
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -551,7 +552,7 @@ def test_wiki_page_alias_spellings_are_rejected(monkeypatch, tmp_path):
 
 
 def test_i18n_wiki_keys_in_all_locales():
-    src = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    src = read_i18n_bundles(REPO)
     required_keys = [
         "wiki_browse",
         "wiki_search_placeholder",

@@ -1,6 +1,7 @@
 """Test: CSV table rendering (#485)"""
 import re
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 WORKSPACE_JS = Path("static/workspace.js").read_text(encoding="utf-8")
 
@@ -165,8 +166,7 @@ def test_csv_line_ending_normalization():
 
 def test_csv_i18n_keys():
     """Verify CSV i18n keys exist in all 7 locales."""
-    with open('static/i18n.js', encoding="utf-8") as f:
-        src = f.read()
+    src = read_i18n_bundles(Path(__file__).resolve().parents[1])
     required_keys = ['csv_loading', 'csv_too_large', 'csv_no_data', 'csv_error']
     for key in required_keys:
         count = src.count(f"{key}:")

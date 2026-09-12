@@ -7,12 +7,13 @@ import subprocess
 from pathlib import Path
 
 from tests.js_source_extract import extract_function
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N = read_i18n_bundles(ROOT)
 
 
 class _Boards:

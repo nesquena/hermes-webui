@@ -8,6 +8,7 @@ import tempfile
 import pytest
 
 from tests.conftest import TEST_STATE_DIR, _post, TEST_BASE
+from tests._i18n_bundles import read_i18n_bundles
 
 pytestmark = pytest.mark.usefixtures("test_server")
 
@@ -77,8 +78,8 @@ def test_cron_jobs_project_i18n_key_exists():
     bringing the count to 9. Use >= so future locale additions don't
     require touching this test.
     """
-    i18n_path = pathlib.Path(__file__).resolve().parent.parent / "static" / "i18n.js"
-    content = i18n_path.read_text(encoding="utf-8")
+    i18n_path = read_i18n_bundles(pathlib.Path(__file__).resolve().parent.parent)
+    content = i18n_path
 
     # Count occurrences of cron_jobs_project
     count = content.count("cron_jobs_project:")

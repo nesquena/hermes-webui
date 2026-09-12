@@ -2,6 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -83,7 +84,7 @@ def locale_keys(src: str, locale_key: str) -> list[str]:
 
 
 def test_korean_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     assert "\n  ko: {" in src
     assert "_lang: 'ko'" in src
     assert "_label: '한국어'" in src
@@ -91,7 +92,7 @@ def test_korean_locale_block_exists():
 
 
 def test_korean_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     expected = [
         "settings_title: '설정'",
         "settings_label_language: '언어'",
@@ -108,7 +109,7 @@ def test_korean_locale_includes_representative_translations():
 
 
 def test_korean_settings_detail_descriptions_are_translated():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     expected = [
         "settings_desc_workspace_panel_open: '활성화하면 새 세션마다 워크스페이스/파일 브라우저 패널이 자동으로 열립니다. 언제든지 수동으로 닫을 수 있습니다.'",
         "settings_desc_notifications: '앱이 백그라운드에 있을 때 응답이 완료되면 시스템 알림을 표시합니다.'",
@@ -126,7 +127,7 @@ def test_korean_settings_detail_descriptions_are_translated():
 
 
 def test_korean_locale_matches_english_key_coverage():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     en_keys = set(locale_keys(src, "en"))
     ko_keys = set(locale_keys(src, "ko"))
     assert sorted((en_keys - ko_keys) - PROFILE_CONCEPT_FALLBACK_KEYS) == []
@@ -134,14 +135,14 @@ def test_korean_locale_matches_english_key_coverage():
 
 
 def test_korean_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     keys = locale_keys(src, "ko")
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
     assert not duplicates, f"Korean locale has duplicate keys: {duplicates}"
 
 
 def test_korean_locale_keys_use_standard_indentation():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     ko_block = extract_locale_block(src, "ko")
     badly_indented = [
         line.strip()

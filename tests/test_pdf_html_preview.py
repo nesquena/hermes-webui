@@ -4,9 +4,11 @@ Validates that the MEDIA: restore block in ui.js produces the correct
 placeholder HTML for .pdf and .html files, that lazy-load functions exist,
 and that CSS classes are defined.
 """
+from pathlib import Path
 import os
 import re
 import pytest
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def _read_js(name):
@@ -327,8 +329,7 @@ class TestI18nKeys:
     HTML_KEYS = ['html_loading', 'html_too_large', 'html_error', 'html_open_full', 'html_sandbox_label']
 
     def _find_locale_block(self, locale):
-        with open('static/i18n.js', encoding="utf-8") as f:
-            content = f.read()
+        content = read_i18n_bundles(Path(__file__).resolve().parents[1])
         start = content.find(f"'{locale}':")
         if start < 0:
             start = content.find(f'{locale}:')

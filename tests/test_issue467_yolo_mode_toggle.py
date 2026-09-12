@@ -18,6 +18,7 @@ import subprocess
 import pytest
 
 from tests.conftest import requires_agent_modules
+from tests._i18n_bundles import read_i18n_bundles
 
 TEST_BASE = f"http://127.0.0.1:{os.environ.get('HERMES_WEBUI_TEST_PORT', '8788')}"
 
@@ -50,7 +51,7 @@ def style_css():
 
 @pytest.fixture(scope="module")
 def i18n_js():
-    return _read_static_file("i18n.js")
+    return read_i18n_bundles(pathlib.Path(__file__).resolve().parents[1])
 
 
 def _get(path, expect_ok=True):

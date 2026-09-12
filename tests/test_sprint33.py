@@ -7,6 +7,7 @@ and that browser-native confirm/prompt calls are no longer used in the Web UI.
 
 import pathlib
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = pathlib.Path(__file__).parent.parent
@@ -98,7 +99,7 @@ def test_save_settings_password_change_preflights_current_password_before_api():
 
 
 def test_disable_auth_typed_confirm_locales_show_literal_phrase():
-    src = read("static/i18n.js")
+    src = read_i18n_bundles(REPO)
     values = re.findall(r"disable_auth_typed_confirm:\s*'([^']*)'", src)
     assert values, "disable_auth_typed_confirm keys missing"
     assert len(values) == len(_i18n_locale_blocks(src)), (
@@ -139,7 +140,7 @@ def _i18n_locale_blocks(src):
 
 
 def test_auth_safety_keys_exist_once_per_locale():
-    src = read("static/i18n.js")
+    src = read_i18n_bundles(REPO)
     blocks = _i18n_locale_blocks(src)
     assert "pt" in blocks
     assert "zh-Hant" in blocks
@@ -154,7 +155,7 @@ def test_auth_safety_keys_exist_once_per_locale():
 
 
 def test_auth_safety_pt_and_zh_hant_strings_stay_in_correct_locale_blocks():
-    src = read("static/i18n.js")
+    src = read_i18n_bundles(REPO)
     blocks = _i18n_locale_blocks(src)
     zh_hant = blocks["zh-Hant"]
     pt = blocks["pt"]

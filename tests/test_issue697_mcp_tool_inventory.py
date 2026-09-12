@@ -1,6 +1,8 @@
 """Regression tests for issue #697 — searchable global MCP tool inventory."""
+from pathlib import Path
 import json
 from unittest.mock import MagicMock, patch
+from tests._i18n_bundles import read_i18n_bundles
 
 from api.routes import (
     _handle_mcp_tools_list,
@@ -126,7 +128,7 @@ class TestMcpToolInventoryUi:
         assert "mcp-tool-error-state" in js
 
     def test_mcp_tool_i18n_keys_are_present(self):
-        i18n = _read("static/i18n.js")
+        i18n = read_i18n_bundles(Path(__file__).resolve().parents[1])
         for key in [
             "mcp_tools_title",
             "mcp_tools_desc",

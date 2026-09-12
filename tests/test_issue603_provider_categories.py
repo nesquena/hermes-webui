@@ -11,8 +11,10 @@ Validates:
   - Fallback when categories are empty
 """
 
+from pathlib import Path
 import pytest
 import sys, os
+from tests._i18n_bundles import read_i18n_bundles
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -292,30 +294,25 @@ class TestApplyBaseURL:
 
 class TestI18nCategoryKeys:
     def test_en_has_all_category_keys(self):
-        with open("static/i18n.js", encoding="utf-8") as f:
-            content = f.read()
+        content = read_i18n_bundles(Path(__file__).resolve().parents[1])
         for key in ["provider_category_easy_start", "provider_category_self_hosted", "provider_category_specialized"]:
             assert f"{key}:" in content, f"Missing i18n key: {key}"
 
     def test_ru_has_all_category_keys(self):
-        with open("static/i18n.js", encoding="utf-8") as f:
-            content = f.read()
+        content = read_i18n_bundles(Path(__file__).resolve().parents[1])
         # Just verify count of category keys (should appear 6+ times: once per locale block)
         assert content.count("provider_category_easy_start:") >= 4
 
     def test_es_has_all_category_keys(self):
-        with open("static/i18n.js", encoding="utf-8") as f:
-            content = f.read()
+        content = read_i18n_bundles(Path(__file__).resolve().parents[1])
         assert "Inicio rápido" in content  # Spanish easy_start
 
     def test_zh_has_all_category_keys(self):
-        with open("static/i18n.js", encoding="utf-8") as f:
-            content = f.read()
+        content = read_i18n_bundles(Path(__file__).resolve().parents[1])
         assert "快速开始" in content  # Chinese easy_start
 
     def test_zh_hant_has_all_category_keys(self):
-        with open("static/i18n.js", encoding="utf-8") as f:
-            content = f.read()
+        content = read_i18n_bundles(Path(__file__).resolve().parents[1])
         assert "快速開始" in content  # zh-Hant easy_start
 
 

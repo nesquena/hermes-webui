@@ -4,13 +4,14 @@ The WebUI should expose how long an agent turn took, using backend timing so
 reload/reconnect does not lose the measurement.
 """
 from pathlib import Path
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO)
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 

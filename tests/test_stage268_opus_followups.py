@@ -8,11 +8,12 @@ Pin the three SHOULD-FIX items applied during stage-268 review:
 """
 from pathlib import Path
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = Path(__file__).parent.parent
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 
 
 # --- SF-1 (#1450): child-count UI uses i18n key ---

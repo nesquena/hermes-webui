@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import time
 import urllib.error
+from tests._i18n_bundles import read_i18n_bundles
 
 import api.gateway_chat as gateway_chat
 import api.models as models
@@ -241,7 +242,7 @@ def test_frontend_renders_gateway_auth_error_with_specific_label():
 
 
 def test_gateway_auth_label_i18n_key_exists_for_every_locale():
-    src = Path("static/i18n.js").read_text(encoding="utf-8")
+    src = read_i18n_bundles(Path(__file__).resolve().parent.parent)
     locale_names = [
         match.group("quoted") or match.group("plain")
         for match in re.finditer(

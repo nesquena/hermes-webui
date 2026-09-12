@@ -26,15 +26,14 @@ in the wider suite).
 """
 from pathlib import Path
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 
 ROOT = Path(__file__).resolve().parent.parent
 ROUTES = ROOT / "api" / "routes.py"
 UI = ROOT / "static" / "ui.js"
 SESSIONS = ROOT / "static" / "sessions.js"
-I18N = ROOT / "static" / "i18n.js"
-
-
+I18N = read_i18n_bundles(ROOT)
 # ════════════════════════════════════════════════════════════════════
 #  Item A — Copy file path in workspace tree right-click menu
 # ════════════════════════════════════════════════════════════════════
@@ -166,7 +165,7 @@ class TestSessionRenameMenuItem:
 
     def test_rename_translation_keys_present(self):
         """English translation keys must exist for the new menu item."""
-        src = I18N.read_text(encoding="utf-8")
+        src = I18N
         assert "session_rename: 'Rename conversation'" in src
         assert "session_rename_desc: 'Edit the title of this conversation'" in src
 
@@ -209,7 +208,7 @@ class TestRevealFailedTostIncludesPath:
         is unchanged — the additional path comes from the server-side
         message, so the prefix + message concat still reads well.
         """
-        src = I18N.read_text(encoding="utf-8")
+        src = I18N
         assert "reveal_failed: 'Failed to reveal: '" in src
 
     def test_reveal_call_site_uses_message_or_err(self):

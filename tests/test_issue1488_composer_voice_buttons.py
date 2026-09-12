@@ -17,9 +17,16 @@ share the same tooltip ("Voice input") in master. This module pins the fix:
    string was identical to the dictation tooltip and caused the bug.
 """
 import re
+from pathlib import Path
+
+from tests._i18n_bundles import read_i18n_bundles
 
 
 def _src(name: str) -> str:
+    if name == "i18n.js":
+        # i18n keys moved to static/locales/*.js (#6652) — re-assemble the
+        # monolithic layout so key-coverage assertions keep working.
+        return read_i18n_bundles(Path(__file__).resolve().parent.parent)
     with open(f"static/{name}", encoding="utf-8") as f:
         return f.read()
 

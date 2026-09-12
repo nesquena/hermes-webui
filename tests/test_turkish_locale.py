@@ -2,6 +2,7 @@ from collections import Counter
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -81,7 +82,7 @@ def locale_keys(src: str, locale_key: str) -> list[str]:
 
 
 def test_turkish_locale_block_exists():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     tr_block = extract_locale_block(src, "tr")
     assert tr_block
     assert "_lang: 'tr'" in tr_block
@@ -90,7 +91,7 @@ def test_turkish_locale_block_exists():
 
 
 def test_turkish_locale_includes_representative_translations():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     tr_block = extract_locale_block(src, "tr")
     expected = [
         "settings_title: 'Ayarlar'",
@@ -108,7 +109,7 @@ def test_turkish_locale_includes_representative_translations():
 
 
 def test_turkish_settings_detail_descriptions_are_translated():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     tr_block = extract_locale_block(src, "tr")
     expected = [
         "settings_desc_workspace_panel_open: 'Etkinleştirildiğinde, çalışma alanı / dosya tarayıcı paneli her yeni oturumda otomatik olarak açılır. Yine de istediğiniz zaman manuel olarak kapatabilirsiniz.'",
@@ -127,7 +128,7 @@ def test_turkish_settings_detail_descriptions_are_translated():
 
 
 def test_turkish_locale_matches_english_key_coverage():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     en_keys = set(locale_keys(src, "en"))
     tr_keys = set(locale_keys(src, "tr"))
     assert sorted((en_keys - tr_keys) - PROFILE_CONCEPT_FALLBACK_KEYS) == []
@@ -135,14 +136,14 @@ def test_turkish_locale_matches_english_key_coverage():
 
 
 def test_turkish_locale_has_no_duplicate_keys():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     keys = locale_keys(src, "tr")
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
     assert not duplicates, f"Turkish locale has duplicate keys: {duplicates}"
 
 
 def test_turkish_locale_keys_use_standard_indentation():
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     tr_block = extract_locale_block(src, "tr")
     badly_indented = [
         line.strip()
@@ -154,7 +155,7 @@ def test_turkish_locale_keys_use_standard_indentation():
 
 def test_turkish_locale_has_no_double_escaped_unicode_sequences():
     """JSON-style double escapes (\\\\u2026) render literal backslash-u in the UI."""
-    src = read(REPO / "static" / "i18n.js")
+    src = read_i18n_bundles(REPO)
     tr_block = extract_locale_block(src, "tr")
     for bad in ("\\\\u2026", "\\\\u2192", "\\\\u2713"):
         assert bad not in tr_block, f"Turkish locale must not contain {bad!r}"

@@ -19,6 +19,7 @@ Run as part of the standard test suite:
 import pathlib
 import re
 from html.parser import HTMLParser
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO = pathlib.Path(__file__).parent.parent
 HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
@@ -1474,7 +1475,7 @@ def test_mobile_config_kickers_have_i18n_fallbacks():
     panel_start = HTML.index('id="composerMobileConfigPanel"')
     panel_end = HTML.index('<div class="profile-dropdown"', panel_start)
     panel_html = HTML[panel_start:panel_end]
-    i18n_js = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+    i18n_js = read_i18n_bundles(REPO)
     en_start = i18n_js.index("  en: {")
     en_end = i18n_js.index("\n  ru: {", en_start)
     english = i18n_js[en_start:en_end]

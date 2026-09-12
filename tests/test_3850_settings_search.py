@@ -7,10 +7,11 @@ Issue: #3850 (Add search input at top of Settings panel)
 """
 from pathlib import Path
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(Path(__file__).parent.parent)
 STYLE_CSS = (Path(__file__).parent.parent / "static" / "style.css").read_text(encoding="utf-8")
 
 

@@ -8,6 +8,7 @@ Fixes:
 """
 import pathlib
 import re
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -264,7 +265,7 @@ class TestNewChatOnWorkspaceSwitchOptIn:
         assert 'id="settingsNewChatOnWorkspaceSwitch"' in html, (
             "the Settings checkbox for the opt-in must exist"
         )
-        i18n = read('static/i18n.js')
+        i18n = read_i18n_bundles(REPO)
         for key in (
             'settings_label_new_chat_on_workspace_switch',
             'settings_desc_new_chat_on_workspace_switch',

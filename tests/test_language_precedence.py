@@ -3,10 +3,11 @@ import pathlib
 import re
 import subprocess
 import textwrap
+from tests._i18n_bundles import read_i18n_bundles
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
@@ -17,7 +18,10 @@ def _run_i18n_case(script_expr: str) -> dict:
         f"""
         const fs = require('fs');
         const vm = require('vm');
-        const src = fs.readFileSync({json.dumps(str(REPO_ROOT / "static" / "i18n.js"))}, 'utf8');
+        const localesDir = {json.dumps(str(REPO_ROOT / "static" / "locales"))};
+        const bundleSrc = fs.readdirSync(localesDir).filter(f => f.endsWith('.js')).sort()
+          .map(f => fs.readFileSync(localesDir + '/' + f, 'utf8')).join('\\n');
+        const src = bundleSrc + '\\n' + fs.readFileSync({json.dumps(str(REPO_ROOT / "static" / "i18n.js"))}, 'utf8');
         const storage = {{}};
         const ctx = {{
           localStorage: {{

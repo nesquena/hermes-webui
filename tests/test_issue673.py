@@ -18,6 +18,7 @@ import re
 import unittest
 import urllib.error
 import urllib.request
+from tests._i18n_bundles import read_i18n_bundles
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
@@ -26,7 +27,7 @@ BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_JS = read_i18n_bundles(REPO_ROOT)
 
 from tests._pytest_port import BASE
 
