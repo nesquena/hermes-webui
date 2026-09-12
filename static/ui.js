@@ -546,6 +546,48 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
+// #4343 root cause: the constants above are a one-number-per-role guess, and only
+// the rows that have entered the render window ever get a real measurement — on a
+// 2000-row session that was ~45 rows, leaving 98% of the virtual scroll geometry
+// built from the guess. The guesses are wrong in both directions (measured median
+// 214 against user:120 / assistant:160 / tool_call:400), so the errors do not
+// cancel: total scroll height came out ~34% short of the real transcript, topPad
+// disagreed with the DOM, and the anchor-restore pass fought that mismatch on every
+// scroll — the oscillation that got virtualization defaulted off for everyone.
+//
+// _updateMessageVirtualMeasurements already computed a measurement-derived mean
+// into _messageVirtualEstimatedRowHeight, and _currentMessageVirtualWindow already
+// passed it down as `defaultHeight` — but _messageVirtualWindow's rowHeightFor only
+// consults `defaultHeight` when no roleForIdx is supplied, and it always is. So the
+// calibrated number was dead code and every unmeasured row kept the static guess.
+//
+// Keep a running mean PER ROLE instead (a tool_call row and a user row have very
+// different real heights, so a single global mean would be worse than the constants
+// for the common case) and use it for unmeasured rows. Roles fall back to their
+// static seed until they have samples, so first paint is unchanged.
+const MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN=3;
+let _messageVirtualRoleHeightStats=Object.create(null);
+function _resetMessageVirtualRoleHeightStats(){
+  _messageVirtualRoleHeightStats=Object.create(null);
+}
+function _recordMessageVirtualRoleHeightSample(role, height){
+  const h=Number(height);
+  if(!Number.isFinite(h)||h<=0) return;
+  const key=role||'default';
+  const stat=_messageVirtualRoleHeightStats[key]||(_messageVirtualRoleHeightStats[key]={count:0,total:0});
+  stat.count++;
+  stat.total+=h;
+}
+// The estimate an UNMEASURED row of this role should contribute to the scroll
+// geometry: the measured mean once the role has enough samples to be meaningful,
+// otherwise the static seed.
+function _messageVirtualEstimatedHeightForRole(role){
+  const stat=_messageVirtualRoleHeightStats[role||'default'];
+  if(stat&&stat.count>=MESSAGE_VIRTUAL_ROLE_SAMPLE_MIN&&stat.total>0){
+    return Math.max(1, Math.round(stat.total/stat.count));
+  }
+  return _messageVirtualDefaultHeightForRole(role);
+}
 const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
@@ -602,6 +644,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
+  _resetMessageVirtualRoleHeightStats();
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
   _messageVirtualMeasurementRetryCount=0;
@@ -667,7 +710,11 @@ function _messageVirtualWindow(opts){
   const rowHeightFor=(idx)=>{
     const cached=Number(heights[idx]);
     if(Number.isFinite(cached)&&cached>0) return cached;
-    return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
+    // Unmeasured: the role's measured mean once it has samples, else its static
+    // seed. Previously this branch always took the static seed (roleForIdx is
+    // always supplied), which made `defaultHeight` dead and left the geometry
+    // uncalibrated — the #4343 oscillation.
+    return roleForIdx?Math.max(1,_messageVirtualEstimatedHeightForRole(roleForIdx(idx))):defaultHeight;
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
@@ -868,7 +915,7 @@ function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   let total=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
   }
   return Math.max(0,Math.round(total));
 }
@@ -939,7 +986,7 @@ function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container
   let offset=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
   }
   const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
   return Math.max(0,Math.round(offset-(viewport*0.35)));
@@ -1384,6 +1431,9 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
+    // Feed the per-role running mean so the rows that never enter the window
+    // stop contributing a static guess to the scroll geometry (#4343).
+    _recordMessageVirtualRoleHeightSample(_messageVirtualRoleForEntry(entry), totalHeight);
     if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
