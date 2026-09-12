@@ -308,7 +308,7 @@ class TestLiveModelsCustomProviderFallback:
         resp = self._call_live_models(monkeypatch, cfg, "custom:rightcode-codex")
 
         assert resp["provider"] == "custom:rightcode-codex"
-        assert [m["id"] for m in resp["models"]] == ["gpt-5.5", "gpt-5.5-mini"]
+        assert [m["id"] for m in resp["models"]] == ["gpt-5.5-mini"]
 
     def test_bare_custom_fallback_ignores_named_custom_provider_models(self, monkeypatch):
         """Bare custom only represents unnamed custom entries, not named siblings."""
