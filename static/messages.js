@@ -6338,10 +6338,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // delivered the final messages and tool calls.
           if(typeof window!=='undefined') window._streamJustFinished=true;
           setTimeout(()=>{ if(typeof window!=='undefined') window._streamJustFinished=false; }, 5000);
-          // Expand render window to cover all messages so the done render
-          // doesn't hide Activity behind a tiny window (winSize=50).
-          if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-            _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
+          // Expand the render window so the done render doesn't hide Activity
+          // behind a tiny window (winSize=50) — but only up to the #6999 growth
+          // cap. Growing it to every loaded row here made a completed turn ratchet
+          // the window open permanently on long sessions (seconds per subsequent
+          // render); the cap keeps the freshly-settled turn visible without that.
+          if(typeof _expandMessageRenderWindowForLoadedMessages==='function'){
+            _expandMessageRenderWindowForLoadedMessages();
           }
           // #4650 review: the agent turn that just completed may have changed
           // server-side reasoning config (e.g. a `/reasoning <level>` slash
@@ -7074,9 +7077,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.toolCalls=[];
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
-        // Expand render window so the settled render doesn't hide Activity.
-        if(typeof _messageRenderableMessageCount==='function'&&typeof _messageRenderWindowSize!=='undefined'){
-          _messageRenderWindowSize=Math.max(typeof _currentMessageRenderWindowSize==='function'?_currentMessageRenderWindowSize():50, _messageRenderableMessageCount());
+        // Expand the render window so the settled render doesn't hide Activity,
+        // bounded by the #6999 growth cap (see the matching site above).
+        if(typeof _expandMessageRenderWindowForLoadedMessages==='function'){
+          _expandMessageRenderWindowForLoadedMessages();
         }
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();

@@ -31,6 +31,11 @@ let _loadSessionGeneration = 0;
 // _statusCard, _anchor_stream_id) survive the wholesale replace. null when there is nothing
 // to carry forward (initial load, switch-to-different-session, etc.).
 let _pendingCarryForwardSnapshot = null;
+// Absolute index of _pendingCarryForwardSnapshot[0] in the server's full
+// message list, stashed with the snapshot because loadSession() resets
+// _oldestIdx to 0 before the reload fetch runs. _ensureMessagesLoaded needs
+// it to re-join retained older rows to a bounded reload window.
+let _pendingCarryForwardOldestIdx = 0;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
@@ -1809,6 +1814,9 @@ async function loadSession(sid){
     _pendingCarryForwardSnapshot = (currentSid === sid && forceReload)
       ? (S.messages || []).slice()
       : null;
+    _pendingCarryForwardOldestIdx = (currentSid === sid && forceReload)
+      ? (Number(_oldestIdx) || 0)
+      : 0;
     // #3239: also capture a reload-width hint BEFORE clearing so the
     // authoritative reload preserves the already-loaded transcript width
     // instead of collapsing a long session back to the default tail window.
@@ -3157,19 +3165,46 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  // A reload window above the server's msg_limit ceiling gets clamped by the
+  // backend (returning only the last _msgLimitMax rows), which would silently
+  // SHRINK an already-loaded transcript that had more than the ceiling of rows
+  // visible (rows 400–999 replaced by 500–999). This used to fall back to the
+  // bare full-transcript request (no msg_limit) to avoid that row loss (Codex
+  // gate #6154) — but that fallback made EVERY same-session refresh of a long
+  // conversation refetch and re-render the entire transcript. Combined with the
+  // reload hint growing to the loaded row count, it was a one-way ratchet: once
+  // a session crossed the ceiling it stayed on the full-transcript path forever,
+  // and each refresh cost seconds of render time on a multi-thousand-message
+  // session (the same class of stall the #6999 render-window cap addressed).
+  //
+  // The window is now always bounded, and the #6154 invariant is preserved a
+  // different way: rows older than the returned window that we ALREADY have are
+  // retained and re-prepended below, so a bounded refresh still cannot drop
+  // loaded history. `null` (the "caller already holds the whole transcript"
+  // signal) asks for the largest allowed window rather than for everything.
+  const reloadCeiling = Number.isFinite(Number(_msgLimitMax)) && Number(_msgLimitMax) > 0
+    ? Number(_msgLimitMax)
+    : _MSG_LIMIT_MAX;
+  const requestedReloadLimit = Number.isFinite(Number(reloadLimit)) && Number(reloadLimit) > 0
+    ? Number(reloadLimit)
+    : reloadCeiling;
+  const boundedReloadLimit = Math.min(requestedReloadLimit, reloadCeiling);
+  const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = '&expand_renderable=1';
+  // Snapshot what we already hold, so a bounded window that starts LATER than
+  // our current oldest row can be re-joined to the history in front of it.
+  // On the destructive force-reload path loadSession() has already cleared
+  // S.messages/_oldestIdx, so the pre-clear values come from the stash it left.
+  const _retainedPrefixSource = (Array.isArray(_pendingCarryForwardSnapshot) && _pendingCarryForwardSnapshot.length)
+    ? _pendingCarryForwardSnapshot
+    : (Array.isArray(S.messages) ? S.messages : []);
+  const _retainedPrefixOldestIdx = (Array.isArray(_pendingCarryForwardSnapshot) && _pendingCarryForwardSnapshot.length)
+    ? (Number(_pendingCarryForwardOldestIdx) || 0)
+    : (Number(_oldestIdx) || 0);
+  const _retainedPrefixBase = _retainedPrefixSource.slice();
   let data;
   try {
     data = await api(
@@ -3210,12 +3245,35 @@ async function _ensureMessagesLoaded(sid, opts) {
       : (S.messages || []);
     msgs=window._carryForwardEphemeralTurnFields(_prev, msgs);
     _pendingCarryForwardSnapshot = null;
+    _pendingCarryForwardOldestIdx = 0;
+  }
+  // #6154 invariant, preserved under the now-always-bounded window: the server
+  // returned a tail window starting at absolute index _messages_offset. Rows we
+  // already held that sit BEFORE that offset are not in the response and would
+  // silently disappear from the transcript, so re-attach them in front.
+  //
+  // Skipped (server window wins) when the prior rows can't be trusted to line up:
+  // the session shrank server-side (fork / undo / truncate), or we simply don't
+  // hold enough rows to cover the gap. Losing a few older rows to a re-fetch is
+  // recoverable via "load earlier"; splicing a stale prefix onto a rewritten
+  // transcript is not.
+  const _windowOldestIdx = Number(data.session._messages_offset) || 0;
+  if (_windowOldestIdx > _retainedPrefixOldestIdx && _retainedPrefixBase.length) {
+    const _retainCount = _windowOldestIdx - _retainedPrefixOldestIdx;
+    const _serverMessageCount = Number(data.session.message_count);
+    const _priorSpanFitsServer = !Number.isFinite(_serverMessageCount)
+      || (_retainedPrefixOldestIdx + _retainedPrefixBase.length) <= _serverMessageCount;
+    if (_retainCount <= _retainedPrefixBase.length && _priorSpanFitsServer) {
+      msgs = _retainedPrefixBase.slice(0, _retainCount).concat(msgs);
+      _oldestIdx = _retainedPrefixOldestIdx;
+      _messagesTruncated = _oldestIdx > 0;
+    }
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
-  if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
+  if(typeof _expandMessageRenderWindowForLoadedMessages==='function'){
     // #6999: bound the auto-expansion. This number gates
     // _messageHiddenBeforeCount() (load-older / jump-to-start affordances)
     // and the non-virtualized fallback render width; the virtualized DOM tail
@@ -3225,11 +3283,10 @@ async function _ensureMessagesLoaded(sid, opts) {
     // hidden-before count for long sessions and widens the effective render
     // window for non-virtualized paths. Keep the #3686 intent (don't collapse
     // back to the 50-row default after a load) but cap the growth to a small
-    // multiple of the default window.
-    _messageRenderWindowSize=Math.max(
-      _currentMessageRenderWindowSize(),
-      Math.min(_messageRenderableMessageCount(), (typeof MESSAGE_RENDER_WINDOW_DEFAULT==='number'?MESSAGE_RENDER_WINDOW_DEFAULT:50)*4)
-    );
+    // multiple of the default window. The cap itself now lives in ui.js's
+    // _expandMessageRenderWindowForLoadedMessages() so the stream-completion
+    // sites in messages.js share this exact bound.
+    _expandMessageRenderWindowForLoadedMessages();
   }
   if(S.session&&S.session.session_id===sid){
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);

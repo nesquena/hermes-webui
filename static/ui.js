@@ -1583,6 +1583,35 @@ function _currentMessageRenderWindowSize(){
 function _messageRenderableMessageCount(){
   return _getVisibleMessagesWithIdx().length;
 }
+// #6999 established the bound that the auto-expanding render window must never
+// grow to the whole loaded transcript. That size gates _messageHiddenBeforeCount()
+// (the load-older / jump-to-start affordances) and sets the render width for the
+// non-virtualized path, so an unbounded window turns every later renderMessages()
+// into a full-transcript rebuild — seconds per render on a multi-thousand-message
+// session, on every send, SSE batch and refresh.
+//
+// sessions.js's reload path applied that cap, but the two stream-completion sites
+// in messages.js ("expand so the done render doesn't hide Activity") did not: they
+// grew the window to every loaded row, so a single completed turn silently undid
+// the cap and the window ratcheted up and never came back down. Route all three
+// through this one helper so the bound cannot drift apart again.
+//
+// The cap is a growth ceiling, not a truncation: an already-larger window (an
+// explicit jump-to-start, "load earlier" paging) is left alone, because those are
+// deliberate user requests for more rows rather than incidental growth.
+const MESSAGE_RENDER_WINDOW_GROWTH_MULTIPLE=4;
+function _messageRenderWindowGrowthCap(){
+  return MESSAGE_RENDER_WINDOW_DEFAULT*MESSAGE_RENDER_WINDOW_GROWTH_MULTIPLE;
+}
+function _expandMessageRenderWindowForLoadedMessages(){
+  const current=_currentMessageRenderWindowSize();
+  if(typeof _messageRenderableMessageCount!=='function') return current;
+  _messageRenderWindowSize=Math.max(
+    current,
+    Math.min(_messageRenderableMessageCount(), _messageRenderWindowGrowthCap())
+  );
+  return _messageRenderWindowSize;
+}
 function _messageHiddenBeforeCount(){
   return Math.max(0,_messageRenderableMessageCount()-_currentMessageRenderWindowSize());
 }
