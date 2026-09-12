@@ -117,7 +117,11 @@ class TestLoadPdfInlineFunction:
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 1500]
-        assert 'api/media?path=' in body, 'Must fetch PDF via api/media endpoint'
+        helper = ui[ui.find('function _mediaPreviewUrl'):ui.find('function buildCsvTablePreview')]
+        assert 'api/media?path=' in helper, 'Shared media helper must fetch via api/media endpoint'
+        assert 'const mediaUrl=_mediaPreviewUrl(path,{snap:snap||undefined})' in body, (
+            'PDF preview must build its fetch URL through the shared media helper'
+        )
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')
@@ -162,7 +166,11 @@ class TestLoadHtmlInlineFunction:
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 1000]
-        assert 'api/media?path=' in body, 'Must fetch HTML via api/media endpoint'
+        helper = ui[ui.find('function _mediaPreviewUrl'):ui.find('function buildCsvTablePreview')]
+        assert 'api/media?path=' in helper, 'Shared media helper must fetch via api/media endpoint'
+        assert 'const mediaUrl=_mediaPreviewUrl(path,{snap:snap||undefined})' in body, (
+            'HTML preview must build its fetch URL through the shared media helper'
+        )
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')
@@ -194,31 +202,31 @@ class TestLoadHtmlInlineFunction:
     def test_html_fetch_url_includes_session_id_for_session_media_artifacts(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 1200]
-        assert 'const mediaSessionId=' in body
-        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
+        body = ui[idx:idx + 2600]
+        helper = ui[ui.find('function _mediaSessionQuery'):ui.find('function buildCsvTablePreview')]
+        assert 'const mediaSessionId=' in helper
+        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in helper
         assert "fetch(mediaUrl, {cache:'no-store'})" in body, (
             "loadHtmlInline must fetch with cache:'no-store' to bypass "
             "browser cache for stale HTML preview (got body without no-store)"
         )
-        assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
-        assert "const openUrl=publicMediaUrl+'&inline=1'+snapQuery;" in body, (
+        assert "const openUrl=_mediaPreviewUrl(path,{inline:true,snap:snap||undefined});" in body, (
             "HTML 'open full page' / fallback links must carry the message's "
-            "snapshot digest (snapQuery) so they open the frozen bytes, not the "
+            "snapshot digest and session_id so they open the frozen bytes, not the "
             "current live file"
         )
 
     def test_pdf_fetch_url_includes_session_id_for_session_media_artifacts(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
-        body = ui[idx:idx + 1200]
-        assert 'const mediaSessionId=' in body
-        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in body
+        body = ui[idx:idx + 2200]
+        helper = ui[ui.find('function _mediaSessionQuery'):ui.find('function buildCsvTablePreview')]
+        assert 'const mediaSessionId=' in helper
+        assert "'&session_id='+encodeURIComponent(mediaSessionId)" in helper
         assert 'fetch(mediaUrl)' in body
-        assert "const publicMediaUrl='api/media?path='+encodeURIComponent(path);" in body
-        assert "const dlUrl=publicMediaUrl+'&download=1'+snapQuery;" in body, (
+        assert "const dlUrl=_mediaPreviewUrl(path,{download:true,snap:snap||undefined});" in body, (
             "PDF download/fallback links must carry the message's snapshot "
-            "digest (snapQuery) so they download the frozen bytes, not the "
+            "digest and session_id so they download the frozen bytes, not the "
             "current live file"
         )
 
