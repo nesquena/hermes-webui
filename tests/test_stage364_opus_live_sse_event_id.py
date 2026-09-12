@@ -104,6 +104,15 @@ def test_cleanup_pops_stream_last_event_id():
     )
 
 
+def test_cancel_allocates_a_new_journal_event_id():
+    cancel_idx = STREAMING_PY.find("if _emit_cancel_event and q:")
+    cancel_block = STREAMING_PY[cancel_idx:cancel_idx + 1800]
+    assert "append_run_event(" in cancel_block
+    assert "'cancel'" in cancel_block
+    assert "STREAM_LAST_EVENT_ID[stream_id] = _cancel_event_id" in cancel_block
+    assert "_cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)" not in cancel_block
+
+
 def test_imports_present():
     """STREAM_LAST_EVENT_ID must be imported in both streaming.py (writer)
     and routes.py (reader)."""

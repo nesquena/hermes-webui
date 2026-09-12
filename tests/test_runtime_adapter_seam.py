@@ -1,3 +1,4 @@
+import ast
 import importlib
 import io
 import queue
@@ -449,18 +450,27 @@ def test_runner_local_chat_start_selection_does_not_fallback_to_legacy():
     assert 'return {"error": str(exc), "_status": 501}' in helper_body
     assert 'return j(handler, {"error": response["error"]}, status=501)' in start_body
     assert "runner-local chat backend is not configured" in src
-    # The adapter branch inside the helper still calls _start_chat_stream_for_session
-    # through the _legacy_start_run delegate before the trailing legacy-direct
-    # fallthrough (the function returns the legacy direct call when the flag
-    # is off — no `else:` keyword anymore since each branch returns).
-    adapter_branch_start = helper_body.index(flag_branch)
-    # Slice up to the final (post-flag) return _start_chat_stream_for_session
-    # — there are two occurrences: one inside _legacy_start_run, one at the
-    # fallthrough; we want both inside the branch slice.
-    fallthrough = helper_body.rindex("return _start_chat_stream_for_session(")
-    adapter_branch = helper_body[adapter_branch_start:fallthrough]
-    assert "_start_chat_stream_for_session(" in adapter_branch, "legacy-journal delegate should still call the legacy path"
-    assert "runtime_adapter_runner_enabled()" in adapter_branch or "runtime_adapter_runner_enabled()" in helper_body
+    # Bound the assertion to the actual nested legacy-journal delegate instead
+    # of relying on the relative order of unrelated helper calls in _start_run.
+    tree = ast.parse(src)
+    start_run_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_start_run"
+    )
+    legacy_start_run_nodes = [
+        node
+        for node in ast.walk(start_run_node)
+        if isinstance(node, ast.FunctionDef) and node.name == "_legacy_start_run"
+    ]
+    assert len(legacy_start_run_nodes) == 1
+    legacy_start_run = legacy_start_run_nodes[0]
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_start_chat_stream_for_session"
+        for node in ast.walk(legacy_start_run)
+    ), "legacy-journal delegate should still call the legacy path"
 
 
 def test_chat_start_adapter_path_preserves_legacy_response_shape():

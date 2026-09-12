@@ -1,21 +1,10 @@
-"""Stage-326 integration test for #1951's PENDING_GOAL_CONTINUATION chain.
+"""Regression tests for the legacy goal marker during server-owned delivery.
 
-Opus advisor flagged a critical race during stage-326 review: the original
-#1951 PR placed a `PENDING_GOAL_CONTINUATION.discard(session_id)` in the
-streaming worker's `finally` block. Because `goal_continue` sets the marker
-inside the SAME function call (line ~3328) that the `finally` then discards
-it (line ~3553), the marker would be erased before the frontend could
-receive the SSE event, post the next /chat/start, and trigger the
-consumer-side `if session_id in PENDING_GOAL_CONTINUATION` check in
-routes.py.
-
-The fix removes the discard from streaming.py's finally and relies on the
-consumer in routes.py to discard atomically when the marker is read.
-
-These tests exercise the full chain to guard against the regression:
-1. The streaming finally must NOT discard the marker
-2. Setting the marker survives the streaming finally
-3. routes.py consumer discards atomically on read
+The durable goal-continuation registry is now authoritative.  The in-memory
+``PENDING_GOAL_CONTINUATION`` set remains only for mixed-version browser tabs
+and must still be consumed exactly once by whichever stream starts next.  A
+server-owned stream is already explicitly goal-related, so marker consumption
+is unconditional rather than gated by ``not goal_related``.
 """
 import re
 from pathlib import Path
@@ -55,29 +44,29 @@ def test_streaming_finally_does_not_discard_pending_goal_continuation():
     )
 
 
-def test_routes_consumer_discards_atomically_on_read():
-    """The routes.py consumer must discard the marker after consuming it,
-    so the marker is single-use (one continuation = one auto-flag).
-    """
+def test_routes_consumer_discards_only_after_matching_adoption():
+    """Unrelated user turns retain priority; matching legacy replays are single-use."""
     src = _read_routes()
 
-    # Find the consumption check.
-    m = re.search(
-        r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?PENDING_GOAL_CONTINUATION\.discard",
-        src,
-        re.DOTALL,
+    gate_idx = src.index("if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:")
+    adopt_idx = src.index("elif legacy_goal_marker_consumed:", gate_idx)
+    lock_idx = src.index("session_lock =", gate_idx)
+    gate_block = src[gate_idx:lock_idx]
+    assert "legacy_browser_goal_prompt_matches" in gate_block
+    assert "PENDING_GOAL_CONTINUATION.discard" not in gate_block
+
+    server_branch = src[
+        src.index('if source == "goal_continuation":', gate_idx):adopt_idx
+    ]
+    assert server_branch.index("bind_goal_continuation_stream") < server_branch.index(
+        "PENDING_GOAL_CONTINUATION.discard"
     )
-    assert m is not None, (
-        "routes.py must consume PENDING_GOAL_CONTINUATION atomically: "
-        "check + set goal_related + discard in the same block"
-    )
-    # The discard must be within ~10 lines of the check (atomic block).
-    block = m.group(0)
-    line_count = block.count("\n")
-    assert line_count <= 10, (
-        f"PENDING_GOAL_CONTINUATION check + discard span {line_count} lines; "
-        "should be tight atomic block"
-    )
+
+    adoption_block = src[adopt_idx:adopt_idx + 900]
+    adopt_call = adoption_block.index("adopt_legacy_browser_goal_stream")
+    discard_call = adoption_block.index("PENDING_GOAL_CONTINUATION.discard")
+    prepare_call = adoption_block.index("_prepare_chat_start_session_for_stream")
+    assert adopt_call < discard_call < prepare_call
 
 
 def test_pending_goal_continuation_is_a_set():
