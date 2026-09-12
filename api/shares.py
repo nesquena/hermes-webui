@@ -24,7 +24,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from api.config import STATE_DIR
-from api.helpers import redact_session_data
+from api.helpers import redact_session_data, split_media_token_ref
 # _redact_fn_cached is the ALWAYS-ON credential redactor (agent redactor with
 # force=True + local fallback regex). Unlike redact_session_data it does NOT
 # consult the user-toggleable api_redact_enabled setting — a public share is a
@@ -290,28 +290,32 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         return None
 
     def _replace_ref(m: re.Match) -> str:
-        raw = (m.group(1) or "").strip()
+        parts = split_media_token_ref(text, m)
+        if not parts:
+            return m.group(0)
+        raw, suffix = parts
+        raw = raw.strip()
         if not raw:
             return m.group(0)
 
         # --- Resolve and validate against allowed roots -----------------------
         p = _resolve_against_roots(raw)
         if p is None:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         # --- Size guard -------------------------------------------------------
         try:
             size = p.stat().st_size
         except OSError:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         if size > _SHARE_EMBED_MAX_BYTES:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         # --- MIME allow-list (images only) ------------------------------------
         mime_type, _ = mimetypes.guess_type(str(p))
         if not mime_type or mime_type not in _SHARE_ALLOWED_MIME_TYPES:
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
         # --- Embed as base64 <img> -------------------------------------------
         try:
@@ -320,7 +324,7 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
             # matches the claimed MIME type — catches extension-spoofed files
             # (e.g. a script renamed to .png).
             if not _check_image_magic(data, mime_type):
-                return _PLACEHOLDER
+                return _PLACEHOLDER + suffix
             # Sanitise SVG content before embedding — SVG can carry
             # <script> elements and on* event handlers that could leak
             # credentials in the context of a public share page.
@@ -335,9 +339,9 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
                 f'<img src="data:{mime_type};base64,{b64}"'
                 f' class="msg-media-img" alt="{safe_name}"'
                 f' loading="lazy">'
-            )
+            ) + suffix
         except (OSError, MemoryError):
-            return _PLACEHOLDER
+            return _PLACEHOLDER + suffix
 
     return _SHARE_MEDIA_RE.sub(_replace_ref, text)
 

@@ -63,13 +63,14 @@ def _extract_js_function(src: str, name: str) -> str:
 def _run_real_smd_media_cases() -> dict:
     helpers = "\n".join(
         [
+            _extract_js_function(UI_JS, "_mediaTokenParts"),
             _extract_js_function(MESSAGES_JS, "_smdMediaPrefixTail"),
             _extract_js_function(MESSAGES_JS, "_smdAppendPlainText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaWriteText"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSet"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailEntryChunk"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailSameOwner"),
-            _extract_js_function(MESSAGES_JS, "_smdMediaRefHasReliableBoundary"),
+            _extract_js_function(MESSAGES_JS, "_smdMediaTokenParts"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlushEntry"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailFlush"),
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
@@ -177,6 +178,18 @@ def _run_real_smd_media_cases() -> dict:
         "  visit(root); return out;\n"
         "}\n"
         "function collectClassTexts(root, cls){ return root.querySelectorAll('.'+cls).map(node=>node.textContent); }\n"
+        "function collectMediaRefs(root){\n"
+        "  const out=[];\n"
+        "  const visit=node=>{ for(const child of node.children){ const ref=child.getAttribute&&child.getAttribute('data-ref'); const path=child.getAttribute&&child.getAttribute('data-path'); if(ref||path) out.push(ref||path); visit(child); } };\n"
+        "  visit(root); return out;\n"
+        "}\n"
+        "function settledParts(source){\n"
+        "  const match=/MEDIA:([^\\s\\)\\]]+)/.exec(source);\n"
+        "  if(!match) return {ref:null,remainder:source};\n"
+        "  const parts=_mediaTokenParts(source,match.index,match[1]);\n"
+        "  if(!parts) return {ref:null,remainder:source};\n"
+        "  return {ref:parts[0],remainder:(parts[1]||'')+source.slice(match.index+match[0].length)};\n"
+        "}\n"
         "function renderChunks(chunks, mode){\n"
         "  postProcessCalls = 0; playbackCalls = 0;\n"
         "  const root=document.createElement('div');\n"
@@ -188,9 +201,30 @@ def _run_real_smd_media_cases() -> dict:
         "  smd.parser_end(parser);\n"
         "  _smdMediaTailFlush(parser);\n"
         "  _smdMediaTailClear(parser);\n"
-        "  return { html: root.outerHTML, text: root.textContent, liTexts: collectTagTexts(root, 'li'), fadeWords: collectClassTexts(root, 'stream-fade-word'), postProcessCalls, playbackCalls };\n"
+        "  const mediaRefs=collectMediaRefs(root);\n"
+        "  return { html: root.outerHTML, text: root.textContent, ref: mediaRefs[0]||null, remainder: root.textContent, liTexts: collectTagTexts(root, 'li'), fadeWords: collectClassTexts(root, 'stream-fade-word'), postProcessCalls, playbackCalls };\n"
         "}\n"
         "function renderModes(chunks){ return { safe: renderChunks(chunks, 'safe'), fade: renderChunks(chunks, 'fade') }; }\n"
+        "function compareWithSettled(chunks){ return {settled:settledParts(chunks.join('')),modes:renderModes(chunks)}; }\n"
+        "function renderDirectCallbacks(chunks){\n"
+        "  const root=document.createElement('div');\n"
+        "  const parser={};\n"
+        "  const data={};\n"
+        "  const writeText=(parent,_data,text)=>parent.appendChild(document.createTextNode(text));\n"
+        "  for(const chunk of chunks) _smdMediaAwareAddText(null,root,data,chunk,_SMD_MEDIA_TAIL,parser,writeText);\n"
+        "  _smdMediaTailFlush(parser);\n"
+        "  const mediaRefs=collectMediaRefs(root);\n"
+        "  return {ref:mediaRefs[0]||null,remainder:root.textContent};\n"
+        "}\n"
+        "function compareDirectWithSettled(chunks){ return {settled:settledParts(chunks.join('')),streamed:renderDirectCallbacks(chunks)}; }\n"
+        "function sweepDirectWithSettled(source){\n"
+        "  const settled=settledParts(source);\n"
+        "  const partitions=[];\n"
+        "  for(let split=0;split<=source.length;split+=1){\n"
+        "    partitions.push({split,streamed:renderDirectCallbacks([source.slice(0,split),source.slice(split)])});\n"
+        "  }\n"
+        "  return {settled,partitions};\n"
+        "}\n"
         "const marker='MEDIA:';\n"
         "const prefixSplits={};\n"
         "for(let i=1;i<marker.length;i++) prefixSplits[i]=renderModes(['\\n\\n'+marker.slice(0,i), marker.slice(i)+'C:/tmp/live.png ']);\n"
@@ -199,7 +233,51 @@ def _run_real_smd_media_cases() -> dict:
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "const completionBoundaries={\n"
+        "  knownExtensionThenFilename:compareWithSettled(['MEDIA:/tmp/a.png', '.bak ']),\n"
+        "  knownExtensionThenQuery:compareWithSettled(['MEDIA:https://example.com/a.png', '?signature=value ']),\n"
+        "  punctuationThenFilename:compareWithSettled(['MEDIA:/tmp/a.png.', 'bak ']),\n"
+        "  finalKnownExtension:compareWithSettled(['MEDIA:/tmp/a.png']),\n"
+        "};\n"
+        "const callbackBoundaries={\n"
+        "  knownExtensionThenFilename:compareDirectWithSettled(['MEDIA:/tmp/a.png', '.bak ']),\n"
+        "  knownExtensionThenQuery:compareDirectWithSettled(['MEDIA:https://example.com/a.png', '?signature=value ']),\n"
+        "  punctuationThenFilename:compareDirectWithSettled(['MEDIA:/tmp/a.png.', 'bak ']),\n"
+        "};\n"
+        "const callbackSplitSweeps={\n"
+        "  filenameSuffix:sweepDirectWithSettled('MEDIA:/tmp/a.png.bak '),\n"
+        "  querySuffix:sweepDirectWithSettled('MEDIA:https://example.com/a.png?signature=value '),\n"
+        "  fragmentSuffix:sweepDirectWithSettled('MEDIA:https://example.com/a.png#section '),\n"
+        "  finalKnownExtension:sweepDirectWithSettled('MEDIA:/tmp/a.png'),\n"
+        "};\n"
+        "const boundedOverflow=renderModes(['MEDIA:'+('a'.repeat(_MEDIA_TAIL_MAX))]);\n"
+        "const boundaries={\n"
+        "  bold:renderModes(['**MEDIA:/tmp/report.xlsx** ']),\n"
+        "  boldSplit:renderModes(['**MEDIA:/tmp/report.', 'xlsx** ']),\n"
+        "  trailingPeriod:renderModes(['MEDIA:/tmp/report.xlsx. ']),\n"
+        "  trailingPeriodEnd:renderModes(['MEDIA:/tmp/report.xlsx.']),\n"
+        "  bareMarker:renderModes(['`MEDIA:` ']),\n"
+        "  queryFragment:renderModes(['MEDIA:https://example.com/a.png?size=1#preview ']),\n"
+        "  wrappedRemoteQueryPunctuation:renderModes(['**MEDIA:https://example.com/a.png?signature=value.**. ']),\n"
+        "  quotedDouble:renderModes(['\"MEDIA:/tmp/report.xlsx\". ']),\n"
+        "  quotedSingleSplit:renderModes([\"'MEDIA:/tmp/report.\", \"xlsx'.\"]),\n"
+        "  entityQuotedDoubleSplit:renderModes(['&quot;', 'MEDIA:/tmp/report.xlsx&quot;. ']),\n"
+        "  entityQuotedSingleEnd:renderModes(['&#39;MEDIA:/tmp/report.xlsx&#39;.']),\n"
+        "  entityQuotedDoubleOpenerSplit:renderModes(['&quo', 't;MEDIA:/tmp/report.xlsx&quot;. ']),\n"
+        "  quotedRemoteQuery:renderModes(['\"MEDIA:https://example.com/a.png?signature=value!\". ']),\n"
+        "  quotedRemoteFragment:renderModes(['\"MEDIA:https://example.com/a.png#preview!\". ']),\n"
+        "  windowsPath:renderModes(['MEDIA:C:\\\\Temp\\\\report.xlsx ']),\n"
+        "  unmatchedDelimiter:renderModes(['MEDIA:/tmp/report.xlsx* ']),\n"
+        "  multiple:renderModes(['MEDIA:/tmp/one.png then MEDIA:/tmp/two.pdf after']),\n"
+        "};\n"
+        "const punctuation={};\n"
+        "for(const mark of ['.',',',';',':','!','?',')']) punctuation[mark]=renderModes([`MEDIA:/tmp/report.xlsx${mark} `]);\n"
+        "const remoteSuffixPunctuation={query:{},fragment:{}};\n"
+        "for(const mark of ['.',',',';',':','!','?']){\n"
+        "  remoteSuffixPunctuation.query[mark]=renderModes([`MEDIA:https://example.com/a.png?signature=value${mark} `]);\n"
+        "  remoteSuffixPunctuation.fragment[mark]=renderModes([`MEDIA:https://example.com/a.png#section${mark} `]);\n"
+        "}\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent, completionBoundaries, callbackBoundaries, callbackSplitSweeps, boundedOverflow, boundaries, punctuation, remoteSuffixPunctuation}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -343,7 +421,7 @@ class TestSmdMediaInStream(unittest.TestCase):
 
     def test_cross_chunk_media_tail_buffer_exists(self):
         # Greptile #2 (cross-chunk split): when smd flushes a MEDIA token
-        # in two pieces (e.g. "MEDIA:C:\\Users\\Admin" then "\\foo.png"),
+        # in two pieces (e.g. "MEDIA:C:\\Temp\\fo" then "o.png"),
         # the second half alone would not match the MEDIA regex; if we
         # only operate on each chunk independently both pieces render as
         # raw text. The new implementation keeps a per-parser tail buffer
@@ -378,49 +456,21 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("_SMD_MEDIA_PREFIX.startsWith(suffix)", MESSAGES_JS)
 
     def test_partial_media_ref_at_chunk_end_is_buffered_until_boundary(self):
-        # Greptile re-review: /MEDIA:([^\s)\]]+)/g will happily match
-        # "MEDIA:fo" at the end of a chunk even if the next chunk is "o.png".
-        # The interceptor must not emit a media node for that partial ref;
-        # it should keep the candidate in unmatchedTail unless a delimiter or
-        # reliable filename suffix proves the ref is complete.
+        # Any add_text callback can stop in the middle of a logical filename or
+        # URL. A familiar extension is not a grammar delimiter: `.bak`, a query,
+        # or a fragment may still arrive in the next callback.
         idx = MESSAGES_JS.index("function _smdMediaAwareAddText")
         block = MESSAGES_JS[idx:idx + 6500]
-        self.assertIn("function _smdMediaRefHasReliableBoundary", MESSAGES_JS)
-        self.assertIn("matchEnd===combined.length", block)
-        self.assertIn("!_smdMediaRefHasReliableBoundary(m[1])", block)
+        self.assertIn("if(matchEnd===combined.length){", block)
         self.assertIn("unmatchedTail = candidate", block)
+        self.assertNotIn("_smdMediaRefHasReliableBoundary", MESSAGES_JS)
 
-    def test_media_ref_boundary_extension_list_matches_renderer_formats(self):
-        # Keep the streaming boundary whitelist aligned with ui.js media
-        # renderer extension families. Otherwise complete refs at chunk end
-        # (e.g. MEDIA:clip.aac) can be buffered and then dropped on stream end.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        for ext in [
-            "png", "jpe?g", "gif", "webp", "bmp", "ico", "svg", "avif",
-            "mp4", "webm", "mov", "m4v", "mkv", "avi", "ogv",
-            "mp3", "wav", "ogg", "m4a", "aac", "wma", "opus", "flac", "oga",
-            "pdf", "html?", "csv", "diff", "patch", "excalidraw",
-        ]:
-            self.assertIn(ext, block)
-
-    def test_extensionless_https_media_ref_is_a_reliable_boundary(self):
-        # _inlineMediaHtmlForRef renders any http(s) ref as an image, including
-        # extensionless CDN URLs such as fal.media generated assets. The stream
-        # boundary check must therefore treat a complete http(s) ref as complete
-        # even when it has no filename extension.
+    def test_parser_finalization_flushes_a_delimiter_free_media_tail(self):
+        # Final parser shutdown is authoritative even when the token has no
+        # trailing whitespace or other grammar delimiter.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
         self.assertIn("/^MEDIA:([^", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
-
-    def test_extensionless_https_tail_waits_until_stream_end(self):
-        # A chunk ending at MEDIA:https://fal.med may still be mid-URL. Do not
-        # treat http(s) scheme alone as a reliable boundary; the stream-end
-        # flush is responsible for rendering a final extensionless URL.
-        idx = MESSAGES_JS.index("function _smdMediaRefHasReliableBoundary")
-        block = MESSAGES_JS[idx:idx + 900]
-        self.assertNotIn("/^https?:", block)
-        self.assertIn("_smdMediaTailFlush", MESSAGES_JS)
 
     def test_tail_buffer_size_cap(self):
         # Defensive: a runaway tail buffer from a malformed stream could
@@ -573,6 +623,125 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                 if mode == "fade":
                     self.assertTrue(result["fadeWords"])
                     self.assertEqual("".join(result["fadeWords"]), "MEow")
+
+    def test_real_smd_parser_completion_is_invariant_to_callback_partitioning(self):
+        for case_name, case in self.cases["completionBoundaries"].items():
+            expected = (case["settled"]["ref"], case["settled"]["remainder"])
+            for mode, result in case["modes"].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertEqual((result["ref"], result["remainder"]), expected)
+
+    def test_media_add_text_callback_completion_matches_settled_parsing(self):
+        for case_name, case in self.cases["callbackBoundaries"].items():
+            expected = (case["settled"]["ref"], case["settled"]["remainder"])
+            actual = (case["streamed"]["ref"], case["streamed"]["remainder"])
+            with self.subTest(case=case_name):
+                self.assertEqual(actual, expected)
+
+    def test_media_add_text_completion_is_invariant_at_every_callback_split(self):
+        for case_name, case in self.cases["callbackSplitSweeps"].items():
+            expected = (case["settled"]["ref"], case["settled"]["remainder"])
+            for partition in case["partitions"]:
+                actual = (partition["streamed"]["ref"], partition["streamed"]["remainder"])
+                with self.subTest(case=case_name, split=partition["split"]):
+                    self.assertEqual(actual, expected)
+
+    def test_real_smd_parser_fails_an_oversized_unterminated_tail_to_literal_text(self):
+        expected = "MEDIA:" + ("a" * 4096)
+        for mode, result in self.cases["boundedOverflow"].items():
+            with self.subTest(mode=mode):
+                self.assertIsNone(result["ref"])
+                self.assertEqual(result["remainder"], expected)
+
+    def test_real_smd_parser_keeps_suffixes_outside_media_refs(self):
+        for case_name in ("bold", "boldSplit", "trailingPeriod", "trailingPeriodEnd"):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx**"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx."', result["html"])
+
+        for punctuation, modes in self.cases["punctuation"].items():
+            for mode, result in modes.items():
+                with self.subTest(punctuation=punctuation, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertIn(punctuation, result["text"])
+
+    def test_real_smd_parser_preserves_unmatched_delimiter_in_ref(self):
+        for mode, result in self.cases["boundaries"]["unmatchedDelimiter"].items():
+            with self.subTest(mode=mode):
+                self.assertIn('data-ref="/tmp/report.xlsx*"', result["html"])
+
+    def test_real_smd_parser_detaches_balanced_quotes_in_safe_fade_split_and_tail_paths(self):
+        for case_name in (
+            "quotedDouble",
+            "quotedSingleSplit",
+            "entityQuotedDoubleSplit",
+            "entityQuotedSingleEnd",
+            "entityQuotedDoubleOpenerSplit",
+        ):
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn('data-ref="/tmp/report.xlsx"', result["html"])
+                    self.assertNotIn('data-ref="/tmp/report.xlsx%22"', result["html"])
+                    self.assertNotIn("data-ref=\"/tmp/report.xlsx'\"", result["html"])
+                    expected_quote = "'" if case_name in ("quotedSingleSplit", "entityQuotedSingleEnd") else '"'
+                    self.assertTrue(
+                        result["text"].rstrip().endswith(f"{expected_quote}."),
+                        result["text"],
+                    )
+
+    def test_real_smd_parser_preserves_quoted_remote_query_and_fragment_values(self):
+        expected = {
+            "quotedRemoteQuery": "https://example.com/a.png?signature=value!",
+            "quotedRemoteFragment": "https://example.com/a.png#preview!",
+        }
+        for case_name, ref in expected.items():
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
+                    self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_remote_query_and_fragment_punctuation(self):
+        for suffix_kind, punctuation_cases in self.cases["remoteSuffixPunctuation"].items():
+            separator = "?signature=value" if suffix_kind == "query" else "#section"
+            for punctuation, modes in punctuation_cases.items():
+                expected = f"https://example.com/a.png{separator}{punctuation}"
+                for mode, result in modes.items():
+                    with self.subTest(
+                        suffix_kind=suffix_kind,
+                        punctuation=punctuation,
+                        mode=mode,
+                    ):
+                        self.assertIn(f'data-ref="{expected}"', result["html"])
+
+        wrapped_ref = "https://example.com/a.png?signature=value."
+        for mode, result in self.cases["boundaries"]["wrappedRemoteQueryPunctuation"].items():
+            with self.subTest(suffix_kind="wrapped_query", mode=mode):
+                self.assertIn(f'data-ref="{wrapped_ref}"', result["html"])
+                self.assertIn(".", result["text"])
+
+    def test_real_smd_parser_preserves_other_requested_token_shapes(self):
+        for mode, result in self.cases["boundaries"]["bareMarker"].items():
+            with self.subTest(case="bareMarker", mode=mode):
+                self.assertIn("MEDIA:", result["text"])
+                self.assertNotIn('class="media-node"', result["html"])
+
+        expected = {
+            "queryFragment": "https://example.com/a.png?size=1#preview",
+            "windowsPath": r"C:\Temp\report.xlsx",
+        }
+        for case_name, ref in expected.items():
+            for mode, result in self.cases["boundaries"][case_name].items():
+                with self.subTest(case=case_name, mode=mode):
+                    self.assertIn(f'data-ref="{ref}"', result["html"])
+
+        for mode, result in self.cases["boundaries"]["multiple"].items():
+            with self.subTest(case="multiple", mode=mode):
+                self.assertIn('data-ref="/tmp/one.png"', result["html"])
+                self.assertIn('data-path="/tmp/two.pdf"', result["html"])
+                self.assertIn("then", result["text"])
+                self.assertIn("after", result["text"])
 
 
 if __name__ == "__main__":

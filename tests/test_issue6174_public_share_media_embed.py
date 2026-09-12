@@ -55,6 +55,24 @@ def test_valid_workspace_image_is_embedded(sandbox):
     assert shares._PLACEHOLDER not in out
 
 
+@pytest.mark.parametrize(
+    "text, suffix",
+    [
+        ("**MEDIA:ok.png**", "**"),
+        ("MEDIA:ok.png.", "."),
+        ('"MEDIA:ok.png".', '".'),
+        ("'MEDIA:ok.png'.", "'."),
+    ],
+)
+def test_wrapped_or_punctuated_workspace_image_is_embedded_without_losing_suffix(
+    sandbox, text, suffix
+):
+    out = _embed(text, [sandbox["ws"]])
+    assert "base64," in out
+    assert shares._PLACEHOLDER not in out
+    assert out.endswith(suffix)
+
+
 def test_relative_path_traversal_is_blocked(sandbox):
     out = _embed("MEDIA:../secret/creds.txt", [sandbox["ws"]])
     assert out == shares._PLACEHOLDER
