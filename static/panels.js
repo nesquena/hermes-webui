@@ -1151,6 +1151,15 @@ function _cronExpansionSet(key, expanded){
   try { localStorage.setItem(key, expanded ? '1' : '0'); } catch(_) {}
 }
 
+function _syncCronRunExpandControl(item, expanded){
+  const btn = item ? item.querySelector('.detail-expand-toggle') : null;
+  if (!btn) return;
+  btn.textContent = expanded ? '▴' : '▾';
+  btn.title = expanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-expanded', String(expanded));
+}
+
 function toggleCronPromptExpanded(jobId){
   const key = _cronPanelExpandKey(jobId, 'prompt');
   _cronExpansionSet(key, !_cronExpansionGet(key));
@@ -1161,17 +1170,25 @@ function toggleCronPromptExpanded(jobId){
 
 function toggleCronRunExpanded(jobId, filename, runId){
   const key = _cronRunExpandKey(jobId, filename);
+  const item = document.getElementById(runId);
+  if (item && !item.classList.contains('open')) {
+    _cronExpansionSet(key, true);
+    _loadRunContent(jobId, filename, runId);
+    return;
+  }
   const expanded = !_cronExpansionGet(key);
   _cronExpansionSet(key, expanded);
-  const item = document.getElementById(runId);
   const body = item ? item.querySelector('.detail-run-body') : null;
-  const btn = item ? item.querySelector('.detail-expand-toggle') : null;
   if (body) body.classList.toggle('expanded', expanded);
-  if (btn) {
-    btn.textContent = expanded ? '▴' : '▾';
-    btn.title = expanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
-    btn.setAttribute('aria-label', btn.title);
+  if (body) {
+    const primary = body.querySelector('.cron-run-primary code');
+    if (primary && body.dataset.fullResponse !== undefined) {
+      primary.textContent = expanded ? body.dataset.fullResponse : body.dataset.fullResponse.slice(0, 600);
+    }
   }
+  _syncCronRunExpandControl(item, expanded);
+  const btn = item ? item.querySelector('.detail-expand-toggle') : null;
+  if (btn) btn.focus({preventScroll:true});
 }
 
 function _isCronScriptJob(job){
@@ -1393,9 +1410,8 @@ async function _loadRunContent(jobId, filename, runId){
     _cronExpansionSet(_cronRunExpandKey(jobId, filename), false);
     const btn = item ? item.querySelector('.detail-expand-toggle') : null;
     if (btn) {
-      btn.textContent = '▾';
-      btn.title = (t('cron_expand_output') || 'Expand output');
-      btn.setAttribute('aria-label', btn.title);
+      _syncCronRunExpandControl(item, false);
+      btn.focus({preventScroll:true});
     }
     return;
   }
@@ -1409,17 +1425,36 @@ async function _loadRunContent(jobId, filename, runId){
       return;
     }
     const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
-    const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
+    const projection = data.projection || {kind:'raw', raw:data.content || ''};
+    const isResponse = projection.kind === 'agent' && typeof projection.response === 'string';
+    const fullResponse = isResponse ? projection.response : (projection.raw || data.content || '');
+    let renderedOutput;
+    let expandableOutput = fullResponse;
+    if (isResponse) {
+      renderedOutput = expanded ? fullResponse : fullResponse.slice(0, 600);
+    } else {
+      // Keep the legacy selection for old payloads, then cap what reaches the DOM.
+      const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
+      const fullFallbackOutput = data.content || fullResponse || data.snippet || '';
+      expandableOutput = fullFallbackOutput;
+      renderedOutput = expanded ? fullFallbackOutput : output.slice(0, 600);
+    }
+    let hasLegacyFallbackExpansion = false;
+    if (!expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
+      hasLegacyFallbackExpansion = true;
+    }
+    body.dataset.fullResponse = expandableOutput;
     body.classList.toggle('expanded', expanded);
+    _syncCronRunExpandControl(item, expanded);
     // Cron run output is never authored Markdown — render as literal
     // preformatted text using DOM-created <pre><code> so all content
     // (including shapes starting with #, |, >, ``` and embedded fences)
     // renders verbatim without Markdown interpretation.
     body.innerHTML = '';
     const pre = document.createElement('pre');
-    pre.className = 'cron-run-pre';
+    pre.className = 'cron-run-pre cron-run-primary';
     const code = document.createElement('code');
-    code.textContent = output;
+    code.textContent = renderedOutput;
     pre.appendChild(code);
     body.appendChild(pre);
     const usageStrip = _formatCronRunUsageStrip(data.usage);
@@ -1429,28 +1464,52 @@ async function _loadRunContent(jobId, filename, runId){
       usage.textContent = usageStrip;
       body.appendChild(usage);
     }
-    // Show "View full output" button only for collapsed previews. Expanded rows render the full body inline.
-    if (!expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
+    if (isResponse && projection.diagnostics) {
+      const diagnostics = document.createElement('details');
+      diagnostics.className = 'cron-run-diagnostics';
+      const summary = document.createElement('summary');
+      summary.textContent = t('cron_view_diagnostics') || 'View diagnostics';
+      diagnostics.append(summary);
+      diagnostics.addEventListener('toggle', () => {
+        if (!diagnostics.open || diagnostics.dataset.loaded) return;
+        const diagnosticPre = document.createElement('pre');
+        diagnosticPre.className = 'cron-run-pre cron-run-diagnostics-content';
+        diagnosticPre.textContent = projection.diagnostics;
+        diagnostics.appendChild(diagnosticPre);
+        diagnostics.dataset.loaded = '1';
+      });
+      body.appendChild(diagnostics);
+    }
+    if (isResponse) {
+      const rawDetails = document.createElement('details');
+      rawDetails.className = 'cron-run-raw-output';
+      const rawSummary = document.createElement('summary');
+      rawSummary.textContent = t('cron_view_raw_output') || 'View raw output';
+      rawDetails.append(rawSummary);
+      rawDetails.addEventListener('toggle', () => {
+        if (!rawDetails.open || rawDetails.dataset.loaded) return;
+        const raw = document.createElement('pre');
+        raw.className = 'cron-run-pre';
+        raw.textContent = data.content || '';
+        rawDetails.appendChild(raw);
+        rawDetails.dataset.loaded = '1';
+      });
+      body.appendChild(rawDetails);
+    }
+    // Expansion changes only the response cap; raw output remains a separate action.
+    if (!expanded && ((isResponse && fullResponse.length > 600) || hasLegacyFallbackExpansion)) {
       const btn = document.createElement('button');
-      btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
+      btn.type = 'button';
+      btn.className = 'cron-run-response-toggle';
       btn.textContent = t('cron_view_full_output') || 'View full output';
       btn.onclick = () => {
         _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
         body.classList.add('expanded');
-        body.innerHTML = '';
-        const pre = document.createElement('pre');
-        pre.className = 'cron-run-pre';
-        const code = document.createElement('code');
-        code.textContent = data.content || '';
-        pre.appendChild(code);
-        body.appendChild(pre);
-        const usageStrip = _formatCronRunUsageStrip(data.usage);
-        if (usageStrip) {
-          const usage = document.createElement('div');
-          usage.className = 'cron-run-usage-strip cron-run-usage-footer';
-          usage.textContent = usageStrip;
-          body.appendChild(usage);
-        }
+        const primary = body.querySelector('.cron-run-primary code');
+        if (primary) primary.textContent = expandableOutput;
+        _syncCronRunExpandControl(item, true);
+        const toggle = item.querySelector('.detail-expand-toggle');
+        if (toggle) toggle.focus({preventScroll:true});
         btn.remove();
       };
       body.appendChild(btn);
@@ -1986,14 +2045,6 @@ async function saveCronForm(){
 // Back-compat aliases for any stale callers
 const submitCronCreate = saveCronForm;
 function toggleCronForm(){ openCronCreate(); }
-
-function _cronOutputSnippet(content) {
-  // Extract the response body from a cron output .md file
-  const lines = content.split('\n');
-  const responseIdx = lines.findIndex(l => l.startsWith('## Response') || l.startsWith('# Response'));
-  const body = (responseIdx >= 0 ? lines.slice(responseIdx + 1) : lines).join('\n').trim();
-  return body.slice(0, 600) || '(empty)';
-}
 
 function _formatCronRunUsageStrip(usage) {
   if (!usage || typeof usage !== 'object') return '';

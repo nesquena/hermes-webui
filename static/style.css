@@ -6486,6 +6486,11 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-run-body.expanded{max-height:none;overflow-y:visible;}
 .detail-run-body .cron-run-pre{margin:0;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;}
 .detail-run-body .cron-run-pre code{background:transparent;padding:0;font-family:var(--font-mono);}
+.cron-run-diagnostics{margin-top:8px;border-top:1px solid var(--border);padding-top:6px;color:var(--muted);}
+.cron-run-diagnostics summary{cursor:pointer;overflow-wrap:anywhere;}
+.cron-run-diagnostics-content,.cron-run-raw-output pre{margin-top:6px;max-height:220px;overflow:auto;}
+.cron-run-raw-output summary,.cron-run-response-toggle{margin-top:8px;padding:4px 12px;border:1px solid var(--border-subtle);border-radius:var(--radius-btn);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px;max-width:100%;white-space:normal;text-align:left;}
+@container rightpanel (max-width:520px){.detail-run-actions{gap:4px}.cron-run-response-toggle{width:100%;}.cron-run-diagnostics summary,.cron-run-raw-output summary{line-height:1.4;}}
 .workspace-panel-tabs{display:flex;gap:4px;padding:6px 8px;border-bottom:1px solid var(--border);}
 .workspace-panel-tab{flex:1;border:1px solid transparent;background:transparent;color:var(--muted);border-radius:7px;padding:5px 8px;font-size:12px;cursor:pointer;}
 .workspace-panel-tab.active{background:var(--surface-subtle);color:var(--text);border-color:var(--border2);}

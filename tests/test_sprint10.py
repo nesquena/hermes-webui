@@ -181,7 +181,8 @@ def test_cron_history_button_in_panels_js(cleanup_test_sessions):
 
 def test_cron_output_snippet_helper(cleanup_test_sessions):
     src, _ = get_text("/static/panels.js")
-    assert "_cronOutputSnippet" in src
+    assert "data.projection" in src
+    assert "cron-run-primary" in src
 
 
 def test_cron_output_usage_metadata_parses_optional_fields(cleanup_test_sessions):
@@ -223,7 +224,8 @@ def test_cron_output_window_preserves_response_after_large_prompt(cleanup_test_s
     from api.routes import _cron_output_content_window
 
     content = (
-        "Job metadata\n"
+        "# Cron Job: Nightly\n"
+        "**Job ID:** abc123\n"
         "## Prompt\n"
         + ("skill dump\n" * 1200)
         + "user prompt\n"
@@ -236,7 +238,7 @@ def test_cron_output_window_preserves_response_after_large_prompt(cleanup_test_s
     assert len(window) <= 8000
     assert "## Response" in window
     assert "actual useful cron result" in window
-    assert "Job metadata" in window
+    assert "# Cron Job: Nightly" in window
 
 
 def test_cron_output_window_without_response_uses_tail(cleanup_test_sessions):
