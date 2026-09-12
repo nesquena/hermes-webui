@@ -383,6 +383,10 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M7 8h10v4a5 5 0 0 1-10 0V8z"/><path d="M12 17v5"/></svg>
             <span data-i18n="settings_tab_extensions">Extensions</span>
           </button>
+          <button type="button" class="side-menu-item" data-settings-section="environment" onclick="switchSettingsSection('environment',{fromSidebarItem:true})">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3"/><path d="M13 15h3"/></svg>
+            <span data-i18n="settings_tab_environment">Environment</span>
+          </button>
           <button type="button" class="side-menu-item" data-settings-section="system" onclick="switchSettingsSection('system',{fromSidebarItem:true})">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
             <span data-i18n="settings_tab_system">System</span>
@@ -1543,6 +1547,35 @@
               <div id="extensionsDiagnostics" class="extensions-diagnostics" aria-live="polite">
                 <div class="extensions-loading">Loading extension diagnostics…</div>
               </div>
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneEnvironment">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="settings_section_environment_title">Environment</div>
+                <div class="settings-section-meta" data-i18n="settings_section_environment_meta">Add user-managed environment entries to the WebUI .env file. Values are write-only here — they are stored securely, never displayed back, and require a Hermes restart to load.</div>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label data-i18n="settings_env_current_label">Currently set keys</label>
+              <div id="settingsEnvKeys" class="settings-env-keys" aria-live="polite"></div>
+              <div id="settingsEnvKeysEmpty" class="settings-env-empty" data-i18n="settings_env_empty">No environment keys are set.</div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsEnvKey" data-i18n="settings_env_key_label">Add or update a key</label>
+              <div class="settings-env-help" data-i18n="settings_env_form_description">Enter an uppercase variable name (A–Z, 0–9, _, starting with a letter or underscore) and its value. The value is stored securely and never displayed after saving.</div>
+              <form id="settingsEnvForm" autocomplete="off" novalidate>
+                <label for="settingsEnvKey" class="settings-env-input-label" data-i18n="settings_env_key_input_label">Key</label>
+                <input type="text" id="settingsEnvKey" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="128" pattern="^[A-Z_][A-Z0-9_]*$" required class="settings-env-input">
+                <label for="settingsEnvValue" class="settings-env-input-label" data-i18n="settings_env_value_input_label">Value</label>
+                <input type="password" id="settingsEnvValue" autocomplete="new-password" placeholder="(stored, not displayed)" data-i18n-placeholder="settings_env_value_placeholder" required class="settings-env-input">
+                <button type="submit" id="settingsEnvSave" class="sm-btn settings-env-save" data-i18n="settings_env_save_btn">Save environment key</button>
+              </form>
+              <div id="settingsEnvStatus" class="settings-autosave-status" aria-live="polite"></div>
+            </div>
+            <div class="settings-field">
+              <label data-i18n="settings_env_safety_title">Safety</label>
+              <div class="settings-env-help" data-i18n="settings_env_safety_help">Reserved names (PATH, HOME, HERMES_HOME, anything starting with HERMES_WEBUI_) are rejected. Existing values are never shown or returned by this panel. Writes go through an atomic, locked writer that preserves comments and never truncates the file in place.</div>
             </div>
           </div>
           <div class="settings-pane" id="settingsPaneSystem">
