@@ -4025,11 +4025,11 @@ def _first_exchange_snippets(messages):
         role = m.get('role')
         if role == 'user':
             candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
-            if not user_text and candidate:
+            if candidate and not user_text:
                 user_text = candidate
-                continue
-            if user_text and candidate:
-                break
+            # Issue #7543: keep scanning past consecutive user rows (queued
+            # first turns) until the first complete user+assistant pair —
+            # aborting here left asst_text empty -> missing_exchange fallback.
         elif role == 'assistant' and user_text:
             candidate = _message_text(m.get('content'))
             # Skip tool-call preambles *only* when content is empty or looks
@@ -5097,8 +5097,16 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     messages = getattr(session, 'messages', None) or []
     if prefer_latest:
         user_text, assistant_text = _latest_exchange_snippets(messages)
+        if not user_text:
+            return None, 'empty_user_message', ''
     else:
         user_text, assistant_text = _first_exchange_snippets(messages)
+        if not user_text:
+            # Issue #7543: scrubbing can empty the opening user message; fall
+            # back to the last complete exchange instead of empty_user_message.
+            fb_user, fb_asst = _latest_exchange_snippets(messages)
+            if fb_user and fb_asst:
+                user_text, assistant_text = fb_user, fb_asst
     if not user_text:
         return None, 'empty_user_message', ''
     from api import profiles as profiles_api
