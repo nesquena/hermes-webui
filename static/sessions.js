@@ -24,6 +24,132 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+// A squash completion may race a newer forced load of the same visible
+// session. The newer navigation keeps authority; this owner-scoped marker asks
+// that load's settlement path to verify (and, once, refresh) the transcript.
+const _postSquashNavigationRefreshBySession = new Map();
+
+function _finishPostSquashNavigationRefresh(marker){
+  if(marker&&typeof marker.resolve==='function') marker.resolve();
+}
+
+function _cancelPostSquashNavigationRefreshesForOtherSession(sessionId){
+  const sid=String(sessionId||'');
+  for(const [owner,marker] of _postSquashNavigationRefreshBySession){
+    if(owner===sid) continue;
+    _postSquashNavigationRefreshBySession.delete(owner);
+    _finishPostSquashNavigationRefresh(marker);
+  }
+}
+
+// Session navigation authority is recorded at request time, before metadata
+// changes S.session.  Async work which might refresh a session later (for
+// example squash completion) captures the current generation and may act only
+// while that exact authority is still current.  This preserves a newer user
+// choice even while its metadata request is pending or after it fails.
+function _beginSessionNavigationRequest(sessionId){
+  const sid=String(sessionId||'');
+  // A later request for another destination owns the view. Drop any deferred
+  // squash reconciliation now so it cannot fire if the user visits its owner
+  // again later.
+  if(typeof _cancelPostSquashNavigationRefreshesForOtherSession==='function'){
+    _cancelPostSquashNavigationRefreshesForOtherSession(sid);
+  }
+  const generation=++_loadSessionGeneration;
+  _loadingSessionId=sid;
+  return generation;
+}
+
+function _sessionNavigationRequestIsCurrent(sessionId,generation){
+  return _loadingSessionId===String(sessionId||'')&&_loadSessionGeneration===generation;
+}
+
+function _captureSessionNavigationAuthority(sessionId){
+  return {
+    sessionId:String(sessionId||''),
+    generation:_loadSessionGeneration,
+  };
+}
+
+function _sessionNavigationAuthorityIsCurrent(authority){
+  if(!authority||!authority.sessionId) return false;
+  return !!(
+    _loadSessionGeneration===authority.generation&&
+    _loadingSessionId===null&&
+    S.session&&S.session.session_id===authority.sessionId
+  );
+}
+
+function _squashTranscriptMatchesResult(sessionId,result){
+  const sid=String(sessionId||'');
+  if(!sid||!S.session||String(S.session.session_id||'')!==sid) return false;
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  if(messages.length!==1||!messages[0]||messages[0]._squash_summary!==true) return false;
+  const expected=Number(result&&result.after&&result.after.message_count);
+  if(Number.isFinite(expected)&&expected>0&&messages.length!==expected) return false;
+  const metadataCount=Number(S.session.message_count);
+  if(Number.isFinite(expected)&&expected>0&&Number.isFinite(metadataCount)&&metadataCount!==expected) return false;
+  return true;
+}
+
+function _requestPostSquashNavigationRefresh(sessionId,result){
+  const sid=String(sessionId||'');
+  const existing=_postSquashNavigationRefreshBySession.get(sid);
+  if(existing) return existing.promise;
+  let resolve;
+  const promise=new Promise(done=>{resolve=done;});
+  _postSquashNavigationRefreshBySession.set(sid,{
+    generation:_loadSessionGeneration,
+    result:result||{},
+    promise,
+    resolve,
+  });
+  return promise;
+}
+
+async function _settleSessionNavigationRequest(sessionId,generation){
+  const sid=String(sessionId||'');
+  const marker=_postSquashNavigationRefreshBySession.get(sid);
+  if(!marker) return;
+  // A superseding same-session request inherits the sid-scoped marker; only
+  // the latest generation may consume it. A different destination cancels it
+  // in _beginSessionNavigationRequest above.
+  if(_loadSessionGeneration!==generation||generation<marker.generation) return;
+  if(!S.session||String(S.session.session_id||'')!==sid){
+    _postSquashNavigationRefreshBySession.delete(sid);
+    _finishPostSquashNavigationRefresh(marker);
+    return;
+  }
+  _postSquashNavigationRefreshBySession.delete(sid);
+  try{
+    if(!_squashTranscriptMatchesResult(sid,marker.result)){
+      // The marker is deleted before this bounded retry starts, so its own
+      // settlement cannot schedule another refresh.
+      await loadSession(sid,{force:true,_postSquashRefresh:true});
+    }
+  }catch(_){
+    // The squash itself succeeded. loadSession owns refresh error display; do
+    // not turn a failed reconciliation into a false squash-failure result.
+  }finally{
+    _finishPostSquashNavigationRefresh(marker);
+  }
+}
+
+async function _refreshSessionAfterConcurrentSameSessionNavigation(sessionId,authority,result){
+  const sid=String(sessionId||'');
+  if(_sessionNavigationAuthorityIsCurrent(authority)){
+    try{ await loadSession(sid,{force:true,_postSquashRefresh:true}); }catch(_){}
+    return;
+  }
+  const newerSameSessionLoad=!!(
+    authority&&authority.sessionId===sid&&
+    _loadSessionGeneration>authority.generation&&
+    _loadingSessionId===sid&&
+    S.session&&String(S.session.session_id||'')===sid
+  );
+  if(!newerSameSessionLoad) return;
+  await _requestPostSquashNavigationRefresh(sid,result);
+}
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -1738,9 +1864,9 @@ async function loadSession(sid){
   }
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
-  const _loadGeneration = ++_loadSessionGeneration;
-  const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
-  _loadingSessionId = sid;
+  const _loadGeneration = _beginSessionNavigationRequest(sid);
+  const _isCurrentLoad = () => _sessionNavigationRequestIsCurrent(sid,_loadGeneration);
+  try{
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
@@ -1993,6 +2119,14 @@ async function loadSession(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #6704 P1: the squash pulse lives on shared desktop/mobile controls. Project
+  // only the session whose CURRENT generation has successfully supplied
+  // metadata and is now authoritative for the visible UI. Projecting the
+  // requested destination before this point clears A's running state when a B
+  // load fails (or returns stale), even though A remains the visible session.
+  if(typeof _squashSyncRunningIndicatorForSession==='function'){
+    _squashSyncRunningIndicatorForSession(S.session.session_id);
+  }
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
@@ -2415,6 +2549,11 @@ async function loadSession(sid){
   // Extension post-load hook
   if(!opts.skipExtHooks && typeof _hermesNotifySessionOpen==='function'){
     try{ _hermesNotifySessionOpen(sid, S.session, {loaded:true, opts:opts}); }catch(_){}
+  }
+  }finally{
+    if(typeof _settleSessionNavigationRequest==='function'){
+      await _settleSessionNavigationRequest(sid,_loadGeneration);
+    }
   }
 }
 
