@@ -98,6 +98,17 @@ logger = logging.getLogger(__name__)
 # short hard cap and graceful degradation.
 CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
 
+# Attempt-only timeout for a probe that ``_CustomProbeSchedule`` reaches *after*
+# the shared rebuild window is already spent while the foreground caller is still
+# waiting — the narrow hand-off race described on ``next_timeout``. It is NOT a
+# per-probe minimum and NOT a share of the window: by the time it applies the
+# window is already gone, so nothing is being divided out of it, and it can never
+# be handed out on the fair-share path. Not zero, because urllib reads a zero
+# timeout as "non-blocking" and would report a probe that is genuinely still in
+# flight as an instant connection failure. The full per-endpoint cap is reserved
+# for the deliberately out-of-band continuation, never for this state.
+CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS = 0.01
+
 
 def _env_mb_bytes(name: str, default_mb: int) -> int:
     """Parse an optional megabyte environment variable into bytes.
@@ -5207,6 +5218,31 @@ _available_models_cache_lock = threading.RLock()  # must be RLock: cold path ref
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
+# ── Catalog publication ordering ─────────────────────────────────────────────
+# Every cold rebuild takes the next sequence number, and the published catalog
+# remembers the sequence it came from. A build may publish only if it is newer
+# than whatever is already published. That is what stops an over-budget worker
+# finishing late — the out-of-band publisher, which outlives the foreground
+# caller that gave up on it — from resurrecting a superseded catalog over a
+# newer one. Wall-clock stamps cannot express this ordering: an OLDER build can
+# publish *after* a newer build has already started, and a time comparison would
+# read that publication as "newer" and wrongly discard the newer build's result
+# (#7481 review).
+_models_rebuild_seq: int = 0
+_models_published_seq: int = 0
+
+
+def _allocate_models_rebuild_seq() -> int:
+    """Take the next catalog-rebuild sequence number.
+
+    The caller must hold ``_available_models_cache_lock`` (the cold path does),
+    so the counter is never advanced by two builds at once.
+    """
+    global _models_rebuild_seq
+    _models_rebuild_seq += 1
+    return _models_rebuild_seq
+
+
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
 # to answer "did this endpoint actually advertise this exact id?" in O(1) per
@@ -5339,6 +5375,97 @@ try:
     )
 except (TypeError, ValueError):
     _LIVE_REBUILD_BUDGET_SECONDS = 4.0
+
+
+class _CustomProbeSchedule:
+    """Fair-share timing for the serial custom-endpoint probe chain (#7481).
+
+    The cold model-catalog rebuild probes the active endpoint first and each
+    named ``custom_providers`` entry after it, serially, and every probe in the
+    chain shares the one ``_LIVE_REBUILD_BUDGET_SECONDS`` wall-clock budget
+    while individually being capped at ``CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS``.
+    One unreachable endpoint — a LAN LM Studio/Ollama host the webui container
+    cannot route to is the common case, since the probe runs server-side —
+    therefore used to spend the entire budget on its connect timeout, and every
+    reachable provider scheduled behind it never got an in-band ``/v1/models``
+    probe at all: its group rendered from a stale disk cache or stayed empty and
+    the whole rebuild was pushed out-of-band.
+
+    This schedule hands each probe a fair slice of the *remaining* budget rather
+    than letting it consume the whole cap, so an endpoint that times out cannot
+    starve the endpoints after it. Two cases intentionally keep the historical
+    unthrottled cap, and both are stated rather than inferred:
+
+    * the legacy unbounded path (``_LIVE_REBUILD_BUDGET_SECONDS <= 0``), where
+      there is no window to share;
+    * the out-of-band continuation, i.e. the rebuild worker still running after
+      the foreground caller already gave up — reported by the ``out_of_band``
+      predicate — whose probes are no longer holding anyone up and must keep
+      their full attempt so the refresh can complete.
+
+    The window itself is never over-allocated: a slice is ``left / (remaining +
+    1)`` with **no lower bound**, because any fixed floor makes the chain's total
+    grow with the number of probes — and ``custom_providers`` has no count limit,
+    so a long enough chain of dead endpoints would again spend past the window and
+    push the reachable providers behind it out of the in-band rebuild.
+
+    The trade-off to know about: slices shrink as the chain grows, because the
+    window is fixed and shared. A slow-but-reachable endpoint sitting in a long
+    chain can therefore be cut off; raise ``HERMES_WEBUI_MODELS_REBUILD_BUDGET``
+    for the endpoints actually in use, or give a ``custom_providers`` entry a
+    static ``models:`` allowlist so it is never probed live. What does NOT change
+    for any chain length is the total: the probes can never between them spend
+    past the window, so the foreground caller still receives a published catalog
+    rather than the over-budget fallback.
+    """
+
+    def __init__(self, endpoint_count: int, *, out_of_band=None) -> None:
+        self._remaining = max(1, int(endpoint_count))
+        self._cap = float(CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS)
+        self._attempt_only = float(CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS)
+        self._out_of_band = out_of_band
+        self._deadline = (
+            time.monotonic() + float(_LIVE_REBUILD_BUDGET_SECONDS)
+            if _LIVE_REBUILD_BUDGET_SECONDS > 0
+            else None
+        )
+
+    def next_timeout(self) -> float:
+        """Timeout for the next probe in the chain, then advance the schedule."""
+        remaining = self._remaining
+        self._remaining = max(1, remaining - 1)
+        # Legacy unbounded path: no window exists, so there is nothing to share.
+        if self._deadline is None:
+            return self._cap
+        # Deliberately out-of-band continuation: the foreground caller has already
+        # stopped waiting and served its fallback, so this chain is no longer
+        # holding anyone up and keeps the full attempt for the refresh to be able
+        # to complete. This is an explicit signal rather than an inference from
+        # the deadline, because the deadline being spent does NOT imply the
+        # foreground has given up — a probe can find the window spent while the
+        # caller is still waiting (the hand-off race handled below), and that
+        # state has to stay bounded.
+        if self._out_of_band is not None and self._out_of_band():
+            return self._cap
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            # In-band, window already spent: attempt the probe with the smallest
+            # workable timeout instead of the full cap. Handing out the cap here
+            # is what let a long chain outspend the window once its early slices
+            # were floored up — the later probes paid a full per-endpoint cap each
+            # after the window was gone, so a reachable provider behind them still
+            # landed out-of-band (or not at all), which is the reported defect.
+            return min(self._cap, self._attempt_only)
+        # ``remaining + 1`` reserves one slot of headroom, so a chain of N probes
+        # can spend at most N/(N+1) of the window and always finishes inside it —
+        # which is what keeps the foreground caller on a published catalog rather
+        # than the over-budget fallback. Deliberately NO lower bound on the slice:
+        # a fixed floor (0.5s, then 0.01s in earlier revisions) made the chain's
+        # cumulative spend grow with the endpoint count, so an unbounded
+        # ``custom_providers`` list could still exhaust the window before the
+        # later providers were reached. A positive ``left`` always divides to a
+        # positive slice, so there is nothing left to guard against here.
+        return min(self._cap, left / (remaining + 1))
 
 
 # ── Budget-exceeded warning rate-limit ───────────────────────────────────────
@@ -6927,6 +7054,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _models_published_seq
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -6942,6 +7070,21 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
+    #
+    # #7481: explicit foreground-vs-out-of-band signal for the probe schedule.
+    # The bounded path below runs the rebuild on a daemon worker and lets the
+    # foreground caller stop waiting at the budget; from that moment the worker's
+    # remaining probes are out-of-band and keep the full per-endpoint cap so the
+    # refresh can complete. That is a *different* contract from the in-band chain,
+    # which must stay inside the shared window — and the two cannot be told apart
+    # by the deadline alone (a probe can find the window spent while the caller is
+    # still waiting). The foreground sets this event when it gives up; every
+    # rebuild invocation gets its own, so a still-running worker from an earlier
+    # rebuild cannot read a later caller's state. Defined before the builder
+    # closure so the closure can capture it as a free variable; on the legacy
+    # synchronous path it is simply never set and there is no window to share.
+    _models_rebuild_abandoned = threading.Event()
+
     def _build_available_models_uncached() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
@@ -7464,7 +7607,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         def _custom_endpoint_error(
             provider: str,
-            exc: Exception,
+            exc: Exception | None = None,
             *,
             code: int | None = None,
         ) -> dict:
@@ -7488,16 +7631,61 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
             }
 
+        # ── In-rebuild probe de-duplication (#7481 follow-up) ────────────────
+        # One rebuild can consult the same endpoint more than once: step 4 probes
+        # the active ``model.base_url``, and the LM Studio provider-group fallback
+        # later reads ``providers.lmstudio.base_url`` (falling back to
+        # ``model.base_url`` when lmstudio is the active provider) — in the config
+        # shape the issue reports those are the SAME unreachable LAN host, so one
+        # dead endpoint cost the rebuild two full connect timeouts and two slots of
+        # the shared window. A named ``custom_providers`` entry can likewise repeat
+        # an endpoint an earlier entry already probed. Memoise by (endpoint URL,
+        # credential) and reuse the outcome, so an endpoint is probed at most once
+        # per rebuild.
+        #
+        # The credential is part of the identity: the same URL with a different key
+        # is a different probe and still runs. The raw payload is cached rather than
+        # the parsed entries, so each consumer still shapes the list for its own
+        # provider, and the memo is consulted only AFTER the per-endpoint
+        # SSRF/validation checks — a consumer that would have been blocked is still
+        # blocked rather than served another caller's result.
+        _custom_endpoint_probe_memo: dict[tuple[str, str], tuple[str, object]] = {}
+
+        def _custom_endpoint_probe_key(endpoint_url: str, headers: dict) -> tuple[str, str]:
+            """Identity of one custom-endpoint probe: the URL it hits + the credential it sends."""
+            parsed = urlparse(
+                str(endpoint_url) if "://" in str(endpoint_url) else f"http://{endpoint_url}"
+            )
+            scheme = (parsed.scheme or "http").lower()
+            host = (parsed.hostname or "").lower()
+            port = parsed.port
+            if port and port != (443 if scheme == "https" else 80):
+                host = f"{host}:{port}"
+            # Path comparison ignores repeated/leading/trailing slashes but keeps
+            # case: a path is case-sensitive, a host is not.
+            path = "/".join(seg for seg in (parsed.path or "").split("/") if seg)
+            return (
+                f"{scheme}://{host}/{path}",
+                str(headers.get("Authorization") or ""),
+            )
+
         def _read_custom_endpoint_models(
             base_url: object,
             provider: str,
             *,
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
+            timeout_seconds: float | None = None,
         ) -> tuple[list[dict], dict | None]:
             base = str(base_url or "").strip()
             if not base:
                 return [], None
+            # Filled in once the endpoint has passed validation; the failure paths
+            # below memoize their outcome under it so a later consumer in the same
+            # rebuild does not pay the same timeout twice. It stays None when the
+            # validation refuses the URL, so a consumer that would have been blocked
+            # is never served another caller's memoized result.
+            probe_key: tuple[str, str] | None = None
             try:
                 import ipaddress
                 import urllib.error
@@ -7540,21 +7728,99 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except socket.gaierror:
                         pass
 
+                probe_key = _custom_endpoint_probe_key(endpoint_url, headers)
+                memoized = _custom_endpoint_probe_memo.get(probe_key)
+                if memoized is not None:
+                    # This exact endpoint + credential was already probed earlier in
+                    # this rebuild, so reuse the outcome rather than paying the
+                    # connect timeout a second time (#7481 follow-up). A memoized
+                    # failure is re-reported for THIS provider (its own label).
+                    memo_kind, memo_value = memoized
+                    if memo_kind == "ok":
+                        logger.debug("Reusing in-rebuild /models probe for %s", endpoint_url)
+                        return _extract_model_entries_from_payload(memo_value, provider), None
+                    return [], _custom_endpoint_error(provider, code=memo_value)
+
                 req = urllib.request.Request(endpoint_url, method="GET")
                 req.add_header("User-Agent", "OpenAI/Python 1.0")
                 for k, v in headers.items():
                     req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
+                # #7481: the caller may hand us a fair-share slice of the shared
+                # rebuild budget (see _CustomProbeSchedule) instead of the full
+                # per-endpoint cap, so one unreachable endpoint cannot starve the
+                # providers probed after it. Default stays the documented cap.
+                probe_timeout = (
+                    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                    if timeout_seconds is None
+                    else float(timeout_seconds)
+                )
+                with urllib.request.urlopen(req, timeout=probe_timeout) as response:  # nosec B310
                     data = json.loads(response.read().decode("utf-8"))
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("ok", data)
                 return _extract_model_entries_from_payload(data, provider), None
             except urllib.error.HTTPError as exc:
-                error = _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
+                response_code = getattr(exc, "code", None)
+                error = _custom_endpoint_error(provider, exc, code=response_code)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", response_code)
                 logger.debug("Custom endpoint models fetch failed for provider %s: %s", provider, error)
                 return [], error
             except Exception as exc:
                 error = _custom_endpoint_error(provider, exc)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", None)
                 logger.debug("Custom endpoint unreachable or misconfigured for provider %s: %s", provider, error)
                 return [], error
+
+        # ── Fair-share schedule for the serial custom-endpoint probe chain ───
+        # #7481: step 4 probes the active endpoint and step 5 probes each named
+        # ``custom_providers`` entry after it, serially, off one shared rebuild
+        # budget. Without a schedule the first endpoint in the chain could spend
+        # that entire budget on its own connect timeout and leave every later —
+        # reachable — provider with no in-band probe at all. See
+        # _CustomProbeSchedule for the allocation rules.
+        def _pending_custom_probe_count() -> int:
+            """How many endpoints this rebuild is about to probe live, in order.
+
+            Counts the active endpoint (step 4) plus the named
+            ``custom_providers`` entries that will need a live ``/v1/models``
+            probe (step 5). Providers carrying a static ``models:`` allowlist
+            never probe live, so they must not dilute the schedule. Entries
+            whose base_url is only resolvable later from the credential pool are
+            counted anyway — over-counting merely makes the earlier slices a
+            little smaller, whereas under-counting would over-spend the budget.
+            """
+            count = 1 if cfg_base_url else 0
+            custom_providers_cfg = cfg.get("custom_providers", [])
+            if isinstance(custom_providers_cfg, list):
+                for entry in custom_providers_cfg:
+                    if not isinstance(entry, dict):
+                        continue
+                    if not (entry.get("name") or "").strip():
+                        continue
+                    configured_models = entry.get("models")
+                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                        continue
+                    count += 1
+            # The LM Studio provider-group branch re-probes the same
+            # /v1/models endpoint from ``providers.lmstudio.base_url`` in its own
+            # right — the second consumer of a single dead LAN endpoint in the
+            # common #7481 config — so it has to hold a slot in the schedule too.
+            # When the hermes_cli tier answers first no HTTP probe happens and
+            # the slot simply goes unused, which only makes the earlier slices a
+            # touch smaller.
+            if (
+                "lmstudio" in {str(pid).strip().lower() for pid in detected_providers}
+                and _get_provider_base_url("lmstudio")
+            ):
+                count += 1
+            return count
+
+        custom_probe_schedule = _CustomProbeSchedule(
+            _pending_custom_probe_count(),
+            out_of_band=_models_rebuild_abandoned.is_set,
+        )
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
@@ -7630,6 +7896,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider,
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
+                timeout_seconds=custom_probe_schedule.next_timeout(),
             )
             for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
@@ -7703,6 +7970,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             _slug,
                             api_key=_cp_api_key,
                             trusted_base_urls=(_cp_base_url,),
+                            timeout_seconds=custom_probe_schedule.next_timeout(),
                         )
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
@@ -8162,17 +8430,57 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 headers["Authorization"] = f"Bearer {lm_api_key}"
                             endpoint = (lm_base_url + "/models").rstrip("/")
                             try:
-                                import urllib.request as _urlreq
-                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
-                                with _urlreq.urlopen(req, timeout=5) as resp:
-                                    lm_data = json.loads(resp.read().decode())
+                                _lm_probe_key = _custom_endpoint_probe_key(endpoint, headers)
+                            except Exception:
+                                _lm_probe_key = None
+                            _lm_memo = (
+                                _custom_endpoint_probe_memo.get(_lm_probe_key)
+                                if _lm_probe_key is not None
+                                else None
+                            )
+                            lm_data = None
+                            if _lm_memo is not None:
+                                # #7481 follow-up: this endpoint was already probed
+                                # earlier in this rebuild — typically by the active
+                                # model.base_url probe, since
+                                # _get_provider_base_url("lmstudio") falls back to
+                                # model.base_url when lmstudio is the active
+                                # provider. Reuse that payload (or its failure)
+                                # instead of stalling on the same host a second
+                                # time, which is what made one dead LAN endpoint
+                                # cost the rebuild two connect timeouts.
+                                if _lm_memo[0] == "ok":
+                                    lm_data = _lm_memo[1]
+                                else:
+                                    logger.debug(
+                                        "LM Studio endpoint %s already failed in this rebuild; not re-probing",
+                                        endpoint,
+                                    )
+                            else:
+                                try:
+                                    import urllib.request as _urlreq
+                                    req = _urlreq.Request(endpoint, method="GET", headers=headers)
+                                    # #7481: this probe is part of the same rebuild as
+                                    # the custom-endpoint chain, so it draws from the
+                                    # shared schedule instead of a hardcoded 5s that
+                                    # could push the rebuild past the budget on its own.
+                                    with _urlreq.urlopen(
+                                        req,
+                                        timeout=custom_probe_schedule.next_timeout(),
+                                    ) as resp:
+                                        lm_data = json.loads(resp.read().decode())
+                                    if _lm_probe_key is not None:
+                                        _custom_endpoint_probe_memo[_lm_probe_key] = ("ok", lm_data)
+                                except Exception:
+                                    if _lm_probe_key is not None:
+                                        _custom_endpoint_probe_memo[_lm_probe_key] = ("error", None)
+                                    logger.debug("LM Studio /models fetch failed at %s", endpoint)
+                            if isinstance(lm_data, dict):
                                 for m in (lm_data.get("data") or []):
                                     if isinstance(m, dict):
                                         mid = str(m.get("id") or "").strip()
                                         if mid and {"id": mid, "label": mid} not in raw_models:
                                             raw_models.append({"id": mid, "label": mid})
-                            except Exception:
-                                logger.debug("LM Studio /models fetch failed at %s", endpoint)
 
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
@@ -8580,6 +8888,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
+        # This build's position in the publication order. Taken while holding
+        # _available_models_cache_lock (above), so no two builds can share one,
+        # and used to keep a late out-of-band publisher from overwriting a newer
+        # catalog (#7481).
+        rebuild_seq = _allocate_models_rebuild_seq()
 
         # Capture the active per-request profile (#3957). The live provider
         # probe inside the rebuild resolves credentials from os.environ /
@@ -8629,6 +8942,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _available_models_cache_ts = published_at
                 _available_models_live_rebuild_ts = published_at
                 _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                _models_published_seq = rebuild_seq
                 _sync_models_cache_provenance()
             try:
                 _save_models_cache_to_disk(result)
@@ -8667,11 +8981,30 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         publish_lock = threading.Lock()
         box: dict = {}
 
-        def _publish_models_result(result):
+        def _publish_models_result(result, *, rebuild_seq: int):
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
-            global _available_models_cache_source_fingerprint
+            global _available_models_cache_source_fingerprint, _models_published_seq
             with _cache_build_cv:
+                if rebuild_seq < _models_published_seq:
+                    # #7481 failure isolation: the cache already holds a catalog
+                    # from a newer rebuild, so this one is superseded and must
+                    # not overwrite it. Only the out-of-band publisher can reach
+                    # this — it outlives the foreground caller that gave up on
+                    # it. Ordered by rebuild sequence, not by wall clock: an
+                    # older build can publish *after* a newer build started, and
+                    # a timestamp comparison would misread that as newer and drop
+                    # the newer result instead. The newer publish already
+                    # released _cache_build_in_progress, so the flag is
+                    # deliberately left alone rather than released for a build
+                    # that may not be ours.
+                    logger.debug(
+                        "discarding superseded models-catalog rebuild result "
+                        "(rebuild #%d, catalog published by rebuild #%d)",
+                        rebuild_seq,
+                        _models_published_seq,
+                    )
+                    return
                 published_at = time.monotonic()
                 _available_models_cache = result
                 _available_models_cache_ts = published_at
@@ -8679,6 +9012,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _available_models_cache_source_fingerprint = (
                     _models_cache_source_fingerprint()
                 )
+                _models_published_seq = rebuild_seq
                 _sync_models_cache_provenance()
             try:
                 _save_models_cache_to_disk(result)
@@ -8729,7 +9063,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # the correct profile's cache file.
                     if budget_exceeded.is_set() and _claim_publish():
                         if "result" in box:
-                            _publish_models_result(box["result"])
+                            _publish_models_result(
+                                box["result"], rebuild_seq=rebuild_seq
+                            )
                         else:
                             _clear_build_in_progress()
 
@@ -8747,17 +9083,20 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _clear_build_in_progress()
                 raise box["error"]
             if _claim_publish():
-                _publish_models_result(box["result"])
+                _publish_models_result(box["result"], rebuild_seq=rebuild_seq)
             return copy.deepcopy(box["result"])
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
-        # publication. Handle the tiny race where the build completed between
-        # wait() returning False and here: if so, still publish synchronously
-        # so this caller honours the cache contract.
+        # publication, and so the probe schedule hands its remaining probes the
+        # full per-endpoint cap instead of a share of a window nobody is waiting
+        # on any more (#7481). Handle the tiny race where the build completed
+        # between wait() returning False and here: if so, still publish
+        # synchronously so this caller honours the cache contract.
         budget_exceeded.set()
+        _models_rebuild_abandoned.set()
         if build_done.is_set() and "error" not in box and "result" in box:
             if _claim_publish():
-                _publish_models_result(box["result"])
+                _publish_models_result(box["result"], rebuild_seq=rebuild_seq)
             return copy.deepcopy(box["result"])
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
