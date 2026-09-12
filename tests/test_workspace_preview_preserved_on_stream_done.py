@@ -64,11 +64,17 @@ def test_load_dir_still_clears_preview_for_directory_navigation():
 
 
 def test_turn_mutation_tracking_reloads_open_preview():
-    block = _function_block(WORKSPACE_JS, "refreshOpenPreviewIfMutated")
-    assert "openFile(_previewCurrentPath" in block.replace(" ", ""), (
+    # #5747 re-gate (F3): the refresh loop must still reload the open preview
+    # through openFile(), and the gate must coalesce triggers onto that loop.
+    loop = _function_block(WORKSPACE_JS, "_runPreviewRefreshLoop")
+    assert "openFile(_previewCurrentPath" in loop.replace(" ", ""), (
         "Mutated open previews must reload through openFile()"
     )
-    assert "_previewDirty" in block, "Reload must be skipped while the preview has unsaved edits"
+    gate = _function_block(WORKSPACE_JS, "refreshOpenPreviewIfMutated")
+    assert "_runPreviewRefreshLoop" in gate, (
+        "Refresh triggers must coalesce onto the in-flight refresh loop (#5747 re-gate F3)"
+    )
+    assert "_previewDirty" in gate, "Reload must be skipped while the preview has unsaved edits"
 
 
 def test_tool_complete_tracks_workspace_mutations_for_preview_reload():
