@@ -22,6 +22,10 @@ def test_clear_composer_draft_suppresses_same_session_stale_restore():
     suppress_idx = clear_body.index("_suppressComposerDraftRestoreAfterSubmit(sid, text, files);")
     post_idx = clear_body.index("api('/api/session/draft'")
     assert suppress_idx < post_idx, "restore suppression must be local and immediate before async POST"
+    assert "clear: true" in clear_body
+    assert "text: String(text || '')" in clear_body
+    assert "files: _composerDraftFilesForPersist(files)" in clear_body
+    assert "const confirmed = result && result.draft;" in clear_body
 
 
 def test_non_empty_draft_save_clears_submit_restore_suppression():

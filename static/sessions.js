@@ -217,6 +217,26 @@ async function _restoreRememberedNewChatDraftSession() {
   }
 }
 
+// Server-assigned draft revision per session. The composer autosaves on a
+// debounce, so a write can still be queued when the user hits send and the
+// draft is cleared. Quoting the revision this client last saw lets the server
+// reject that stale write instead of resurrecting the text that was just sent.
+const _composerDraftRevisions = new Map();
+
+function _composerDraftRevision(sid) {
+  const rev = _composerDraftRevisions.get(sid);
+  return typeof rev === 'number' ? rev : null;
+}
+
+function _noteComposerDraftRevision(sid, result) {
+  if (!sid || !result) return;
+  if (typeof result.rev === 'number') _composerDraftRevisions.set(sid, result.rev);
+}
+
+function _forgetComposerDraftRevision(sid) {
+  _composerDraftRevisions.delete(sid);
+}
+
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
@@ -229,11 +249,40 @@ function _saveComposerDraft(sid, text, files) {
   _draftSaveTimer = setTimeout(() => {
     api('/api/session/draft', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-    }).then(() => {
+      body: JSON.stringify({
+        session_id: sid, text: normalizedText, files: normalizedFiles,
+        rev: _composerDraftRevision(sid),
+      }),
+    }).then((result) => {
+      _noteComposerDraftRevision(sid, result);
       _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-    }).catch(() => {});
+    }).catch((err) => {
+      // A 409 means this write was fenced (a clear won, or the session id
+      // rotated). Do NOT record it as the persisted state — that would make
+      // the client believe a draft exists which the server rejected.
+      _handleComposerDraftConflict(sid, err);
+    });
   }, _DRAFT_SAVE_DELAY_MS);
+}
+
+function _composerDraftErrorPayload(err) {
+  // `api()` attaches the raw response text as `err.body`.
+  if (!err || typeof err.body !== 'string') return null;
+  try { return JSON.parse(err.body); } catch (_) { return null; }
+}
+
+function _handleComposerDraftConflict(sid, err) {
+  if (!err || err.status !== 409) return;
+  const payload = _composerDraftErrorPayload(err);
+  if (!payload) return;
+  if (typeof payload.rev === 'number') _composerDraftRevisions.set(sid, payload.rev);
+  // The conversation continues under a new id: stop treating the old sid as
+  // the draft owner so the next autosave reaches the live session instead of
+  // the archived parent.
+  if (payload.session_id && payload.session_id !== sid) {
+    _composerDraftKnownPayloadSessions.delete(sid);
+    _forgetComposerDraftRevision(sid);
+  }
 }
 
 function _composerDraftHasPayload(text, files) {
@@ -279,10 +328,16 @@ function _saveComposerDraftNow(sid, text, files) {
   }
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
+    body: JSON.stringify({
+      session_id: sid, text: normalizedText, files: normalizedFiles,
+      rev: _composerDraftRevision(sid),
+    }),
+  }).then((result) => {
+    _noteComposerDraftRevision(sid, result);
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+  }).catch((err) => {
+    _handleComposerDraftConflict(sid, err);
+  });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -339,10 +394,40 @@ function _clearComposerDraft(sid, text, files) {
   else _suppressComposerDraftRestoreAfterSubmit(sid);
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+    body: JSON.stringify({
+      session_id: sid,
+      clear: true,
+      expected: {
+        text: String(text || ''),
+        files: _composerDraftFilesForPersist(files),
+      },
+    }),
+  }).then((result) => {
+    _noteComposerDraftRevision(sid, result);
+    const confirmed = result && result.draft;
+    _rememberComposerDraftPayloadState(
+      sid,
+      confirmed && typeof confirmed.text === 'string' ? confirmed.text : '',
+      confirmed && Array.isArray(confirmed.files) ? confirmed.files : [],
+    );
+    return true;
+  }).catch((err) => {
+    // A failed clear is not a no-op: the draft is still on the server and
+    // reappears on the next load. Swallowing the error left the client
+    // believing the draft was gone. Keep this session marked as having a
+    // payload so the next switch/save path actually talks to the server
+    // instead of short-circuiting, drop the restore suppression so the
+    // surviving draft can come back, and tell the user.
+    _handleComposerDraftConflict(sid, err);
+    _composerDraftKnownPayloadSessions.add(sid);
+    _clearComposerDraftRestoreSuppression(sid);
+    if (typeof showToast === 'function' && typeof t === 'function') {
+      showToast(t('draft_clear_failed'), 4000, 'error');
+    }
+    // Resolve false rather than rejecting: the existing callers do not attach
+    // a handler, and an unhandled rejection would be a second bug.
+    return false;
+  });
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
