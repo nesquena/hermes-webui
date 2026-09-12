@@ -61,9 +61,9 @@ def test_routes_consumer_discards_atomically_on_read():
     """
     src = _read_routes()
 
-    # Find the consumption check.
+    # The shared marker helper keeps the check and discard under one lock.
     m = re.search(
-        r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?PENDING_GOAL_CONTINUATION\.discard",
+        r"with PENDING_START_MARKERS_LOCK:.*?if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?PENDING_GOAL_CONTINUATION\.discard",
         src,
         re.DOTALL,
     )
@@ -111,11 +111,11 @@ def test_goal_continue_set_marker_before_emitting_event():
     happen BEFORE the goal_continue SSE event is put on the queue, so the
     marker is observable by the time the frontend reacts."""
     src = _read_streaming()
-    add_idx = src.find("PENDING_GOAL_CONTINUATION.add(session_id)")
+    add_idx = src.find("add_pending_goal_continuation(session_id)")
     if add_idx == -1:
         # Tolerate slight phrasing variations.
-        m = re.search(r"PENDING_GOAL_CONTINUATION\.add\([^)]*\)", src)
-        assert m is not None, "PENDING_GOAL_CONTINUATION.add not found"
+        m = re.search(r"add_pending_goal_continuation\([^)]*\)", src)
+        assert m is not None, "add_pending_goal_continuation not found"
         add_idx = m.start()
 
     # Find the next goal_continue SSE event AFTER the add.

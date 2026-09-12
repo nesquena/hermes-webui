@@ -25,6 +25,8 @@ import stat as _stat
 import subprocess
 import sys
 import threading
+import tempfile
+from threading import Event as _ThreadEvent
 import time
 import uuid
 import http.client
@@ -2915,6 +2917,7 @@ from api.config import (
     ACTIVE_RUNS_LOCK,
     register_stream_owner,
     register_session_writeback_owner,
+    session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     stream_owner_session_id,
     peek_stream,
@@ -2938,6 +2941,7 @@ from api.config import (
     get_config_snapshot,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    discard_pending_bg_task_completion,
     _get_config_path,
     _load_yaml_config_file,
     _save_yaml_config_file,
@@ -22669,6 +22673,378 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return False
 
 
+def _claim_pending_start_markers(s, goal_related):
+    from api.config import PENDING_START_MARKERS_LOCK
+
+    goal_marker_claimed = False
+    background_marker_claimed = False
+    with PENDING_START_MARKERS_LOCK:
+        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+            goal_related = True
+            PENDING_GOAL_CONTINUATION.discard(s.session_id)
+            goal_marker_claimed = True
+        if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+            PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+            background_marker_claimed = True
+    return goal_related, {"goal": goal_marker_claimed, "background": background_marker_claimed}
+
+
+def _restore_pending_start_markers(s, claim):
+    from api.config import PENDING_START_MARKERS_LOCK
+
+    with PENDING_START_MARKERS_LOCK:
+        if claim.get("goal"):
+            PENDING_GOAL_CONTINUATION.add(s.session_id)
+        if claim.get("background"):
+            PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
+
+
+def _run_chat_start_worker(worker_target, worker_args, worker_kwargs, release, abort):
+    """Keep the real worker unchanged while the route owns admission gating."""
+    if not release.wait() or abort.is_set():
+        return
+    worker_target(*worker_args, **worker_kwargs)
+
+
+def _commit_chat_start_admission(
+    s,
+    *,
+    prepare,
+    workspace: str,
+    model: str,
+    model_provider,
+    normalized_model: bool,
+    goal_related: bool,
+    backend_is_gateway: bool,
+    moa_config,
+    diag,
+    gateway_regeneration: bool = False,
+    journal_required: bool = False,
+):
+    """Own the shared pre-acceptance transaction for every WebUI chat start."""
+    from api.session_ops import restore_session_state, snapshot_session_state
+
+    stream_id = uuid.uuid4().hex
+    pre_attempt_snapshot = None
+    marker_claim = {"goal": False, "background": False}
+    session_path = getattr(s, "path", None)
+    sidecar_existed = bool(session_path and session_path.exists())
+    backup_path = session_path.with_suffix(".json.bak") if session_path is not None else None
+    backup_before_image = None
+    if backup_path is not None:
+        try:
+            backup_before_image = backup_path.read_bytes()
+        except FileNotFoundError:
+            backup_before_image = None
+    was_hidden_empty_session = _is_hidden_empty_session(s)
+    journal_event = {}
+    journal_append = None
+    stream_registered = False
+    stream_owner_registered = False
+    writeback_owner_registered = False
+    goal_stream_registered = False
+    gateway_starting = False
+    save_attempted = False
+    committed = False
+    worker_thread = None
+    worker_release = _ThreadEvent()
+    worker_abort = _ThreadEvent()
+
+    class _AdmissionRejected(Exception):
+        def __init__(self, result):
+            super().__init__(result.get("error") or "chat start rejected")
+            self.result = result
+
+    def _cleanup_owned_resources():
+        if goal_stream_registered:
+            STREAM_GOAL_RELATED.pop(stream_id, None)
+        if stream_registered:
+            with STREAMS_LOCK:
+                STREAMS.pop(stream_id, None)
+        if stream_owner_registered:
+            unregister_stream_owner(stream_id)
+        if writeback_owner_registered:
+            clear_session_writeback_owner_if_owned(s.session_id, stream_id)
+        if gateway_starting:
+            from api.gateway_chat import (
+                _clear_gateway_run_starting,
+                _finish_gateway_run_starting,
+            )
+
+            _finish_gateway_run_starting(stream_id)
+            _clear_gateway_run_starting(stream_id)
+
+    def _restore_backup_before_image():
+        if backup_path is None:
+            return
+        if backup_before_image is None:
+            backup_path.unlink(missing_ok=True)
+            return
+        from api import models as _models
+
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=backup_path.parent,
+                prefix=f".{backup_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as backup_temp:
+                temp_path = Path(backup_temp.name)
+                backup_temp.write(backup_before_image)
+                backup_temp.flush()
+                os.fsync(backup_temp.fileno())
+            _models._safe_replace(temp_path, backup_path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    try:
+        pre_attempt_snapshot = snapshot_session_state(s)
+        effective_goal_related, marker_claim = _claim_pending_start_markers(s, goal_related)
+        register_session_writeback_owner(s.session_id, stream_id)
+        writeback_owner_registered = True
+        prepared = prepare(stream_id, effective_goal_related)
+        if isinstance(prepared, dict) and "_status" in prepared:
+            raise _AdmissionRejected(prepared)
+        worker_msg, worker_attachments = prepared
+        diag.stage("turn_journal_submitted") if diag else None
+        from api.turn_journal import append_turn_journal_event
+
+        journal_append = append_turn_journal_event
+        try:
+            journal_event = append_turn_journal_event(
+                s.session_id,
+                {
+                    "event": "submitted",
+                    "stream_id": stream_id,
+                    "role": "user",
+                    "content": worker_msg,
+                    "attachments": worker_attachments,
+                    "workspace": workspace,
+                    "model": model,
+                    "model_provider": model_provider,
+                    "created_at": s.pending_started_at,
+                },
+            )
+        except Exception:
+            logger.warning("Failed to append submitted turn journal event", exc_info=True)
+            try:
+                from api.turn_journal import read_turn_journal
+
+                journal_event = next(
+                    (
+                        event
+                        for event in reversed(
+                            read_turn_journal(s.session_id).get("events") or []
+                        )
+                        if event.get("event") == "submitted"
+                        and event.get("stream_id") == stream_id
+                    ),
+                    {},
+                )
+            except Exception:
+                journal_event = {}
+            if journal_required:
+                raise
+        diag.stage("stream_registration") if diag else None
+        stream = create_stream_channel()
+        stream_registered = True
+        register_stream_owner(stream_id, s.session_id)
+        stream_owner_registered = True
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        if effective_goal_related:
+            STREAM_GOAL_RELATED[stream_id] = True
+            goal_stream_registered = True
+        if backend_is_gateway:
+            from api.gateway_chat import _mark_gateway_run_starting
+
+            gateway_starting = True
+            _mark_gateway_run_starting(stream_id)
+
+        worker_target = (
+            _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+        )
+        worker_kwargs = {
+            "model_provider": model_provider,
+            "goal_related": effective_goal_related,
+        }
+        if gateway_regeneration and backend_is_gateway:
+            worker_kwargs["regeneration"] = True
+        if moa_config and not backend_is_gateway:
+            worker_kwargs["moa_config"] = moa_config
+        save_attempted = True
+        save = getattr(s, "save", None)
+        if callable(save):
+            if session_path is not None:
+                save(skip_index=True)
+            else:
+                save()
+        diag.stage("worker_thread_start") if diag else None
+        worker_thread = threading.Thread(
+            target=_run_chat_start_worker,
+            args=(
+                worker_target,
+                (
+                s.session_id,
+                worker_msg,
+                model,
+                workspace,
+                stream_id,
+                copy.deepcopy(worker_attachments),
+                ),
+                worker_kwargs,
+                worker_release,
+                worker_abort,
+                ),
+                daemon=True,
+                kwargs={},
+            )
+        worker_thread.start()
+        committed = True
+        worker_release.set()
+        try:
+            _write_session_index(updates=[s])
+        except Exception:
+            logger.warning(
+                "Failed to publish session index after accepted chat start for %s",
+                s.session_id,
+                exc_info=True,
+            )
+        try:
+            set_last_workspace(workspace)
+        except Exception:
+            logger.warning(
+                "Failed to publish last workspace after accepted chat start for %s",
+                s.session_id,
+                exc_info=True,
+            )
+        if was_hidden_empty_session:
+            try:
+                publish_session_list_changed(
+                    "session_new",
+                    profile=getattr(s, "profile", None),
+                    session_id=getattr(s, "session_id", None),
+                )
+            except Exception:
+                logger.warning("Failed to publish new session %s", s.session_id, exc_info=True)
+    except Exception as exc:
+        if committed:
+            raise
+        worker_abort.set()
+        worker_release.set()
+        if worker_thread is not None:
+            join = getattr(worker_thread, "join", None)
+            if callable(join):
+                try:
+                    join(timeout=1)
+                except RuntimeError:
+                    logger.debug("Chat-start worker thread was not joinable after launch failure")
+        try:
+            _cleanup_owned_resources()
+        except Exception:
+            logger.exception("Failed to clean rejected chat start %s", stream_id)
+        # The owner registry is authoritative only after this attempt has
+        # relinquished its entries. A successor installed during Thread.start
+        # must keep its in-memory state and durable checkpoint untouched.
+        successor_owner = session_writeback_owner(s.session_id)
+        successor_present = bool(successor_owner and successor_owner != stream_id)
+        successor_stream_remapped = False
+        if successor_present and getattr(s, "active_stream_id", None) == stream_id:
+            s.active_stream_id = successor_owner
+            successor_stream_remapped = True
+        if not successor_present and pre_attempt_snapshot is not None:
+            restore_session_state(s, pre_attempt_snapshot)
+        _restore_pending_start_markers(s, marker_claim)
+        compensation_errors = []
+        sidecar_compensated = not save_attempted
+        if save_attempted and pre_attempt_snapshot is not None and not successor_present:
+            try:
+                save = getattr(s, "save", None)
+                if callable(save):
+                    if sidecar_existed:
+                        # No successor owns this rollback, so do not back up the rejected prompt.
+                        save(touch_updated_at=False, skip_index=True, skip_backup=True)
+                    else:
+                        path = getattr(s, "path", None)
+                        if path is not None:
+                            path.unlink(missing_ok=True)
+                sidecar_compensated = True
+            except Exception as compensation_exc:
+                compensation_errors.append(compensation_exc)
+                logger.exception(
+                    "Failed to persist compensated chat start for %s",
+                    s.session_id,
+                )
+        if (
+            pre_attempt_snapshot is not None
+            and not successor_present
+            and sidecar_compensated
+        ):
+            try:
+                _restore_backup_before_image()
+            except Exception as compensation_exc:
+                compensation_errors.append(compensation_exc)
+                logger.exception(
+                    "Failed to restore chat start backup for %s",
+                    s.session_id,
+                )
+        elif successor_stream_remapped:
+            try:
+                save = getattr(s, "save", None)
+                if callable(save):
+                    if session_path is not None:
+                        save(touch_updated_at=False)
+                    else:
+                        save()
+            except Exception as compensation_exc:
+                compensation_errors.append(compensation_exc)
+                logger.exception(
+                    "Failed to persist successor stream identity for %s",
+                    s.session_id,
+                )
+        if journal_event and journal_append is not None:
+            try:
+                journal_append(
+                    s.session_id,
+                    {
+                        "event": "interrupted",
+                        "stream_id": stream_id,
+                        "turn_id": journal_event.get("turn_id"),
+                        "reason": "start_compensated",
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to close compensated turn journal event", exc_info=True)
+        if compensation_errors:
+            compensation_detail = "; ".join(str(error) for error in compensation_errors)
+            raise RuntimeError(
+                f"chat start failed: {exc}; compensation failed: {compensation_detail}"
+            ) from exc
+        if isinstance(exc, _AdmissionRejected):
+            return exc.result
+        raise
+
+    response = {
+        "stream_id": stream_id,
+        "session_id": s.session_id,
+        "pending_started_at": s.pending_started_at,
+        "turn_id": journal_event.get("turn_id"),
+        "title": s.title,
+    }
+    if normalized_model:
+        response["effective_model"] = model
+    if model_provider:
+        response["effective_model_provider"] = model_provider
+    return response
+
+
 def _start_regeneration_stream_locked(
     s,
     *,
@@ -22684,13 +23060,7 @@ def _start_regeneration_stream_locked(
     backend_is_gateway: bool,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
-    from api.session_ops import (
-        RegenerationUnavailable,
-        apply_regeneration_plan,
-        plan_regeneration,
-        restore_regeneration_state,
-        snapshot_regeneration_state,
-    )
+    from api.session_ops import RegenerationUnavailable, apply_regeneration_plan, plan_regeneration
 
     try:
         plan = plan_regeneration(
@@ -22703,89 +23073,23 @@ def _start_regeneration_stream_locked(
             "code": exc.code,
             "_status": exc.status,
         }
-    # Snapshot only after lock-held authority validation, before mutation.
-    snapshot = snapshot_regeneration_state(s)
-    if compression_recovery_payload_for_session(s):
-        clear_compression_recovery(s)
-    stream_id = uuid.uuid4().hex
-    gateway_starting = False
-    thread_started = False
-    save_attempted = False
-    accepted = False
-    journal_event = {}
-    release_worker = threading.Event()
-    abort_worker = threading.Event()
-    worker_thread = None
-
-    worker_target = (
-        _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    )
-    worker_kwargs = {
-        "model_provider": model_provider,
-        "goal_related": goal_related,
-    }
-    if backend_is_gateway:
-        worker_kwargs["regeneration"] = True
-    if moa_config and not backend_is_gateway:
-        worker_kwargs["moa_config"] = moa_config
-
-    def _gated_worker():
-        release_worker.wait()
-        if abort_worker.is_set():
-            return
-        worker_target(
-            s.session_id,
-            turn.message_text,
-            model,
-            workspace,
-            stream_id,
-            copy.deepcopy(turn.attachments),
-            **worker_kwargs,
-        )
-
-    def _cleanup_owned_start():
-        if goal_related:
-            STREAM_GOAL_RELATED.pop(stream_id, None)
-        with STREAMS_LOCK:
-            STREAMS.pop(stream_id, None)
-        unregister_stream_owner(stream_id)
-        clear_session_writeback_owner_if_owned(s.session_id, stream_id)
-        if gateway_starting:
-            try:
-                from api.gateway_chat import (
-                    _clear_gateway_run_starting,
-                    _finish_gateway_run_starting,
-                )
-
-                _finish_gateway_run_starting(stream_id)
-                _clear_gateway_run_starting(stream_id)
-            except Exception:
-                logger.debug(
-                    "Failed to clear compensated gateway start %s",
-                    stream_id,
-                    exc_info=True,
-                )
-
-    try:
+    def prepare(stream_id, effective_goal_related):
+        if compression_recovery_payload_for_session(s):
+            clear_compression_recovery(s)
         applied, retained_context_user = apply_regeneration_plan(
-            s,
-            plan,
-            return_context_user=True,
+            s, plan, return_context_user=True
         )
         if not applied:
-            restore_regeneration_state(s, snapshot)
             return {
                 "error": "Session changed while regeneration was being prepared.",
                 "code": "stale_regeneration_revision",
                 "_status": 409,
             }
         retained_user = s.messages[-1]
-        msg = turn.message_text
         attachments = copy.deepcopy(turn.attachments)
-        was_hidden_empty_session = _is_hidden_empty_session(s)
         _prepare_chat_start_session_for_stream(
             s,
-            msg=msg,
+            msg=turn.message_text,
             attachments=attachments,
             workspace=workspace,
             model=model,
@@ -22796,118 +23100,22 @@ def _start_regeneration_stream_locked(
             retained_context_user=retained_context_user,
             defer_save=True,
         )
+        return turn.message_text, attachments
 
-        diag.stage("turn_journal_submitted") if diag else None
-        from api.turn_journal import append_turn_journal_event
-
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
-        )
-        diag.stage("stream_registration") if diag else None
-        stream = create_stream_channel()
-        register_stream_owner(stream_id, s.session_id)
-        with STREAMS_LOCK:
-            STREAMS[stream_id] = stream
-        if goal_related:
-            STREAM_GOAL_RELATED[stream_id] = True
-        if backend_is_gateway:
-            from api.gateway_chat import _mark_gateway_run_starting
-
-            gateway_starting = True
-            _mark_gateway_run_starting(stream_id)
-
-        diag.stage("worker_thread_start") if diag else None
-        worker_thread = threading.Thread(target=_gated_worker, daemon=True)
-        worker_thread.start()
-        thread_started = True
-        save_attempted = True
-        s.save()
-        accepted = True
-        set_last_workspace(workspace)
-        release_worker.set()
-    except Exception as exc:
-        abort_worker.set()
-        release_worker.set()
-        if (
-            thread_started
-            and worker_thread is not None
-            and callable(getattr(worker_thread, "join", None))
-        ):
-            worker_thread.join(timeout=1)
-        _cleanup_owned_start()
-        if accepted:
-            if journal_event:
-                try:
-                    append_turn_journal_event(
-                        s.session_id,
-                        {
-                            "event": "interrupted",
-                            "stream_id": stream_id,
-                            "turn_id": journal_event.get("turn_id"),
-                            "reason": "post_acceptance_workspace_failure",
-                        },
-                    )
-                except Exception:
-                    logger.warning("Failed to close accepted regeneration journal", exc_info=True)
-            exc._regeneration_accepted = True
-            raise
-        restore_regeneration_state(s, snapshot)
-        if save_attempted:
-            try:
-                s.save(touch_updated_at=False)
-            except Exception:
-                logger.exception(
-                    "Failed to persist compensated regeneration for %s",
-                    s.session_id,
-                )
-        if journal_event:
-            try:
-                append_turn_journal_event(
-                    s.session_id,
-                    {
-                        "event": "interrupted",
-                        "stream_id": stream_id,
-                        "turn_id": journal_event.get("turn_id"),
-                        "reason": "start_compensated",
-                    },
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to close compensated turn journal event",
-                    exc_info=True,
-                )
-        raise
-
-    release_worker.set()
-    if was_hidden_empty_session:
-        publish_session_list_changed(
-            "session_new",
-            profile=getattr(s, "profile", None),
-            session_id=getattr(s, "session_id", None),
-        )
-    response = {
-        "stream_id": stream_id,
-        "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
-        "turn_id": journal_event.get("turn_id"),
-        "title": s.title,
-    }
-    if normalized_model:
-        response["effective_model"] = model
-    if model_provider:
-        response["effective_model_provider"] = model_provider
-    return response
+    return _commit_chat_start_admission(
+        s,
+        prepare=prepare,
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+        normalized_model=normalized_model,
+        goal_related=goal_related,
+        backend_is_gateway=backend_is_gateway,
+        moa_config=moa_config,
+        diag=diag,
+        gateway_regeneration=True,
+        journal_required=True,
+    )
 
 
 def _active_run_stream_for_session(session_id: str | None) -> str | None:
@@ -23069,21 +23277,6 @@ def _start_chat_stream_for_session(
         diag.stage("stale_stream_cleanup") if diag else None
         _clear_stale_stream_state(s)
 
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-        goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
-
-    # process_complete wakeup (ours-original, Option B): if this session has a
-    # pending process_complete marker (set by api/background_process.py drain),
-    # discard it atomically here. Mirrors the goal_continue pattern (#1932).
-    # The marker is server-internal telemetry; the actual wakeup is delivered
-    # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
-        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
     while True:
@@ -23122,20 +23315,33 @@ def _start_chat_stream_for_session(
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
                     )
-                stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
-                was_hidden_empty_session = _is_hidden_empty_session(s)
-                _prepare_chat_start_session_for_stream(
+                def prepare(stream_id, _effective_goal_related):
+                    _prepare_chat_start_session_for_stream(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=model,
+                        model_provider=model_provider,
+                        stream_id=stream_id,
+                        source=source,
+                        defer_save=True,
+                    )
+                    return msg, attachments
+
+                return _commit_chat_start_admission(
                     s,
-                    msg=msg,
-                    attachments=attachments,
+                    prepare=prepare,
                     workspace=workspace,
                     model=model,
                     model_provider=model_provider,
-                    stream_id=stream_id,
-                    source=source,
+                    normalized_model=normalized_model,
+                    goal_related=goal_related,
+                    backend_is_gateway=backend_is_gateway,
+                    moa_config=moa_config,
+                    diag=diag,
                 )
-                break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
             cleared = _clear_stale_stream_state(s)
@@ -23146,82 +23352,6 @@ def _start_chat_stream_for_session(
                     "active_stream_id": getattr(s, "active_stream_id", None),
                     "_status": 409,
                 }
-    if was_hidden_empty_session:
-        publish_session_list_changed(
-            "session_new",
-            profile=getattr(s, "profile", None),
-            session_id=getattr(s, "session_id", None),
-        )
-    diag.stage("turn_journal_submitted") if diag else None
-    journal_event = {}
-    try:
-        from api.turn_journal import append_turn_journal_event
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
-        )
-    except Exception:
-        logger.warning("Failed to append submitted turn journal event", exc_info=True)
-    diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
-    diag.stage("stream_registration") if diag else None
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, s.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
-    if goal_related:
-        STREAM_GOAL_RELATED[stream_id] = True
-    diag.stage("worker_thread_start") if diag else None
-    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
-    if moa_config and not backend_is_gateway:
-        worker_kwargs["moa_config"] = moa_config
-    if backend_is_gateway:
-        from api.gateway_chat import _mark_gateway_run_starting
-        _mark_gateway_run_starting(stream_id)
-    thr = threading.Thread(
-        target=worker_target,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs=worker_kwargs,
-        daemon=True,
-    )
-    try:
-        thr.start()
-    except Exception:
-        if backend_is_gateway:
-            try:
-                from api.gateway_chat import _finish_gateway_run_starting
-                _finish_gateway_run_starting(stream_id)
-                from api.gateway_chat import _clear_gateway_run_starting
-                _clear_gateway_run_starting(stream_id)
-            except Exception:
-                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
-        raise
-    response = {
-        "stream_id": stream_id,
-        "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
-        "turn_id": journal_event.get("turn_id"),
-        "title": s.title,
-    }
-    if normalized_model:
-        response["effective_model"] = model
-    if model_provider:
-        response["effective_model_provider"] = model_provider
-    return response
-
-
 def _runtime_runner_client_factory():
     """Return the configured runner-local client.
 
@@ -23596,7 +23726,7 @@ def start_session_turn(
             )
             if _paused_wakeup is not None:
                 try:
-                    PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+                    discard_pending_bg_task_completion(s.session_id)
                 except Exception:
                     logger.debug(
                         "failed to discard pending bg-task marker for paused wakeup %s",

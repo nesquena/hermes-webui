@@ -179,13 +179,23 @@ def apply_regeneration_plan(
     return _result(True, retained_context_user)
 
 
-def snapshot_regeneration_state(session):
+def snapshot_session_state(session):
+    """Return a deep snapshot suitable for a lock-held session transaction."""
     return copy.deepcopy(session.__dict__)
 
 
-def restore_regeneration_state(session, snapshot):
+def restore_session_state(session, snapshot):
+    """Restore a session snapshot without retaining mutable snapshot values."""
     session.__dict__.clear()
     session.__dict__.update(copy.deepcopy(snapshot))
+
+
+def snapshot_regeneration_state(session):
+    return snapshot_session_state(session)
+
+
+def restore_regeneration_state(session, snapshot):
+    restore_session_state(session, snapshot)
 
 
 def regeneration_revision_for(rows, *, session=None, context=None) -> str:

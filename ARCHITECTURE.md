@@ -258,9 +258,17 @@ limits remain downstream responsibilities.
 
 This is the most architecturally interesting part. Two endpoints cooperate:
 
-    POST /api/chat/start     Receives the user message. Creates a queue.Queue, stores it
-                             in STREAMS[stream_id], spawns a daemon thread running
-                             _run_agent_streaming(), returns {stream_id} immediately.
+    POST /api/chat/start     Receives the user message. Under the session lock, the route
+                             snapshots session state, claims pending goal/background
+                             markers under their shared lock, registers stream and
+                             writeback ownership before preparation, and prepares the
+                             pending turn. It journals and registers the stream, then
+                             saves the accepted state before starting a route-owned
+                             gated worker. The gate opens only after durable acceptance;
+                             rejected admission restores the snapshot and claimed
+                             markers, while a successor owner preserves its complete
+                             state. Session-list publication is best effort after
+                             acceptance and cannot reject the start.
 
     GET  /api/chat/stream    Long-lived SSE connection. Reads from STREAMS[stream_id]
                              and forwards events to the browser until 'done' or 'error'.

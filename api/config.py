@@ -9340,6 +9340,17 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+PENDING_START_MARKERS_LOCK = threading.Lock()
+
+
+def add_pending_goal_continuation(session_id: str) -> None:
+    with PENDING_START_MARKERS_LOCK:
+        PENDING_GOAL_CONTINUATION.add(session_id)
+
+
+def discard_pending_goal_continuation(session_id: str) -> None:
+    with PENDING_START_MARKERS_LOCK:
+        PENDING_GOAL_CONTINUATION.discard(session_id)
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:
@@ -9537,6 +9548,16 @@ def invalidate_gateway_caps(base_url: str | None = None) -> None:
 PROCESS_SESSION_INDEX: dict = {}  # process_registry session_key -> WebUI session_id
 PROCESS_SESSION_INDEX_LOCK = threading.Lock()
 PENDING_BG_TASK_COMPLETIONS: set = set()  # session_ids awaiting a process_complete wakeup turn
+
+
+def add_pending_bg_task_completion(session_id: str) -> None:
+    with PENDING_START_MARKERS_LOCK:
+        PENDING_BG_TASK_COMPLETIONS.add(session_id)
+
+
+def discard_pending_bg_task_completion(session_id: str) -> None:
+    with PENDING_START_MARKERS_LOCK:
+        PENDING_BG_TASK_COMPLETIONS.discard(session_id)
 BG_TASK_COMPLETE_EVENTS_SEEN: dict = {}  # session_id -> set[process_id] for idempotency
 BG_TASK_COMPLETE_EVENTS_SEEN_LOCK = threading.Lock()
 

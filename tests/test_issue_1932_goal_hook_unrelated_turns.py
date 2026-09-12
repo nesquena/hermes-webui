@@ -56,7 +56,7 @@ def test_streaming_source_code_gates_on_stream_goal_related():
 
 
 # ---------------------------------------------------------------------------
-# Test 4: streaming.py sets PENDING_GOAL_CONTINUATION on goal_continue
+# Test 4: streaming.py records pending continuation through the shared helper
 # ---------------------------------------------------------------------------
 
 def test_streaming_sets_pending_goal_continuation_on_goal_continue():
@@ -65,14 +65,14 @@ def test_streaming_sets_pending_goal_continuation_on_goal_continue():
     from pathlib import Path
     streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
 
-    assert "PENDING_GOAL_CONTINUATION" in streaming_py, (
-        "streaming.py must reference PENDING_GOAL_CONTINUATION"
+    assert "add_pending_goal_continuation" in streaming_py, (
+        "streaming.py must use the synchronized pending-continuation helper"
     )
 
-    # The PENDING_GOAL_CONTINUATION set must happen near goal_continue
-    goal_continue_idx = streaming_py.find("goal_continue")
-    pending_idx = streaming_py.find("PENDING_GOAL_CONTINUATION")
-    assert goal_continue_idx != -1 and pending_idx != -1
+    pending_idx = streaming_py.find("add_pending_goal_continuation(")
+    assert pending_idx != -1
+    goal_continue_idx = streaming_py.find("put('goal_continue'", pending_idx)
+    assert pending_idx < goal_continue_idx < pending_idx + 500
 
 
 # ---------------------------------------------------------------------------
