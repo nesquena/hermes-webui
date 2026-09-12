@@ -311,16 +311,16 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     return raw in ("1", "true", "yes", "on")
 
 
-def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None, session_effort=None):
+    """Resolve the session-aware effective effort for a gateway request."""
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
+        from api.config import resolve_effective_reasoning_effort
+
+        coerced = resolve_effective_reasoning_effort(
+            cfg if isinstance(cfg, dict) else {},
             model,
             provider_id=model_provider,
+            session_effort=session_effort,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
@@ -393,6 +393,106 @@ def _auto_approve_gateway_run(
         approval_id,
         "once",
     )
+
+
+# Effort ladder every runs-API gateway can carry inside ``model_options``.
+# A level outside this six-level set is DROPPED by *older* receivers and parsed
+# as a bare ``{"enabled": True}`` — losing the session's choice.
+_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+# Supra-legacy levels that only NEWER receivers accept.
+# Two receiver generations are in the wild and NEITHER advertises its ladder:
+#
+#   * older: ``_REASONING_EFFORTS`` = the six legacy levels — 'max'/'ultra' are
+#     dropped by ``_request_reasoning_config()`` and the request degenerates to
+#     a bare ``{"enabled": True}``, losing the session's explicit choice;
+#   * current: ``_REASONING_EFFORTS`` also contains 'max' and 'ultra', which
+#     ``_request_reasoning_config()`` preserves verbatim.
+#
+# A reachable-but-silent ``/v1/capabilities`` is therefore genuinely ambiguous:
+# it does NOT identify which generation is answering. Guessing "current"
+# would fail open — on an older receiver we would send a level it silently
+# discards, which is strictly worse than sending a slightly lower level it
+# honours. So the ambiguous case fails closed onto the legacy ladder.
+#
+# The ambiguity is resolved on the receiver side, not by heuristics here:
+# hermes-agent#92839 makes the API server advertise its accepted ladder as
+# ``features.reasoning_efforts``. Once a receiver advertises, this function
+# preserves exactly what it declares — including 'max'/'ultra'.
+_GATEWAY_SUPRA_LEGACY_MODEL_OPTIONS_EFFORTS = ("max", "ultra")
+
+
+def _gateway_receiver_supported_efforts(base_url="", api_key=""):
+    """Return the effort ladder the receiving gateway is KNOWN to carry.
+
+    ``features.reasoning_efforts`` from ``/v1/capabilities`` is the only
+    authority: it is an explicit, machine-readable declaration of what the
+    receiver's parser accepts, so it is trusted verbatim.
+
+    Anything else — no advertisement, an unreachable probe, a malformed
+    response — means we cannot establish the receiver's parser surface, and we
+    fall back to the legacy ladder every runs-API receiver can carry.
+    """
+    legacy = list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS)
+    try:
+        from api.config import get_gateway_caps
+
+        caps = get_gateway_caps(base_url, api_key)
+    except Exception:
+        return legacy
+    if not isinstance(caps, dict):
+        return legacy
+    advertised = caps.get("reasoning_efforts")
+    if not advertised:
+        return legacy
+    levels = [str(level).strip().lower() for level in advertised if str(level).strip()]
+    return levels or legacy
+
+
+def _gateway_run_model_options(effort, base_url="", api_key=""):
+    """Serialize the effective session effort under the receiver's model_options contract.
+
+    The installed Hermes Agent API server constructs ``AIAgent.reasoning_config``
+    exclusively from ``body.model_options`` (``_request_agent_overrides`` →
+    ``_request_reasoning_config``); a top-level ``reasoning_effort`` field is
+    ignored on ``/v1/runs``. Returns the ``model_options`` dict to send, or
+    None when no explicit reasoning should be requested (gateway resolves its
+    own profile/per-model default).
+
+    Capability handling for supra-legacy levels ('max'/'ultra'): send them
+    verbatim whenever the live receiver can carry them (see
+    ``_gateway_receiver_supported_efforts``); only degrade down the WebUI
+    ladder for a receiver that genuinely cannot. Never escalate, and never let
+    the receiver silently fall back to the profile default.
+    """
+    effort = str(effort or "").strip().lower()
+    if not effort:
+        return None
+    if effort == "none":
+        return {"reasoning": {"enabled": False}, "reasoning_effort": "none"}
+    wire_effort = effort
+    if effort not in _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS:
+        supported = _gateway_receiver_supported_efforts(base_url, api_key)
+        if effort not in supported:
+            try:
+                from api.config import VALID_REASONING_EFFORTS
+
+                ladder = [str(level) for level in VALID_REASONING_EFFORTS]
+            except Exception:
+                ladder = []
+            wire_effort = None
+            if effort in ladder:
+                idx = ladder.index(effort)
+                for level in reversed(ladder[:idx]):  # strictly lower, highest first
+                    if level in supported:
+                        wire_effort = level
+                        break
+    if not wire_effort:
+        # No representable lower level: request reasoning-on and let the
+        # receiver pick its default effort — still better than dropping the
+        # override entirely (which could resolve to reasoning-off).
+        return {"reasoning": {"enabled": True}}
+    return {"reasoning": {"enabled": True, "effort": wire_effort}, "reasoning_effort": wire_effort}
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -996,6 +1096,7 @@ def _run_gateway_chat_streaming(
             cfg,
             model=model,
             model_provider=model_provider,
+            session_effort=getattr(s, "reasoning_effort", None),
         )
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
@@ -1056,9 +1157,23 @@ def _run_gateway_chat_streaming(
             if model_provider:
                 body_extras["provider"] = model_provider
             if reasoning_effort is not None:
+                # Kept for forward/older-gateway compatibility, but the
+                # installed runs handler ignores top-level reasoning_effort…
                 body_extras["reasoning_effort"] = reasoning_effort
+            # …so the effective session value MUST also ride in
+            # body.model_options, the only field the installed Agent API
+            # authority reads when constructing AIAgent.reasoning_config
+            # (nesquena re-gate 2026-08-13). Same contract for service_tier:
+            # _request_service_tier() reads model_options, not the top level.
+            _run_model_options = _gateway_run_model_options(
+                reasoning_effort, base_url=base_url, api_key=api_key
+            )
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+                _run_model_options = dict(_run_model_options or {})
+                _run_model_options["service_tier"] = _gw_overrides["service_tier"]
+            if _run_model_options:
+                body_extras["model_options"] = _run_model_options
             try:
                 final_text, usage = _run_gateway_runs_api_streaming(
                     session_id, msg_text, model, workspace, stream_id,
