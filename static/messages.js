@@ -4664,11 +4664,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     renderer.add_text=(data,text)=>{
       const parent=data&&data.nodes&&data.nodes[data.index];
-      if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
+      if(!parent){baseAddText(data,text);return;}
       // MEDIA-in-stream: if this chunk carries a MEDIA:<ref> token, defer to
       // the shared interceptor so the token becomes a real media element
       // instead of plain text. The fade renderer would otherwise wrap every
       // word in a stream-fade-word span, leaving MEDIA: paths visible.
+      //
+      // This check runs BEFORE the generic pre/code skip below. Settled
+      // renderMd() stashes MEDIA *before* its fence pass, so MEDIA stays active
+      // inside fenced and inline code; the safe renderer matches that. Skipping
+      // to baseAddText first made fade the only mode that rendered a MEDIA token
+      // inside code as literal text. Prose inside a skip node still bypasses fade
+      // spans, because writeFadeText falls back to _smdAppendPlainText there.
       const parser=parserFor(data);
       const hasMediaTail=!!(_SMD_MEDIA_TAIL&&parser&&_SMD_MEDIA_TAIL.has&&_SMD_MEDIA_TAIL.has(parser));
       const value=String(text||'');
@@ -4677,6 +4684,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _smdMediaAwareAddText(baseAddText, parent, data, text, _SMD_MEDIA_TAIL, parser, writeFadeText);
         return;
       }
+      if(_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
       const frag=document.createDocumentFragment();
       const wordRe=/(\S+)(\s*)/g;
       const reduceMotion=_streamFadeReduceMotionEnabled();
@@ -4762,8 +4770,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   //   3. A MEDIA prefix split across smd flushes (e.g. "MEDIA:" then
   //      "foo.png") is buffered in a per-parser tail buffer and completed
   //      on the next add_text call.
-  const _MEDIA_TAIL_MAX = 4096; // bytes; defensive cap on per-parser buffer
+  // MEDIA-in-stream buffering. There is exactly ONE ceiling, and it is
+  // _smdMediaCandidateMax() below — a candidate is `MEDIA:` plus a capture, so
+  // the number that bounds it is the shared capture ceiling plus the keyword.
+  //
+  // There used to be two: the matched-token branch bounded the candidate at
+  // _mediaTokenMaxLength() + 6 = 4102, while the no-match / open-quote tail
+  // branch bounded it at a separate _MEDIA_TAIL_MAX = 4096. A LEGAL quoted
+  // capture whose opening quote crossed a chunk boundary reaches the second
+  // branch — the complete quoted grammar has not matched yet — so at candidate
+  // length 4096 the stream flushed it as literal text and lost quote ownership.
+  // A later closing quote could not reassemble it, while settled renderMd()
+  // still accepted the same capture through 4096 characters.
   const _SMD_MEDIA_PREFIX = 'MEDIA:';
+  /** The single inclusive candidate ceiling, in UTF-16 code units.
+   *
+   *  Derived FROM the shared capture ceiling, never an independent number. The
+   *  ceiling is measured on the CAPTURE (everything after the keyword), so a
+   *  candidate holding a still-legal ref is the keyword plus at most
+   *  _mediaTokenMaxLength() code units. Inclusive: a 4096-code-unit capture is
+   *  legal, and `MEDIA:` plus 4096 is 4102.
+   *
+   *  Unit: UTF-16 code units, because `.length` is what bounds the buffer this
+   *  cap exists to bound. See _mediaTokenMaxLength() in static/ui.js. */
+  function _smdMediaCandidateMax(){
+    return _mediaTokenMaxLength() + _SMD_MEDIA_PREFIX.length;
+  }
   function _smdMediaPrefixTail(value){
     const text=String(value||'');
     const max=Math.min(_SMD_MEDIA_PREFIX.length,text.length);
@@ -4796,21 +4828,182 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailEntryChunk(entry){
     return entry && typeof entry==='object' && Object.prototype.hasOwnProperty.call(entry,'chunk') ? entry.chunk : entry;
   }
+  /** Park a per-parser "this reference is refused" marker.
+   *
+   *  An over-limit reference must stay CLOSED, and staying closed has to survive
+   *  a chunk boundary: its continuation arrives in the next add_text call, and
+   *  without a marker that continuation is scanned fresh, so a `MEDIA:` sitting
+   *  inside the refused span activates as a token of its own. Settled
+   *  renderMd() sees one over-limit span and renders no card, so that suffix
+   *  card is a streamed-versus-settled divergence.
+   *
+   *  `quote` carries the opening quote character when the refused reference is a
+   *  quoted one, because a quoted span ends at its closing quote rather than at a
+   *  delimiter. Spelled as an entry with an empty chunk so it flows through the
+   *  same owner-identity and flush machinery as a buffered candidate:
+   *  _smdMediaTailFlushEntry writes nothing for an empty chunk, and a different
+   *  owner clears it exactly as it clears a real tail. */
+  function _smdMediaRefuseLine(tailMap, parser, parent, baseAddText, data, writeText, quote){
+    if(!tailMap||!parser||!tailMap.set) return;
+    tailMap.set(parser, {chunk:'', refused:true, quote:quote||'', parent, baseAddText, data, writeText});
+  }
+  /** True when *entry* is a refused-reference marker rather than a buffered tail. */
+  function _smdMediaEntryRefused(entry){
+    return !!(entry && typeof entry==='object' && entry.refused);
+  }
+  /** True when *ch* can continue an unquoted MEDIA run, per the REAL grammar.
+   *
+   *  Asked by probing `_mediaTokenRe()` with a two-character subject rather than
+   *  by restating the character class: the class lives in `_mediaPathSrc()` in
+   *  static/ui.js, and a second copy here is exactly the drift the shared grammar
+   *  exists to prevent. A capture of length 2 means the character stayed inside
+   *  the run; length 1 means it closed the token.
+   *
+   *  Note that whitespace closes the run. The spaced alternative can cross a
+   *  space, but only toward a final word carrying an extension, and an
+   *  already-over-limit reference can never become legal by growing — so the
+   *  refused span ends at the same place the settled parser's refused match ends. */
+  function _smdMediaRunChar(ch){
+    const m=_mediaTokenRe().exec('MEDIA:a'+ch);
+    return !!m && m[1].length===2;
+  }
+  /** How many leading characters of *text* still belong to a refused reference.
+   *
+   *  A refused reference does NOT own the whole rest of the line. It ends where
+   *  the grammar ends any token, and an INDEPENDENT reference after that point is
+   *  legal — settled renderMd() resumes scanning right after the refused match
+   *  and renders that card, so the stream must too.
+   *
+   *  A quoted reference ends after its closing quote, or at a newline when the
+   *  quote never closes. An unquoted one ends at the first character that cannot
+   *  continue its run. */
+  function _smdMediaRefusedRunLength(text, quote){
+    const value=String(text||'');
+    if(quote){
+      const closing=value.indexOf(quote);
+      const newline=value.indexOf('\n');
+      if(closing>=0 && (newline<0 || closing<newline)) return closing+1;
+      return newline<0 ? value.length : newline;
+    }
+    for(let i=0;i<value.length;i+=1){
+      if(!_smdMediaRunChar(value[i])) return i;
+    }
+    return value.length;
+  }
   function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
     return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
   }
-  function _smdMediaRefHasReliableBoundary(rawRef){
-    const raw=String(rawRef||'');
-    if(/[?#]$/.test(raw)) return false;
-    const ref=raw.split(/[?#]/,1)[0];
-    return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
+  /** True when a MEDIA token that ends at the end of the arrived text can be
+   *  finalized NOW without risking a different result once more bytes land.
+   *
+   *  Only two things settle a token mid-stream:
+   *    - a closed quoted ref — the closing quote is itself the delimiter, so
+   *      no later byte can extend it; or
+   *    - stream end (the caller passes atStreamEnd on flush).
+   *  Everything else buffers, so streamed and settled renderings agree over
+   *  every possible chunk cut. */
+  function _smdMediaTokenIsSettled(rawRef, atStreamEnd){
+    if(atStreamEnd) return true;
+    const raw=String(rawRef||'').trim();
+    const q=raw[0];
+    return (q==='"'||q==="'") && raw.length>=2 && raw[raw.length-1]===q;
+  }
+  /** True when the text AFTER a matched MEDIA token could still be absorbed
+   *  into that token once more bytes arrive.
+   *
+   *  Checking only `matchEnd === combined.length` is not enough. The unquoted
+   *  fallback stops at a space, so `MEDIA:/tmp/v1.2 Reports` matches
+   *  `/tmp/v1.2` with 8 characters still to go — the token does NOT reach the
+   *  end of the arrived text, the at-end guard never fires, and a truncated
+   *  card is emitted even though ` Reports/chart.png` is about to land and the
+   *  settled parse yields the whole path.
+   *
+   *  So: if everything between the match end and the end of the arrived text is
+   *  a run of spaces plus non-delimiter characters on the same line, a
+   *  continuation is still possible and the token must keep buffering. A
+   *  newline, or any token-closing delimiter, ends the MEDIA token for good and
+   *  makes the match final. */
+  function _smdMediaTailCouldExtend(trailing){
+    const rest=String(trailing||'');
+    if(!rest) return false;
+    // A newline or a closing delimiter terminates the token definitively.
+    // The closing brace is spelled \x7d because the test harnesses extract
+    // production functions by counting brace depth and do not skip regex
+    // literals — a literal closing brace here truncates the extraction.
+    return /^(?:[^\S\n]+[^\s)\]\x7d"'*_,;:]*)+$/.test(rest);
+  }
+  /** True when the arrived text opens a quoted MEDIA ref that has not been
+   *  closed yet on the same line.
+   *
+   *  An unterminated quote must keep buffering as a unit: the quoted
+   *  alternative cannot match, so the grammar falls through to the unquoted
+   *  branch and captures a truncated `"/tmp/My` — a leading-quote fragment that
+   *  the settled parse never produces. Bounded to the current line because a
+   *  newline always ends a MEDIA token. */
+  function _smdMediaHasOpenQuote(text){
+    return _smdMediaOpenQuoteChar(text) !== '';
+  }
+  /** The opening quote character of an unclosed quoted MEDIA ref, or ''.
+   *
+   *  Same measurement _smdMediaHasOpenQuote() reports as a boolean, kept in one
+   *  place: the refusal path needs the character itself, because a refused quoted
+   *  span ends at its closing quote rather than at a delimiter. */
+  function _smdMediaOpenQuoteChar(text){
+    const m=/MEDIA:(["'])([^\n]*)$/.exec(String(text||''));
+    if(!m) return '';
+    return m[2].indexOf(m[1])===-1 ? m[1] : '';
   }
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
-    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+    // Stream end: the buffered candidate is final, so decide it here.
+    //
+    // The candidate is NOT necessarily just a token. `_smdMediaAwareAddText`
+    // buffers from the MEDIA keyword to end-of-line whenever the same-line
+    // suffix could still extend the token, so at flush time the candidate can be
+    // `MEDIA:/tmp/a.png and after` — a complete token PLUS trailing prose.
+    //
+    // Matching the whole candidate with the anchored ^...$ matcher fails on that
+    // shape, and the old fallback wrote the entire string as literal prose: the
+    // media card vanished and the raw `MEDIA:` keyword was shown to the user,
+    // while settled `renderMd()` rendered the card and kept ` and after`.
+    //
+    // So PARTITION instead: walk every shared-grammar match in the whole
+    // candidate, emit each normalized capture, and hand every exact prose slice
+    // (including the trailing suffix) to the owning text writer. If one media
+    // append fails, preserve that token's raw span and continue so a later valid
+    // token is still handled. Byte-preserving by construction: the emitted spans
+    // plus written slices reconstruct the candidate exactly.
+    const raw=String(chunk);
+    if(!entry) return;
+    const re=_mediaTokenRe();
+    let last=0, m, matched=false;
+    while((m=re.exec(raw))){
+      matched=true;
+      if(m.index>last){
+        _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw.slice(last,m.index));
+      }
+      // Same length ceiling as the live path and as settled renderMd(): an
+      // over-ceiling capture is not a legal token, so preserve its raw span as
+      // text instead of activating a card at stream end.
+      const emitted=!_mediaTokenExceedsMaxLength(m[1])
+        && !!(entry.parent && _smdAppendMediaNode(entry.parent, _unquoteMediaRef(m[1])));
+      if(!emitted){
+        _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, m[0]);
+      }
+      const next=m.index+m[0].length;
+      last=next;
+      // Defensive only: the shared grammar cannot match an empty span, but do
+      // not let a future grammar change turn stream-end flush into an infinite loop.
+      if(re.lastIndex<=m.index) re.lastIndex=m.index+1;
+    }
+    if(!matched){
+      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw);
+      return;
+    }
+    if(last<raw.length){
+      _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, raw.slice(last));
+    }
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
@@ -4830,6 +5023,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Pull any pending tail from a previous (split) chunk, then clear it;
     // this call will either complete it, re-buffer it, or flush it as text.
     let leadEntry = tails && parser && tails.get ? tails.get(parser) : null;
+    // A refused-line marker outranks everything below: the previous chunk ended
+    // inside a reference that is already over the ceiling, so nothing arriving
+    // now can make it legal. Write this chunk's share of the line as literal
+    // text, and keep ownership until a newline ends the reference for good.
+    // Without this, the continuation is scanned fresh and a `MEDIA:` inside the
+    // refused span activates as its own token, while settled renderMd() sees one
+    // over-ceiling span and renders no card.
+    if(_smdMediaEntryRefused(leadEntry)){
+      if(_smdMediaTailSameOwner(leadEntry, parent, baseAddText, writeText)){
+        // The refused reference owns only the run that could still have extended
+        // it. At the first token-closing character the refusal is over, and the
+        // remainder is re-scanned normally so an INDEPENDENT later reference
+        // still renders — settled parsing renders its card too.
+        const owned = _smdMediaRefusedRunLength(value, leadEntry.quote);
+        if(owned >= value.length){
+          writeCurrent(value);
+          return;
+        }
+        writeCurrent(value.slice(0, owned));
+        if(tails && parser && tails.delete) tails.delete(parser);
+        _smdMediaAwareAddText(baseAddText, parent, data, value.slice(owned), tails, parser, writeText);
+        return;
+      }
+      // Different owner: the refused line belonged to another text sink, so drop
+      // the marker and treat this chunk on its own.
+      if(tails && parser && tails.delete) tails.delete(parser);
+      leadEntry = null;
+    }
     let lead = _smdMediaTailEntryChunk(leadEntry);
     if(lead && !_smdMediaTailSameOwner(leadEntry, parent, baseAddText, writeText)){
       if(tails && parser && tails.delete) tails.delete(parser);
@@ -4843,7 +5064,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Fast path: no MEDIA tokens in the (possibly combined) string.
     if(!/MEDIA:/.test(combined)){
       const prefixTail=_smdMediaPrefixTail(combined);
-      if(prefixTail && tails && parser && prefixTail.length < _MEDIA_TAIL_MAX){
+      // A bare `MEDIA:` prefix fragment can never exceed the keyword's own 6
+      // characters, so this gate is structurally satisfied. Spelled against the
+      // one shared ceiling anyway, so no second number can reappear here.
+      if(prefixTail && tails && parser && prefixTail.length <= _smdMediaCandidateMax()){
         const stable=combined.slice(0, combined.length-prefixTail.length);
         if(stable) writeCurrent(stable);
         _smdMediaTailSet(tails, parser, prefixTail, parent, baseAddText, data, writeText);
@@ -4856,7 +5080,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a delimiter or
     // reliable filename suffix proves the ref is complete.
-    const re=/MEDIA:([^\s\)\]]+)/g;
+    const re=_mediaTokenRe();
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
@@ -4865,30 +5089,160 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===combined.length && !_smdMediaRefHasReliableBoundary(m[1])){
+      // Hold the token when more bytes could still change what it captures.
+      // Two distinct cases, both of which made streaming disagree with settled:
+      //   1. The token runs to the end of the arrived text — the next chunk may
+      //      extend it (`MEDIA:/tmp/archive.png` then `.bak`).
+      //   2. The token ended EARLY at a space with same-line text still
+      //      following — the unquoted fallback stops at the space, so
+      //      `MEDIA:/tmp/v1.2 Reports` matches only `/tmp/v1.2` while the
+      //      settled parse of the finished line yields the whole spaced path.
+      // A closed quoted ref is self-terminating and finalizes immediately; an
+      // OPEN quote must keep buffering, or the unquoted fallback captures a
+      // truncated leading-quote fragment the settled parse never yields.
+      const trailing = combined.slice(matchEnd);
+      const openQuote = _smdMediaHasOpenQuote(combined.slice(m.index));
+      const mayGrow = openQuote
+        || (matchEnd===combined.length)
+        || _smdMediaTailCouldExtend(trailing);
+      if(mayGrow && !_smdMediaTokenIsSettled(m[1], false)){
         const candidate = combined.slice(m.index);
-        if(candidate.length < _MEDIA_TAIL_MAX){
+        // Buffer bound derived FROM the lexical ceiling, not an independent
+        // number. The ceiling is measured on the CAPTURE (everything after the
+        // keyword), so a candidate holding a still-legal ref is `MEDIA:` plus at
+        // most MEDIA_TOKEN_MAX_LENGTH characters. Bounding the candidate at the
+        // bare ceiling instead would refuse refs the settled parser accepts —
+        // a 4095-character capture is legal, but `MEDIA:` + 4095 is 4101 bytes.
+        const candidateMax = _smdMediaCandidateMax();
+        if(candidate.length <= candidateMax){
           unmatchedTail = candidate;
         } else {
-          writeCurrent(candidate);
+          // Past the ceiling even allowing for the keyword. Two shapes reach
+          // here and they need opposite treatment — collapsing them is what the
+          // re-gate caught.
+          //
+          // (a) A COMPLETE, legal token followed by a long same-line prose run
+          //     that merely looked extendable (`MEDIA:/tmp/a.png see ...4000`).
+          //     Settled parsing renders its card, so flattening the whole
+          //     candidate to text would silently drop a card. Partition: emit
+          //     the token, write the exact prose slices.
+          //
+          // (b) The REFERENCE ITSELF exceeds the ceiling. EOF-style
+          //     partitioning would cut it at the cap, emit the prefix as a media
+          //     node, and leave the rest as prose, while settled renderMd()
+          //     applies the same ceiling and keeps the whole span as text. So
+          //     FAIL CLOSED and write it literally.
+          //
+          // Ask the shared grammar which shape this is, and judge the CAPTURE
+          // against the ceiling — the same measurement api/helpers.py uses.
+          const probe = _mediaTokenRe();
+          const pm = probe.exec(candidate);
+          if(pm && !_mediaTokenExceedsMaxLength(pm[1])){
+            _smdMediaTailFlushEntry({
+              chunk:candidate,
+              parent,
+              data,
+              baseAddText,
+              writeText,
+            });
+          } else if(pm){
+            // Case (b): the ref itself is over the ceiling. Two sub-cases, and
+            // the difference is whether the refused span is FINAL.
+            //
+            // If the match ends before the end of the arrived text, a real
+            // delimiter closed it, the span is final, and scanning resumes after
+            // it — a later INDEPENDENT token (`...oversized... then
+            // MEDIA:/tmp/ok.png`) is a legal reference that settled parsing
+            // renders, so swallowing the rest of the line would drop its card.
+            //
+            // If the match runs to the END of the arrived text, the reference was
+            // cut mid-stream and can only grow, so it can never become legal.
+            // Partitioning on that truncated span is what let a refused
+            // reference's SUFFIX activate on its own: an over-cap URL is
+            // tempered-greedy and swallows a nested `MEDIA:`, so settled parsing
+            // sees ONE over-cap span and renders no card, while the stream
+            // flushed the truncated prefix and then matched the nested token in
+            // the next chunk. FAIL CLOSED and take ownership of the rest of the
+            // line instead.
+            const refEnd = m.index + pm.index + pm[0].length;
+            if(refEnd < combined.length){
+              writeCurrent(combined.slice(m.index, refEnd));
+              last = refEnd;
+              re.lastIndex = refEnd;
+              continue;
+            }
+            writeCurrent(combined.slice(m.index));
+            _smdMediaRefuseLine(tails, parser, parent, baseAddText, data, writeText,
+                                _smdMediaOpenQuoteChar(combined.slice(m.index)));
+            return;
+          } else {
+            writeCurrent(candidate);
+          }
         }
         last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      // Length ceiling applies at the ACTIVATION point too, not only in the
+      // buffer branch above. A token followed by a delimiter is "settled" and
+      // never enters the tail buffer, so without this an over-ceiling ref would
+      // become a media node here while settled renderMd() (which applies the
+      // same ceiling) keeps it as prose.
+      if(_mediaTokenExceedsMaxLength(m[1])){
+        writeCurrent(m[0]);
+      } else if(!_smdAppendMediaNode(parent, _unquoteMediaRef(m[1]))) {
+        writeCurrent(m[0]);
+      }
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      // Space-tolerant so a half-arrived spaced path (`MEDIA:/tmp/My Files`)
+      // keeps buffering rather than being flushed into the bubble as prose.
+      // Bounded to the current line: a newline ends any MEDIA token.
+      const tailMatch = /MEDIA:[^\n]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
-      if(tailValue && rest.length < _MEDIA_TAIL_MAX){
+      // Bound the BUFFER by what is actually buffered (tailValue), not by the
+      // length of the whole remaining text. Gating on `rest.length` meant a long
+      // prose run ending in a MEDIA prefix blew the cap and discarded the tail:
+      // the partial `MEDIA:/t` was flushed as prose, the next chunk arrived with
+      // no buffered tail, and the token never reassembled — so a ref preceded by
+      // more than the ceiling in characters silently lost its card while settled
+      // parsing rendered it. The cap exists to stop unbounded tail growth, and
+      // only tailValue can grow.
+      //
+      // The ceiling is _smdMediaCandidateMax() — the SAME inclusive candidate
+      // ceiling the matched-token branch above uses, and inclusive in the same
+      // way (`<=`). This branch used a separate, smaller `_MEDIA_TAIL_MAX` of
+      // 4096, and the two ceilings disagreed for every candidate from 4096
+      // through 4102 code units. A legal quoted capture whose opening quote
+      // crossed a chunk boundary lands HERE — the complete quoted grammar has
+      // not matched yet — so it was flushed as literal text at 4096, quote
+      // ownership was lost, and a later closing quote could not reassemble it,
+      // while settled renderMd() accepted the identical capture.
+      if(tailValue && tailValue.length <= _smdMediaCandidateMax()){
         const tailStart = tailMatch ? tailMatch.index : rest.length-prefixTail.length;
         if(tailStart>0) writeCurrent(rest.slice(0, tailStart));
         unmatchedTail = tailValue;
+      } else if(tailValue){
+        // Genuinely past the ceiling. FAIL THE REFERENCE CLOSED: write its whole
+        // span as literal text, exactly as settled renderMd() does, and take
+        // ownership of the rest of the line so the refusal survives the chunk
+        // boundary. Re-scanning inside a refused reference is what let an
+        // over-limit ref's SUFFIX activate on its own — an over-cap URL that
+        // swallows a nested `MEDIA:` rendered a card streamed while settled
+        // parsing kept the whole span as prose.
+        //
+        // Prose before the reference is still written separately, so a long turn
+        // preceding an oversized ref keeps its exact text.
+        const tailStart = tailMatch ? tailMatch.index : rest.length-prefixTail.length;
+        if(tailStart>0) writeCurrent(rest.slice(0, tailStart));
+        writeCurrent(rest.slice(tailStart));
+        _smdMediaRefuseLine(tails, parser, parent, baseAddText, data, writeText,
+                            _smdMediaOpenQuoteChar(rest.slice(tailStart)));
+        return;
       } else {
         writeCurrent(rest);
       }

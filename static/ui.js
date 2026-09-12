@@ -2728,6 +2728,228 @@ function _dataImageHtml(ref, altText){
   return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
 }
 
+// ── MEDIA: path matching (shared with the streaming path in messages.js) ──────
+// A MEDIA path may legitimately contain spaces:
+//   MEDIA:/home/u/vault/Meeting Notes/2026-07-29 - SDE Focus Group.md
+// The original `[^\s\)\]]+` class stopped at the first space, so the artifact
+// card was built from the truncated path ("Meeting"), rendered the wrong
+// basename, and the remainder of the real path leaked into the bubble as raw
+// prose beside the card.
+//
+// Widening cannot be unbounded — greedy space-tolerance would swallow trailing
+// prose ("MEDIA:/tmp/a.png looks good") and glue an adjacent tag
+// ("MEDIA:/a.png MEDIA:/b.png") into one invalid path, which is the bug class
+// the Python gateway already hit (#68773). So the bare form is anchored on a
+// file extension and tempered: it crosses single spaces only while still
+// reaching a `.ext`, never crosses a newline, and never crosses a following
+// MEDIA: keyword. Extension-less paths still match via the fallback branch, so
+// nothing that worked before stops working.
+//
+// Keep this the SINGLE source of truth for MEDIA path shape. messages.js reuses
+// it so the streamed and settled renderings of one token stay byte-identical.
+//
+// Exposed as a FUNCTION, not a const, because the test harnesses in tests/*.py
+// white-box-extract production code by `function <name>(` declaration and eval
+// it in isolation (see tests/test_data_uri_images.py). A bare top-level const is
+// invisible to that extractor, so any renderMd harness would die with
+// "_MEDIA_PATH_SRC is not defined". When you add a helper that renderMd calls,
+// add it to the eval list in every harness that extracts renderMd.
+function _mediaPathSrc(){
+  // One path character: no whitespace, and none of the delimiters that close a
+  // token.
+  const ch = String.raw`[^\s\)\]]`;
+  // FIRST character of an unquoted ref. A quote is excluded here — and only
+  // here — so an UNTERMINATED quoted ref cannot fall through to a bare branch.
+  // Without it, `MEDIA:"/tmp/bad.png` (no closing quote) fails the quoted
+  // alternative, falls through to the bare grammar, and captures the literal
+  // `"/tmp/bad.png` INCLUDING the leading quote, which the streaming flush then
+  // activates as a media node. Interior quotes stay legal (`ch` is unchanged).
+  // Kept in lockstep with ch_first in api/helpers.py.
+  const chFirst = String.raw`[^\s\)\]"']`;
+  // A whole space-separated word that contains NO dot. Requiring the
+  // intermediate words to be dot-free is what BOUNDS the spaced form: the run
+  // can cross `Reports/` or `Notes/`, but stops dead at the first word carrying
+  // a `.ext`, so trailing prose after `a.png` is never absorbed and two
+  // adjacent MEDIA tags stay two tags.
+  //
+  // Spelled as a dot-free character class rather than a negative lookbehind on
+  // purpose. A lookbehind assertion here would be a PARSE-TIME brick on engines
+  // without regex lookbehind support (Safari < 16.4, some embedded WebViews):
+  // ui.js is a classic deferred script, so the whole file fails to parse and the
+  // app blanks. tests/test_5552_viewport_anchor_surrogate.py enforces that, and
+  // greps the raw source — so do not spell the assertion out even in a comment.
+  const wordNoDot = String.raw`(?!MEDIA:)[^\s\)\]\.]+`;
+  // The final space-separated word carries the extension. This is what makes a
+  // dotted DIRECTORY work: `/tmp/v1.2 Reports/chart.png` must not settle on
+  // `/tmp/v1.2` just because a space follows it.
+  const finalWithExt = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+`;
+  // Bare matches must end at whitespace, a closing delimiter, a glued MEDIA:
+  // keyword, or end of input — never mid-prose. The closing-brace delimiter is
+  // spelled as the hex escape below because the harnesses' brace counter does
+  // not skip regex literals or comments, so an unmatched brace anywhere in this
+  // function truncates the extraction mid-literal.
+  const boundary = String.raw`(?=[\s\)\]\x7d"'*_,;:]|MEDIA:|$)`;
+  // Terminal sentence punctuation belongs to the PROSE, not to the ref:
+  // `see MEDIA:/tmp/a.png.` is a sentence about a file, not a file named
+  // `a.png.`. `.`/`!`/`?` only close the token when the NEXT character ends the
+  // token anyway, so a dot genuinely inside a name still belongs to the ref
+  // (`/tmp/a.tar.gz`, `/tmp/v1.2/chart.png`). Kept in lockstep with
+  // _MEDIA_TOKEN_BOUNDARY / _MEDIA_TOKEN_SENTENCE_END in api/helpers.py.
+  // Sentence punctuation only when a REAL delimiter follows. End-of-input does
+  // NOT count: a streaming chunk can stop mid-token, and treating that as a
+  // sentence end would capture `/tmp/a` out of `MEDIA:/tmp/a.png` on the final
+  // chunk, making the streamed and settled renderings disagree.
+  const sentenceEnd = String.raw`[.!?](?=[\s\)\]\x7d"'*_,;:])`;
+  const boundaryOrSentence = String.raw`(?=[\s\)\]\x7d"'*_,;:]|${sentenceEnd}|MEDIA:|$)`;
+  // One path character that is NOT terminal sentence punctuation. TEMPERED
+  // GREEDY, not lazy: it consumes as much as the old greedy `${ch}+` did, so
+  // `C:/tmp/live.png` and a URL's `://` plus any nested `MEDIA:` in its query
+  // stay inside one token. A lazy `${ch}+?` would stop at `C` (because `:`
+  // closes a token) and at a nested `MEDIA:`.
+  const chNotSentenceEnd = String.raw`(?:(?!${sentenceEnd})${ch})`;
+  // Same run, first character only — cannot be a quote (see chFirst).
+  const chFirstNotSentenceEnd = String.raw`(?:(?!${sentenceEnd})${chFirst})`;
+  // Ambiguous prose shape: the FIRST word is already a complete dot-bearing
+  // filename, followed by dot-free prose and then another filename:
+  //
+  //   MEDIA:/tmp/a.png see README.md
+  //
+  // Reject that shape so `/tmp/a.png` wins and the rest remains prose. The
+  // continuation classes exclude `/`, so `/tmp/v1.2 Reports/chart.png` does not
+  // match the rejection and dotted-directory support remains intact. A genuinely
+  // ambiguous spaced filename can use the already-supported quoted form.
+  const noSlash = String.raw`[^\s\)\]/]`;
+  const wordNoDotNoSlash = String.raw`(?!MEDIA:)[^\s\)\]\./]+`;
+  const finalWithExtNoSlash = String.raw`(?!MEDIA:)${noSlash}+?\.[A-Za-z0-9]+`;
+  const dottedFirstThenDottedProse = String.raw`(?!MEDIA:)${ch}+?\.[A-Za-z0-9]+(?:[^\S\n]${wordNoDotNoSlash})*?[^\S\n]${finalWithExtNoSlash}${boundary}`;
+  const spaced = String.raw`(?!(?:${dottedFirstThenDottedProse}))(?!MEDIA:)${chFirst}${ch}*?(?:[^\S\n]${wordNoDot})*?[^\S\n]${finalWithExt}${boundary}`;
+  const nospace = String.raw`(?!MEDIA:)${chFirst}${ch}*?\.[A-Za-z0-9]+${boundaryOrSentence}`;
+  // A real HTTP(S) URL is one tempered-greedy run, tried BEFORE the bare forms so
+  // `://host/...` (and a nested `MEDIA:` in its path/query) stays in one token. A
+  // query string keeps its `?`/`!`; a trailing period stays in the sentence.
+  const externalUrl = String.raw`(?:[hH][tT][tT][pP][sS]?)://${chNotSentenceEnd}+`;
+  // Extension-less legacy shape: greedy over path characters, but a trailing
+  // sentence `.`/`!`/`?` is left to the prose instead of captured.
+  const extensionless = String.raw`${chFirstNotSentenceEnd}${chNotSentenceEnd}*`;
+  // Quoted form wins first (can hold any character), then the spaced form, then
+  // the no-space form, then the fallback for extension-less paths.
+  // Kept in lockstep with media_token_pattern() in api/helpers.py.
+  return String.raw`"[^"\n]+"|'[^'\n]+'|${externalUrl}|${spaced}|${nospace}|${extensionless}|${chFirst}${ch}*`;
+}
+
+/** Global matcher for MEDIA: tokens. Fresh instance per call — a shared /g regex
+ *  carries lastIndex between callers and silently skips matches. */
+function _mediaTokenRe(){
+  return new RegExp(String.raw`MEDIA:(${_mediaPathSrc()})`, 'g');
+}
+
+/** Strip surrounding quotes from a captured MEDIA path. */
+function _unquoteMediaRef(ref){
+  const value = String(ref || '').trim();
+  const quote = value[0];
+  return (quote === '"' || quote === "'") && value.endsWith(quote) ? value.slice(1, -1) : value;
+}
+
+/** True when a MEDIA ref carries an http(s) scheme. Scheme only — NOT a trust
+ *  decision. Mirrors is_external_media_url() in api/helpers.py. */
+function _isExternalMediaUrl(ref){
+  return /^https?:\/\//i.test(_unquoteMediaRef(ref));
+}
+
+/** Ceiling on a MEDIA token's captured length — part of the shared lexical
+ *  contract, NOT a private detail of the streaming buffer. If the streaming
+ *  parser treated "buffer full" as "stream ended" and finalized the token while
+ *  settled renderMd() re-parsed the same text uncapped and saw ONE complete
+ *  reference, the two renderings would disagree. A candidate that reaches the
+ *  ceiling without a real delimiter is not a token: it fails closed and stays
+ *  literal text.
+ *
+ *  Kept in lockstep with MEDIA_TOKEN_MAX_LENGTH in api/helpers.py and
+ *  _MEDIA_TAIL_MAX in static/messages.js.
+ *
+ *  UNIT: UTF-16 CODE UNITS, in both languages. Deliberate: this cap bounds the
+ *  per-parser streaming buffer, that buffer is a JavaScript string, JavaScript
+ *  strings are stored as UTF-16, and `String.prototype.length` counts code
+ *  units — so code units are the unit that actually bounds the memory. Counting
+ *  code points instead would let a 4096-character astral token occupy 8192 code
+ *  units of the buffer. Python `len()` counts code points, so api/helpers.py
+ *  converts via media_token_length(); before it did, a token of 2049 U+1F600
+ *  characters measured 2049 in Python and 4098 here, and Python admitted a
+ *  token this side refused. */
+function _mediaTokenMaxLength(){ return 4096; }
+
+/** True when a capture is too long to be a legal MEDIA token. Measured on the
+ *  RAW capture (quotes included), matching the streaming buffer's own bound, in
+ *  UTF-16 code units — `.length` IS that unit, so no conversion is needed here.
+ *  Mirrors media_token_exceeds_max_length() in api/helpers.py. */
+function _mediaTokenExceedsMaxLength(ref){
+  return String(ref == null ? '' : ref).length > _mediaTokenMaxLength();
+}
+
+/** Markers meaning "this URL leads back to a local or authenticated target".
+ *  Built lazily inside a function rather than held in a module-scope `const`:
+ *  several test harnesses extract these helpers by name and eval them before
+ *  the module body has finished evaluating, and a `const` read in that window
+ *  throws a temporal-dead-zone ReferenceError instead of returning a verdict.
+ *  A security predicate must never fail that way.
+ *  Mirrors _LOCAL_TARGET_MARKERS in api/helpers.py. */
+function _localTargetMarkers(){
+  return ['media:', 'file://', '/api/media'];
+}
+
+/** Percent-decode up to `rounds` times, stopping when stable. Bounded: a single
+ *  decode misses `%254d`, and an unbounded loop is a DoS on crafted input.
+ *  Mirrors _decode_url_component_bounded() in api/helpers.py. */
+function _decodeUrlComponentBounded(value, rounds){
+  let current = String(value || '');
+  const max = typeof rounds === 'number' ? rounds : 3;
+  for(let i=0; i<max; i++){
+    let next;
+    try{ next = decodeURIComponent(current); }
+    catch(_){ return current; }
+    if(next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+/** True when an http(s) MEDIA ref smuggles a LOCAL or AUTHENTICATED target.
+ *
+ *  Defense in depth for the share page. api/shares.py already placeholders
+ *  these server-side before a snapshot is written, but this renderer also runs
+ *  on the PUBLIC share page (static/share.html loads ui.js; share.js calls
+ *  renderMd()), and the https:// branch of _inlineMediaHtmlForRef() rewrites a
+ *  loopback host to document.baseURI — which on a share origin turns
+ *  `MEDIA:http://127.0.0.1:8080/api/media?path=...` into a same-origin
+ *  authenticated request. Refuse to treat such a ref as a renderable image so
+ *  an older snapshot (written before the server-side guard) cannot fire it.
+ *
+ *  Scope note: a private/loopback HOST alone is NOT reported here. In the
+ *  normal app a loopback asset URL is legitimate and must keep following the
+ *  origin, and `_inlineMediaHtmlForRef` calls this before its rewrite. Only a
+ *  smuggled local TARGET (nested `MEDIA:`, `file://`, or our `/api/media`
+ *  route) makes a ref unrenderable. The server-side twin in api/helpers.py is
+ *  stricter — it also rejects private hosts outright — because a snapshot is
+ *  published to an anonymous audience where a loopback URL can never be a
+ *  valid public asset. Deliberate asymmetry, not drift.
+ *
+ *  Mirrors the marker half of external_media_url_hides_local_target()
+ *  in api/helpers.py. */
+function _externalMediaUrlHidesLocalTarget(ref){
+  const value = _unquoteMediaRef(ref);
+  if(!/^https?:\/\//i.test(value)) return false;
+  let u;
+  try{ u = new URL(value); }
+  catch(_){ return true; }  // unparseable → fail closed
+  const host = (u.hostname || '').trim();
+  if(!host) return true;
+  // Only the parts a renderer can turn into a nested target; hostname excluded
+  // so an ordinary public CDN host is never rejected for its name alone.
+  const probe = (u.pathname || '') + (u.search || '') + (u.hash || '');
+  const decoded = _decodeUrlComponentBounded(probe).toLowerCase();
+  return _localTargetMarkers().some(marker => decoded.indexOf(marker) !== -1);
+}
+
 // Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
 // <img>; file:// and bare data:image/ URIs route through the same helpers the
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
@@ -2769,8 +2991,30 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(/^https?:\/\//i.test(ref)){
     let src=ref;
     if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
+      // Retarget a loopback ref at the CURRENT origin. This is deliberate for
+      // the normal app (a dev-server asset URL should follow the app), but it is
+      // exactly what makes a hostile ref dangerous on the PUBLIC share page:
+      // `MEDIA:http://127.0.0.1:8080/api/media?path=/etc/shadow` would become a
+      // same-origin AUTHENTICATED request issued by the viewer's browser.
+      //
+      // So gate only the rewrite, not loopback rendering as a whole: if the ref
+      // hides a nested MEDIA:/file:///api/media target, render it inert. A plain
+      // loopback image (`http://127.0.0.1:8787/img/shot.png`) is untouched and
+      // still follows the origin as before.
+      //
+      // api/shares.py placeholders these server-side before a snapshot is ever
+      // written; this is the second line, so a snapshot written by an older
+      // build cannot fire one either.
+      if(typeof _externalMediaUrlHidesLocalTarget==='function' && _externalMediaUrlHidesLocalTarget(ref)){
+        return `<code>${esc(String(ref).slice(0,120))}</code>`;
+      }
       const base=(typeof document!=='undefined'&&document.baseURI||'').replace(/\/$/,'');
       src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
+    }else if(typeof _externalMediaUrlHidesLocalTarget==='function' && _externalMediaUrlHidesLocalTarget(ref)){
+      // Non-loopback host, but the URL still smuggles a local/authenticated
+      // target in its path, query, or fragment (`https://cdn.test/api/media?...`,
+      // or a nested `MEDIA:`/`file://`). Never a renderable public asset.
+      return `<code>${esc(String(ref).slice(0,120))}</code>`;
     }
     const urlPath=src.split('?')[0];
     // SVG URLs → render inline as image (must precede the https:// <img>
@@ -7648,8 +7892,14 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
-    media_stash.push(raw_ref);
+  s=s.replace(_mediaTokenRe(),(whole,raw_ref)=>{
+    // Honor the shared length ceiling here too. The streaming parser refuses an
+    // over-ceiling candidate (its buffer is bounded), so if settled parsing
+    // accepted one, a single reference would render as a card in one view and
+    // as literal text in the other. Leave the whole span untouched: it stays
+    // prose, exactly as the streamed path writes it.
+    if(_mediaTokenExceedsMaxLength(raw_ref)) return whole;
+    media_stash.push(_unquoteMediaRef(raw_ref));
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
@@ -9061,8 +9311,11 @@ function _stripForTTS(text){
   text=text.replace(/^#{1,6}\s+/gm,'');
   // Strip links, keep text
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
-  // Replace MEDIA: paths with a simple label
-  text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  // Replace MEDIA: refs with a simple label. Uses the SHARED token grammar so a
+  // dotted/spaced or quoted path is removed whole — `/MEDIA:[^\s]+/g` stopped at
+  // the first space, leaving the local-path tail ("Reports/chart.png") to be read
+  // aloud, and left the closing quote of a quoted ref behind.
+  text=text.replace(_mediaTokenRe(),'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown

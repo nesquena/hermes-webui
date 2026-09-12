@@ -71,6 +71,15 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+// MEDIA: token matching helpers renderMd depends on. Must be eval'd BEFORE
+// renderMd so the extracted function can resolve them.
+eval(extractFunc('_mediaPathSrc'));
+eval(extractFunc('_mediaTokenRe'));
+eval(extractFunc('_unquoteMediaRef'));
+// Shared MEDIA length ceiling consulted by renderMd's stash. Extracted, not
+// stubbed, so this driver applies the same rule as the streaming path.
+eval(extractFunc('_mediaTokenMaxLength'));
+eval(extractFunc('_mediaTokenExceedsMaxLength'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
