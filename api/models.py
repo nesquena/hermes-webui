@@ -1,5 +1,6 @@
 """Hermes Web UI -- Session model and in-memory session store."""
 import collections
+import contextvars
 import copy
 import datetime
 import hashlib
@@ -8222,18 +8223,138 @@ def _state_db_active_rows_digest(rows) -> str:
     return digest.hexdigest() if stamped else ''
 
 
+# hermes_state stores list/dict message content (multimodal parts) as a
+# sentinel-prefixed JSON string because sqlite3 binds only scalars; see
+# hermes_state._CONTENT_JSON_PREFIX and _decode_content(). This module reads
+# that table with its own SQL, so it must apply the same decode. Without it an
+# image part's base64 data URI reaches the transcript as literal text -- a
+# single unbreakable ~65k-character run -- and WebKit computes min-content
+# width by scanning every line-break position, pinning a core for minutes.
+#
+# The decode deliberately does NOT widen `content` beyond the one shape the
+# rest of the WebUI already accepts:
+#   * list roots only. A dict root would reach _getCachedRender() unchanged and
+#     _renderCacheKey() would call text.slice() on an object, blanking the turn.
+#   * no non-finite numbers. Python emits NaN/Infinity, which the browser's
+#     JSON.parse() rejects, breaking the whole /api/session response.
+# Anything else is returned as the original string, exactly as before.
+_STATE_DB_CONTENT_JSON_PREFIX = "\x00json:"
+
+
+def _is_valid_image_part_payload(part) -> bool:
+    """Explicit per-type payload validation for an image content part."""
+    part_type = part.get("type")
+    if part_type in ("image_url", "input_image"):
+        ref = part.get("image_url")
+        if isinstance(ref, dict):
+            ref = ref.get("url")
+        if isinstance(ref, str) and ref.strip():
+            return True
+        file_id = part.get("file_id")
+        return part_type == "input_image" and isinstance(file_id, str) and bool(file_id.strip())
+    if part_type == "image":
+        source = part.get("source")
+        if not isinstance(source, dict):
+            return False
+        if source.get("type") == "base64":
+            data = source.get("data")
+            return (
+                isinstance(data, str)
+                and bool(data)
+                and isinstance(source.get("media_type"), str)
+            )
+        if source.get("type") == "url":
+            url = source.get("url")
+            return isinstance(url, str) and bool(url.strip())
+        return False
+    return False
+
+
+def _is_supported_content_part_list(parts) -> bool:
+    """True only for lists the current WebUI will actually render.
+
+    The shared JS readers keep text parts and discard every image part:
+    ``msgContent()`` joins the text parts and trims, and ``_messageIsRenderable()``
+    hides the row when that is empty. This projection supplies no attachments,
+    so image parts do not render from it either. A list is therefore decoded only
+    when it carries non-whitespace text to show. Image-only lists, and lists with
+    a malformed image part, stay undecoded so the row cannot silently vanish.
+    """
+    if not parts:
+        return False
+    has_text = False
+    for part in parts:
+        if not isinstance(part, dict):
+            return False
+        part_type = part.get("type")
+        if not isinstance(part_type, str):
+            return False
+        if part_type == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                return False
+            if text.strip():
+                has_text = True
+        elif part_type in _SESSION_MESSAGE_IMAGE_PART_TYPES:
+            if not _is_valid_image_part_payload(part):
+                return False
+        else:
+            return False
+    return has_text
+
+
+def _reject_non_finite_state_db_json_constant(value):
+    raise ValueError(f"unsupported JSON constant: {value}")
+
+
+def _parse_finite_state_db_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"unsupported JSON float: {value}")
+    return parsed
+
+
+def _decode_state_db_content(value):
+    """Decode the Agent's structured-content storage form without widening it.
+
+    Returns the original value unchanged for anything that is not a
+    sentinel-prefixed, finite, list-rooted payload.
+    """
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if not isinstance(value, str) or not value.startswith(_STATE_DB_CONTENT_JSON_PREFIX):
+        return value
+    try:
+        decoded = json.loads(
+            value[len(_STATE_DB_CONTENT_JSON_PREFIX):],
+            parse_constant=_reject_non_finite_state_db_json_constant,
+            parse_float=_parse_finite_state_db_json_float,
+        )
+    except Exception:
+        return value
+    if not isinstance(decoded, list) or not _is_supported_content_part_list(decoded):
+        return value
+    try:
+        # Prove the decoded value survives the trip to the browser before
+        # handing it on: re-serialisable, finite, UTF-8 encodable.
+        json.dumps(decoded, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except Exception:
+        return value
+    return decoded
+
+
 def _project_state_db_message(row, available, id_col, optional):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
     Shared by ``get_state_db_session_messages`` and the regeneration
     single-snapshot helper so the bounded tail can never drift from the
-    canonical reader: JSON-decode tool_calls/reasoning payloads, omit
+    canonical reader: JSON-decode content/tool_calls/reasoning payloads, omit
     empty fields, keep durable row id private (``_state_db_row_id`` only for
     real Agent api_content replays), and apply ``tool_name → name``.
     """
     msg = {
         'role': row['role'],
-        'content': row['content'],
+        'content': _decode_state_db_content(row['content']),
         'timestamp': row['timestamp'],
     }
     for col in optional:
@@ -8636,7 +8757,11 @@ def get_state_db_session_message_keys_before_timestamp(
                 _session_message_visible_key(
                     {
                         "role": row["role"],
-                        "content": row["content"],
+                        # Same guarded decode as the projected tail: prefix and
+                        # tail keys must share one representation or the
+                        # prefix/tail collision proof can miss a genuine
+                        # repeated recovered turn.
+                        "content": _decode_state_db_content(row["content"]),
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
                     },
@@ -8744,7 +8869,7 @@ def get_state_db_regeneration_tail_snapshot(
             prefix_keys = [
                 _session_message_visible_key({
                     "role": r["role"],
-                    "content": r["content"],
+                    "content": _decode_state_db_content(r["content"]),
                     "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
                     "api_content": r["api_content"] if "api_content" in r.keys() else None,
                 }, normalize_workspace_prefix=True)
@@ -8931,14 +9056,27 @@ def _session_message_multimodal_mirror_key(
     msg: dict,
     *,
     require_image_parts: bool = False,
+    require_scalar_mirror: bool = False,
 ):
-    """Return exact cross-store identity for a native multimodal mirror."""
+    """Return exact cross-store identity for a native multimodal mirror.
+
+    The bridge exists to pair ONE rich image-bearing row with ONE scalar row
+    holding the Agent's stored projection of it. It must never pair two rich
+    rows: distinct image turns can project to the same "[screenshot] <text>"
+    string, so rich-to-rich matching collapses different images into one turn.
+    Callers pass ``require_image_parts`` on the rich side and
+    ``require_scalar_mirror`` on the scalar side to keep the pairing asymmetric.
+    """
     if not isinstance(msg, dict):
+        return None
+    if require_image_parts and require_scalar_mirror:
         return None
     role = str(msg.get("role") or "").strip().lower()
     if role != "user":
         return None
     raw_content = msg.get("content")
+    if require_scalar_mirror and not isinstance(raw_content, str):
+        return None
     content = _agent_durable_multimodal_content(msg)
     if require_image_parts and content is None:
         return None
@@ -8964,6 +9102,53 @@ def _session_message_multimodal_mirror_key(
     )
 
 
+# Per-call memo of structured-content identities. Reconciliation derives merge,
+# dedup, content and visible keys for every message, several per source, so a
+# large multimodal payload would otherwise be serialised once per key. The memo
+# is scoped to a single merge call (set/reset in
+# merge_session_messages_append_only) and keyed by object identity with the
+# object held alive, so a later call always recomputes after mutation and an id
+# can never be reused for a different list within one call.
+_STRUCTURED_IDENTITY_MEMO = contextvars.ContextVar(
+    "_STRUCTURED_IDENTITY_MEMO", default=None
+)
+
+
+def _canonical_structured_content(content) -> str:
+    """Canonical serialisation of structured content -- the expensive step."""
+    try:
+        return json.dumps(content, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return repr(content)
+
+
+def _content_identity_for_key(content):
+    """Identity component for message content in every reconciliation key.
+
+    Non-list values key exactly as they always have: ``str(content or "")``.
+
+    Non-empty list content -- which reaches these paths once the state.db
+    sentinel is decoded -- gets an OUT-OF-BAND identity: a tuple, not a string.
+    No scalar can ever compare equal to it, so there is no in-band marker for a
+    message body to imitate. (An earlier revision tagged lists with a string
+    prefix; a scalar containing that prefix collided with the rich row.)
+
+    Merge, dedup, content and visible keys all derive structured content
+    through this one function so the discriminator cannot drift between them.
+    """
+    if not (isinstance(content, list) and content):
+        return str(content or "")
+    memo = _STRUCTURED_IDENTITY_MEMO.get()
+    if memo is not None:
+        hit = memo.get(id(content))
+        if hit is not None and hit[0] is content:
+            return hit[1]
+    identity = ("structured_content", _canonical_structured_content(content))
+    if memo is not None:
+        memo[id(content)] = (content, identity)
+    return identity
+
+
 def _session_message_merge_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
@@ -8983,7 +9168,7 @@ def _session_message_merge_key(msg: dict):
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
-        str(msg.get("content") or ""),
+        _content_identity_for_key(msg.get("content")),
         _normalized_message_timestamp_for_key(msg.get("timestamp")),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
@@ -9234,7 +9419,9 @@ def _copy_api_content_sidecar(target: dict | None, source: dict | None) -> bool:
         )
         if (
             target_mirror_key is None
-            or target_mirror_key != _session_message_multimodal_mirror_key(source)
+            or target_mirror_key != _session_message_multimodal_mirror_key(
+                source, require_scalar_mirror=True
+            )
         ):
             return False
     if target.get("api_content") not in (None, ""):
@@ -9674,7 +9861,7 @@ def _session_message_dedup_key(msg: dict):
     return _session_message_key_with_sidecar((
         "legacy",
         str(msg.get("role") or ""),
-        str(msg.get("content") or ""),
+        _content_identity_for_key(msg.get("content")),
         str(msg.get("timestamp") or ""),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
@@ -9682,10 +9869,19 @@ def _session_message_dedup_key(msg: dict):
     ), msg)
 
 
-def _normalized_session_message_content(msg: dict) -> str:
+def _normalized_session_message_content(msg: dict):
+    """Visible identity for a message's content.
+
+    Scalars normalise whitespace as before. Structured content returns the same
+    out-of-band tuple as the merge/dedup keys, so content and visible keys can
+    never place a list and a string in the same identity space.
+    """
     if not isinstance(msg, dict):
         return repr(msg)
-    return " ".join(str(msg.get("content") or "").split())
+    content = msg.get("content")
+    if isinstance(content, list) and content:
+        return _content_identity_for_key(content)
+    return " ".join(str(content or "").split())
 
 
 def _loose_session_message_content(value: str) -> str:
@@ -9701,7 +9897,7 @@ def _session_message_content_key(
         return ("non_dict", repr(msg))
     role = str(msg.get("role") or "")
     content = _normalized_session_message_content(msg)
-    if role == "user" and normalize_workspace_prefix:
+    if role == "user" and normalize_workspace_prefix and isinstance(content, str):
         # WebUI sends the model a workspace-prefixed user_message
         # ("[Workspace::v1: /path]\n<text>") while the visible/optimistic
         # bubble and the WebUI sidecar row carry only the bare "<text>". The
@@ -9744,7 +9940,7 @@ def _session_message_visible_key(
     _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     role = str(msg.get("role") or "")
     content = _normalized_session_message_content(msg)
-    if role == "user" and normalize_workspace_prefix:
+    if role == "user" and normalize_workspace_prefix and isinstance(content, str):
         # state.db stores the model-facing workspace-prefixed prompt while the
         # WebUI sidecar owns the bare visible text. Fold that protocol wrapper
         # into the exact key so large-session reconciliation does not depend on
@@ -9769,7 +9965,9 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
             content = key[1]
         except (TypeError, IndexError):
             continue
-        if not content:
+        # Only text identities take part in fuzzy matching; structured content
+        # is exact-identity only and must never fuzzy-match a scalar.
+        if not content or not isinstance(content, str):
             continue
         by_role.setdefault(role, []).append(key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
@@ -9789,6 +9987,11 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     sidecar = visible_key[3] if len(visible_key) > 3 else None
     if not content:
         return None
+    # Structured content is matched by exact identity only (checked above).
+    # Substring/token matching would otherwise compare a canonical list
+    # serialisation against arbitrary text and pair a rich row with a scalar.
+    if not isinstance(content, str):
+        return None
     # Exact identity above remains authoritative at every size. The fallback
     # below scans the existing keys for every candidate, so it becomes
     # quadratic on long transcripts even when each individual message is small.
@@ -9803,7 +10006,12 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
-        if role != existing_role or sidecar != existing_sidecar or not existing_content:
+        if (
+            role != existing_role
+            or sidecar != existing_sidecar
+            or not existing_content
+            or not isinstance(existing_content, str)
+        ):
             continue
         # Exact visible-key equality was checked above. For very large payloads
         # (tool logs / request dumps), Python-in substring and fuzzy-token
@@ -10138,6 +10346,30 @@ def merge_session_messages_append_only(
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
+    Thin wrapper that scopes the structured-content identity memo to this one
+    call; see :func:`_merge_session_messages_append_only_impl` for the merge.
+    """
+    token = _STRUCTURED_IDENTITY_MEMO.set({})
+    try:
+        return _merge_session_messages_append_only_impl(
+            sidecar_messages,
+            state_messages,
+            truncation_watermark=truncation_watermark,
+            truncation_boundary=truncation_boundary,
+        )
+    finally:
+        _STRUCTURED_IDENTITY_MEMO.reset(token)
+
+
+def _merge_session_messages_append_only_impl(
+    sidecar_messages: list,
+    state_messages: list,
+    *,
+    truncation_watermark=None,
+    truncation_boundary=None,
+) -> list:
+    """Merge sidecar/context and state.db messages without deleting local rows.
+
     ``truncation_boundary``: the original truncate cutoff — the
     timestamp of the last message kept by the truncate operation.  When the
     watermark is later advanced (new turn committed), this boundary is preserved
@@ -10228,7 +10460,16 @@ def merge_session_messages_append_only(
                 value = helper(msg)
                 # If this is a legacy message key, keep the already-stringified
                 # content payload for downstream helper calls.
-                if isinstance(value, tuple) and value and value[0] == "legacy":
+                # Structured content is never substituted: its key component is
+                # an identity token, not content, and writing it back would let
+                # a scalar equal to that token impersonate the rich row.
+                if (
+                    isinstance(value, tuple)
+                    and value
+                    and value[0] == "legacy"
+                    and isinstance(value[2], str)
+                    and not isinstance(msg.get("content"), list)
+                ):
                     prepared_msg = dict(msg)
                     prepared_msg["content"] = value[2]
                     _cached_msg_prepared[msg_cache_key] = prepared_msg
@@ -10243,13 +10484,20 @@ def merge_session_messages_append_only(
             prepared_msg = _cached_msg_prepared.get(msg_cache_key)
             if prepared_msg is None:
                 prepared_msg = dict(msg)
-                prepared_msg["content"] = (
-                    merge_key[2]
-                    if isinstance(merge_key, tuple)
+                raw_content = msg.get("content")
+                if isinstance(raw_content, list):
+                    # Keep the real structure; downstream keys derive their own
+                    # out-of-band identity from it.
+                    prepared_msg["content"] = raw_content
+                elif (
+                    isinstance(merge_key, tuple)
                     and len(merge_key) > 2
                     and merge_key[0] == "legacy"
-                    else str(msg.get("content") or "")
-                )
+                    and isinstance(merge_key[2], str)
+                ):
+                    prepared_msg["content"] = merge_key[2]
+                else:
+                    prepared_msg["content"] = str(raw_content or "")
                 _cached_msg_prepared[msg_cache_key] = prepared_msg
 
         value = helper(prepared_msg)
@@ -10392,7 +10640,9 @@ def merge_session_messages_append_only(
     if sidecar_multimodal_mirrors:
         state_multimodal_mirror_identities = {}
         for state_message in state_messages:
-            mirror_key = _session_message_multimodal_mirror_key(state_message)
+            mirror_key = _session_message_multimodal_mirror_key(
+                state_message, require_scalar_mirror=True
+            )
             state_multimodal_mirror_keys[id(state_message)] = mirror_key
             if (
                 mirror_key is not None
