@@ -2262,6 +2262,9 @@ $('modelSelect').onchange=async()=>{
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
     : {model:selectedModel,model_provider:null};
+  if(typeof _rememberComposerModelPick==='function'){
+    _rememberComposerModelPick(modelState.model,modelState.model_provider);
+  }
   if(typeof clearProfileTransitionReasoningContext==='function') clearProfileTransitionReasoningContext();
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
