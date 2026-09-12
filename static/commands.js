@@ -33,6 +33,15 @@ const COMMANDS=[
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
+  {name:'sessions', desc:t('cmd_sessions'), fn:cmdSessions, noEcho:true},
+  {name:'resume', desc:t('cmd_resume'), fn:cmdResume, arg:'[name]', noEcho:true},
+  {name:'fast', desc:t('cmd_fast'), fn:cmdFast, noEcho:true},
+  {name:'profile', desc:t('cmd_profile'), fn:cmdProfile, noEcho:true},
+  {name:'version', desc:t('cmd_version'), fn:cmdVersion, noEcho:true},
+  {name:'agents', desc:t('cmd_agents'), fn:cmdAgents, noEcho:true},
+  {name:'insights', desc:t('cmd_insights'), fn:cmdInsights, arg:'[days]', noEcho:true},
+  {name:'rollback', desc:t('cmd_rollback'), fn:cmdRollback, arg:'[number]', noEcho:true},
+  {name:'learn', desc:t('cmd_learn'), fn:cmdLearn, arg:'<what to learn from>', noEcho:true},
 ];
 
 const SLASH_SUBARG_SOURCES={
@@ -2283,4 +2292,122 @@ function selectCmdDropdownItem(){
 // The COMMANDS array above is the authoritative dispatch table. These aliases
 // allow tooling and tests to discover command handlers by name independently.
 const HANDLERS = {};
+
+// ── Session and profile commands ──────────────────────────────────────────
+
+function cmdSessions(){
+  if(typeof _openProfileSwitchSessionBrowser==='function') _openProfileSwitchSessionBrowser();
+  else if(typeof expandSidebar==='function') expandSidebar();
+  if(typeof renderSessionList==='function') renderSessionList();
+  showToast(t('cmd_sessions'));
+}
+
+function cmdResume(args){
+  return cmdSessions();
+}
+
+async function cmdFast(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command:'/fast'})
+    });
+    const output=String(data&&data.output||'Fast mode toggled.');
+    showToast(output);
+  }catch(e){showToast('Fast mode: '+e.message);}
+}
+
+async function cmdProfile(){
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command:'/profile'})
+    });
+    const output=String(data&&data.output||'');
+    S.messages.push({role:'assistant',content:output||'No profile info available.',_ts:Date.now()/1000});
+    renderMessages();
+  }catch(e){showToast('Profile: '+e.message);}
+}
+
+async function cmdVersion(){
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command:'/version'})
+    });
+    const output=String(data&&data.output||'');
+    S.messages.push({role:'assistant',content:output||'Version info unavailable.',_ts:Date.now()/1000});
+    renderMessages();
+  }catch(e){showToast('Version: '+e.message);}
+}
+
+async function cmdAgents(){
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command:'/agents'})
+    });
+    const output=String(data&&data.output||'No active agents.');
+    S.messages.push({role:'assistant',content:output,_ts:Date.now()/1000});
+    renderMessages();
+  }catch(e){showToast('Agents: '+e.message);}
+}
+
+async function cmdInsights(args){
+  const days=String(args||'').trim()||'';
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command:'/insights'+(days?' '+days:'')})
+    });
+    const output=String(data&&data.output||'No insights available.');
+    S.messages.push({role:'assistant',content:output,_ts:Date.now()/1000});
+    renderMessages();
+  }catch(e){showToast('Insights: '+e.message);}
+}
+
+async function cmdRollback(args){
+  const num=String(args||'').trim()||'';
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command:'/rollback'+(num?' '+num:'')})
+    });
+    const output=String(data&&data.output||'Rollback not available.');
+    S.messages.push({role:'assistant',content:output,_ts:Date.now()/1000});
+    renderMessages();
+  }catch(e){showToast('Rollback: '+e.message);}
+}
+
+// ── /learn ────────────────────────────────────────────────────────────────
+async function cmdLearn(args){
+  const what=(args||'').trim();
+  if(!what){showToast('/learn <what to learn from> — e.g. /learn ~/project or /learn https://...');return;}
+  if(!S.session){await newSession();await renderSessionList();}
+  S.messages.push({role:'user',content:'/learn '+what,_ts:Date.now()/1000});
+  try{
+    const data=await api('/api/commands/exec',{
+      method:'POST',
+      body:JSON.stringify({command:'/learn '+what})
+    });
+    const output=String(data&&data.output||'Learn complete.');
+    S.messages.push({role:'assistant',content:output,_ts:Date.now()/1000});
+  }catch(e){
+    S.messages.push({role:'assistant',content:'Learn command error: '+(e&&e.message||e),_ts:Date.now()/1000});
+  }
+  renderMessages();
+  $('msg').value='';autoResize();hideCmdDropdown();
+}
+
+// ── Handler aliases (test discoverability) ────────────────────────────────
 HANDLERS.skills = cmdSkills;
+HANDLERS.sessions = cmdSessions;
+HANDLERS.resume = cmdResume;
+HANDLERS.fast = cmdFast;
+HANDLERS.profile = cmdProfile;
+HANDLERS.version = cmdVersion;
+HANDLERS.agents = cmdAgents;
+HANDLERS.insights = cmdInsights;
+HANDLERS.rollback = cmdRollback;
+HANDLERS.learn = cmdLearn;
