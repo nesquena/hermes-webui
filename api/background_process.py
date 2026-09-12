@@ -257,13 +257,23 @@ class SessionChannel:
             if matched_real_id:
                 # Continue from the exact real event id the client last saw.
                 initial_event_id = str(after_event_id)
+            elif matched_cursor and replay_count > 0:
+                # A synthetic reconnect WITH queued replay: keep advertising the
+                # client's INCOMING watermark cursor, not the post-replay one.
+                # The replay events are delivered AFTER this `initial` frame; if
+                # the connection drops between the initial frame and replay
+                # delivery, the next reconnect must still re-replay them. (Once a
+                # replay frame is actually delivered, its own real ``event_id``
+                # advances the client's Last-Event-ID past it, so resumption is
+                # correct on either side of the drop.)
+                initial_event_id = str(after_event_id)
             else:
-                # A first connection (or a synthetic-cursor reconnect) gets a
-                # cursor encoding the CURRENT replay watermark so an event
-                # emitted during the later EOF/reconnect gap can still replay —
-                # without appending anything to the bounded replay history.
-                # Unknown/evicted cursors fall here too and never replay stale
-                # data (fail-closed).
+                # A first connection, a fail-closed reconnect, or a synthetic
+                # reconnect with nothing pending: issue a cursor encoding the
+                # CURRENT replay watermark so an event emitted during the later
+                # EOF/reconnect gap can still replay — without appending anything
+                # to the bounded replay history. Unknown/evicted cursors fall
+                # here too and never replay stale data (fail-closed).
                 initial_event_id = (
                     f"session-channel:{uuid.uuid4().hex}@{self._event_seq}"
                 )
@@ -357,9 +367,14 @@ class SessionChannel:
             if event_id:
                 self._event_seq += 1
                 self._history.append((event, dict(data), event_id, self._event_seq))
-            subs = list(self._subscribers)
             self.last_event_at = time.time()
-            for q in subs:
+            # Deliver to live subscribers INSIDE the lock so history ordering and
+            # subscriber-queue ordering are one atomic serialized operation.
+            # Concurrent emits must never record A-before-B in history yet
+            # deliver B-before-A: a drop after B would then resume replay past B
+            # and permanently lose A. The same critical section keeps the stall
+            # bookkeeping current for the reaper (see the docstring above).
+            for q in list(self._subscribers):
                 try:
                     q.put_nowait((event, data))
                     delivered += 1
