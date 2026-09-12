@@ -56,6 +56,13 @@ class TestPreflightAllowOrigin:
             "Host": "127.0.0.1:8787",
         }) == ""
 
+    def test_null_origin_emits_no_allow_origin_header(self):
+        sent = _preflight_headers({
+            "Origin": "null",
+            "Host": "127.0.0.1:8787",
+        })
+        assert "Access-Control-Allow-Origin" not in sent
+
     def test_wildcard_never_returned(self):
         """Even a same-origin match echoes the Origin, never '*'."""
         result = _preflight({
