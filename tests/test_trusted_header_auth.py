@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -893,3 +894,506 @@ signOut().then(() => process.stdout.write(JSON.stringify(window.location.href)))
 
     assert run_sign_out("https://auth.example.com/logout") == "https://auth.example.com/logout"
     assert run_sign_out(None) == "login"
+
+
+# ── PR #6798: stale non-trusted sessions vs. trusted-header reconciliation ──
+
+
+@pytest.mark.parametrize(
+    "group_map",
+    [
+        {"devs": "dev", "admins": "*"},
+        {"admins": "*", "devs": "dev"},
+    ],
+)
+def test_wildcard_group_dominates_concrete_mappings_regardless_of_order(monkeypatch, group_map):
+    # An identity in both a bound group and a wildcard (unbound/admin) group
+    # must be unbound no matter how the operator ordered the mapping.
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map=group_map)
+    handler = _Handler(headers={"Remote-User": "alice", "Remote-Groups": "devs,admins"})
+
+    info = auth.ensure_trusted_auth_session(handler)
+
+    assert info["auth_type"] == "trusted"
+    assert info["bound_profile"] is None
+    assert auth.trusted_session_allows_active_profile(info) is True
+
+
+def test_wildcard_only_match_creates_unbound_session(monkeypatch):
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"admins": "*"})
+    handler = _Handler(headers={"Remote-User": "alice", "Remote-Groups": "admins"})
+
+    info = auth.ensure_trusted_auth_session(handler)
+
+    assert info["auth_type"] == "trusted"
+    assert info["bound_profile"] is None
+    # No profile cookie is forced for an unbound session.
+    pending = getattr(handler, "_pending_set_cookies", [])
+    assert not any(cookie.startswith("hermes_profile=") for cookie in pending)
+
+
+def _stale_session_cases():
+    # (case id, create_session kwargs, group map, groups header value)
+    return [
+        pytest.param({}, None, None, id="legacy-password-no-metadata"),
+        pytest.param(
+            {"auth_type": "password", "username": "mallory", "bound_profile": "other"},
+            None,
+            None,
+            id="non-trusted-different-identity",
+        ),
+        pytest.param(
+            {"auth_type": "password", "username": "alice", "bound_profile": None},
+            {"admins": "*"},
+            "admins",
+            id="non-trusted-exact-match-wildcard-unbound",
+        ),
+        pytest.param(
+            {"auth_type": "password", "username": "alice", "bound_profile": "devops"},
+            {"hermes_devops": "devops"},
+            "hermes_devops",
+            id="non-trusted-exact-match-bound-profile",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("session_kwargs,group_map,groups_value", _stale_session_cases())
+def test_stale_non_trusted_cookie_replaced_on_trusted_get(
+    monkeypatch, session_kwargs, group_map, groups_value
+):
+    # Any non-trusted session presented on a valid trusted request must be
+    # invalidated and replaced by a trusted session — including a non-trusted
+    # record whose username/bound_profile exactly match the proxy assertion
+    # (create_session permits arbitrary metadata for other auth flows).
+    _trusted_env(
+        monkeypatch,
+        groups_header="Remote-Groups" if group_map else None,
+        group_map=group_map,
+    )
+    stale_cookie = auth.create_session(**session_kwargs)
+    headers = {"Cookie": f"hermes_session={stale_cookie}", "Remote-User": "alice"}
+    if groups_value:
+        headers["Remote-Groups"] = groups_value
+    handler = _Handler(headers=headers)
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+
+    # The old cookie is dead, the replacement is trusted, exactly one new
+    # auth cookie is queued.
+    assert auth.verify_session(stale_cookie) is False
+    info = handler._trusted_auth_session_info
+    assert info["auth_type"] == "trusted"
+    assert info["username"] == "alice"
+    replacement = handler._trusted_auth_session_cookie_value
+    assert replacement != stale_cookie
+    assert auth.verify_session(replacement) is True
+    auth_cookies = [
+        cookie for cookie in handler._pending_set_cookies if cookie.startswith("hermes_session=")
+    ]
+    assert len(auth_cookies) == 1
+    assert getattr(handler, "_trusted_auth_session_rotated", False) is True
+
+
+def test_untrusted_peer_with_stale_non_trusted_cookie_does_not_rotate(monkeypatch):
+    # The same header from an untrusted network peer must not gain
+    # trusted-session rotation: no invalidation, no trusted cookie.
+    _trusted_env(monkeypatch)
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    handler = _Handler(
+        headers={"Cookie": f"hermes_session={stale_cookie}", "Remote-User": "alice"},
+        client_address=("10.0.0.5", 12345),
+    )
+
+    info = auth.ensure_trusted_auth_session(handler)
+
+    assert info["auth_type"] == "password"
+    assert auth.verify_session(stale_cookie) is True
+    assert not hasattr(handler, "_trusted_auth_session_info")
+    assert getattr(handler, "_pending_set_cookies", []) == []
+    assert getattr(handler, "_trusted_auth_session_rotated", False) is False
+
+
+def test_first_unsafe_request_during_rotation_is_deliberately_retryable(monkeypatch):
+    # First browser POST carrying a stale non-trusted cookie plus its CSRF
+    # token: reconciliation rotates the session mid-request, so the CSRF gate
+    # rejects the write with the deliberate retryable reason while the
+    # replacement trusted cookie is emitted on the 403 response.
+    _trusted_env(monkeypatch)
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={stale_cookie}",
+            "Remote-User": "alice",
+            "Host": "127.0.0.1:8787",
+            "Origin": "http://127.0.0.1:8787",
+            auth.CSRF_HEADER_NAME: auth.csrf_token_for_session(stale_cookie),
+        }
+    )
+    handler.command = "POST"
+
+    # Authentication reconciles first (server.py order) and rotates.
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.verify_session(stale_cookie) is False
+
+    # The CSRF gate then sees the old request cookie: deliberate rejection.
+    assert routes._check_csrf(handler) is False
+    assert routes._csrf_rejection_error(handler) == "Session was re-authenticated - retry the request"
+
+    # The production 403 path flushes the queued replacement cookie and hands
+    # back the replacement CSRF token so an open tab can actually retry.
+    from api.helpers import j
+
+    j(handler, routes._csrf_rejection_payload(handler), status=403)
+    assert handler.status == 403
+    set_cookies = handler.header_values("Set-Cookie")
+    assert any(cookie.startswith("hermes_session=") for cookie in set_cookies)
+    replacement = handler._trusted_auth_session_cookie_value
+    assert auth.verify_session(replacement) is True
+    body = handler.json_body()
+    assert body["reason"] == "session_rotated"
+    assert body["csrf_token"] == auth.csrf_token_for_session(replacement)
+
+
+def test_second_request_after_rotation_succeeds_with_replacement_cookie(monkeypatch):
+    # Real client path: the retry may only use material the first RESPONSE
+    # handed back — the replacement cookie from Set-Cookie and the CSRF token
+    # from the 403 body. An open tab cannot mint tokens server-side.
+    _trusted_env(monkeypatch)
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    first = _Handler(
+        headers={
+            "Cookie": f"hermes_session={stale_cookie}",
+            "Remote-User": "alice",
+            "Host": "127.0.0.1:8787",
+            "Origin": "http://127.0.0.1:8787",
+            auth.CSRF_HEADER_NAME: auth.csrf_token_for_session(stale_cookie),
+        }
+    )
+    first.command = "POST"
+    assert auth.check_auth(first, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert routes._check_csrf(first) is False
+    from api.helpers import j
+
+    j(first, routes._csrf_rejection_payload(first), status=403)
+    replacement_cookie = next(
+        cookie for cookie in first.header_values("Set-Cookie") if cookie.startswith("hermes_session=")
+    ).split("=", 1)[1].split(";", 1)[0]
+    retry_token = first.json_body()["csrf_token"]
+
+    second = _Handler(
+        headers={
+            "Cookie": f"hermes_session={replacement_cookie}",
+            "Remote-User": "alice",
+            "Host": "127.0.0.1:8787",
+            "Origin": "http://127.0.0.1:8787",
+            auth.CSRF_HEADER_NAME: retry_token,
+        }
+    )
+    second.command = "POST"
+
+    assert auth.check_auth(second, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert routes._check_csrf(second) is True
+    # No further rotation: the trusted session is reused as-is.
+    assert second._trusted_auth_session_cookie_value == replacement_cookie
+    assert getattr(second, "_trusted_auth_session_rotated", False) is False
+
+
+def test_concurrent_rotations_for_same_identity_reuse_one_replacement(monkeypatch):
+    # Two requests that each carry their OWN stale cookie for the same
+    # identity (two tabs, or a poll racing a write, right after a
+    # group→profile remap) must rotate into the SAME replacement session —
+    # not two different ones. Two different replacements would let a client
+    # end up with cookie B from one response paired with the CSRF token
+    # minted for cookie A from the other's response (#6798 review round 4).
+    _trusted_env(monkeypatch)
+    stale_a = auth.create_session(auth_type="password", username="alice")
+    stale_b = auth.create_session(auth_type="password", username="alice")
+    assert stale_a != stale_b
+
+    handler_a = _Handler(headers={"Cookie": f"hermes_session={stale_a}", "Remote-User": "alice"})
+    handler_b = _Handler(headers={"Cookie": f"hermes_session={stale_b}", "Remote-User": "alice"})
+
+    assert auth.check_auth(handler_a, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.check_auth(handler_b, SimpleNamespace(path="/api/sessions", query="")) is True
+
+    replacement_a = handler_a._trusted_auth_session_cookie_value
+    replacement_b = handler_b._trusted_auth_session_cookie_value
+    assert replacement_a == replacement_b
+    assert auth.verify_session(replacement_a) is True
+
+
+def test_concurrent_rotations_for_different_identities_do_not_collide(monkeypatch):
+    # The reuse window must be scoped to the identity being rotated INTO —
+    # two different users rotating at the same time must never be handed
+    # each other's replacement session.
+    _trusted_env(monkeypatch)
+    stale_alice = auth.create_session(auth_type="password", username="alice")
+    stale_bob = auth.create_session(auth_type="password", username="bob")
+
+    handler_alice = _Handler(headers={"Cookie": f"hermes_session={stale_alice}", "Remote-User": "alice"})
+    handler_bob = _Handler(headers={"Cookie": f"hermes_session={stale_bob}", "Remote-User": "bob"})
+
+    assert auth.check_auth(handler_alice, SimpleNamespace(path="/api/sessions", query="")) is True
+    assert auth.check_auth(handler_bob, SimpleNamespace(path="/api/sessions", query="")) is True
+
+    replacement_alice = handler_alice._trusted_auth_session_cookie_value
+    replacement_bob = handler_bob._trusted_auth_session_cookie_value
+    assert replacement_alice != replacement_bob
+    assert auth.get_session_info(replacement_alice)["username"] == "alice"
+    assert auth.get_session_info(replacement_bob)["username"] == "bob"
+
+
+def test_concurrent_rotation_reuse_is_thread_safe(monkeypatch):
+    # Same scenario as test_concurrent_rotations_for_same_identity_reuse_one_replacement,
+    # but with real threads racing the check-then-create critical section in
+    # `_rotated_trusted_session`, to catch a lock ordering/reentrancy
+    # regression that a purely sequential test cannot exercise.
+    import threading
+
+    _trusted_env(monkeypatch)
+    thread_count = 8
+    barrier = threading.Barrier(thread_count)
+    replacements: list[str] = [None] * thread_count
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            stale = auth.create_session(auth_type="password", username="racer")
+            handler = _Handler(headers={"Cookie": f"hermes_session={stale}", "Remote-User": "racer"})
+            barrier.wait(timeout=5)
+            assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+            replacements[index] = handler._trusted_auth_session_cookie_value
+        except BaseException as exc:  # noqa: BLE001 - surfaced via `errors` below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors, errors
+    assert all(replacements), "every worker must have rotated into a replacement session"
+    assert len(set(replacements)) == 1, "all concurrent rotations for one identity must converge on one session"
+
+
+def test_stale_cookie_shell_renders_replacement_csrf_token(monkeypatch):
+    # Regression (#6798 review): a PRESENT-but-invalidated request cookie must
+    # not leave the shell with an empty CSRF token — that disabled client-side
+    # token injection and bricked every unsafe request for exactly the rotated
+    # user until a manual reload.
+    _trusted_env(monkeypatch)
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    handler = _Handler(headers={"Cookie": f"hermes_session={stale_cookie}", "Remote-User": "alice"})
+    monkeypatch.setattr(routes, "_render_index_shell_base", lambda: "csrfToken:__CSRF_TOKEN_JSON__")
+    monkeypatch.setattr("api.extensions.inject_extension_tags", lambda html: html)
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/", query="")) is True
+    routes.handle_get(handler, SimpleNamespace(path="/", query=""))
+
+    replacement = handler._trusted_auth_session_cookie_value
+    assert replacement != stale_cookie
+    expected = auth.csrf_token_for_session(replacement)
+    assert expected
+    assert handler.body_text() == f"csrfToken:{json.dumps(expected)}"
+
+
+def test_unbound_rotation_preserves_authenticated_profile_selection(monkeypatch):
+    # Rotating into an UNBOUND session (wildcard map) must re-sign the
+    # authenticated profile cookie for the replacement session; otherwise the
+    # next request rejects the stale signature and silently falls back to the
+    # process default profile.
+    _trusted_env(monkeypatch, groups_header="Remote-Groups", group_map={"admins": "*"})
+    stale_cookie = auth.create_session(auth_type="password", username="alice")
+    profile_cookie = auth.sign_profile_cookie_value("devops", stale_cookie)
+    handler = _Handler(
+        headers={
+            "Cookie": f"hermes_session={stale_cookie}; hermes_profile={profile_cookie}",
+            "Remote-User": "alice",
+            "Remote-Groups": "admins",
+        }
+    )
+
+    assert auth.check_auth(handler, SimpleNamespace(path="/api/sessions", query="")) is True
+
+    replacement = handler._trusted_auth_session_cookie_value
+    assert handler._trusted_auth_session_info["bound_profile"] is None
+    assert profiles.get_active_profile_name() == "devops"
+    reissued = next(
+        cookie for cookie in handler._pending_set_cookies if cookie.startswith("hermes_profile=")
+    ).split("=", 1)[1].split(";", 1)[0]
+    assert auth.verify_profile_cookie_value(reissued, replacement) == "devops"
+
+    # The follow-up request presenting only response material keeps the profile.
+    second = _Handler(
+        headers={
+            "Cookie": f"hermes_session={replacement}; hermes_profile={reissued}",
+            "Remote-User": "alice",
+            "Remote-Groups": "admins",
+        }
+    )
+    assert auth.check_auth(second, SimpleNamespace(path="/api/sessions", query="")) is True
+    from api.helpers import get_profile_cookie
+
+    assert get_profile_cookie(second) == "devops"
+
+
+def _extract_csrf_wrapper_script() -> str:
+    src = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+    script = next(
+        (
+            match.group(1)
+            for match in re.finditer(r"<script>((?:(?!</script>).)*)</script>", src, re.S)
+            if "X-Hermes-CSRF-Token" in match.group(1)
+        ),
+        None,
+    )
+    assert script, "CSRF fetch wrapper script not found in index.html"
+    return script
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required to execute the fetch wrapper")
+def test_fetch_wrapper_adopts_rotated_csrf_token_for_retry():
+    # Execute the REAL inline wrapper from index.html: the first unsafe fetch
+    # sends the shell token and receives the rotation 403; the retry must send
+    # the replacement token from that 403 body — no page reload involved, and
+    # with NO artificial delay between the two fetches. The wrapper's
+    # returned promise must not resolve until the token has actually been
+    # adopted, or a caller that awaits fetch() and immediately fires the next
+    # request would still race the token here (#6798 review round 4).
+    script = _extract_csrf_wrapper_script()
+    harness = """
+'use strict';
+global.window = globalThis;
+global.location = new URL('http://127.0.0.1:8787/');
+global.document = { baseURI: 'http://127.0.0.1:8787/' };
+window.__HERMES_CONFIG__ = { csrfToken: 'OLD_TOKEN' };
+const sentTokens = [];
+window.fetch = function (input, init) {
+  const headers = init && init.headers ? Object.fromEntries(init.headers) : {};
+  sentTokens.push(headers['x-hermes-csrf-token'] || null);
+  if (sentTokens.length === 1) {
+    return Promise.resolve({
+      status: 403,
+      headers: { get: (name) => (name === 'Content-Type' ? 'application/json' : null) },
+      clone() {
+        return {
+          json: () =>
+            Promise.resolve({
+              error: 'Session was re-authenticated - retry the request',
+              reason: 'session_rotated',
+              csrf_token: 'NEW_TOKEN',
+            }),
+        };
+      },
+    });
+  }
+  return Promise.resolve({
+    status: 200,
+    headers: { get: () => 'application/json' },
+    clone() { return { json: () => Promise.resolve({}) }; },
+  });
+};
+%SCRIPT%
+;(async () => {
+  await fetch('/api/sessions', { method: 'POST' });
+  // No setTimeout here on purpose: firing the second request the instant
+  // the first await resolves proves synchronous adoption, not merely
+  // "eventually consistent" adoption masked by a timing gap.
+  await fetch('/api/sessions', { method: 'POST' });
+  console.log(JSON.stringify(sentTokens));
+})();
+"""
+    harness = harness.replace("%SCRIPT%", script)
+    result = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    first, second = json.loads(result.stdout.strip())
+    assert first == "OLD_TOKEN"
+    assert second == "NEW_TOKEN"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required to execute the fetch wrapper")
+def test_fetch_wrapper_adopts_rotated_csrf_token_from_safe_get():
+    # The session poll is a plain GET, and trusted-header reconciliation can
+    # rotate the session on ANY request — including this one. Its 200 JSON
+    # response carries `csrf_token` with no `reason` field (that field is
+    # reserved for the 403 recovery payload); the wrapper must still adopt
+    # it, and a subsequent unsafe request must carry the new token, again
+    # with no delay between the two calls (#6798 review round 4).
+    script = _extract_csrf_wrapper_script()
+    harness = """
+'use strict';
+global.window = globalThis;
+global.location = new URL('http://127.0.0.1:8787/');
+global.document = { baseURI: 'http://127.0.0.1:8787/' };
+window.__HERMES_CONFIG__ = { csrfToken: 'OLD_TOKEN' };
+const sentTokens = [];
+window.fetch = function (input, init) {
+  const method = (init && init.method) || 'GET';
+  if (method === 'GET') {
+    return Promise.resolve({
+      status: 200,
+      headers: { get: () => 'application/json' },
+      clone() {
+        return { json: () => Promise.resolve({ session_id: 'abc', csrf_token: 'POLL_ROTATED_TOKEN' }) };
+      },
+    });
+  }
+  const headers = init && init.headers ? Object.fromEntries(init.headers) : {};
+  sentTokens.push(headers['x-hermes-csrf-token'] || null);
+  return Promise.resolve({
+    status: 200,
+    headers: { get: () => 'application/json' },
+    clone() { return { json: () => Promise.resolve({}) }; },
+  });
+};
+%SCRIPT%
+;(async () => {
+  await fetch('/api/session?id=abc');
+  await fetch('/api/sessions', { method: 'POST' });
+  console.log(JSON.stringify(sentTokens));
+})();
+"""
+    harness = harness.replace("%SCRIPT%", script)
+    result = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    [sent] = json.loads(result.stdout.strip())
+    assert sent == "POLL_ROTATED_TOKEN"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is required to execute the fetch wrapper")
+def test_fetch_wrapper_ignores_non_json_same_origin_responses():
+    # A same-origin GET that is NOT JSON (a static asset, an SSE stream) must
+    # never be probed with .clone().json() — that would try to buffer a
+    # long-lived stream, or throw on a non-JSON body. The wrapper must pass
+    # such responses through untouched and must not crash.
+    script = _extract_csrf_wrapper_script()
+    harness = """
+'use strict';
+global.window = globalThis;
+global.location = new URL('http://127.0.0.1:8787/');
+global.document = { baseURI: 'http://127.0.0.1:8787/' };
+window.__HERMES_CONFIG__ = { csrfToken: 'OLD_TOKEN' };
+let jsonCloneCalls = 0;
+window.fetch = function (input, init) {
+  return Promise.resolve({
+    status: 200,
+    headers: { get: (name) => (name === 'Content-Type' ? 'text/event-stream' : null) },
+    clone() {
+      jsonCloneCalls += 1;
+      return { json: () => Promise.reject(new Error('must not be called on a stream')) };
+    },
+  });
+};
+%SCRIPT%
+;(async () => {
+  const res = await fetch('/api/events?channel=x');
+  console.log(JSON.stringify({ status: res.status, jsonCloneCalls }));
+})();
+"""
+    harness = harness.replace("%SCRIPT%", script)
+    result = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout.strip())
+    assert outcome["status"] == 200
+    assert outcome["jsonCloneCalls"] == 0
