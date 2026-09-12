@@ -34,12 +34,26 @@ compression contexts.
 """
 
 
+def _part_type_in(part, part_types):
+    """True when a content part's ``type`` is a plain string in ``part_types``.
+
+    Total over malformed persisted input (#6378 review): ``part.get('type')``
+    can be an unhashable structured value (list/dict) from a corrupt row; a
+    raw ``part.get('type') in part_types`` membership test against a set would
+    raise TypeError and abort recovery. String-only comparison never raises.
+    """
+    if not isinstance(part, dict):
+        return False
+    part_type = part.get('type')
+    return isinstance(part_type, str) and part_type in part_types
+
+
 def _content_text(content, *, part_types):
     if isinstance(content, list):
         return "\n".join(
             str(part.get("text") or part.get("content") or "")
             for part in content
-            if isinstance(part, dict) and part.get("type") in part_types
+            if _part_type_in(part, part_types)
         ).strip()
     return str(content or "").strip()
 
@@ -47,10 +61,7 @@ def _content_text(content, *, part_types):
 def _content_has_part_type(content, part_types):
     if not isinstance(content, list):
         return False
-    return any(
-        isinstance(part, dict) and part.get("type") in part_types
-        for part in content
-    )
+    return any(_part_type_in(part, part_types) for part in content)
 
 
 def is_context_compression_marker(message):
