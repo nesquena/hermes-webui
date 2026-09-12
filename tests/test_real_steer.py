@@ -31,6 +31,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 @pytest.fixture(autouse=True)
 def _restore_auth_sessions():
     """Snapshot and restore api.auth._sessions — see test_1058 for the rationale."""
+    if os.environ.get("HERMES_WEBUI_PYTHON"):
+        os.environ["HERMES_AGENT_PYTHON"] = os.environ["HERMES_WEBUI_PYTHON"]
     import api.auth as _auth
     snapshot = dict(_auth._sessions)
     yield
@@ -120,6 +122,39 @@ class TestHandleChatSteerHappyPath:
             _handle_chat_steer(handler, {"session_id": sid, "text": "Use Python instead"})
 
         agent.steer.assert_called_once_with("Use Python instead")
+        body = _captured_response(handler)
+        assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
+
+    def test_accepts_multiple_steers_in_order(self, _clear_caches):
+        """Repeated accepted steers must all reach agent.steer() in submit order.
+
+        The CLI concatenates pending steer payloads at the next tool-result
+        boundary.  WebUI must not add a frontend/server slot that replaces the
+        first steer with the second.
+        """
+        from api.streaming import _handle_chat_steer
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+        sid, stream_id = "sid_multi_steer", "stream_multi_steer"
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[sid] = (agent, "sig")
+        with STREAMS_LOCK:
+            import queue as _q
+            STREAMS[stream_id] = _q.Queue()
+
+        sess = MagicMock()
+        sess.active_stream_id = stream_id
+        with patch("api.streaming.get_session", return_value=sess):
+            handler = _make_handler()
+            for text in ("first steer", "second steer", "third steer"):
+                assert _handle_chat_steer(handler, {"session_id": sid, "text": text}) is not False
+
+        assert agent.steer.call_args_list == [
+            unittest.mock.call("first steer"),
+            unittest.mock.call("second steer"),
+            unittest.mock.call("third steer"),
+        ]
         body = _captured_response(handler)
         assert body == {"accepted": True, "fallback": None, "stream_id": stream_id}
 
@@ -291,6 +326,8 @@ class TestFrontendWiring:
         cls.cmds = (Path(__file__).parent.parent / "static" / "commands.js").read_text(encoding="utf-8")
         cls.msgs = (Path(__file__).parent.parent / "static" / "messages.js").read_text(encoding="utf-8")
         cls.i18n = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+        cls.ui = (Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+        cls.sessions = (Path(__file__).parent.parent / "static" / "sessions.js").read_text(encoding="utf-8")
 
     def test_cmd_steer_calls_endpoint(self):
         idx = self.cmds.find("async function cmdSteer(")
@@ -302,7 +339,7 @@ class TestFrontendWiring:
     def test_try_steer_calls_endpoint(self):
         idx = self.cmds.find("async function _trySteer(")
         assert idx >= 0
-        body = _source_between(self.cmds, "async function _trySteer(", "\nasync function cmdTitle")
+        body = _source_between(self.cmds, "async function _trySteer(", "\nasync function cmdTitle(args){")
         assert "/api/chat/steer" in body, "_trySteer must POST to /api/chat/steer"
         assert "method:'POST'" in body or 'method:"POST"' in body
 
@@ -412,6 +449,7 @@ class TestFrontendWiring:
               return {{accepted:true}};
             }}
             eval({json.dumps(steer_src)});
+            _setSteerPendingCount('A', 1);
             (async()=>{{
               const delivered = await _trySteer('hint', false);
               assert.strictEqual(delivered, true);
@@ -422,7 +460,12 @@ class TestFrontendWiring:
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
-        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        try:
+            subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            print(exc.stdout)
+            print(exc.stderr, file=sys.stderr)
+            raise
 
     def test_attachment_only_steer_indicator_uses_file_label(self):
         import json
@@ -468,6 +511,790 @@ class TestFrontendWiring:
               assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
               assert.ok(!indicatorText.includes('file tools/read_file'));
             }})().catch(err=>{{console.error(err); process.exit(1);}});
+            """
+        )
+        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+    def test_multiple_accepted_steers_preserve_pending_count(self):
+        """The visible pending-steer count must grow, not collapse to one steer."""
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        steer_src = _source_between(
+            self.cmds,
+            "function _steerUploadedAttachmentPaths",
+            "\nasync function cmdTitle",
+        )
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            let S = {{session:{{session_id:'A'}}, pendingFiles:[]}};
+            let status = null;
+            function t(key, arg){{ return `${{key}}:${{arg ?? ''}}`; }}
+            function _showSteerIndicator(){{}}
+            function _showSteerRecovery(){{}}
+            function _clearComposerDraft(){{}}
+            function showToast(){{}}
+            async function api(){{ return {{accepted:true}}; }}
+            globalThis.setComposerStatus = (value) => {{ status = value; }};
+            eval({json.dumps(steer_src)});
+            _setSteerPendingCount('A', 1);
+            (async()=>{{
+              const delivered = await _trySteer('second steer', true);
+              assert.strictEqual(delivered, true);
+              assert.strictEqual(status, 'steer_pending_count:2');
+            }})().catch(err=>{{console.error(err); process.exit(1);}});
+            """
+        )
+        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+    def test_render_messages_does_not_clear_pending_steer(self):
+        """Transcript rendering must not mutate or clear pending steer state."""
+        render_start = "function renderMessages(options){"
+        start = self.ui.find(render_start)
+        assert start >= 0
+        end = self.ui.find(chr(10) + "function ", start + len(render_start))
+        render_src = self.ui[start:end]
+        assert "if(typeof updateSteerPendingBadge==='function') updateSteerPendingBadge(sid);" in render_src, (
+            "renderMessages may refresh the owner-scoped indicator"
+        )
+        assert "clearSteerPending" not in render_src, (
+            "renderMessages must not explicitly clear pending state"
+        )
+        assert "_setSteerPendingCount" not in render_src, (
+            "renderMessages must not mutate the pending count"
+        )
+
+    def test_set_busy_false_clears_pending_steer(self):
+        """Turn completion is the explicit consumption/requeue boundary."""
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        busy_start = "function setBusy(v){"
+        start = self.ui.find(busy_start)
+        assert start >= 0
+        end = self.ui.find(chr(10) + "function ", start + len(busy_start))
+        busy_src = self.ui[start:end]
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            const counts = {{ A: 2 }};
+            const clearCalls = [];
+            let indicator = null;
+            let queueBadgeSid = null;
+            globalThis.S = {{ busy: true, session: {{ session_id: 'A' }} }};
+            globalThis._queueDrainSid = 'A';
+            globalThis.updateSendBtn = () => {{}};
+            globalThis._clearActivityElapsedTimer = () => {{}};
+            globalThis.setStatus = () => {{}};
+            globalThis.setComposerStatus = () => {{}};
+            globalThis.updateQueueBadge = (sid) => {{ queueBadgeSid = sid; }};
+            globalThis.shiftQueuedSessionMessage = () => null;
+            globalThis._steerPendingCounts = counts;
+            globalThis.clearSteerPending = (sid) => {{
+              clearCalls.push(sid);
+              delete counts[sid];
+              indicator = 0;
+            }};
+            eval({json.dumps(busy_src)});
+            setBusy(false);
+            assert.deepStrictEqual(clearCalls, ['A'], 'setBusy(false) must clear pending state');
+            assert.strictEqual(queueBadgeSid, 'A');
+            assert.strictEqual(counts.A, undefined, 'setBusy(false) must clear pending count');
+            assert.strictEqual(indicator, 0, 'setBusy(false) must refresh empty indicator');
+            assert.strictEqual(globalThis._queueDrainSid, null);
+            """
+        )
+        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+    def _run_steer_consumption_script(self, statements):
+        """Evaluate the production arming/consumption helpers in Node."""
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        helper_start = self.msgs.find("const _STEER_CONSUMPTION_ARMED = {};")
+        assert helper_start >= 0
+        helper_end = self.msgs.find("\nfunction attachLiveStream(", helper_start)
+        assert helper_end > helper_start
+        helper_src = self.msgs[helper_start:helper_end]
+        try_body = _source_between(self.cmds, "async function _trySteer(", "\nasync function cmdTitle")
+        combined_src = helper_src.replace('const _STEER_CONSUMPTION_ARMED = {};', 'var _STEER_CONSUMPTION_ARMED = {};').replace('const _STEER_TOOL_BATCHES = {};', 'var _STEER_TOOL_BATCHES = {};').replace('function _resetSteerToolBatch', 'globalThis._resetSteerToolBatch = function').replace('function _clearSteerToolBatch', 'globalThis._clearSteerToolBatch = function').replace('function _trackSteerToolStart', 'globalThis._trackSteerToolStart = function', 1).replace('function _trackSteerToolComplete', 'globalThis._trackSteerToolComplete = function', 1).replace('function _armSteerConsumption', 'globalThis._armSteerConsumption = function').replace('function _resetSteerConsumptionArming', 'globalThis._resetSteerConsumptionArming = function').replace('function _consumeArmedSteer', 'globalThis._consumeArmedSteer = function')
+        combined_src = combined_src + "\n" + try_body
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            globalThis.S = {{ session: {{ session_id: 'A', active_stream_id: 'stream-1' }}, pendingFiles: [], activeStreamId: 'stream-1' }};
+            const counts = {{ A: 1 }};
+            const clearCalls = [];
+            globalThis._steerPendingCounts = counts;
+            globalThis.clearSteerPending = (sid) => {{
+              clearCalls.push(sid);
+              delete counts[sid];
+            }};
+            globalThis._steerOwnerIsCurrent = (sid) => sid === 'A';
+            globalThis._armSteerConsumption = (sid, streamId) => {{
+              const current = _STEER_CONSUMPTION_ARMED[sid];
+              if (current && current.streamId === streamId && current.armed) {{
+                if (current.consumed) {{
+                  delete _STEER_CONSUMPTION_ARMED[sid];
+                  clearSteerPending(sid);
+                  return true;
+                }}
+                return true;
+              }}
+              _STEER_CONSUMPTION_ARMED[sid] = {{ streamId, armed: true, consumed: false }};
+              return true;
+            }};
+            globalThis.$ = () => null;
+            globalThis.api = async () => ({{ accepted: true }});
+            globalThis._steerTextWithPendingFiles = async (text) => text;
+            globalThis._steerFallbackIsDeadRun = () => false;
+            globalThis._steerOwnerStreamIsCurrent = () => true;
+            globalThis._steerClearCurrentOwnerDeadRun = () => false;
+            globalThis._showSteerRecovery = () => {{}};
+            globalThis._steerIndicatorText = () => '';
+            globalThis.t = (key) => key;
+            globalThis._steerSetComposerStatusForOwner = () => {{}};
+            globalThis._steerFailureMessageKey = (fallback) => `steer_fail_${{fallback}}`;
+            globalThis._showSteerIndicator = () => {{}};
+            globalThis._steerIndicatorText = () => '';
+            globalThis.getSteerPendingCount = (sid) => counts[sid] || 0;
+            globalThis._setSteerPendingCount = (sid, count) => {{ if (count) counts[sid] = count; else delete counts[sid]; }};
+            globalThis._updateSteerPendingIndicatorStatus = () => {{}};
+            globalThis.showToast = () => {{}};
+            eval({json.dumps(combined_src)});
+            (async()=>{{
+              {statements}
+            }})().catch(err => {{
+              console.error(err);
+              process.exit(1);
+            }});
+            """
+        )
+        try:
+            subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            print(exc.stdout)
+            print(exc.stderr, file=sys.stderr)
+            raise
+
+    def test_steer_helpers_never_reference_globalthis_lexical_state(self):
+        """Greptile P1 (2026-09-04T14:32): `_consumeArmedSteer` indexed
+        `globalThis._STEER_TOOL_BATCHES`, but messages.js is a classic script —
+        its top-level `const` bindings are lexical and never land on
+        globalThis, so that read threw TypeError before clearSteerPending ran
+        and aborted the whole tool_complete handler. The eval-based harness
+        masks this (direct-eval `var` probes land on globalThis), so guard the
+        source directly: steer helpers must reference these bindings by their
+        lexical names only."""
+        forbidden = [
+            "globalThis._STEER_TOOL_BATCHES",
+            "globalThis._STEER_CONSUMPTION_ARMED",
+        ]
+        for needle in forbidden:
+            assert needle not in self.msgs, (
+                f"steer helpers must not read lexical state via {needle} — "
+                "top-level const in a classic script is not a globalThis property"
+            )
+
+    def test_steer_event_before_submission_does_not_clear_pending_count(self):
+        """A pre-submit boundary must not consume a steer accepted later."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false);\n"
+            "assert.deepStrictEqual(clearCalls, []);\n"
+            "assert.strictEqual(counts.A, 1);\n"
+        )
+
+    def test_next_tool_call_after_accepted_steer_clears_count(self):
+        """A live `tool` event after the accepted steer means the batch was drained."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.streamId, 'stream-1');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0);\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'boundary must advance the epoch');\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+        )
+
+    def test_parallel_batch_completion_requires_all_tool_ids(self):
+        """Finalized tool batches drain accepted steers once, onto their last result."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
+            "_trackSteerToolStart('A', 'stream-1', 'tool-1');\n"
+            "_trackSteerToolStart('A', 'stream-1', 'tool-2');\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-1'), false, 'the first parallel result must not drain');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false);\n"
+            "assert.deepStrictEqual(clearCalls, []);\n"
+            "assert.strictEqual(counts.A, 2, 'the pending count must survive the first parallel result');\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-2'), true, 'the final parallel result drains');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+        )
+
+    def test_single_tool_batch_completion_drains(self):
+        """A single-tool batch retains the existing immediate drain behavior."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
+            "_trackSteerToolStart('A', 'stream-1', 'tool-1');\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-1'), true, 'the single tracked tool completes the batch');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+            "assert.strictEqual(_STEER_TOOL_BATCHES.A, undefined);\n"
+        )
+
+    def test_batch_tracking_survives_same_stream_reconnect(self):
+        """Reattaching an in-flight parallel batch must preserve its id set."""
+        self._run_steer_consumption_script(
+            "_trackSteerToolStart('A', 'stream-1', 'tool-1');\n"
+            "_trackSteerToolStart('A', 'stream-1', 'tool-2');\n"
+            "_resetSteerToolBatch('A', 'stream-1', { reconnecting: true });\n"
+            "assert.deepStrictEqual([..._STEER_TOOL_BATCHES.A.ids].sort(), ['tool-1', 'tool-2']);\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-1'), false);\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-2'), true);\n"
+        )
+
+    def test_legacy_tool_completion_without_id_is_not_a_batch_boundary(self):
+        """A legacy Hermes Agent emits tool_complete without tid. The missing
+        id carries no batch-boundary information, so it must not consume every
+        pending steer at the first concurrent tool result."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
+            "_trackSteerToolStart('A', 'stream-1', 'tool-1');\n"
+            "_trackSteerToolStart('A', 'stream-1', 'tool-2');\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', ''), false, 'legacy missing id is not a boundary');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'legacy missing id must not consume');\n"
+            "assert.strictEqual(_STEER_TOOL_BATCHES.A.ids.size, 2, 'both batch members must survive');\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-1'), false);\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-2'), true, 'the tracked batch itself is the boundary');\n"
+        )
+
+    def test_detached_reconnect_preflight_clears_stale_pending_for_stream(self):
+        """The reconnect preflight is another terminal teardown path for a
+        detached stream that completed while no EventSource was attached."""
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        helper_src = _source_between(
+            self.msgs,
+            "function _clearOwnerInflightState",
+            "\n  function _isMarkerOnlyAssistantMessage",
+        )
+        helper_src = helper_src.replace("function _clearOwnerInflightState(){", "globalThis._clearOwnerInflightState = function(){", 1)
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            let clearedConsumption = [];
+            globalThis.INFLIGHT = {{ A: {{ streamId: 'stream-1' }} }};
+            globalThis._isActiveSession = () => true;
+            globalThis.S = {{ activeStreamId: 'stream-1' }};
+            globalThis.activeSid = 'A';
+            globalThis.streamId = 'stream-1';
+            globalThis._clearSteerToolBatch = () => {{}};
+            globalThis._clearSteerConsumptionForStream = (sid, stream) => clearedConsumption.push([sid, stream]);
+            globalThis.clearInflightState = () => {{}};
+            globalThis._clearActivePaneInflightIfOwner = () => {{}};
+            globalThis._resumeSessionStreamAfterLiveChat = () => {{}};
+            eval({json.dumps(helper_src)});
+            _clearOwnerInflightState();
+            assert.deepStrictEqual(clearedConsumption, [['A', 'stream-1']]);
+            """
+        )
+        try:
+            subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            print(exc.stdout)
+            print(exc.stderr, file=sys.stderr)
+            raise
+
+    def test_clear_inflight_state_releases_batch_tracking(self):
+        """Terminal teardown must not leak stream-scoped batch state."""
+        self._run_steer_consumption_script(
+            "_trackSteerToolStart('A', 'stream-1', 'tool-1');\n"
+            "_clearSteerToolBatch('A', 'stream-1');\n"
+            "assert.strictEqual(_STEER_TOOL_BATCHES.A, undefined);\n"
+            "assert.strictEqual(_trackSteerToolComplete('A', 'stream-1', 'tool-1'), false, 'a cleared batch has no boundary information');\n"
+        )
+
+    def test_terminal_inflight_teardown_clears_pending_steer_for_stream(self):
+        """A detached stream can complete without delivering done to its old
+        EventSource. The terminal teardown helper is the shared chokepoint that
+        must expire the corresponding pending count for that stream."""
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        helper_src = _source_between(
+            self.msgs,
+            "function _clearOwnerInflightState",
+            "\n  function _isMarkerOnlyAssistantMessage",
+        )
+        helper_src = helper_src.replace("function _clearOwnerInflightState(){", "globalThis._clearOwnerInflightState = function(){", 1)
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            let clearedBatches = [];
+            let clearedConsumption = [];
+            globalThis.INFLIGHT = {{ A: {{ streamId: 'stream-1' }} }};
+            globalThis._isActiveSession = () => true;
+            globalThis.S = {{ activeStreamId: 'stream-1' }};
+            globalThis.activeSid = 'A';
+            globalThis.streamId = 'stream-1';
+            globalThis._clearSteerToolBatch = (sid, stream) => clearedBatches.push([sid, stream]);
+            globalThis._clearSteerConsumptionForStream = (sid, stream) => clearedConsumption.push([sid, stream]);
+            globalThis.clearInflightState = () => {{}};
+            globalThis._clearActivePaneInflightIfOwner = () => {{}};
+            globalThis._resumeSessionStreamAfterLiveChat = () => {{}};
+            eval({json.dumps(helper_src)});
+            _clearOwnerInflightState();
+            assert.deepStrictEqual(clearedBatches, [['A', 'stream-1']]);
+            assert.deepStrictEqual(clearedConsumption, [['A', 'stream-1']]);
+            assert.strictEqual(INFLIGHT.A, undefined);
+            """
+        )
+        try:
+            subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            print(exc.stdout)
+            print(exc.stderr, file=sys.stderr)
+            raise
+
+    def test_idle_session_reload_clears_stale_pending_for_stream(self):
+        """Reopening a session after its detached stream completed must expire
+        the owner's stale pending count, even though the old EventSource never
+        delivered done."""
+        import json
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        start=self.sessions.index("  if(INFLIGHT[sid]){\n    _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
+        end=self.sessions.index("\n  // Sync context usage indicator", start)
+        block=self.sessions[start:end]
+        prefix = """
+        const assert = require('assert');
+        const counts={A:2};
+        const cleared=[];
+        globalThis.INFLIGHT={};
+        globalThis.S={busy:true,activeStreamId:null,session:{session_id:'A',active_stream_id:null,pending_attachments:[]}};
+        globalThis._keepStaleUntilLoaded=false;
+        globalThis._loadGeneration=null;
+        globalThis._hydrateTodosFromSession=()=>{};
+        globalThis.sid='A'; globalThis.activeStreamId='stream-1'; globalThis.sameSessionForceReload=false;
+        globalThis._serverLiveSnapshotInflight=()=>null; globalThis._selectLiveRecoveryInflight=()=>null;
+        globalThis._ensureInflightLiveAssistantMessage=()=>{}; globalThis._projectInflightMessagesForActivityBursts=()=>[];
+        globalThis._mergePendingSessionMessage=()=>{};
+        globalThis.appendThinking=()=>{};
+        globalThis._clearSteerConsumptionForStream=(sid,streamId)=>cleared.push([sid,streamId]);
+        globalThis.clearLiveToolCards=()=>{}; globalThis._syncToolCallsForLoadedMessages=()=>{};
+        globalThis._ensureMessagesLoaded=async()=>{}; globalThis._rearmActiveSessionStream=()=>{};
+        globalThis._isCurrentLoad=()=>true; globalThis.setBusy=()=>{};
+        globalThis.attachLiveStream=()=>{}; globalThis.watchInflightSession=()=>{};
+        globalThis.updateSendBtn=()=>{}; globalThis.setStatus=()=>{};
+        globalThis.setComposerStatus=()=>{}; globalThis.syncTopbar=()=>{};
+        globalThis.renderMessages=()=>{}; globalThis.updateQueueBadge=()=>{};
+        globalThis.startApprovalPolling=()=>{}; globalThis.startClarifyPolling=()=>{};
+        globalThis._fetchYoloState=()=>{}; globalThis.resumeManualCompressionForSession=()=>{};
+        globalThis._deferWorkspaceRefreshForSession=()=>{};
+        S.activeStreamId=null;
+        (async()=>{
+          var activeStreamId='stream-1';
+          var sid='A';
+          var S={activeStreamId:'stream-2',session:{session_id:'B'}};
+        """
+        suffix = """
+        assert.deepStrictEqual(cleared,[["A",null],["A","stream-1"]]);
+        assert.strictEqual(counts.A,2);
+        })().catch(err=>{console.error(err);process.exit(1);});
+        """
+        script = prefix + "await eval(" + json.dumps("(async()=>{" + block + "})()") + ");" + suffix
+        try:
+            subprocess.run([node,"-e",script],check=True,capture_output=True,text=True)
+        except subprocess.CalledProcessError as exc:
+            print(exc.stdout)
+            print(exc.stderr,file=sys.stderr)
+            raise
+
+    def test_idle_reload_expires_owner_pending_even_without_stream_snapshot(self):
+        """Polling can force a reload after the owner is already known idle, so
+        the idle branch must expire owner state even when no stream id remains."""
+        start = self.sessions.index("  }else{\n    // Phase 2b: Idle session")
+        end = self.sessions.index("    // _ensureMessagesLoaded is idempotent;", start)
+        idle_head = self.sessions[start:end]
+        assert "if (typeof _clearSteerConsumptionForStream === 'function') {" in idle_head
+        assert "_clearSteerConsumptionForStream(sid, null);" in idle_head
+
+    def test_new_stream_reattach_clears_stale_pending_count(self):
+        """A different stream is a turn boundary and must expire stale pending state."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
+            "_resetSteerConsumptionArming('A', 'stream-2');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined);\n"
+            "assert.strictEqual(counts.A, undefined, 'a new stream must clear the stale pending count');\n"
+            "assert.deepStrictEqual(clearCalls, []);\n"
+        )
+
+    def test_midawait_boundary_keeps_prearm_for_first_steer_of_turn(self):
+        """Round-2 invariant: a boundary during an in-flight POST must not
+        disarm the arm. If a tool-batch boundary lands while the POST is in
+        flight, _consumeArmedSteer runs armed with count 0 and must keep the
+        arm until either the next real boundary consumes it or the delayed
+        response reconciles the boundary.
+
+        The api stub fires a mid-await boundary (the exact 0-count window)
+        while the POST is unresolved, then resolves accepted. Harness audit
+        note: the shared harness seeds counts.A=1, so this test explicitly
+        deletes the entry first to make the 0→1 transition real."""
+        self._run_steer_consumption_script(
+            # Real 0-to-1 transition: delete the harness seed first.
+            "delete counts.A;\n"
+            # Boundary fires inside the api stub while the POST is in flight.
+            "globalThis.api = async () => {\n"
+            "  const midAwait = _consumeArmedSteer('A', 'stream-1');\n"
+            "  if (midAwait !== false) throw new Error('mid-await boundary must NOT consume at count 0');\n"
+            "  if (!_STEER_CONSUMPTION_ARMED.A || _STEER_CONSUMPTION_ARMED.A.armed !== true) {\n"
+            "    throw new Error('mid-await boundary must NOT delete the pre-arm');\n"
+            "  }\n"
+            "  return { accepted: true };\n"
+            "};\n"
+            "assert.strictEqual(await _trySteer('first steer', true), true);\n"
+            "assert.strictEqual(counts.A, 1, 'accepted steers are always counted; over-count self-heals at turn end');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'the reconciled arm survives with epoch=1');\n"
+        )
+
+    def test_boundary_during_post_reconciles_delayed_accepted_response(self):
+        # #7434: accepted steers are always counted (never suppressed by the
+        # epoch). The boundary may have drained the steer before the accepted
+        # response resolves, producing a bounded over-count that self-heals
+        # at turn end. Hiding a still-pending steer (under-count) is worse.
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "let accept = null;\n"
+            "globalThis.api = () => new Promise(resolve => {\n"
+            "  accept = () => resolve({ accepted: true });\n"
+            "});\n"
+            "const first = _trySteer('racing steer', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true, 'pre-arm must exist before the response');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'count 0 cannot consume yet');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'boundary must advance the epoch');\n"
+            "accept();\n"
+            "assert.strictEqual(await first, true);\n"
+            "assert.strictEqual(counts.A, 1, 'accepted steers are always counted; over-count self-heals at turn end');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'arm survives with advanced epoch');\n"
+        )
+
+    def test_concurrent_steers_one_boundary_epoch_reconciliation(self):
+        """#7434: two steers in flight, one boundary fires during both POSTs.
+        Both accepted responses always increment (over-count policy), so the
+        count reaches 2. The next boundary or done clears it."""
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "let accept1 = null;\n"
+            "let accept2 = null;\n"
+            "let callCount = 0;\n"
+            "globalThis.api = () => {\n"
+            "  callCount++;\n"
+            "  if (callCount === 1) return new Promise(resolve => { accept1 = () => resolve({ accepted: true }); });\n"
+            "  return new Promise(resolve => { accept2 = () => resolve({ accepted: true }); });\n"
+            "};\n"
+            "const first = _trySteer('steer one', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "const second = _trySteer('steer two', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true, 'arm exists before boundary');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0, 'epoch is 0 before boundary');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false, 'count 0, no payload to clear');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 1, 'epoch advanced to 1');\n"
+            "accept1();\n"
+            "accept2();\n"
+            "assert.strictEqual(await first, true, 'first steer resolved');\n"
+            "assert.strictEqual(await second, true, 'second steer resolved');\n"
+            "assert.strictEqual(counts.A, 2, 'accepted steers are always counted; over-count self-heals at next boundary or turn end');\n"
+        )
+
+    def test_accepted_steer_after_sibling_failure_rearms_and_counts(self):
+        """#7434: accepted steer must re-arm via _armSteerConsumption (not the
+        bare getter) when a sibling failure deleted the shared arm. The epoch
+        read must return the live epoch from the re-created arm, not 0."""
+        self._run_steer_consumption_script(
+            "delete counts.A;\n"
+            "let accept1 = null;\n"
+            "let apiCalls = [];\n"
+            "globalThis.api = (url, options) => {\n"
+            "  apiCalls.push(url);\n"
+            "  if (apiCalls.length === 1) {\n"
+            "    return new Promise(resolve => { accept1 = () => resolve({ accepted: true }); });\n"
+            "  }\n"
+            "  return Promise.resolve({ accepted: false, fallback: 'busy' });\n"
+            "};\n"
+            "const first = _trySteer('accepted steer', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            "const second = _trySteer('failed sibling', true);\n"
+            "assert.strictEqual(await second, false, 'sibling failed');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'sibling failure deleted the shared arm');\n"
+            "assert.strictEqual(counts.A, undefined, 'count stays 0 (nothing accepted yet)');\n"
+            "accept1();\n"
+            "assert.strictEqual(await first, true, 'first steer accepted');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.boundaryEpoch, 0, 're-arm via _armSteerConsumption re-created the arm at epoch 0');\n"
+            "assert.strictEqual(counts.A, 1, 'epoch reconcile did not skip (0<0 false); count incremented');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true, 'next boundary consumes and clears');\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+        )
+
+    def test_prearm_steer_consumption_before_accepted_response(self):
+        """The backend may call agent.steer() before HTTP resolves and reach the
+        next tool boundary before response processing resumes. Pre-arm on
+        submission so a concurrent boundary still sees the consumption signal;
+        failed fallbacks release the pre-arm before restoring the draft."""
+        self._run_steer_consumption_script(
+            "counts.A = 1;\n"
+            "await _trySteer('continue with this', true);\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+            "globalThis.api = async () => ({ accepted: false, fallback: 'busy' });\n"
+                        "await _trySteer('rejected steer', true);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined);\n"
+        )
+
+    def test_network_timeout_releases_prearm(self):
+        """DeepSeek round-0 question, now locked by test: if the steer POST
+        never reaches the server (network timeout / 5xx), the pre-arm installed
+        at submit time must be released — otherwise a later accepted steer of
+        the same session would be consumed at the stale stream boundary from
+        the failed submission. The catch-all sets fallback=network_error and
+        the generic fallback path releases the arm via
+        _resetSteerConsumptionArming; the count stays 0 and nothing is
+        consumed."""
+        self._run_steer_consumption_script(
+            # Real timeout shape: no accepted steer exists yet, so the count is
+            # 0 (delete the harness seed — a count>0 here would mean a sibling
+            # steer is genuinely pending, which is the concurrent-failure case
+            # covered by test_concurrent_failure_keeps_sibling_accepted_arm).
+            "delete counts.A;\n"
+            "globalThis.api = async () => { throw new Error('timeout'); };\n"
+            "assert.strictEqual(await _trySteer('will time out', true), false);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'timeout must release the pre-arm');\n"
+            "assert.strictEqual(counts.A, undefined, 'timeout path must not touch the count');\n"
+            "assert.deepStrictEqual(clearCalls, [], 'nothing was consumed');\n"
+            # And a boundary arriving on the still-running stream consumes nothing.
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), false);\n"
+        )
+
+    def test_concurrent_failure_keeps_sibling_accepted_arm(self):
+        """Greptile P1 (2026-09-05T04:07): two steers race on the same session
+        and stream; one resolves accepted (count > 0, arm waiting for the
+        boundary) before the other fails. The failed fallback's
+        _resetSteerConsumptionArming must not delete the shared arm — the
+        accepted steer's count would otherwise strand until turn end. A bare
+        arm with no pending payload still gets cleared, and a stream change
+        still clears everything."""
+        self._run_steer_consumption_script(
+            # steer#1 accepted mid-run: count raised, arm installed, waiting.
+            "assert.strictEqual(await _trySteer('sibling accepted', true), true);\n"
+            "assert.strictEqual(counts.A, 2);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true);\n"
+            # steer#2 on the same session+stream fails after steer#1 resolved.
+            "globalThis.api = async () => ({ accepted: false, fallback: 'busy' });\n"
+            "assert.strictEqual(await _trySteer('sibling failed', true), false);\n"
+            "assert.strictEqual(counts.A, 2, 'the failed sibling must not touch the accepted count');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true, 'failure release must keep the sibling accepted arm');\n"
+            # The next real boundary still consumes the accepted steer.
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+        )
+
+    def test_failure_first_overlap_rearms_on_acceptance(self):
+        """Greptile P1 (2026-09-05T04:29): two steers overlap on the same
+        session and stream — #2's submit (with its pre-arm) happens while #1
+        is still in flight, and #1 then fails, releasing the shared arm before
+        #2 resolves accepted. Acceptance must re-arm idempotently before
+        raising the count, otherwise the raised count never sees a boundary
+        consume and strands until turn end."""
+        self._run_steer_consumption_script(
+            "counts.A = 0;\n"
+            # #1's POST hangs until #2 has submitted, then fails — so the
+            # failure release lands AFTER #2's pre-arm and BEFORE #2's accept.
+            "let release1 = null;\n"
+            "const originalApi = globalThis.api;\n"
+            "globalThis.api = (url, options) => new Promise(resolve => {\n"
+            "  release1 = () => resolve({ accepted: false, fallback: 'busy' });\n"
+            "});\n"
+            "const first = _trySteer('in flight then fails', true);\n"
+            "await Promise.resolve();\n"
+            "await Promise.resolve();\n"
+            # #2 submits while #1 is still hanging: its pre-arm is a no-op
+            # (already armed), but it moves the arm's lifecycle forward.
+            "globalThis.api = async () => ({ accepted: true });\n"
+            "const second = _trySteer('overlapping accepted', true);\n"
+            "await Promise.resolve();\n"
+            "if (typeof release1 !== 'function') throw new Error('#1 api stub never captured a resolver');\n"
+            "release1();\n"
+            "assert.strictEqual(await first, false, '#1 failed');\n"
+            "assert.strictEqual(await second, true, '#2 accepted');\n"
+            "assert.strictEqual(counts.A, 1, '#2 raised the count 0→1');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true, 'acceptance re-armed after #1 released the shared arm');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+        )
+
+    def test_reset_still_clears_bare_arm_and_stream_change(self):
+        """The count>0 protection only covers arms whose stream still holds
+        pending payload: a bare arm with count 0 is released as before, and a
+        stream change (attach/detach) clears both arm and stale count."""
+        self._run_steer_consumption_script(
+            # Bare arm, no pending payload → submission release still works.
+            "counts.A = 0;\n"
+            "globalThis.api = async () => ({ accepted: false, fallback: 'busy' });\n"
+            "assert.strictEqual(await _trySteer('fails with count 0', true), false);\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'bare arm still released');\n"
+            # Stream change → full clear (arm + stale count). The arm belongs
+            # to stream-9; a reset against a DIFFERENT stream id is the
+            # attach/detach path and clears everything, count included.
+            "counts.A = 2;\n"
+            "_armSteerConsumption('A', 'stream-9');\n"
+            "_resetSteerConsumptionArming('A', 'stream-8');\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A, undefined, 'stream-change full clear');\n"
+            "assert.strictEqual(counts.A, undefined, 'stale count expired on stream change');\n"
+        )
+
+    def test_tool_completion_after_accepted_steer_clears_count(self):
+        """A post-submit tool result is the earliest observable drain boundary."""
+        listener_start = self.msgs.find("source.addEventListener('tool',e=>{")
+        assert listener_start >= 0
+        complete_start = self.msgs.find("source.addEventListener('tool_complete',e=>{", listener_start)
+        assert complete_start > listener_start
+        complete_end = self.msgs.find("\n    source.addEventListener('todo_state'", complete_start)
+        assert complete_end > complete_start
+        complete_listener = self.msgs[complete_start:complete_end]
+        assert "_trackSteerToolComplete(activeSid, streamId, d.tid||d.id)" in complete_listener
+        assert "_steerBatchFinalized" in complete_listener
+        assert "_consumeArmedSteer(activeSid, streamId)" in complete_listener
+        assert "_trackSteerToolStart(activeSid, streamId, d.tid||d.id)" in self.msgs[listener_start:complete_start]
+        assert "_consumeArmedSteer(activeSid, streamId)" not in self.msgs[listener_start:complete_start]
+
+    def test_all_accumulated_steers_clear_at_one_boundary(self):
+        """Agent drains concatenated pending steers once; one boundary clears all."""
+        self._run_steer_consumption_script(
+            "counts.A = 2;\n"
+            "assert.strictEqual(await _trySteer('second steer', true), true);\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+            "assert.strictEqual(counts.A, undefined);\n"
+        )
+
+    def test_reconnect_before_boundary_preserves_consumption_signal(self):
+        """Reattaching the same stream must not lose the post-submit boundary arm."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
+            "_resetSteerConsumptionArming('A', 'stream-1', { reconnecting: true });\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true);\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+        )
+
+    def test_same_stream_reconnect_preserves_accumulated_pending_count(self):
+        """Reconnecting to the same stream keeps every accumulated steer live."""
+        self._run_steer_consumption_script(
+            "assert.strictEqual(await _trySteer('continue with this', true), true);\n"
+            "_resetSteerConsumptionArming('A', 'stream-1', { reconnecting: true });\n"
+            "assert.strictEqual(_STEER_CONSUMPTION_ARMED.A.armed, true);\n"
+            "assert.strictEqual(counts.A, 2, 'the same stream reconnect must preserve the pending count');\n"
+            "assert.strictEqual(_consumeArmedSteer('A', 'stream-1'), true);\n"
+            "assert.deepStrictEqual(clearCalls, ['A']);\n"
+        )
+
+    def test_clear_steer_pending_refreshes_display(self):
+        """Explicit clear is the only function that moves count to zero."""
+        import json
+        import shutil
+        import subprocess
+        import textwrap
+
+        node = shutil.which("node")
+        if not node:  # pragma: no cover
+            pytest.skip("node not available")
+        assert node is not None
+
+        badge_start = "function updateSteerPendingBadge(sessionId){"
+        start = self.ui.find(badge_start)
+        assert start >= 0
+        end = self.ui.find(chr(10) + "function updateQueueBadge", start + len(badge_start))
+        badge_src = self.ui[start:end]
+
+        script = textwrap.dedent(
+            f"""
+            const assert = require('assert');
+            const counts = {{ A: 2 }};
+            let indicator = null;
+            globalThis._steerPendingCounts = counts;
+            globalThis._currentSteerSessionId = () => 'A';
+            globalThis._steerOwnerIsCurrent = () => true;
+            globalThis.getSteerPendingCount = (sid) => counts[sid] || 0;
+            globalThis.setComposerStatus = () => {{}};
+            globalThis._updateSteerPendingIndicatorStatus = (count) => {{ indicator = count; }};
+            globalThis._setSteerPendingCount = (sid, count) => {{
+              if (count) counts[sid] = count; else delete counts[sid];
+              return count;
+            }};
+            eval({json.dumps(badge_src)});
+            counts.A = 2;
+            updateSteerPendingBadge('A');
+            assert.strictEqual(counts.A, 2, 'refresh must not mutate count');
+            assert.strictEqual(indicator, 2);
+            clearSteerPending('A');
+            assert.strictEqual(counts.A, undefined, 'explicit clear must remove count');
+            assert.strictEqual(indicator, 0, 'explicit clear must refresh display');
             """
         )
         subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
@@ -951,16 +1778,42 @@ class TestFrontendWiring:
         """Frontend must listen for pending_steer_leftover SSE events and queue them."""
         idx = self.msgs.find("addEventListener('pending_steer_leftover'")
         assert idx >= 0, "messages.js must add a listener for pending_steer_leftover"
-        block = self.msgs[idx:idx + 600]
+        block = self.msgs[idx:idx + 1200]
         assert "queueSessionMessage" in block, (
             "pending_steer_leftover handler must queue the leftover text for the next turn"
+        )
+        assert "clearSteerPending" in block, (
+            "pending_steer_leftover must explicitly clear pending state after requeue"
+        )
+        assert "updateSteerPendingBadge" not in block, (
+            "leftover must use explicit clear, not the display-only refresh"
+        )
+
+    def test_done_handler_clears_background_owner_pending_count(self):
+        """Maintainer review (2026-09-04T15:15): the done handler runs for both
+        active and background sessions, while the setBusy(false) clear only
+        fires for the viewed session — so a steer delivered to a non-active
+        owner session A (user switched to B) never cleared. The done handler
+        must call clearSteerPending(completedSid) unconditionally, which is
+        the one point that covers background owners without inventing an
+        'applied' proof."""
+        idx = self.msgs.find("addEventListener('done'")
+        assert idx >= 0, "messages.js must have a done listener"
+        block = self.msgs[idx:idx + 9000]
+        completed_idx = block.find("_clearOwnerInflightState();")
+        assert completed_idx >= 0, "done handler must call _clearOwnerInflightState"
+        tail = block[completed_idx:completed_idx + 600]
+        assert "clearSteerPending(completedSid)" in tail, (
+            "done handler must call clearSteerPending(completedSid) right after "
+            "_clearOwnerInflightState so a background owner's stale pending count "
+            "clears when its turn completes"
         )
 
 
 # ── i18n keys ─────────────────────────────────────────────────────────────
 
 class TestI18nKeys:
-    """The two new keys (cmd_steer_delivered, steer_leftover_queued) must be in all 6 locales."""
+    """Steer-facing user copy must exist in every locale block."""
 
     @classmethod
     def setup_class(cls):
@@ -970,6 +1823,12 @@ class TestI18nKeys:
         assert self.i18n.count("cmd_steer_delivered:") >= 6, (
             f"cmd_steer_delivered appears {self.i18n.count('cmd_steer_delivered:')} times; "
             f"expected ≥6 (one per locale)"
+        )
+
+    def test_steer_pending_count_in_all_locales(self):
+        assert self.i18n.count("steer_pending_count:") == 15, (
+            f"steer_pending_count appears {self.i18n.count('steer_pending_count:')} times; "
+            f"expected 15 (one per locale)"
         )
 
     def test_steer_leftover_queued_in_all_locales(self):

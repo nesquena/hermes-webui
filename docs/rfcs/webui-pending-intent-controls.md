@@ -179,6 +179,42 @@ Open questions:
   need a separate scoped affordance later?
 - The current preference is not to change the Stop icon in the first version.
 
+## Steer Pending Visibility
+
+Repeated Steer submits within one active run are all accepted and consumed in
+order — the agent core concatenates pending steer payloads at the next
+tool-result boundary. To make that visible, the composer tracks a per-session
+pending-steer count:
+
+- Each accepted Steer delivery increments the owning session's count and the
+  composer status shows `N pending steer` (reusing the `queued_count` i18n
+  key), so the user can tell a second Steer was delivered rather than
+  silently replaced.
+- The count clears only as an explicit state transition (`clearSteerPending`)
+  when the session's pending-steer buffer is consumed, expired, or re-queued:
+  at the finalized tool-batch boundary, on `pending_steer_leftover`
+  (unconsumed text is queued as a session message for the next turn), on a
+  replacement stream or authoritative idle reload, and on turn completion.
+  The accepted response always increments the count: the boundary epoch
+  proves only that a boundary was observed after arming, not that this
+  particular steer was in the Agent buffer when that boundary drained.
+  An over-count (transient +1 that clears at turn end) is preferable to
+  hiding pending input (under-count), because the composer must never
+  claim "no pending steers" when the Agent still holds one. The count
+  may be off by ≤ (steers affected by boundary-before-buffer-append),
+  and self-heals at turn completion when the `done` handler zeroes it
+  unconditionally. A definitive fix requires backend consumption
+  attribution in the steer response.
+- Transcript rendering (`renderMessages`) may refresh the indicator but never
+  mutates the count; a render while steer still waits at a tool-result boundary
+  must continue showing the pending value.
+- The count is per-owner-session: steering session A then switching to
+  session B shows B's count (likely empty), not A's.
+
+Open question carried from review: should the pending count also render as a
+badge on the session list entry for non-active owner sessions (same treatment
+as the queued-message badge)?
+
 ## Steer Live-to-Final Rendering
 
 Steer is not only a temporary live UI state. It must preserve meaning in both
