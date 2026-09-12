@@ -4577,6 +4577,37 @@ def set_max_tokens(max_tokens) -> dict[str, int | None]:
     return get_max_tokens_status()
 
 
+def get_vision_capability_first() -> dict:
+    """Read ``agent.vision_capability_first`` from the active profile's config.yaml."""
+    cfg = get_config()
+    agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+    enabled = isinstance(agent_cfg, dict) and agent_cfg.get("vision_capability_first") is True
+    return {"vision_capability_first": bool(enabled)}
+
+
+def set_vision_capability_first(enabled: bool) -> dict:
+    """Persist ``agent.vision_capability_first`` to the active profile's config.yaml.
+
+    Capability-first image routing: when true, ``auto`` mode attaches images
+    natively to ANY model whose vision capability resolves to True, and a
+    configured ``auxiliary.vision`` backend keeps its documented fallback role
+    (describing images for text-only mains) instead of capturing every image.
+    Default false preserves the #97339 de-facto aux behavior. The agent-side
+    default lives in hermes_cli/config_defaults.py; this only writes the key.
+    """
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        agent_cfg = config_data.get("agent")
+        if not isinstance(agent_cfg, dict):
+            agent_cfg = {}
+        agent_cfg["vision_capability_first"] = bool(enabled)
+        config_data["agent"] = agent_cfg
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    return get_vision_capability_first()
+
+
 def set_reasoning_display(show: bool) -> dict:
     """Persist ``display.show_reasoning`` to the active profile's config.yaml.
 

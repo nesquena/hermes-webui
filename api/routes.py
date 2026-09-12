@@ -13828,6 +13828,10 @@ def handle_get(handler, parsed) -> bool:
         from api.config import get_auxiliary_models
         return j(handler, get_auxiliary_models())
 
+    if parsed.path == "/api/vision-capability-first":
+        from api.config import get_vision_capability_first
+        return j(handler, get_vision_capability_first())
+
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -15550,6 +15554,16 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    if parsed.path == "/api/vision-capability-first":
+        # Capability-first image routing toggle (agent.vision_capability_first
+        # in config.yaml — the same key the CLI/hermes config can set). Writes
+        # config.yaml, not WebUI settings.json, so every surface shares it.
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return bad(handler, "vision-capability-first: 'enabled' must be a boolean")
+        from api.config import set_vision_capability_first
+        return j(handler, set_vision_capability_first(enabled))
 
     if parsed.path == "/api/admin/reload":
         # Hot-reload api.models module to pick up code changes without restart.

@@ -12636,6 +12636,26 @@ async function _loadAuxiliaryModels(){
    _mainAdvancedConfig=null;
   }
   _bindMainAdvancedOptionsButton();
+  // Capability-first toggle state (agent.vision_capability_first in config.yaml)
+  try{
+   const vcf=await api('/api/vision-capability-first');
+   const vcfCb=$('settingsVisionCapabilityFirst');
+   if(vcfCb) vcfCb.checked=!!(vcf&&vcf.vision_capability_first);
+  }catch(e){/* toggle falls back to unchecked; save reports failures */}
+  const vcfBind=$('settingsVisionCapabilityFirst');
+  if(vcfBind&&!vcfBind._bound){
+   vcfBind._bound=true;
+   vcfBind.addEventListener('change',async()=>{
+    const desired=vcfBind.checked;
+    try{
+     await api('/api/vision-capability-first',{method:'POST',body:JSON.stringify({enabled:desired})});
+     if(typeof showToast==='function') showToast(desired?(t('settings_vcf_on')||'Vision-capable models now receive images directly'):(t('settings_vcf_off')||'Auxiliary vision model handles images again'));
+    }catch(err){
+     vcfBind.checked=!desired;
+     if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save setting');
+    }
+   });
+  }
   _auxTasks=_normalizeAuxiliaryTasks((auxData&&auxData.tasks)||[]);
   // Build a quick lookup: taskKey → config
   const taskMap={};
