@@ -3000,6 +3000,20 @@
   @media(max-width:900px){
     .workspace-panel-edge-toggle{display:none!important;}
     .rightpanel{display:none}
+    /* Right panel: slide-over from right. Must live at the 900px compact
+       breakpoint, not 640px — the JS (_isCompactWorkspaceViewport) adds
+       `mobile-open` at <=900px, so foldables/tablets (Pixel Fold inner
+       screen ~730px) fell into a dead zone where the panel stayed
+       display:none and the toggle did nothing. */
+    .rightpanel{display:flex!important;position:fixed!important;
+      --mobile-rightpanel-width:min(300px, 100vw);
+      right:calc(-1 * var(--mobile-rightpanel-width))!important;
+      top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;padding-top:var(--app-titlebar-safe-top);box-sizing:border-box;transition:right .25s ease;
+      box-shadow:none!important;}
+    .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
+    .rightpanel .resize-handle{display:none;}
+    .rightpanel .panel-header{row-gap:8px;}
+    .rightpanel .panel-actions{align-items:center;gap:8px;}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
@@ -3604,10 +3618,16 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 }
 .resize-handle:hover,.resize-handle.dragging{background:var(--accent);}
 /* Desktop-only: position:relative for sidebar/rightpanel resize handles.
-   Must be scoped to min-width:641px so it doesn't override the mobile
-   position:fixed slide-in overlay set in the max-width:640px @media block above. */
+   The sidebar needs position:relative from min-width:641px so the desktop
+   collapse mechanism (.sidebar-collapsed → width:0) works in the foldable/
+   tablet band (641-900px). The rightpanel stays position:fixed (slide-over
+   overlay) through 900px and only becomes an in-flow resizable pane at
+   min-width:901px — otherwise it would sit in-flow at 300px next to the
+   sidebar and squeeze the chat. */
 @media(min-width:641px){
   .sidebar{position:relative;}
+}
+@media(min-width:901px){
   .rightpanel{position:relative;}
 }
 .sidebar .resize-handle{right:-2px;}

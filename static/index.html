@@ -25,7 +25,10 @@
 <meta name="theme-color" id="hermes-theme-color" content="#0D0D1A">
 <script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
-<script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
+<!-- Keep this inline pre-paint script in sync with _sidebarShouldCollapse() in boot.js:
+     tri-state rule — '1' = collapsed, '0' = open, unset = collapsed only in the
+     641-900px compact band. If the helper's logic changes, update this too. -->
+<script>(function(){try{var p=localStorage.getItem('hermes-webui-sidebar-collapsed');var compact=(window.matchMedia('(max-width: 900px)').matches&&window.matchMedia('(min-width: 641px)').matches);if(p==='1'||(p==null&&compact))document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
 <link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
 <script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
 <script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
