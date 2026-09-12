@@ -602,4 +602,3 @@ class TestRealLoaderNestedConfig:
         assert not (write_home / "memories").exists(), (
             "memories/ must not be created when memory is disabled"
         )
-
