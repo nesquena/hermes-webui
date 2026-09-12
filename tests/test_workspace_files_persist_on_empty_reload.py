@@ -28,7 +28,7 @@ BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 
 def test_ephemeral_guard_does_not_remove_session_localstorage_key():
     """The empty-session guard block must NOT call
-    localStorage.removeItem('hermes-webui-session') — that's exactly what
+    _forgetActiveSession() — that's exactly what
     breaks the second refresh."""
     # Find the guard block (message_count===0 check)
     guard_idx = BOOT_JS.find("(S.session.message_count||0) === 0")

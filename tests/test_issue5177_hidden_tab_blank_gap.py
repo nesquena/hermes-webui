@@ -178,9 +178,15 @@ def test_ensure_messages_loaded_supports_force_override():
         "opts=opts||{};" in region
         or "constopts=arguments[1]||{};" in region
     ), "_ensureMessagesLoaded must coerce opts to an object before reading opts.force"
-    # The early-return MUST be GATED on !opts.force.
-    assert "if(!opts.force&&S.messages&&S.messages.length>0" in region, (
+    # The early-return MUST be GATED on !opts.force (and, since the multi-tab
+    # fix, also on the transcript actually belonging to this sid).
+    assert "if(!opts.force&&_messagesBelongToSid&&S.messages&&S.messages.length>0" in region, (
         "_ensureMessagesLoaded's early-return must short-circuit on opts.force"
+    )
+    # Ownership guard: a transcript left over from another conversation must not
+    # satisfy the early return (multi-tab / session-switch stale render fix).
+    assert "const_messagesBelongToSid=(_messagesOwnerSid===sid);" in region, (
+        "_ensureMessagesLoaded must verify the loaded transcript belongs to sid"
     )
 
 
