@@ -34,7 +34,7 @@ from api.config import (
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
     get_effective_default_model, _get_session_agent_lock,
 )
-from api.workspace import get_last_workspace
+from api.workspace import get_last_workspace, _resolve_path
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
@@ -1264,7 +1264,8 @@ class Session:
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
-        self.workspace = str(Path(workspace).expanduser().resolve())
+        self.profile = profile
+        self.workspace = str(_resolve_path(workspace, profile=profile))
         # #6672: immutable snapshot of the workspace at session creation time.
         # s.workspace is updated on every turn when the user switches workspaces
         # mid-session via the WebUI header dropdown; interpolating the live
@@ -1276,7 +1277,7 @@ class Session:
         # without a persisted created_workspace fall back to the workspace
         # recorded on disk, which is the best available approximation.
         self.created_workspace = (
-            str(Path(created_workspace).expanduser().resolve())
+            str(_resolve_path(created_workspace, profile=profile))
             if created_workspace
             else self.workspace
         )
@@ -5098,7 +5099,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
-        workspace=workspace_path or get_last_workspace(),
+        workspace=workspace_path or get_last_workspace(profile=profile),
         model=effective_model,
         model_provider=effective_model_provider,
         profile=profile,
@@ -5763,6 +5764,7 @@ def get_session_for_file_ops(sid: str):
         workspace, recovered = resolve_implicit_workspace_with_recovery(
             stored_workspace,
             get_last_workspace,
+            profile=session_profile or None,
         )
     except ValueError:
         # Preserve the existing file-handler behavior for non-missing trust or
@@ -6797,7 +6799,7 @@ def import_cli_session(
     s = Session(
         session_id=session_id,
         title=title,
-        workspace=get_last_workspace(),
+        workspace=get_last_workspace(profile=profile),
         model=model,
         messages=messages,
         profile=profile,
@@ -7720,7 +7722,10 @@ def _load_cli_sessions_uncached(
     _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
     def _cli_workspace():
         if _cli_workspace_cache[0] is None:
-            _cli_workspace_cache[0] = str(get_last_workspace())
+            try:
+                _cli_workspace_cache[0] = str(get_last_workspace(profile=_cli_profile))
+            except TypeError:
+                _cli_workspace_cache[0] = str(get_last_workspace())
         return _cli_workspace_cache[0]
 
     _webhook_pid_cache: list[str | None] = [None]
@@ -7934,7 +7939,7 @@ def _load_cli_sessions_uncached(
                 cli_sessions.append({
                     'session_id': sid,
                     'title': _display_title,
-                    'workspace': str(get_last_workspace()),
+                    'workspace': str(get_last_workspace(profile=_cli_profile)),
                     'model': row['model'] or None,
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],

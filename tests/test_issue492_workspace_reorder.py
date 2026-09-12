@@ -22,7 +22,8 @@ class TestWorkspaceReorderEndpoint:
             {"path": "/home/user/b", "name": "Beta"},
             {"path": "/home/user/c", "name": "Gamma"},
         ]
-        mock_save.side_effect = lambda wss: wss
+        # Accept the profile-scoped save signature (save_workspaces(wss, profile=...)).
+        mock_save.side_effect = lambda wss, **kwargs: wss
         handler = _make_handler()
         _handle_workspace_reorder(handler, {
             "paths": ["/home/user/c", "/home/user/a", "/home/user/b"]

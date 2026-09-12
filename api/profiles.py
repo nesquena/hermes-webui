@@ -1711,19 +1711,22 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     default_workspace = None
     try:
         from api.config import DEFAULT_WORKSPACE as _DW
+        from api.workspace import _resolve_path, _remote_terminal_workspace_candidate
         lw_file = home / 'webui_state' / 'last_workspace.txt'
         if lw_file.exists():
             _p = lw_file.read_text(encoding='utf-8').strip()
             if _p:
-                _pp = Path(_p).expanduser()
-                if _pp.is_dir():
-                    default_workspace = str(_pp.resolve())
+                _pp = _resolve_path(_p, profile=name)
+                remote_cand = _remote_terminal_workspace_candidate(_p, profile=name)
+                if remote_cand is not None or _pp.is_dir():
+                    default_workspace = str(_pp)
         if default_workspace is None:
             for _key in ('workspace', 'default_workspace'):
                 _v = cfg.get(_key)
                 if _v:
-                    _pp = Path(str(_v)).expanduser().resolve()
-                    if _pp.is_dir():
+                    _pp = _resolve_path(str(_v), profile=name)
+                    remote_cand = _remote_terminal_workspace_candidate(str(_v), profile=name)
+                    if remote_cand is not None or _pp.is_dir():
                         default_workspace = str(_pp)
                         break
         if default_workspace is None:
@@ -1731,8 +1734,9 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             if isinstance(_tc, dict):
                 _cwd = _tc.get('cwd', '')
                 if _cwd and str(_cwd) not in ('.', ''):
-                    _pp = Path(str(_cwd)).expanduser().resolve()
-                    if _pp.is_dir():
+                    _pp = _resolve_path(str(_cwd), profile=name)
+                    remote_cand = _remote_terminal_workspace_candidate(str(_cwd), profile=name)
+                    if remote_cand is not None or _pp.is_dir():
                         default_workspace = str(_pp)
         if default_workspace is None:
             default_workspace = str(_DW)

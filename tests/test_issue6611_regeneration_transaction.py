@@ -193,7 +193,7 @@ def test_locked_postacceptance_workspace_exception_does_not_restore_turn(monkeyp
     monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
     monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *_args, **_kwargs: {"turn_id": "turn-6611"})
     monkeypatch.setattr(Session, "save", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args: (_ for _ in ()).throw(RuntimeError("workspace failed")))
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kw: (_ for _ in ()).throw(RuntimeError("workspace failed")))
 
     class FakeThread:
         def __init__(self, *args, **kwargs):

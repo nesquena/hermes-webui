@@ -200,7 +200,7 @@ def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, t
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: messages if _sid == sid else [])
     monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [meta])
-    monkeypatch.setattr(routes, "get_last_workspace", lambda: tmp_path / "workspace")
+    monkeypatch.setattr(routes, "get_last_workspace", lambda profile=None: tmp_path / "workspace")
     monkeypatch.setattr(routes, "import_cli_session", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read-only import must not persist")))
 
     response = routes._handle_session_import_cli(object(), {"session_id": sid})
