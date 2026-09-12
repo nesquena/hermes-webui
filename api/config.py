@@ -1399,6 +1399,37 @@ def _configured_model_ids(raw_models: object) -> list[str]:
     return model_ids
 
 
+def _provider_discover_allowed(provider_cfg: object) -> bool:
+    """Mirror the Hermes Agent ``discover_models`` opt-out (``model_switch_providers._discover_flag``).
+
+    ``discover_models`` defaults to True; the string forms ``"false"``/``"no"``/``"0"``
+    (case-insensitive) mean False. A provider that pins its catalog with
+    ``discover_models: false`` keeps its configured ``models:`` even when the entry is
+    also marked ``models_discovered: true`` — the explicit opt-out wins.
+    """
+    if not isinstance(provider_cfg, dict):
+        return True
+    discover = provider_cfg.get("discover_models", True)
+    if isinstance(discover, str):
+        return discover.strip().lower() not in {"false", "no", "0"}
+    return bool(discover)
+
+
+def _provider_models_are_discovered_catalog(provider_cfg: object) -> bool:
+    """True when ``models:`` is an auto-discovered catalog that should defer to the live probe.
+
+    A provider entry marked ``models_discovered: true`` carries a per-model *metadata*
+    mapping written by Hermes discovery, not a hand-curated allowlist — so the live
+    ``/v1/models`` catalog is authoritative. But an explicit ``discover_models: false``
+    re-pins the configured mapping as the source of truth, so honor that opt-out.
+    """
+    return (
+        isinstance(provider_cfg, dict)
+        and provider_cfg.get("models_discovered") is True
+        and _provider_discover_allowed(provider_cfg)
+    )
+
+
 def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
     """Return picker option rows from supported config allowlist shapes."""
     labels: dict[str, str] = {}
@@ -1416,6 +1447,29 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
         {"id": model_id, "label": labels.get(model_id, model_id)}
         for model_id in _configured_model_ids(raw_models)
     ]
+
+
+def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
+    """Merge picker option rows from multiple sources, first-seen order, deduped by id.
+
+    Used to preserve a discovered provider's configured model IDs (ordered first) as a
+    fallback when a live ``/v1/models`` probe transiently returns nothing, merged with
+    any static built-in catalog without producing duplicate ids.
+    """
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for rows in row_lists:
+        if not isinstance(rows, (list, tuple)):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            merged.append(row)
+    return merged
 
 
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
@@ -5744,9 +5798,9 @@ def _static_models_catalog_without_live_probes() -> dict:
             if (
                 isinstance(provider_cfg, dict)
                 and "models" in provider_cfg
-                and provider_cfg.get("models_discovered") is not True
+                and not _provider_models_are_discovered_catalog(provider_cfg)
             ):
-                raw_models = _configured_model_options(provider_cfg["models"])
+                raw_models = _configured_model_options(provider_cfg.get("models"))
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
@@ -8147,16 +8201,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # whichever model had local settings. Only Copilot skips the
                     # config-models allowlist branch and asks Hermes CLI for the
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
-                    _uses_models_as_settings_map = pid == "copilot" or (
-                        isinstance(provider_cfg, dict)
-                        and provider_cfg.get("models_discovered") is True
+                    _uses_models_as_settings_map = (
+                        pid == "copilot"
+                        or _provider_models_are_discovered_catalog(provider_cfg)
                     )
                     if (
                         not _uses_models_as_settings_map
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
                     ):
-                        raw_models = _configured_model_options(provider_cfg["models"])
+                        raw_models = _configured_model_options(provider_cfg.get("models"))
 
                     if not raw_models:
                         if pid == "moa":
@@ -8172,6 +8226,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 pid,
                                 _read_live_provider_model_ids(pid),
                             )
+                            if (
+                                not raw_models
+                                and _provider_models_are_discovered_catalog(provider_cfg)
+                            ):
+                                # A transient live-catalog failure must not drop a
+                                # provider's persisted discovered models (the empty
+                                # result would then be cached for up to 24h). Fall
+                                # back to the configured discovered IDs, ordered
+                                # first, merged with any static fallback (deduped).
+                                raw_models = _merge_model_option_rows(
+                                    _configured_model_options(provider_cfg.get("models")),
+                                    copy.deepcopy(_PROVIDER_MODELS.get(pid, [])),
+                                )
 
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
