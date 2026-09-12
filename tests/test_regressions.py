@@ -701,7 +701,7 @@ def test_live_stream_tokens_persist_partial_assistant_for_session_switch(cleanup
     # assistant text is mirrored into INFLIGHT state — is unchanged.
     assert "content:split.content" in messages_src, \
         "messages.js must persist the (think-split) partial assistant text into INFLIGHT state"
-    assert "_splitThinkFromContent(assistantText" in messages_src, \
+    assert "_semanticSnapshot(reasoningText)" in messages_src and "inflight.lastAssistantText=assistantText" in messages_src, \
         "the persisted partial must be derived from the live assistantText"
     assert "_live:true" in messages_src, \
         "messages.js must mark the persisted in-flight assistant row so renderMessages can re-anchor it"
@@ -1065,8 +1065,11 @@ def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_tes
     compact_token_body = token_body.replace(" ", "").replace("\n", "")
     assert "if(assistantRow){ensureAssistantRow();_scheduleRender();}" in compact_token_body, \
         "token handler should skip the per-token full-text parse after the live answer segment exists"
-    assert "constparsed=_parseStreamState();if(String((parsed&&parsed.displayText)||'').trim())ensureAssistantRow();_scheduleRender(parsed);" in compact_token_body, \
-        "token handler must only create the live answer segment once visible answer text starts"
+    assert "_scheduleSemanticProse(d.text);" in compact_token_body
+    assert "_parseStreamState()" not in compact_token_body
+    semantic_body = src[src.index("function _drainSemanticProse("):src.index("function _scheduleSemanticProse(")]
+    assert "if(String(parsed.displayText||'').trim()) ensureAssistantRow();" in semantic_body, \
+        "semantic batch must only create the live answer segment once visible answer text starts"
 
 
 def test_messages_js_stream_perf_cleanup_lifecycle(cleanup_test_sessions):

@@ -7265,6 +7265,12 @@ function _settleFinalScroll(token){
 }
 function scrollIfPinned(){
   if(!window._autoScrollFollow) return;
+  // Live producers only request follow work. The owner's scene transaction
+  // captures/restores once, after all visual writes in the shared frame.
+  const liveOwner=typeof LIVE_STREAMS!=='undefined'&&typeof S!=='undefined'&&S.session
+    ? LIVE_STREAMS[S.session.session_id] : null;
+  if(liveOwner&&liveOwner.streamId===S.activeStreamId&&
+     typeof liveOwner.deferScroll==='function'&&liveOwner.deferScroll()) return;
   // A jump-to-question owner is mid-flight: it deliberately holds the reader at
   // the jump target across smooth-scroll frames, so never let a live token
   // reclaim the bottom while it is active (#6621). _finishMessageJumpScroll()
@@ -13060,8 +13066,175 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
     _syncToolRowsContainer(tools, !!(opts&&opts.live));
   }
 }
+const _anchorSceneRenderProjectionCaches=new Map();
+function _releaseAnchorSceneRenderProjections(sessionId,streamId){
+  let released=0;
+  for(const [key,state] of _anchorSceneRenderProjectionCaches){
+    if(state.sessionId===String(sessionId||'')&&state.streamId===String(streamId||'')){
+      _anchorSceneRenderProjectionCaches.delete(key);
+      released++;
+    }
+  }
+  return released;
+}
+function _anchorSceneRenderCacheKey(scene, settled){
+  const identity=scene&&scene.identity&&typeof scene.identity==='object'?scene.identity:{};
+  const values=[
+    identity.session_id,
+    identity.turn_id,
+    identity.run_id,
+    identity.stream_id,
+    identity.local_id,
+    Array.isArray(identity.source_message_refs)?identity.source_message_refs:[],
+  ];
+  if(settled){
+    _anchorSceneRenderProjectionCaches.delete(_anchorSceneRenderCacheKey(scene,false));
+    return '';
+  }
+  // Without a stream/session owner there is no lifecycle that can release it.
+  if(!String(identity.session_id||'').trim()||!String(identity.stream_id||'').trim()||
+      !String(identity.turn_id||identity.local_id||'').trim()) return '';
+  return `live:${JSON.stringify(values)}`;
+}
+function _anchorSceneRenderOutputKey(row){
+  if(!row||typeof row!=='object') return '';
+  if(row.role==='tool'){
+    const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
+    const payload=row.payload&&typeof row.payload==='object'?row.payload:{};
+    const id=row.tool_call_id||tool.id||tool.tid||payload.id||payload.tid||'';
+    if(id) return `tool:call:${String(id)}`;
+  }
+  const stable=row.row_id||row.local_id||row.event_id||'';
+  return stable?`${String(row.role||'activity')}:${String(stable)}`:'';
+}
+function _anchorSceneAttachIncrementalProjection(rows, projection, state){
+  if(!Array.isArray(rows)||!projection||!state) return rows;
+  const changedKeys=Array.isArray(projection.changed_row_keys)?Array.from(new Set(projection.changed_row_keys)):[];
+  const changedOutputIndices=changedKeys.map(key=>{
+    const value=state.outputIndexByKey.get(String(key||''));
+    return value===undefined?-1:value;
+  });
+  const hasChanges=Array.isArray(projection.changed_row_keys)&&projection.changed_row_keys.length>0;
+  const renderProjection=hasChanges
+    ? {...projection,changed_row_keys:changedKeys,changed_output_indices:changedOutputIndices}
+    : {...projection,full_rebuild:false,changed_row_keys:[],changed_row_indices:[],changed_output_indices:[],fallback_reason:null};
+  try{Object.defineProperty(rows,'_anchorSceneProjection',{value:renderProjection,enumerable:false,configurable:true});}
+  catch(_){rows._anchorSceneProjection=renderProjection;}
+  return rows;
+}
+function _anchorSceneSourceRows(scene){
+  const descriptor=scene&&Object.getOwnPropertyDescriptor(scene,'_activity_rows_view');
+  const view=descriptor&&descriptor.enumerable===false?descriptor.value:null;
+  return Array.isArray(view)?view:(Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[]);
+}
+function _anchorSceneRowsIncrementalProjection(scene, opts){
+  const projection=scene&&scene.projection&&typeof scene.projection==='object'?scene.projection:null;
+  if(!projection) return null;
+  const settled=!!(opts&&opts.settled);
+  const rows=_anchorSceneSourceRows(scene);
+  const cacheKey=_anchorSceneRenderCacheKey(scene,settled);
+  if(!cacheKey) return null;
+  const state=_anchorSceneRenderProjectionCaches.get(cacheKey);
+  if(state&&state.revision===projection.revision&&state.sourceRows===rows){
+    return _anchorSceneAttachIncrementalProjection(state.outputRows,projection,state);
+  }
+  if(!state||projection.full_rebuild===true||state.mode!==String(scene.mode||'')) return null;
+  const changedIndices=Array.isArray(projection.changed_row_indices)?projection.changed_row_indices.map(Number):[];
+  if(!changedIndices.length){
+    if(rows.length!==state.sourceCount) return null;
+    state.revision=projection.revision;
+    state.sourceRows=rows;
+    return _anchorSceneAttachIncrementalProjection(state.outputRows,projection,state);
+  }
+  // Validate the complete dirty set before mutating the cached projection.
+  // Unknown identities, removals, deduplication or order changes use the full path.
+  let nextAppend=state.sourceCount;
+  const seen=new Set(),newKeys=new Set(),planned=[];
+  for(const index of changedIndices){
+    if(!Number.isInteger(index)||index<0||index>=rows.length||seen.has(index)) return null;
+    seen.add(index);
+    const row=rows[index],key=_anchorSceneRenderOutputKey(row);
+    if(!row||!key||row.role==='terminal'||_anchorSceneIsSettledSuccessfulCompression(row,settled)) return null;
+    const existing=state.outputIndexByKey.get(key);
+    const append=index>=state.sourceCount;
+    if(append){
+      if(index!==nextAppend++) return null;
+      if(row.role!=='tool'&&(existing!==undefined||newKeys.has(key))) return null;
+      newKeys.add(key);
+    }else{
+      if(!state.sourceOutputKeys||state.sourceOutputKeys[index]!==key||existing===undefined) return null;
+      if(row.role!=='prose'&&row.role!=='thinking') return null;
+      if(state.outputRows[existing].role!==row.role) return null;
+    }
+    const textKey=String(row.text||'').replace(/\s+/g,' ').trim();
+    if((row.role==='prose'||row.role==='thinking')&&!textKey) return null;
+    if(row.role==='prose'){
+      const collision=state.proseTextKeys.get(textKey);
+      if(collision!==undefined&&collision!==existing) return null;
+      if(planned.some(item=>item.row.role==='prose'&&item.textKey===textKey&&item.key!==key)) return null;
+    }
+    planned.push({row,key,index,append,textKey});
+  }
+  if(nextAppend!==rows.length) return null;
+  for(const item of planned){
+    const {row,key,index,append,textKey}=item;
+    let outputIndex=state.outputIndexByKey.get(key);
+    if(outputIndex!==undefined){
+      const previous=state.outputRows[outputIndex];
+      if(row.role==='prose'){
+        const oldText=String(previous.text||'').replace(/\s+/g,' ').trim();
+        if(state.proseTextKeys.get(oldText)===outputIndex) state.proseTextKeys.delete(oldText);
+      }
+      state.outputRows[outputIndex]=row.role==='tool'?_anchorSceneMergeToolRows(previous,row):row;
+    }else{
+      outputIndex=state.outputRows.length;
+      state.outputIndexByKey.set(key,outputIndex);
+      state.outputRows.push(row);
+    }
+    if(row.role==='prose') state.proseTextKeys.set(textKey,outputIndex);
+    state.sourceOutputKeys[index]=key;
+  }
+  state.sourceCount=rows.length;
+  state.sourceRows=rows;
+  state.revision=projection.revision;
+  return _anchorSceneAttachIncrementalProjection(state.outputRows,projection,state);
+}
+function _anchorSceneRememberFullProjection(scene, opts, rows){
+  const projection=scene&&scene.projection&&typeof scene.projection==='object'?scene.projection:null;
+  if(!projection||!Array.isArray(rows)) return;
+  const settled=!!(opts&&opts.settled);
+  const cacheKey=_anchorSceneRenderCacheKey(scene,settled);
+  if(!cacheKey) return;
+  const state={
+    sessionId:String(scene.identity?.session_id||''),
+    streamId:String(scene.identity?.stream_id||''),
+    turnId:String(scene.identity?.turn_id||scene.identity?.local_id||''),
+    mode:String(scene.mode||''),
+    settled,
+    revision:projection.revision,
+    sourceCount:_anchorSceneSourceRows(scene).length,
+    sourceRows:_anchorSceneSourceRows(scene),
+    sourceOutputKeys:_anchorSceneSourceRows(scene).map(_anchorSceneRenderOutputKey),
+    outputRows:rows,
+    outputIndexByKey:new Map(),
+    proseTextKeys:new Map(),
+  };
+  rows.forEach((row,index)=>{
+    const key=_anchorSceneRenderOutputKey(row);
+    if(key&&!state.outputIndexByKey.has(key)) state.outputIndexByKey.set(key,index);
+    if(row&&row.role==='prose'){
+      const textKey=String(row.text||'').replace(/\s+/g,' ').trim();
+      if(textKey&&!state.proseTextKeys.has(textKey)) state.proseTextKeys.set(textKey,index);
+    }
+  });
+  _anchorSceneRenderProjectionCaches.set(cacheKey,state);
+}
 function _anchorSceneRowsForRendering(scene, opts){
-  const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  const incrementalRows=typeof _anchorSceneRowsIncrementalProjection==='function'
+    ? _anchorSceneRowsIncrementalProjection(scene,opts)
+    : null;
+  if(incrementalRows) return incrementalRows;
+  const rows=_anchorSceneSourceRows(scene);
   const settled=!!(opts&&opts.settled);
   const live=!settled;
   const out=[];
@@ -13110,6 +13283,35 @@ function _anchorSceneRowsForRendering(scene, opts){
       out.push(row);
     }
   }
+  const projection=scene&&scene.projection&&typeof scene.projection==='object'?scene.projection:null;
+  if(projection&&Array.isArray(projection.changed_row_keys)){
+    const outputRowKey=(row,index)=>{
+      if(row&&row.role==='tool'){
+        const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
+        const payload=row.payload&&typeof row.payload==='object'?row.payload:{};
+        const id=row.tool_call_id||tool.id||tool.tid||payload.id||payload.tid||'';
+        if(id) return `tool:call:${String(id)}`;
+      }
+      const role=String(row&&row.role||'activity');
+      const stable=String(row&& (row.row_id||row.local_id||row.event_id)||'');
+      return stable?`${role}:${stable}`:'';
+    };
+    const outputIndexByKey=new Map();
+    out.forEach((row,index)=>{
+      const key=outputRowKey(row,index);
+      if(key&&!outputIndexByKey.has(key)) outputIndexByKey.set(key,index);
+    });
+    const changedOutputIndices=projection.changed_row_keys.map((key)=>{
+      const raw=String(key||'');
+      if(outputIndexByKey.has(raw)) return outputIndexByKey.get(raw);
+      const roleKey=out.findIndex((row)=>outputRowKey(row,0)===raw);
+      return roleKey;
+    });
+    const renderProjection={...projection,changed_output_indices:changedOutputIndices};
+    try{Object.defineProperty(out,'_anchorSceneProjection',{value:renderProjection,enumerable:false,configurable:true});}
+    catch(_){out._anchorSceneProjection=renderProjection;}
+  }
+  if(typeof _anchorSceneRememberFullProjection==='function') _anchorSceneRememberFullProjection(scene,opts,out);
   return out;
 }
 function _anchorSceneIsSettledSuccessfulCompression(row, settled){
@@ -13365,6 +13567,7 @@ function _anchorSceneWorklogGroup(blocks, opts){
   const live=!!(opts&&opts.live);
   const activityKey=(opts&&opts.activityKey)||'anchor-scene';
   let group=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  const created=!group;
   if(!group){
     group=ensureActivityGroup(blocks,{
       // Respect callers that need the settled activity group open. Round 6:
@@ -13387,35 +13590,291 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.streamId) group.setAttribute('data-anchor-stream-id',String(opts.streamId));
   if(opts&&opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  group._anchorSceneWorklogCreated=created;
   return group;
+}
+function _anchorSceneWorklogRowKey(row, index){
+  if(!row||typeof row!=='object') return '';
+  const stable=row.row_id||row.local_id||row.event_id||'';
+  if(row.role==='tool'){
+    const logical=_anchorSceneToolRowLogicalKey(row);
+    if(logical) return `tool:${logical}`;
+  }
+  if(stable) return `${String(row.role||'activity')}:${String(stable)}`;
+  return '';
+}
+function _anchorSceneWorklogState(group){
+  if(!group) return null;
+  if(group._anchorSceneWorklogState&&typeof group._anchorSceneWorklogState==='object') return group._anchorSceneWorklogState;
+  const state={
+    initialized:false,
+    orderKeys:[],
+    entryByKey:new Map(),
+    currentTools:null,
+    rowsLength:0,
+    projectionRevision:null,
+    stats:{rows_scanned:0,rows_rebuilt:0,groups_scanned:0,groups_rebuilt:0,groups_created:0,groups_reused:0},
+  };
+  group._anchorSceneWorklogState=state;
+  group._anchorSceneProjectionStats=state.stats;
+  return state;
+}
+function _anchorWorklogNewCounts(){return {total:0,failed:0,running:{},done:{}};}
+function _anchorWorklogAdjustCounts(counts, part, delta){
+  if(!part) return;
+  const target=part.isDone?counts.done:counts.running;
+  target[part.kind]=(target[part.kind]||0)+delta;
+  counts.total+=delta;
+  if(part.isErr) counts.failed+=delta;
+}
+function _anchorWorklogCountSummary(counts){
+  if(counts.total===1){
+    for(const status of ['running','done']){
+      for(const kind of Object.keys(counts[status])){
+        if(counts[status][kind]===1){
+          const line=_toolWorklogSummaryLine(kind,status,1);
+          return counts.failed?`${line}, 1 failed`:line;
+        }
+      }
+    }
+  }
+  const lines=[];
+  for(const status of ['running','done']){
+    for(const kind of ['shell','read','search','write','skill','memory','web','list','delegate','unknown']){
+      const n=counts[status][kind]||0;
+      if(n>0) lines.push(_toolWorklogSummaryLine(kind,status,n));
+    }
+  }
+  if(counts.failed) lines.push(`${counts.failed} failed`);
+  return lines.length?_toolWorklogJoin(lines):'Running';
+}
+function _anchorSceneWorklogAppendOwnedTool(tools,node,state){
+  if(!state.ownedSummary) state.ownedSummary=_anchorWorklogNewCounts();
+  if(!state.dirtySteps) state.dirtySteps=new Set();
+  let step=tools._anchorOwnedStep;
+  if(!step){
+    step={counts:_anchorWorklogNewCounts(),rows:[],group:null,body:null,index:state.ownedStepCount||0};
+    state.ownedStepCount=(state.ownedStepCount||0)+1;
+    tools._anchorOwnedStep=step;
+  }
+  node._anchorOwnedPart=_toolWorklogActionParts(node);
+  node._anchorOwnedStepEl=tools;
+  node._anchorOwnedStepIndex=step.rows.length;
+  step.rows.push(node);
+  _anchorWorklogAdjustCounts(step.counts,node._anchorOwnedPart,1);
+  _anchorWorklogAdjustCounts(state.ownedSummary,node._anchorOwnedPart,1);
+  (step.body||tools).appendChild(node);
+  state.dirtySteps.add(tools);
+}
+function _anchorSceneWorklogReplaceOwnedTool(state,oldNode,node){
+  const tools=oldNode&&oldNode._anchorOwnedStepEl;
+  const step=tools&&tools._anchorOwnedStep;
+  if(!step||!state.ownedSummary) return;
+  _anchorWorklogAdjustCounts(step.counts,oldNode._anchorOwnedPart,-1);
+  _anchorWorklogAdjustCounts(state.ownedSummary,oldNode._anchorOwnedPart,-1);
+  node._anchorOwnedPart=_toolWorklogActionParts(node);
+  node._anchorOwnedStepEl=tools;
+  node._anchorOwnedStepIndex=oldNode._anchorOwnedStepIndex;
+  step.rows[node._anchorOwnedStepIndex]=node;
+  _anchorWorklogAdjustCounts(step.counts,node._anchorOwnedPart,1);
+  _anchorWorklogAdjustCounts(state.ownedSummary,node._anchorOwnedPart,1);
+  state.dirtySteps.add(tools);
+}
+function _syncAnchorSceneOwnedWorklogSummary(group){
+  const state=group&&group._anchorSceneWorklogState;
+  if(!state||!state.initialized||!state.ownedSummary||group.getAttribute('data-tool-worklog-group')!=='1') return false;
+  for(const tools of state.dirtySteps){
+    const step=tools._anchorOwnedStep;
+    if(step.counts.total<2) continue;
+    if(!step.group){
+      const open=_worklogDetailsExpandedDefault();
+      const nested=document.createElement('div');
+      nested.className='tool-group'+(open?' open':' tool-worklog-tool-group-collapsed');
+      nested.setAttribute('data-tool-worklog-tool-group','1');
+      nested.setAttribute('data-tool-group-disclosure-key',`step:${step.index}`);
+      nested.innerHTML=`<button type="button" class="tool-group-head tool-worklog-tool-group-head" aria-expanded="${open?'true':'false'}" onclick="_toggleToolWorklogGroup(this)"><span class="tool-worklog-tool-group-icon tg-icon"></span><span class="tg-sum tool-worklog-tool-group-label"></span><span class="tool-call-group-chevron tg-caret">${li('chevron-right',12)}</span></button><div class="tool-group-body tool-worklog-tool-group-body"><div class="tg-rows tool-worklog-tool-group-rows"></div></div>`;
+      step.group=nested;step.body=nested.querySelector('.tg-rows');
+      for(const row of step.rows) step.body.appendChild(row);
+      tools.appendChild(nested);
+    }
+    const label=step.group.querySelector('.tool-worklog-tool-group-label');
+    if(label) label.textContent=_anchorWorklogCountSummary(step.counts);
+    const kind=['search','shell','read','write','skill','memory','web','list','delegate','unknown'].find(k=>(step.counts.running[k]||0)+(step.counts.done[k]||0)>0)||'unknown';
+    const icon=step.group.querySelector('.tool-worklog-tool-group-icon');
+    if(icon&&step.iconKind!==kind){icon.innerHTML=_toolKindIcon(kind);step.iconKind=kind;}
+  }
+  state.dirtySteps.clear();
+  const counts=state.ownedSummary;
+  const running=Object.values(counts.running).some(n=>n>0);
+  if(running) group.setAttribute('data-tool-worklog-running','1');else group.removeAttribute('data-tool-worklog-running');
+  const live=group.getAttribute('data-live-tool-worklog-group')==='1'||group.getAttribute('data-live-tool-call-group')==='1';
+  const runGroup=group.getAttribute('data-run-activity-group')==='1';
+  const label=group.querySelector('.tool-worklog-label')||group.querySelector('.tool-call-group-label');
+  if(label){
+    label.textContent=runGroup?_anchorWorklogCountSummary(counts):((live?_activityProcessedElapsedLabel(group):_activitySettledProcessedLabel(group))||t('processed_elapsed',''));
+    label.setAttribute('data-sweep-label',label.textContent);
+  }
+  const duration=group.querySelector('.tool-call-group-duration');
+  if(duration){
+    if(runGroup){
+      const formatted=_formatTurnDuration(group.dataset.turnDuration),elapsed=formatted?'':_activityElapsedLabel(group);
+      duration.textContent=formatted?` Done in ${formatted}`:(elapsed?` Working for ${elapsed}`:'');
+      duration.style.display=duration.textContent?'':'none';
+    }else{
+      if(live){const elapsed=_activityElapsedLabel(group);if(elapsed) group.setAttribute('data-active-turn-elapsed',elapsed);else group.removeAttribute('data-active-turn-elapsed');}
+      duration.textContent='';duration.style.display='none';
+    }
+  }
+  return true;
+}
+function _anchorSceneWorklogAppendRow(list, row, node, state){
+  if(row.role==='tool'){
+    let tools=state.currentTools;
+    if(!tools){
+      tools=document.createElement('div');
+      tools.className='wl-step-tools tool-worklog-tools';
+      tools.setAttribute('data-worklog-tools','1');
+      list.appendChild(tools);
+    }
+    if(typeof _anchorSceneWorklogAppendOwnedTool==='function'&&typeof _toolWorklogActionParts==='function') _anchorSceneWorklogAppendOwnedTool(tools,node,state);
+    else tools.appendChild(node);
+    state.currentTools=tools;
+  }else{
+    state.currentTools=null;
+    list.appendChild(node);
+  }
 }
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
+  opts=opts||{};
+  const state=_anchorSceneWorklogState(group);
+  const projection=opts.projection&&typeof opts.projection==='object'?opts.projection:null;
+  const sourceRows=Array.isArray(rows)?rows:[];
+  if(state.initialized&&projection&&projection.full_rebuild===false&&projection.revision!==undefined&&
+      projection.revision===state.projectionRevision&&sourceRows.length===state.rowsLength){
+    state.stats.groups_scanned+=1;
+    state.stats.groups_reused+=1;
+    return state.rowsLength>0;
+  }
+  const changedKeys=Array.isArray(projection&&projection.changed_row_keys)?projection.changed_row_keys:[];
+  const changedIndices=Array.isArray(projection&&projection.changed_row_indices)?projection.changed_row_indices:[];
+  const changedOutputIndices=Array.isArray(projection&&projection.changed_output_indices)
+    ? projection.changed_output_indices.map((value)=>Number(value)) : [];
+  const dirtyIndices=changedOutputIndices.length?changedOutputIndices:
+    (changedIndices.length?changedIndices:changedKeys.map((_,offset)=>state.rowsLength+offset));
+  const canPatch=state.initialized&&projection&&projection.full_rebuild===false&&
+    changedKeys.length>0&&dirtyIndices.length===changedKeys.length&&sourceRows.length>=state.rowsLength;
+  if(canPatch){
+    const pairs=dirtyIndices.map((index,offset)=>({index,key:String(changedKeys[offset])})).sort((a,b)=>a.index-b.index);
+    let nextAppend=state.rowsLength;
+    const plans=[];
+    for(const pair of pairs){
+      const index=pair.index;
+      if(!Number.isInteger(index)||index<0||index>=sourceRows.length) break;
+      const row=sourceRows[index],key=_anchorSceneWorklogRowKey(row,index);
+      if(!row||!key||!(key===pair.key||key===`${String(row.role||'activity')}:${pair.key}`)) break;
+      const entry=state.entryByKey.get(key);
+      if(index<state.rowsLength){
+        if(!entry||entry.row.role!==row.role||!entry.node.parentElement||state.orderKeys[index]!==key) break;
+      }else if(index!==nextAppend++||entry) break;
+      plans.push({index,row,key,entry});
+    }
+    if(plans.length!==pairs.length||nextAppend!==sourceRows.length){
+      return _renderAnchorSceneRowsIntoWorklog(group,sourceRows,{...opts,projection:{...projection,full_rebuild:true}});
+    }
+    for(const plan of plans){
+      plan.node=_anchorSceneNodeForRow(plan.row,opts);
+      if(!plan.node) return _renderAnchorSceneRowsIntoWorklog(group,sourceRows,{...opts,projection:{...projection,full_rebuild:true}});
+    }
+    for(const {row,key,entry,node} of plans){
+      if(entry){
+        if(typeof _anchorSceneWorklogReplaceOwnedTool==='function') _anchorSceneWorklogReplaceOwnedTool(state,entry.node,node);
+        const parent=entry.node.parentElement;
+        if(typeof parent.replaceChild==='function') parent.replaceChild(node,entry.node);
+        else if(Array.isArray(parent.children)){
+          const childIndex=parent.children.indexOf(entry.node);
+          if(childIndex>=0){parent.children[childIndex]=node;node.parentElement=parent;entry.node.parentElement=null;}
+        }
+        entry.row=row;entry.node=node;
+      }else{
+        _anchorSceneWorklogAppendRow(list,row,node,state);
+        state.orderKeys.push(key);state.entryByKey.set(key,{row,node});state.rowsLength+=1;
+      }
+    }
+    state.projectionRevision=projection.revision;
+    state.stats.rows_scanned+=plans.length;
+    state.stats.rows_rebuilt+=plans.length;
+    state.stats.groups_reused+=1;state.stats.groups_scanned+=1;
+    if(typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
+    return state.rowsLength>0;
+  }
+  const canReuseClean=!!(
+    state.initialized&&projection&&projection.full_rebuild===false&&changedKeys.length===0&&
+    projection.revision!==undefined&&projection.revision===state.projectionRevision&&
+    sourceRows.length===state.rowsLength
+  );
+  if(canReuseClean){
+    state.stats.groups_scanned+=1;
+    state.stats.groups_reused+=1;
+    return state.rowsLength>0;
+  }
+  // Full fallback retains the historical for(const row of rows) ordering.
+  // The incremental tail keeps the same currentTools=null; reset boundary as
+  // the full path when prose interrupts a tool run.
   list.innerHTML='';
-  let wrote=false;
-  let currentTools=null;
-  for(const row of rows){
+  if(typeof _anchorWorklogNewCounts==='function'){state.ownedSummary=_anchorWorklogNewCounts();state.dirtySteps=new Set();state.ownedStepCount=0;}
+  state.initialized=true;
+  state.orderKeys=[];
+  state.entryByKey=new Map();
+  state.currentTools=null;
+  state.rowsLength=0;
+  state.projectionRevision=projection&&projection.revision!==undefined?projection.revision:null;
+  state.stats.rows_scanned+=sourceRows.length;
+  state.stats.rows_rebuilt+=sourceRows.length;
+  state.stats.groups_scanned+=1;
+  state.stats.groups_rebuilt+=1;
+  if(group._anchorSceneWorklogCreated) state.stats.groups_created+=1;
+  else state.stats.groups_reused+=1;
+  for(let index=0;index<sourceRows.length;index+=1){
+    const row=sourceRows[index];
     const node=_anchorSceneNodeForRow(row,opts);
     if(!node) continue;
-    if(row.role==='tool'){
-      if(!currentTools){
-        currentTools=document.createElement('div');
-        currentTools.className='wl-step-tools tool-worklog-tools';
-        currentTools.setAttribute('data-worklog-tools','1');
-        list.appendChild(currentTools);
+    const key=_anchorSceneWorklogRowKey(row,index);
+    const storedKey=opts._identityFallback?`fallback:${index}`:key;
+    if(!storedKey||state.entryByKey.has(storedKey)){
+      // Ambiguous identity is a full-path condition. Keep the source order and
+      // visible semantics rather than attempting a keyed partial mutation.
+      state.orderKeys=[];
+      state.entryByKey=new Map();
+      state.currentTools=null;
+      state.rowsLength=0;
+      list.innerHTML='';
+      if(typeof _anchorWorklogNewCounts==='function'){state.ownedSummary=_anchorWorklogNewCounts();state.dirtySteps=new Set();state.ownedStepCount=0;}
+      return _renderAnchorSceneRowsIntoWorklog(group,sourceRows,{...opts,projection:{...(projection||{}),full_rebuild:true},_identityFallback:true});
+    }
+    if(typeof _anchorSceneWorklogAppendRow==='function'){
+      _anchorSceneWorklogAppendRow(list,row,node,state);
+    }else if(row.role==='tool'){
+      let tools=state.currentTools;
+      if(!tools){
+        tools=document.createElement('div');
+        tools.className='wl-step-tools tool-worklog-tools';
+        tools.setAttribute('data-worklog-tools','1');
+        list.appendChild(tools);
       }
-      currentTools.appendChild(node);
+      tools.appendChild(node);
+      state.currentTools=tools;
     }else{
-      currentTools=null;
+      state.currentTools=null;
       list.appendChild(node);
     }
-    wrote=true;
+    state.orderKeys.push(storedKey);
+    state.entryByKey.set(storedKey,{row,node});
+    state.rowsLength+=1;
   }
-  if(wrote){
-    _syncToolCallGroupSummary(group);
-  }
-  return wrote;
+  if(state.rowsLength&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
+  return state.rowsLength>0;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -13650,18 +14109,33 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return false;
-  const liveDisclosureState=typeof _captureWorklogDetailDisclosureState==='function'
+  const existingWorklogGroup=blocks.querySelector('.tool-worklog-group[data-anchor-scene-owner="1"]');
+  const incrementalOwned=!!(existingWorklogGroup&&existingWorklogGroup._anchorSceneWorklogState?.initialized&&rows._anchorSceneProjection&&!rows._anchorSceneProjection.full_rebuild);
+  const liveDisclosureState=!incrementalOwned&&typeof _captureWorklogDetailDisclosureState==='function'
     ? _captureWorklogDetailDisclosureState(blocks)
     : null;
-  const scrollSnapshot=_captureMessageScrollSnapshot();
+  const scrollSnapshot=opts.scrollOwned?null:_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
+  const ownedByExistingGroup=(el)=>!!(
+    existingWorklogGroup&&
+    (el===existingWorklogGroup||
+      (typeof existingWorklogGroup.contains==='function'&&existingWorklogGroup.contains(el)))
+  );
+  // Retire legacy surfaces before resolving the owner. Existing owner
+  // descendants are protected so the Compact Worklog group can be reused.
+  if(!incrementalOwned){
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
+    if(!ownedByExistingGroup(el)) el.remove();
+  });
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
+    if(!ownedByExistingGroup(el)) el.remove();
+  });
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
     el.setAttribute('aria-hidden','true');
     el.hidden=true;
   });
+  }
   const group=_anchorSceneWorklogGroup(blocks,{
     live:true,
     collapsed:false,
@@ -13669,7 +14143,12 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     streamId:streamId||S.activeStreamId||'',
     turnStartedAt:S.session&&S.session.pending_started_at,
   });
-  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{live:true,settled:false});
+  if(!group) return false;
+  const ok=_renderAnchorSceneRowsIntoWorklog(group,rows,{
+    live:true,
+    settled:false,
+    projection:rows&&rows._anchorSceneProjection||scene&&scene.projection,
+  });
   if(!ok){
     const list=_toolWorklogListEl(group);
     if(list) list.innerHTML='';
@@ -13684,6 +14163,73 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+function _tryIncrementalTransparentAnchorPaint(turn, blocks, rows, opts){
+  const state=blocks._anchorTransparentProjectionState;
+  const projection=rows&&rows._anchorSceneProjection;
+  const flags=JSON.stringify([window._showThinking,window._fadeTextEffect]);
+  if(!state||!projection||projection.full_rebuild||state.flags!==flags||
+      state.streamId!==String(opts.streamId||'')||state.sessionId!==String(opts.sessionId||'')) return null;
+  if(state.revision===projection.revision&&state.nodes.length===rows.length) return true;
+  const indices=Array.from(new Set(projection.changed_output_indices||[])).sort((a,b)=>a-b);
+  if(!indices.length||rows.length<state.nodes.length) return null;
+  const bar=blocks.querySelector(':scope > .transparent-event-controls');
+  if(!bar) return null;
+  let appendIndex=state.nodes.length;
+  const plans=[];
+  for(const index of indices){
+    if(!Number.isInteger(index)||index<0||index>=rows.length) return null;
+    const row=rows[index],key=_anchorSceneRenderOutputKey(row);
+    if(!row||!key) return null;
+    const existing=state.nodes[index];
+    if(existing){
+      if(state.keys[index]!==key||existing.parentElement!==blocks) return null;
+    }else if(index!==appendIndex++) return null;
+    plans.push({index,row,key,existing});
+  }
+  if(appendIndex!==rows.length) return null;
+  for(const plan of plans){
+    plan.node=_anchorSceneTransparentNodeForRow(plan.row,{live:true,settled:false,...opts});
+    if(!plan.node) return null;
+  }
+  const scroll=opts.scrollOwned?null:_captureMessageScrollSnapshot();
+  const oldCount=state.nodes.length;
+  const footer=blocks.querySelector('#liveRunStatus');
+  let reused=0;
+  for(const plan of plans){
+    const {index,row,key,existing,node}=plan;
+    let mounted=node;
+    if(existing&&_transparentLiveRowsCompatible(existing,node)){
+      mounted=_refreshTransparentLiveRow(existing,node,{});
+      reused+=1;
+    }else if(existing){
+      blocks.replaceChild(node,existing);
+    }else{
+      if(footer&&footer.parentElement===blocks) blocks.insertBefore(node,footer);
+      else blocks.appendChild(node);
+      if(row.role==='tool') state.toolCount+=1;
+    }
+    state.nodes[index]=mounted;
+    state.keys[index]=key;
+  }
+  const label=bar.querySelector('.transparent-event-controls-label');
+  const stashed=Number(turn.getAttribute&&turn.getAttribute('data-transparent-total-tool-count'))||0;
+  const tools=Math.max(stashed,state.toolCount);
+  if(label){label.textContent=_transparentEventCountLabel(tools);label.setAttribute('data-transparent-tool-count',String(tools));}
+  bar.setAttribute('data-tool-count',String(tools));
+  // Only the previous recency tail and dirty/new nodes can change fade level.
+  const fadeIndices=new Set(indices);
+  for(let i=Math.max(0,oldCount-6);i<state.nodes.length;i++) fadeIndices.add(i);
+  for(const index of fadeIndices){
+    const node=state.nodes[index],step=Math.min(5,state.nodes.length-1-index);
+    if(step>0) node.setAttribute('data-transparent-fade',String(step));
+    else node.removeAttribute('data-transparent-fade');
+  }
+  state.revision=projection.revision;
+  state.stats={rows_scanned:indices.length,dirty_rows:indices.length,nodes_created:plans.length,nodes_reused:reused,full_rebuild:false};
+  if(scroll) _restoreMessageScrollSnapshotSameFrame(scroll);
+  return true;
+}
+
 function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   opts=opts||{};
   if(!S.session||!S.activeStreamId) return false;
@@ -13704,7 +14250,14 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   if(S.session) turn.dataset.sessionId=S.session.session_id;
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return false;
-  const scrollSnapshot=_captureMessageScrollSnapshot();
+  if(typeof _tryIncrementalTransparentAnchorPaint==='function'){
+    const incremental=_tryIncrementalTransparentAnchorPaint(turn,blocks,rows,{...opts,
+      streamId:String(streamId||S.activeStreamId||''),sessionId:String(S.session.session_id||''),
+    });
+    if(incremental!==null) return incremental;
+  }
+  blocks._anchorTransparentProjectionState=null;
+  const scrollSnapshot=opts.scrollOwned?null:_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
@@ -13747,6 +14300,18 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const liveFooter=blocks.querySelector('#liveRunStatus');
   const renderedRows=[];
   for(const row of rows){
+    // Reuse unchanged mounted rows of every role. This avoids historical DOM
+    // rebuilding; event/row projection still needs its separate dirty boundary.
+    const toolKey=(row.row_id||row.local_id)
+      ? `${activeStreamId}\u0000${String(row.row_id||row.local_id).trim()}\u0000${row.role}\u0000${String(row.source_event_type||'').trim()}`
+      : '';
+    const preservedTool=toolKey?preserveByKey.get(toolKey):null;
+    const toolSignature=toolKey?JSON.stringify(row)+(row.role==='tool'?'':JSON.stringify([window._showThinking,window._fadeTextEffect])):null;
+    if(preservedTool&&preservedTool._anchorToolPaintSignature===toolSignature){
+      preserveByKey.delete(toolKey);
+      renderedRows.push(preservedTool);
+      continue;
+    }
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const node=_anchorSceneTransparentNodeForRow(row,{
       live:true,
@@ -13764,6 +14329,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
+    if(toolKey) renderedNode._anchorToolPaintSignature=toolSignature;
     renderedRows.push(renderedNode);
   }
   const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
@@ -13785,9 +14351,23 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   preserveByKey.forEach(stale=>stale.remove());
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
+  // Keyed reconciliation does not tear down the live container. Release its
+  // temporary height guard and restore once, in this same committed paint;
+  // a second rAF restore both duplicated layout and outlived scene ownership.
+  if(scrollRebuildGuard.release) scrollRebuildGuard.release();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
-  _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
-  if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
+  if(rows._anchorSceneProjection&&rows.length===renderedRows.length&&typeof _anchorSceneRenderOutputKey==='function'){
+    const keys=rows.map(_anchorSceneRenderOutputKey);
+    if(keys.every(Boolean)&&new Set(keys).size===keys.length){
+      blocks._anchorTransparentProjectionState={
+        streamId:activeStreamId,sessionId:activeSessionId,
+        flags:JSON.stringify([window._showThinking,window._fadeTextEffect]),
+        revision:rows._anchorSceneProjection.revision,keys,nodes:renderedRows,
+        toolCount:rows.filter(row=>row.role==='tool').length,
+        stats:{rows_scanned:rows.length,dirty_rows:rows.length,full_rebuild:true},
+      };
+    }
+  }
   return !!renderedRows.length;
 }
 
@@ -14105,7 +14685,45 @@ function _refreshTransparentLiveRow(existing, node, opts){
   }
   return existing;
 }
+// One visual projection per frame. Semantic events are applied by the caller
+// before request(); the paint always reads the latest authoritative registry.
+function _createLiveScenePaintScheduler(options){
+  let frame=null;
+  let generation=0;
+  let disposed=false;
+  function cancel(){
+    generation++;
+    if(frame!==null) options.cancelFrame(frame);
+    frame=null;
+  }
+  function flush(){
+    const pending=frame!==null;
+    cancel();
+    if(pending&&!disposed&&options.isCurrent()) options.paint();
+  }
+  function request(){
+    if(disposed||frame!==null||!options.isCurrent()) return;
+    const expected=++generation;
+    frame=options.requestFrame(()=>{
+      if(disposed||generation!==expected) return;
+      frame=null;
+      if(options.isCurrent()) options.paint();
+    });
+  }
+  function dispose(){
+    cancel();
+    disposed=true;
+  }
+  return {request,flush,cancel,dispose,pending:()=>frame!==null};
+}
 function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
+  // Compatibility producers share the active stream's visual owner. Only that
+  // owner's commit may project; a disposed owner returns false without revival.
+  const sid=String(sessionId||(S.session&&S.session.session_id)||'');
+  const owner=typeof LIVE_STREAMS!=='undefined'?LIVE_STREAMS[sid]:null;
+  if(!(opts&&opts.committed)&&owner&&owner.streamId===streamId&&typeof owner.requestScene==='function'){
+    return owner.requestScene();
+  }
   const requestedMode=opts&&opts.mode;
   const activeMode=chatActivityMode();
   const mode=activeMode==='hide_all_activity'
@@ -19033,6 +19651,7 @@ function _toggleToolDiff(btn){
 
 function _syncToolCallGroupSummary(group){
   if(!group) return;
+  if(typeof _syncAnchorSceneOwnedWorklogSummary==='function'&&_syncAnchorSceneOwnedWorklogSummary(group)) return;
   if(group.getAttribute('data-tool-worklog-group')==='1') _syncToolWorklogToolGroup(group);
   const cards=Array.from((_toolWorklogListEl(group)||group).querySelectorAll('.tool-card-row .tool-card,.tool-card-row.tl'));
   const toolCount=cards.length;

@@ -243,9 +243,11 @@ global.CSS = {{ escape:(value)=>String(value) }};
 global.requestAnimationFrame = (fn)=>fn();
 
 global.S = {{ session:{{ session_id: 'session-1', pending_started_at: 123 }}, activeStreamId:'stream-1' }};
-global._captureMessageScrollSnapshot = () => ({{ scrollHeight: 1000 }});
+let scrollCaptures=0, scrollRestores=0;
+global._captureMessageScrollSnapshot = () => {{ scrollCaptures++; return {{ scrollHeight: 1000, pinned:true }}; }};
 global._prepareLiveAnchorScrollRebuildGuard = () => ({{ readerAwayFromBottom:false, release:null }});
-global._restoreMessageScrollSnapshotSameFrame = () => {{}};
+global._restoreMessageScrollSnapshotSameFrame = () => {{scrollRestores++;}};
+global._restoreMessageScrollSnapshotAfterRebuild = () => {{scrollRestores++;}};
 global.scrollIfPinned = () => {{}};
 global._moveLiveRunStatusToTurnEnd = () => {{}};
 global._messageUserUnpinned = false;
@@ -321,6 +323,26 @@ eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
+
+const countAssert = require('node:assert/strict');
+const originalBuildToolCard = buildToolCard;
+let toolBuildCount = 0;
+global.buildToolCard = (...args) => {{ toolBuildCount++; return originalBuildToolCard(...args); }};
+const toolScene = {{version:'activity_scene_v1',activity_rows:[
+  {{row_id:'stable-tool',role:'tool',source_event_type:'tool',status:'completed',tool:{{name:'terminal'}}}},
+]}};
+_renderLiveAnchorActivitySceneTransparent('stream-1',toolScene,{{sessionId:'session-1'}});
+const stableToolNode = turn.querySelector('[data-anchor-row-id="stable-tool"]');
+const initialToolBuildCount = toolBuildCount;
+_renderLiveAnchorActivitySceneTransparent('stream-1',toolScene,{{sessionId:'session-1'}});
+countAssert.equal(toolBuildCount,initialToolBuildCount,'unchanged tools must not build replacement candidates');
+countAssert.equal(turn.querySelector('[data-anchor-row-id="stable-tool"]'),stableToolNode);
+toolScene.activity_rows[0].tool.name='changed';
+_renderLiveAnchorActivitySceneTransparent('stream-1',toolScene,{{sessionId:'session-1'}});
+countAssert.equal(toolBuildCount,initialToolBuildCount+1,'changed payload must refresh');
+countAssert.equal(turn.querySelector('[data-anchor-row-id="stable-tool"]'),stableToolNode);
+countAssert.equal(scrollCaptures,3,'one snapshot per committed paint');
+countAssert.equal(scrollRestores,scrollCaptures,'one restore per committed paint');
 
 const firstScene = {{
   version:'activity_scene_v1',
@@ -1580,9 +1602,11 @@ global.CSS = {{ escape:(value)=>String(value) }};
 global.t = (key)=>key;
 global.showToast = () => {{}};
 global.S = {{ session:{{ session_id:'session-1' }}, activeStreamId:'stream-1' }};
-global._captureMessageScrollSnapshot = () => ({{ scrollHeight: 1000 }});
+let scrollCaptures=0, scrollRestores=0;
+global._captureMessageScrollSnapshot = () => {{ scrollCaptures++; return {{ scrollHeight: 1000, pinned:true }}; }};
 global._prepareLiveAnchorScrollRebuildGuard = () => ({{ readerAwayFromBottom:false, release:null }});
-global._restoreMessageScrollSnapshotSameFrame = () => {{}};
+global._restoreMessageScrollSnapshotSameFrame = () => {{scrollRestores++;}};
+global._restoreMessageScrollSnapshotAfterRebuild = () => {{scrollRestores++;}};
 global.scrollIfPinned = () => {{}};
 global._moveLiveRunStatusToTurnEnd = () => {{}};
 global._messageUserUnpinned = false;

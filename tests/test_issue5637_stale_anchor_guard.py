@@ -155,7 +155,7 @@ const turn={{
   setAttribute(){{}},
   querySelectorAll(){{return [];}},
 }};
-const blocks={{querySelectorAll(){{return [];}}}};
+const blocks={{querySelector(){{return null;}},querySelectorAll(){{return [];}}}};
 function $(id){{
   if(id==='messages') return el;
   if(id==='msgInner') return msgInner;

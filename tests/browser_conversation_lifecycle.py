@@ -291,6 +291,8 @@ class DeterministicGateway:
 
     def __init__(self, scenario: str) -> None:
         self.scenario = scenario
+        self.reasoning_ready = threading.Event()
+        self.release_reasoning = threading.Event()
         self.activity_ready = threading.Event()
         self.release_settle = threading.Event()
         self.final_prefix_ready = threading.Event()
@@ -354,6 +356,10 @@ class DeterministicGateway:
                         "event": "reasoning.available",
                         "text": REASONING_TEXT,
                     })
+                    if os.environ.get("LIFECYCLE_REASONING_FIRST") == "1":
+                        owner.reasoning_ready.set()
+                        if not owner.release_reasoning.wait(timeout=30):
+                            return
                     if owner.scenario == "terminal-error":
                         self._event("message.delta", {
                             "event": "message.delta",
@@ -419,6 +425,7 @@ class DeterministicGateway:
         self._thread.start()
 
     def close(self) -> None:
+        self.release_reasoning.set()
         self.release_settle.set()
         self.release_terminal.set()
         self._server.shutdown()
@@ -841,8 +848,23 @@ def main() -> int:
         errors = _capture_page_errors(page)
         page.goto("/", wait_until="domcontentloaded")
         page.wait_for_selector("#msg", state="visible", timeout=15000)
+        # Isolate the lifecycle under test from concurrent first-session boot.
+        # Await real session creation before the real composer starts its run.
+        page.evaluate("async () => { await newSession(); }")
         page.locator("#msg").fill(PROMPT)
         page.locator("#btnSend").click()
+
+        if os.environ.get("LIFECYCLE_REASONING_FIRST") == "1":
+            assert gateway.reasoning_ready.wait(timeout=30), "reasoning fixture checkpoint missing"
+            # Deterministically exercise a scene painted before its first prose
+            # segment exists. No sleep/retry can hide a duplicate final surface.
+            page.wait_for_function(
+                """() => Boolean(document.querySelector(
+                  '#liveAssistantTurn [data-anchor-row-role="thinking"]'
+                ))""",
+                timeout=10000,
+            )
+            gateway.release_reasoning.set()
 
         if not gateway.activity_ready.wait(timeout=GATEWAY_ACTIVITY_TIMEOUT):
             raise AssertionError(
