@@ -13,6 +13,7 @@ on:
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_approval_first_click.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -24,6 +25,7 @@ on:
       - 'server.py'
       - 'tests/browser_conversation_lifecycle.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_approval_first_click.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -45,6 +47,8 @@ jobs:
             scenario: terminal-error
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
+          - name: approval-first-click
+            script: tests/browser_approval_first_click.py
     steps:
       - uses: actions/checkout@v4
 
