@@ -523,6 +523,8 @@ const LOCALES = {
      download_folder: 'Download Folder',
     path_copied: 'File path copied to clipboard',
     path_copy_failed: 'Failed to copy path: ',
+    settings_label_skip_delete_confirm: 'Skip delete confirmation',
+    settings_desc_skip_delete_confirm: 'When enabled, sessions are deleted immediately without a confirmation dialog. Use with caution — deleted conversations cannot be recovered.',
     session_rename: 'Rename conversation',
     session_rename_desc: 'Edit the title of this conversation',
     session_title_regenerate: 'Regenerate title',
@@ -3538,6 +3540,9 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
+    settings_label_skip_delete_confirm: 'Salta conferma eliminazione',
+    settings_desc_skip_delete_confirm: 'Quando attivato, le sessioni vengono eliminate immediatamente senza conferma.',
+
   },
 
   ja: {
@@ -5298,10 +5303,13 @@ const LOCALES = {
     outline_title: 'アウトライン',
     outline_empty: 'まだ質問はありません。',
     outline_loading: '読み込み中…',
-    wiki_browse: 'Wikiを閲覧',
-    wiki_search_placeholder: 'ページを検索...',
-    wiki_no_pages: 'Wikiページが見つかりません',
-    wiki_not_configured: 'Wikiが設定されていません',
+    wiki_browse: 'Browse wiki',
+    wiki_search_placeholder: 'Search pages...',
+    wiki_no_pages: 'No wiki pages found',
+    wiki_not_configured: 'Wiki not configured',
+    settings_label_skip_delete_confirm: '削除確認をスキップ',
+    settings_desc_skip_delete_confirm: '有効にすると、セッションは確認なしで直ちに削除されます。',
+
   },
 
   ru: {
@@ -7040,6 +7048,9 @@ const LOCALES = {
     wiki_search_placeholder: 'Искать страницы…',
     wiki_no_pages: 'Страницы wiki не найдены',
     wiki_not_configured: 'Wiki не настроена',
+    settings_label_skip_delete_confirm: 'Пропустить подтверждение удаления',
+    settings_desc_skip_delete_confirm: 'При включении сеансы удаляются немедленно без подтверждения.',
+
   },
 
   es: {
@@ -8745,6 +8756,9 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
+    settings_label_skip_delete_confirm: 'Saltar confirmación de eliminación',
+    settings_desc_skip_delete_confirm: 'Cuando está activado, las sesiones se eliminan inmediatamente sin confirmación.',
+
   },
 
   de: {
@@ -10444,6 +10458,9 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
+    settings_label_skip_delete_confirm: 'Löschbestätigung überspringen',
+    settings_desc_skip_delete_confirm: 'Wenn aktiviert, werden Sitzungen sofort ohne Bestätigung gelöscht.',
+
   },
 
   zh: {
@@ -12136,6 +12153,9 @@ const LOCALES = {
     wiki_search_placeholder: '搜索页面...',
     wiki_no_pages: '未找到维基页面',
     wiki_not_configured: '维基未配置',
+    settings_label_skip_delete_confirm: '跳过删除确认',
+    settings_desc_skip_delete_confirm: '启用后，会话将立即删除而无需确认。',
+
   },
 
   // Traditional Chinese (zh-Hant)
@@ -13898,6 +13918,8 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
+    settings_label_skip_delete_confirm: '跳過刪除確認',
+    settings_desc_skip_delete_confirm: '啟用後，刪除對話將直接刪除而不顯示確認對話框',
 
   },
 
@@ -15478,6 +15500,9 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
+    settings_label_skip_delete_confirm: 'Pular confirmação de exclusão',
+    settings_desc_skip_delete_confirm: 'Quando ativado, as sessões são excluídas imediatamente sem confirmação.',
+
   },
   ko: {
     offline_title: '연결이 끊겼습니다',
@@ -17226,6 +17251,9 @@ const LOCALES = {
     wiki_search_placeholder: 'Search pages...',
     wiki_no_pages: 'No wiki pages found',
     wiki_not_configured: 'Wiki not configured',
+    settings_label_skip_delete_confirm: '삭제 확인 건너뛰기',
+    settings_desc_skip_delete_confirm: '활성화되면 세션이 확인 없이 즉시 삭제됩니다.',
+
   },
 
   fr: {
@@ -18958,6 +18986,9 @@ const LOCALES = {
     outline_title: 'Plan',
     outline_empty: 'Pas encore de questions.',
     outline_loading: 'Chargement\u2026',
+    settings_label_skip_delete_confirm: 'Ignorer la confirmation de suppression',
+    settings_desc_skip_delete_confirm: "Lorsqu'il est activé, les sessions sont supprimées immédiatement sans confirmation.",
+
   },
 
   cs: {
@@ -20677,6 +20708,8 @@ const LOCALES = {
     tool_action_label: _i18nToolActionLabelCs,
     tool_worklog_summary: _i18nToolWorklogSummaryCs,
     tool_summary_join: _i18nToolSummaryJoinCs,
+    settings_label_skip_delete_confirm: 'Přeskočit potvrzení smazání',
+    settings_desc_skip_delete_confirm: 'Po zapnutí bude smazání konverzace probíhat bez potvrzovacího dialogu',
   },
   tr: {
 
@@ -22431,6 +22464,9 @@ const LOCALES = {
   
   
   
+    settings_label_skip_delete_confirm: 'Silme onayını atla',
+    settings_desc_skip_delete_confirm: 'Etkinleştirildiğinde, oturumlar onay olmadan hemen silinir.',
+
   },
   pl: {
     offline_title: 'Połączenie utracone',
@@ -24185,6 +24221,9 @@ const LOCALES = {
     checkpoint_diff_title: 'Zmiany w punkcie kontrolnym',
     checkpoint_diff_no_changes: 'Nie znaleziono różnic między tym punktem kontrolnym a obecnym obszarem roboczym.',
     checkpoint_diff_files_changed: (n) => n === 1 ? '1 plik zmieniony' : `${n} zmienionych plików`,
+    settings_label_skip_delete_confirm: 'Pomiń potwierdzenie usunięcia',
+    settings_desc_skip_delete_confirm: 'Po włączeniu sesje są usuwane natychmiast bez potwierdzenia.',
+
   },
   vi: {
     offline_title: 'Mất kết nối',
@@ -25941,6 +25980,9 @@ const LOCALES = {
     yolo_pill_label: 'YOLO',
     yolo_pill_title_active: 'Chế độ YOLO đang bật — bấm để tắt',
 },
+
+    settings_label_skip_delete_confirm: 'Bỏ qua xác nhận xóa',
+    settings_desc_skip_delete_confirm: 'Khi được bật, các phiên sẽ bị xóa ngay lập tức mà không cần xác nhận.',
 
 };
 
