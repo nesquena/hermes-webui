@@ -1232,8 +1232,12 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
-  const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
-  const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
+  // Format in the server's configured timezone (#7140): the agent stores
+  // last_run_at/next_run_at in Hermes time, and plain toLocaleString() would
+  // render the browser's zone (UTC for most operators) instead.
+  const _fmtTz = (typeof _formatInServerTz === 'function') ? _formatInServerTz : null;
+  const nextRun = job.next_run_at ? (_fmtTz ? _fmtTz(new Date(job.next_run_at)) : new Date(job.next_run_at).toLocaleString()) : t('not_available');
+  const lastRun = job.last_run_at ? (_fmtTz ? _fmtTz(new Date(job.last_run_at)) : new Date(job.last_run_at).toLocaleString()) : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
@@ -1361,7 +1365,10 @@ async function _loadCronDetailRuns(jobId, detailKey){
     const rows = data.runs.map((run, i) => {
       const ts = run.filename.replace('.md','').replace(/_/g,' ');
       const sizeStr = run.size > 1024 ? (run.size/1024).toFixed(1)+' KB' : run.size+' B';
-      const dateStr = new Date(run.modified * 1000).toLocaleString();
+      // Server-time formatting (#7140): run files are written by the agent in
+      // Hermes time; plain toLocaleString() would render the browser's zone.
+      const _fmtTz = (typeof _formatInServerTz === 'function') ? _formatInServerTz : null;
+      const dateStr = (_fmtTz ? _fmtTz(new Date(run.modified * 1000)) : new Date(run.modified * 1000).toLocaleString());
       const rid = `cron-det-run-${jobId}-${i}`;
       const usageStrip = isScriptJob ? '' : _formatCronRunUsageStrip(run.usage);
       const runExpanded = _cronExpansionGet(_cronRunExpandKey(jobId, run.filename));

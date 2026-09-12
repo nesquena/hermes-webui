@@ -772,6 +772,38 @@ def _worktree_retained_payload_for_session_id(sid: str) -> dict:
         return {}
 
 
+def _server_tz_offset() -> str:
+    """Return the server's configured timezone as a "+HHMM"/"-HHMM" offset string.
+
+    The agent resolves its timezone as: ``HERMES_TIMEZONE`` env var (highest
+    priority) -> ``timezone`` key in the active profile's config.yaml ->
+    server local time. ``time.strftime("%z")`` alone returns the *process*
+    timezone, which is typically UTC inside a container even when Hermes is
+    configured for a different zone — so the cron panel would show UTC times
+    for anyone not on the server's zone (#7140).
+
+    Falls back to the process offset on any failure; never raises.
+    """
+    tz_name = os.getenv("HERMES_TIMEZONE", "").strip()
+    if not tz_name:
+        try:
+            config_path = _active_profile_config_path()
+            if config_path.exists():
+                cfg = _load_yaml_config_file(config_path)
+                if isinstance(cfg, dict):
+                    tz_name = str(cfg.get("timezone") or "").strip()
+        except Exception:
+            tz_name = ""
+    if tz_name:
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(tz_name)).strftime("%z")
+        except Exception:
+            pass
+    return time.strftime("%z")
+
+
 def _active_profile_config_path() -> Path:
     """Return config.yaml for the request's active WebUI profile.
 
@@ -2670,7 +2702,7 @@ def _session_list_payload_to_response(payload: dict) -> dict:
         "active_profile": payload.get("active_profile"),
         "other_profile_count": int(payload.get("other_profile_count", 0)),
         "server_time": time.time(),
-        "server_tz": time.strftime("%z"),
+        "server_tz": _server_tz_offset(),
     }
     if "webui_session_count" in payload:
         response["webui_session_count"] = int(payload.get("webui_session_count", 0))
