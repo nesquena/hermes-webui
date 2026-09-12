@@ -1173,6 +1173,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
     to distinguish unmatched paths from already-responded paths (#1843).
     """
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Multi-board management endpoints — these do NOT take a board arg
         # because they operate on the on-disk board collection itself, not
@@ -1192,7 +1193,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
         if path == "/api/kanban/events/stream":
             return _handle_events_sse_stream(handler, parsed)
         if path.startswith(_TASK_PREFIX) and path.endswith("/log"):
-            task_id = unquote(path[len(_TASK_PREFIX):-len("/log")]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):-len("/log")]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             payload = _task_log_payload(parsed, task_id)
@@ -1200,7 +1201,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
                 return bad(handler, "task not found", status=404)
             return j(handler, payload) or True
         if path.startswith(_TASK_PREFIX):
-            task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             payload = _task_detail_payload(task_id, board=_resolve_board(parsed))
@@ -1225,6 +1226,7 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban POST. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Multi-board management endpoints — `_create_board_payload` and
         # `_switch_board_payload` operate on the on-disk board collection,
@@ -1234,7 +1236,7 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
         # POST /api/kanban/boards/<slug>/switch — set active board
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX) and path.endswith("/switch"):
-            slug = unquote(path[len(_BOARDS_PREFIX):-len("/switch")]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):-len("/switch")]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _switch_board_payload(slug)) or True
@@ -1254,14 +1256,14 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
         if path == "/api/kanban/links/delete":
             return j(handler, _link_tasks_payload(body, unlink=True, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/comments"):
-            task_id = path[len(_TASK_PREFIX):-len("/comments")].strip("/")
+            task_id = raw_path[len(_TASK_PREFIX):-len("/comments")].strip("/")
             return j(handler, _comment_payload(task_id, body, board=board)) or True
         for suffix, action in (("/block", "block"), ("/unblock", "unblock")):
             if path.startswith(_TASK_PREFIX) and path.endswith(suffix):
-                task_id = path[len(_TASK_PREFIX):-len(suffix)].strip("/")
+                task_id = raw_path[len(_TASK_PREFIX):-len(suffix)].strip("/")
                 return j(handler, _task_action_payload(task_id, body, action, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/patch"):
-            task_id = path[len(_TASK_PREFIX):-len("/patch")].strip("/")
+            task_id = raw_path[len(_TASK_PREFIX):-len("/patch")].strip("/")
             return j(handler, _patch_task_payload(task_id, body, board=board)) or True
     except ImportError as exc:
         return bad(handler, f"kanban unavailable: {exc}", status=503)
@@ -1278,6 +1280,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban PATCH. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         if path == "/api/kanban/config":
             return j(handler, _update_config_payload(body)) or True
@@ -1289,7 +1292,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
         # by Opus advisor.)
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX):
-            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _update_board_payload(slug, body)) or True
@@ -1299,7 +1302,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
         board_b = _resolve_board_from_body(body)
         board = board_q if board_q is not None else board_b
         if path.startswith(_TASK_PREFIX):
-            task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             return j(handler, _patch_task_payload(task_id, body, board=board)) or True
@@ -1318,12 +1321,13 @@ def handle_kanban_delete(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban DELETE. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Same routing reorder as PATCH: /boards/<slug> path-routed first,
         # so a stray ?board=ghost can't 404 a legitimate board archive.
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX):
-            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _delete_board_payload(slug, parsed)) or True
