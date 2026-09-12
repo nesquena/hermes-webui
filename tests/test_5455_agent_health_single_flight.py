@@ -2,9 +2,9 @@
 
 Pre-fix behaviour: ``_probe_remote_gateway`` held ``_remote_probe_lock`` only
 around the cache read and the cache write; the network probe itself
-(``_http_probe`` per path, each up to ~2s) ran with no lock held.  On a cold
+(``_http_probe`` per path, each up to ~5s) ran with no lock held.  On a cold
 cache a dashboard that fans out to N panels therefore fired N concurrent probe
-sets at the (possibly dead) gateway, each blocking for up to ~6s.
+sets at the (possibly dead) gateway, each blocking for up to ~15s.
 
 Fix: single-flight.  The first "leader" thread marks the base_url in-flight and
 runs the probe; latecomers wait on ``_remote_probe_cond`` for the leader's
