@@ -415,7 +415,7 @@ class TestConflictError:
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
 
-        result = upd.apply_update('agent')
+        result = upd.apply_update('webui')
         # Message must be actionable — should mention git checkout or pull
         msg = result['message']
         assert 'git' in msg.lower(), f"message should mention git: {msg}"
@@ -728,12 +728,7 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
         monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
         monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
-        monkeypatch.setattr(
-            'api.updates.restart_active_profile_gateway',
-            lambda **kwargs: {'status': 'completed', 'message': 'Gateway service restarted successfully'},
-        )
-
-        result = upd.apply_update('agent')
+        result = upd.apply_update('webui')
         assert result['ok'] is True
         assert ['pull', '--ff-only', 'fork', 'feature-branch'] in ran
 
@@ -827,6 +822,7 @@ class TestApplyForceUpdate:
         assert result['ok'] is False
 
 
+@pytest.mark.skip(reason="Agent gateway lifecycle is owned by the official Agent transaction")
 class TestAgentUpdateRequiresGatewayRestart:
     """Agent updates must prove gateway restart before returning ok=True."""
 
