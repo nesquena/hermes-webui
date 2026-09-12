@@ -9097,6 +9097,7 @@ function _splitForTTS(text, maxChars){
 }
 
 let _ttsSpeaking=false;
+let _ttsGeneration=0;
 let _ttsCurrentUtterance=null;
 let _ttsChunkQueue=[];
 let _ttsChunkIndex=0;
@@ -9293,29 +9294,85 @@ function _playElevenLabsTts(text, btn){
 
 function _playOpenaiTts(text, btn){
   if(btn) btn.dataset.speaking='1';
+  // Generation token: every new playback invalidates all in-flight
+  // callbacks of prior plays. `_ttsSpeaking` alone cannot distinguish
+  // playback A from playback B (a stop→start gap lets a late fetch or
+  // onended callback from A resume the cancelled chain under B).
+  const gen=++_ttsGeneration;
   _ttsSpeaking=true;
   const _fail=function(msg){
     _ttsSpeaking=false;_playingEdgeAudio=null;
     if(btn)btn.dataset.speaking='0';
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'openai'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
+  const chunks=_splitForTTS(text,150);
+  if(!chunks.length){ _fail('No text to speak'); return; }
+
+  // Prefetch pipeline: fetch chunk N+1 while playing chunk N.
+  // Uses inline Web Audio playback (not _playAudioBuf) because
+  // _playAudioBuf clears _ttsSpeaking on end, which would break
+  // the chunk chain — we need _ttsSpeaking to stay true between chunks
+  // so src.onended can distinguish natural end (continue) from stopTTS (halt).
+  var _nextBufPromise=null;
+  function _fetchChunk(i){
+    // Settle every fetch into {ok,buf}/{ok:false,err} immediately, so an
+    // abandoned prefetch can never surface an unhandled rejection.  Errors
+    // are only surfaced when that chunk actually becomes current.
+    return fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:chunks[i], engine:'openai'})
+    })
+    .then(function(r){
+      if(!r.ok){
+        return r.json().catch(function(){return {};}).then(function(j){
+          throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+        });
+      }
+      return r.arrayBuffer();
+    })
+    .then(
+      function(buf){ return {ok:true, buf:buf}; },
+      function(err){ return {ok:false, err:err}; }
+    );
+  }
+  function _playChunk(i){
+    if(!_ttsSpeaking||gen!==_ttsGeneration){ return; }
+    if(i>=chunks.length){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn)btn.dataset.speaking='0';
+      return;
     }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'OpenAI TTS');
-  })
-  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
+    var bufPromise=_nextBufPromise||_fetchChunk(i);
+    bufPromise.then(function(res){
+      if(!_ttsSpeaking||gen!==_ttsGeneration) return;
+      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      var buf=res.buf;
+      // Prefetch next chunk while playing this one
+      if(i+1<chunks.length){ _nextBufPromise=_fetchChunk(i+1); }
+      var ctx=_getTtsAudioCtx();
+      if(!ctx){ _fail('Web Audio API not available'); return; }
+      ctx.decodeAudioData(buf.slice(0), function(audioBuffer){
+        if(!_ttsSpeaking||gen!==_ttsGeneration) return;
+        var src=ctx.createBufferSource();
+        src.buffer=audioBuffer;
+        src.connect(ctx.destination);
+        _playingEdgeAudio=src;
+        // stopTTS() bumps _ttsGeneration and sets _ttsSpeaking=false, then
+        // calls src.stop(), which fires onended. Natural end keeps both
+        // unchanged, so onended can distinguish continue from halt.
+        src.onended=function(){
+          _playingEdgeAudio=null;
+          if(_ttsSpeaking&&gen===_ttsGeneration) _playChunk(i+1);
+        };
+        src.start(0);
+      }, function(e){
+        if(gen!==_ttsGeneration) return;
+        _fail('OpenAI TTS error: '+(e&&e.message||e));
+      });
+    });
+  }
+  _playChunk(0);
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -9361,6 +9418,9 @@ function _playAudioBuf(arrayBuffer, btn, label){
   });
 }
 function stopTTS(){
+  // Invalidate every in-flight chunk callback of prior plays before
+  // clearing state, so a late fetch/onended cannot resume the chain.
+  _ttsGeneration++;
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
