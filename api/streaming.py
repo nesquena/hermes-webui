@@ -5135,6 +5135,14 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
 
 
 def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+    """Serialize snapshot read/modify/write with session-store transactions."""
+    from api.session_batch_transaction import session_store_transaction_lock
+
+    with session_store_transaction_lock(SESSION_DIR):
+        _preserve_pre_compression_snapshot_locked(s, old_sid)
+
+
+def _preserve_pre_compression_snapshot_locked(s, old_sid: str) -> None:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the

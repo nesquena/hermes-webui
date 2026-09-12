@@ -569,19 +569,10 @@ def main() -> None:
 
     fix_credential_permissions()
 
-    try:
-        from api.models import _active_state_db_path
-        from api.session_recovery import recover_all_sessions_on_startup
-        result = recover_all_sessions_on_startup(
-            SESSION_DIR,
-            rebuild_index=True,
-            state_db_path=_active_state_db_path(),
-        )
-        if result.get("restored"):
-            print(f"[recovery] Restored {result['restored']}/{result['scanned']} sessions from .bak (see #1558).", flush=True)
-    except Exception as exc:
-        # Recovery is best-effort; never block server startup.
-        print(f"[recovery] startup recovery failed: {exc}", flush=True)
+    # Batch journal replay fails startup closed; legacy .bak repair stays
+    # best-effort. See api/session_recovery.py::run_startup_session_recovery.
+    from api.session_recovery import run_startup_session_recovery
+    run_startup_session_recovery(SESSION_DIR)
 
     within_container = False
     try:

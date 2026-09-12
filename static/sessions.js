@@ -4309,6 +4309,13 @@ function _updateBatchActionBar(){
   if(count>0){_renderBatchActionBar();}
   else{bar.style.display='none';}
 }
+function _requestSessionArchive(sessionId,archived){
+  // Sidebar lineage metadata is deliberately bounded, so no caller can prove
+  // that a selected row is a singleton. Keep the backend as the mutation-scope
+  // authority for both individual and batch archive/restore actions.
+  const payload={session_id:sessionId,archived,lineage:true};
+  return api('/api/session/archive',{method:'POST',body:JSON.stringify(payload)});
+}
 function _renderBatchActionBar(){
   const bar=$('batchActionBar');if(!bar)return;
   bar.innerHTML='';bar.style.display=_selectedSessions.size>0?'flex':'none';
@@ -4329,7 +4336,7 @@ function _renderBatchActionBar(){
     if(!ok)return;
     try{
       const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
+        const response=await _requestSessionArchive(sid,true);
         return {response,session:sessionsById.get(sid)||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
@@ -4862,12 +4869,17 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    const response=await _requestSessionArchive(session.session_id,archived);
+    const targetIds=new Set(Array.isArray(response.session_ids)?response.session_ids:[session.session_id]);
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
-    if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
+    for(const related of (_allSessions||[])){
+      if(related&&targetIds.has(related.session_id)) related.archived=archived;
+    }
+    if(S.session&&targetIds.has(S.session.session_id)) S.session.archived=archived;
     try{ if(archived&&session.session_id&&localStorage.getItem('hermes-webui-session')===session.session_id) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+    try{ if(archived&&targetIds.has(localStorage.getItem('hermes-webui-session'))) localStorage.removeItem('hermes-webui-session'); }catch(_){ }
     showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
     if(renderHold) await renderHold;
     if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');

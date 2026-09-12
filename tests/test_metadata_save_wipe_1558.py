@@ -252,8 +252,10 @@ def test_recover_all_sessions_on_startup_restores_shrunken_session(temp_session_
     assert len(restored["messages"]) == 1000
 
 
-def test_recover_all_sessions_on_startup_restores_orphan_bak(temp_session_dir):
-    """Startup self-heal: if only <sid>.json.bak survived, recreate <sid>.json."""
+def test_recover_all_sessions_on_startup_leaves_pre_index_orphan_for_manual_migration(
+    temp_session_dir,
+):
+    """A pre-index orphan cannot supply its own current metadata envelope."""
     sid = _make_session_on_disk(temp_session_dir, n_msgs=293)
     live_path = temp_session_dir / f"{sid}.json"
     bak_path = temp_session_dir / f"{sid}.json.bak"
@@ -263,11 +265,12 @@ def test_recover_all_sessions_on_startup_restores_orphan_bak(temp_session_dir):
     from api.session_recovery import recover_all_sessions_on_startup
     result = recover_all_sessions_on_startup(temp_session_dir)
 
-    assert result["restored"] == 1
+    assert result["restored"] == 0
     assert result["scanned"] == 1
     assert result.get("orphaned_backups") == 1
-    restored = json.loads(live_path.read_text(encoding="utf-8"))
-    assert len(restored["messages"]) == 293
+    assert not live_path.exists()
+    assert result["details"][0]["recovery_residual"] == "metadata_authority_unavailable"
+    assert len(json.loads(bak_path.read_text(encoding="utf-8"))["messages"]) == 293
 
 
 def test_recover_all_sessions_on_startup_skips_tombstoned_orphan_bak(temp_session_dir):
@@ -316,8 +319,11 @@ def test_recover_all_sessions_on_startup_rebuilds_missing_index_without_restores
     assert index[0]["message_count"] == 42
 
 
-def test_recover_all_sessions_on_startup_rebuilds_index_after_orphan_restore(temp_session_dir, monkeypatch):
-    """A restored orphan must be visible through the WebUI session index immediately."""
+def test_recover_all_sessions_on_startup_does_not_index_unauthorized_orphan(
+    temp_session_dir,
+    monkeypatch,
+):
+    """An empty index is not metadata authority for an orphan backup."""
     import api.models as _m
 
     sid = _make_session_on_disk(temp_session_dir, n_msgs=42)
@@ -333,10 +339,11 @@ def test_recover_all_sessions_on_startup_rebuilds_index_after_orphan_restore(tem
     from api.session_recovery import recover_all_sessions_on_startup
     result = recover_all_sessions_on_startup(temp_session_dir, rebuild_index=True)
 
-    assert result["restored"] == 1
+    assert result["restored"] == 0
+    assert result["details"][0]["recovery_residual"] == "metadata_authority_unavailable"
+    assert not live_path.exists()
     index = json.loads(stale_index.read_text(encoding="utf-8"))
-    assert [entry["session_id"] for entry in index] == [sid]
-    assert index[0]["message_count"] == 42
+    assert index == []
 
 
 def test_orphan_bak_recovery_skips_sessions_absent_from_state_db(temp_session_dir):

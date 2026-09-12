@@ -288,7 +288,7 @@ def test_incomplete_clear_like_sidecar_missing_pending_fields_still_restores(tmp
     assert json.loads(live_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "pre-clear prompt"
 
 
-def test_malformed_live_sidecar_still_recovers_larger_backup(tmp_path):
+def test_malformed_live_sidecar_without_index_authority_fails_closed(tmp_path):
     sid = "issue5570_malformed_live"
     live_path = tmp_path / f"{sid}.json"
     bak_path = live_path.with_suffix(".json.bak")
@@ -299,8 +299,10 @@ def test_malformed_live_sidecar_still_recovers_larger_backup(tmp_path):
     result = recover_session(live_path)
 
     assert status["recommend"] == "restore"
-    assert result["restored"] is True
-    assert json.loads(live_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "pre-clear prompt"
+    assert result["restored"] is False
+    assert result["recovery_residual"] == "metadata_authority_unavailable"
+    assert live_path.read_text(encoding="utf-8") == "{not json"
+    assert json.loads(bak_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "pre-clear prompt"
 
 
 def test_manual_compression_recovery_behavior_is_preserved(tmp_path):

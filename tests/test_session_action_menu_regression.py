@@ -36,14 +36,16 @@ def test_archive_action_repaints_sidebar_before_full_refresh():
     menu_body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
     helper_body = _function_block(SESSIONS_JS, "_archiveSession")
 
-    api_call = "const response=await api('/api/session/archive'"
+    api_call = "const response=await _requestSessionArchive(session.session_id,archived);"
     optimistic = "if(cached) cached.archived=archived;"
+    related_optimistic = "if(related&&targetIds.has(related.session_id)) related.archived=archived;"
     cached_render = "renderSessionListFromCache();"
     full_refresh = "void renderSessionList();"
 
     assert "await _archiveSession(session,!session.archived);" in menu_body
     assert optimistic in helper_body
-    assert helper_body.index(api_call) < helper_body.index(optimistic) < helper_body.index(cached_render) < helper_body.index(full_refresh)
+    assert related_optimistic in helper_body
+    assert helper_body.index(api_call) < helper_body.index(optimistic) < helper_body.index(related_optimistic) < helper_body.index(cached_render) < helper_body.index(full_refresh)
 
 
 def test_archive_action_clears_saved_session_pointer_for_archived_current_session():
@@ -55,7 +57,13 @@ def test_archive_action_clears_saved_session_pointer_for_archived_current_sessio
     )
 
     assert stale_saved_pointer_guard in helper_body
-    assert helper_body.index("if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;") < helper_body.index(stale_saved_pointer_guard)
+    lineage_saved_pointer_guard = (
+        "try{ if(archived&&targetIds.has(localStorage.getItem('hermes-webui-session'))) "
+        "localStorage.removeItem('hermes-webui-session'); }catch(_){ }"
+    )
+    assert lineage_saved_pointer_guard in helper_body
+    assert helper_body.index("if(S.session&&targetIds.has(S.session.session_id)) S.session.archived=archived;") < helper_body.index(stale_saved_pointer_guard)
+    assert helper_body.index(stale_saved_pointer_guard) < helper_body.index(lineage_saved_pointer_guard)
     assert helper_body.index(stale_saved_pointer_guard) < helper_body.index("showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));")
 
 
