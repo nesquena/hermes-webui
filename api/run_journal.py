@@ -45,6 +45,14 @@ TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_
 SSE_RELAY_CLOSE_EVENTS = frozenset({"stream_end", "cancel", "apperror", "error"})
 # Back-compat alias used by older call sites / tests.
 _TERMINAL_SSE_EVENTS = TERMINAL_SSE_EVENTS
+# Events that are live-UI-only telemetry with no recovery value in the run
+# journal. They are skipped at WRITE time (never durably journaled, so they
+# cannot bloat the journal on marathon runs) and filtered at REPLAY time (so
+# legacy journals that already contain a backlog never stream it to a
+# reconnecting browser tab). Readers deliberately do NOT filter: cursor math
+# (``cursor_event_missing`` bound) and the offline-gap coverage check count
+# journal seqs and must keep seeing every row.
+REPLAY_SKIPPED_SSE_EVENTS = frozenset({"metering"})
 _FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
 _FSYNC_MODE_EAGER = "eager"
 _FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
@@ -447,6 +455,15 @@ class RunJournalWriter:
         self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict:
+        # Live-UI-only telemetry (metering) has no recovery value in the journal:
+        # nothing reads those rows back for recovery, and journaling them at ~10 Hz
+        # on marathon runs balloons the durable file (12+ MB of a single 18 MB run
+        # was metering). Skip the write entirely and return None so callers'
+        # journal-id plumbing (``(journaled or {}).get("event_id")``) is untouched.
+        # Not reserving a seq keeps the remaining journaled seqs contiguous, which
+        # the offline-gap coverage and replay-cursor contiguity checks rely on.
+        if str(event_name or "").strip() in REPLAY_SKIPPED_SSE_EVENTS:
+            return None
         # Draw from the shared module-level seq cache under the per-path lock so
         # this writer and any direct append_run_event() call on the same path
         # agree on one monotonic, gapless sequence.
@@ -460,6 +477,22 @@ class RunJournalWriter:
             session_dir=self.session_dir,
             seq=seq,
         )
+
+
+def journal_replay_visible(event) -> bool:
+    """Return True when a journal row should be streamed to a reconnecting tab.
+
+    Live-UI-only telemetry rows (see ``REPLAY_SKIPPED_SSE_EVENTS``) carry no
+    recovery value — replaying a metering backlog only re-paints a stale TPS
+    number while multiplying the reconnect burst size. Writers no longer journal
+    them, but legacy journals may already contain them, so the replay emit sites
+    filter through this predicate. Non-dict rows are passed through (visible) so
+    an unexpected shape can never silently swallow user-visible output.
+    """
+    if not isinstance(event, dict):
+        return True
+    name = str(event.get("event") or event.get("type") or "")
+    return name not in REPLAY_SKIPPED_SSE_EVENTS
 
 
 def read_run_events(

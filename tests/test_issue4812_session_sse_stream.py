@@ -583,6 +583,62 @@ def test_session_route_live_delivery_skips_replayed_active_run_items(monkeypatch
     assert stream.unsubscribed is True
 
 
+def test_session_route_replay_skips_metering_rows(monkeypatch):
+    import api.routes as routes
+
+    class _FakeStream:
+        def __init__(self):
+            self.q = queue.Queue()
+            self.q.put_nowait(("stream_end", {"status": "done"}, "run_active:2"))
+            self.unsubscribed = False
+
+        def subscribe_with_snapshot(self):
+            return self.q, {"last_event_id": "run_active:1", "offline_buffered_events": 1}
+
+        def unsubscribe(self, q):
+            self.unsubscribed = q is self.q
+
+    stream = _FakeStream()
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: SimpleNamespace(
+            session_id=sid,
+            compact=lambda **_kwargs: {"session_id": sid, "title": "Session"},
+        ),
+    )
+    monkeypatch.setattr(routes, "_active_run_stream_for_session", lambda *_args, **_kwargs: "run_active")
+    monkeypatch.setattr(routes, "STREAMS", {"run_active": stream})
+    # Both the pre-attach replay and the post-attach reconciliation draw from the
+    # same journal; a metering row among them must never reach the SSE body.
+    monkeypatch.setattr(
+        routes,
+        "read_session_run_events",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "events": [
+                {"run_id": "run_prev", "seq": 1, "event": "token", "payload": {"text": "replayed"}, "event_id": "run_prev:1"},
+                {"run_id": "run_prev", "seq": 2, "event": "metering", "payload": {"tps": 47.3}, "event_id": "run_prev:2"},
+            ],
+        },
+    )
+
+    handler = _FakeHandler()
+    routes._handle_session_sse_stream_for_session(
+        handler,
+        urlparse("/api/sessions/session_1/events?after_event_id=run_prev:0"),
+        "session_1",
+    )
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "id: run_prev:1\n" in body
+    assert "event: token\n" in body
+    assert "event: metering\n" not in body
+    assert "id: run_prev:2\n" not in body
+    assert stream.unsubscribed is True
+
+
 def test_session_route_breaks_on_terminal_even_when_reconciliation_replayed_it(monkeypatch):
     """CORE regression (#5677 gate r3): if reconciliation replays the active run's
     TERMINAL event at the subscribe cutoff, the live queue's copy is deduped — but

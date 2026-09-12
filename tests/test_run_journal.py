@@ -2,11 +2,14 @@ import json
 from pathlib import Path
 
 from api.run_journal import (
+    REPLAY_SKIPPED_SSE_EVENTS,
     RunJournalWriter,
     append_run_event,
     find_run_summary,
+    journal_replay_visible,
     latest_run_summary,
     read_run_events,
+    read_session_run_events,
     stale_interrupted_event,
 )
 
@@ -26,6 +29,58 @@ def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
 
     journal = read_run_events("session_1", "run_1", after_seq=1, session_dir=tmp_path)
     assert [event["event"] for event in journal["events"]] == ["done"]
+
+
+def test_writer_skips_metering_and_keeps_remaining_seqs_contiguous(tmp_path):
+    writer = RunJournalWriter("session_1", "run_1", session_dir=tmp_path)
+
+    first = writer.append_sse_event("token", {"text": "hello"})
+    skipped = writer.append_sse_event("metering", {"tps": 47.3})
+    second = writer.append_sse_event("done", {"session": {}})
+
+    assert skipped is None
+    assert first["seq"] == 1
+    # Skipped metering must NOT consume a seq, so visible rows stay contiguous —
+    # the offline-gap coverage and replay-cursor contiguity checks depend on it.
+    assert second["seq"] == 2
+
+    journal = read_run_events("session_1", "run_1", session_dir=tmp_path)
+    assert [event["event"] for event in journal["events"]] == ["token", "done"]
+
+
+def test_writer_skip_is_payload_independent(tmp_path):
+    writer = RunJournalWriter("session_1", "run_1", session_dir=tmp_path)
+
+    assert writer.append_sse_event("metering", None) is None
+    assert writer.append_sse_event("metering", {"tps": 1.0, "active": 1}) is None
+
+    journal = read_run_events("session_1", "run_1", session_dir=tmp_path)
+    assert journal["events"] == []
+
+
+def test_journal_replay_visible_predicate():
+    assert REPLAY_SKIPPED_SSE_EVENTS == {"metering"}
+    assert journal_replay_visible({"event": "token", "payload": {"text": "x"}}) is True
+    assert journal_replay_visible({"event": "metering", "payload": {"tps": 1.0}}) is False
+    # `type` fallback: metering rows are invisible under either field.
+    assert journal_replay_visible({"type": "metering"}) is False
+    # Unknown shapes must pass through (visible) so they can never swallow output.
+    assert journal_replay_visible("not-a-dict") is True
+
+
+def test_readers_keep_metering_rows(tmp_path):
+    # Writers skip metering, but readers deliberately do NOT filter: cursor math
+    # (the ``cursor_event_missing`` bound) and the offline-gap coverage check
+    # count journal seqs and must keep seeing every row.
+    append_run_event("session_1", "run_1", "token", {"text": "hello"}, session_dir=tmp_path)
+    append_run_event("session_1", "run_1", "metering", {"tps": 47.3}, session_dir=tmp_path)
+
+    journal = read_run_events("session_1", "run_1", session_dir=tmp_path)
+    assert [event["event"] for event in journal["events"]] == ["token", "metering"]
+
+    replay = read_session_run_events("session_1", after_event_id="run_1:1", session_dir=tmp_path)
+    assert replay["status"] == "ok"
+    assert [event["event"] for event in replay["events"]] == ["metering"]
 
 
 def test_run_journal_reads_bounded_replay_window(tmp_path):
