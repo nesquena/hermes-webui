@@ -5,7 +5,7 @@
 // legacy reverse-scan over S.messages — that keeps new clients working
 // against old servers (Phase 1 may not yet be deployed everywhere).
 // See api/todo_state.py for the wire contract.
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null,_verifiedSessionProfileIntent:null};
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -1506,26 +1506,128 @@ function _scheduleMessageVirtualizedRender(force){
 const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
-function _renderCacheKey(text, isUser){
+function _renderCacheKey(text, isUser, linkSessionReferences=true){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
-  const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
+  const p = (isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a')+
+    (linkSessionReferences?'s':'l');
   // Short content: use the full string as key (cheap Map lookup).
   // Long content: length + prefix + suffix is good enough — collisions on
   // 20-char prefix+suffix are vanishingly rare for chat messages.
   if(text.length <= 500) return p + ':' + text;
   return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
 }
-function _getCachedRender(text, isUser){
-  const key = _renderCacheKey(text, isUser);
+function _linkBareSessionReferences(html){
+  const source=String(html||'');
+  const reference=/@session:(?:(?:[a-z0-9][a-z0-9_-]{0,63})\/)?[A-Za-z0-9_-]{1,256}/gi;
+  const protectedTags=new Set(['a','code','pre','script','style','textarea']);
+  let out='',cursor=0,protectedStack=[];
+  const renderText=(text)=>{
+    let result='',last=0,match;
+    reference.lastIndex=0;
+    while((match=reference.exec(text))){
+      const start=match.index;
+      let end=start+match[0].length;
+      const before=text[start-1]||'',after=text[end]||'',afterNext=text[end+1]||'';
+      const entityAfter=/^&(?:quot|apos|amp|lt|gt|#\d+|#x[0-9a-f]+);/i.test(text.slice(end,end+24));
+      const beforeWindow=text.slice(Math.max(0,start-24),start);
+      const entityBefore=(beforeWindow.match(/&(?:quot|apos|amp|lt|gt|#\d+|#x[0-9a-f]+);$/i)||[''])[0];
+      const entityBeforeUrl=!!entityBefore&&/[/:?#&=%]/.test(text[start-entityBefore.length-1]||'');
+      const entityBeforeAmp=/&(?:amp|#38);$/i.test(beforeWindow);
+      const danglingHtmlAttribute=/^["'][^<>]{0,160}(?:>|\s+[a-z_:][a-z0-9_:.-]*\s*=)/i
+        .test(text.slice(end,end+192));
+      const urlLikeAfter=/[A-Za-z0-9_\/#=%-]/.test(after)||
+        (after==='.'&&/[A-Za-z0-9_]/.test(afterNext))||
+        (after==='?'&&/[A-Za-z0-9_=&%#/-]/.test(afterNext))||
+        (after===':'&&/[/?#]/.test(afterNext))||
+        (after==='&'&&!entityAfter);
+      if(before==='\\'||/[A-Za-z0-9]/.test(before)||/[/:?#&=%]/.test(before)||
+        entityBeforeAmp||entityBeforeUrl||danglingHtmlAttribute||
+        urlLikeAfter) continue;
+      let openingUnderscores=0;
+      for(let i=start-1;i>=0&&text[i]==='_'&&openingUnderscores<3;i--) openingUnderscores++;
+      const trailingUnderscores=(text.slice(start,end).match(/_+$/)||[''])[0].length;
+      const wrapperUnderscores=(openingUnderscores===1||openingUnderscores===2)&&trailingUnderscores>=openingUnderscores
+        ? openingUnderscores : 0;
+      let value=match[0].slice('@session:'.length);
+      if(wrapperUnderscores){
+        end-=wrapperUnderscores;
+        value=value.slice(0,-wrapperUnderscores);
+      }
+      const parts=value.split('/');
+      const profile=parts.length===2?parts[0]:null;
+      const sid=parts.length===2?parts[1]:parts[0];
+      if(!sid||!/^[A-Za-z0-9_-]{1,256}$/.test(sid)||
+        (profile!==null&&!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(profile))) continue;
+      const label=text.slice(start,end);
+      let href='';
+      try{
+        if(typeof _sessionUrlForSid==='function') href=_sessionUrlForSid(sid,profile);
+        else href=`session/${encodeURIComponent(sid)}`;
+      }catch(_){ href=`session/${encodeURIComponent(sid)}`; }
+      result+=text.slice(last,start);
+      result+=`<a class="session-link" href="${esc(href)}" data-session-ref="1" data-session-id="${esc(sid)}"${profile!==null?` data-session-profile="${esc(profile)}"`:''}>${esc(label)}</a>`;
+      last=end;
+    }
+    return result+text.slice(last);
+  };
+  while(cursor<source.length){
+    const tagStart=source.indexOf('<',cursor);
+    if(tagStart<0){
+      out+=protectedStack.length?source.slice(cursor):renderText(source.slice(cursor));
+      break;
+    }
+    if(tagStart>cursor) out+=protectedStack.length?source.slice(cursor,tagStart):renderText(source.slice(cursor,tagStart));
+    if(source.startsWith('<!--',tagStart)){
+      const commentEnd=source.indexOf('-->',tagStart+4);
+      if(commentEnd<0){out+=source.slice(tagStart);break;}
+      const end=commentEnd+3;
+      out+=source.slice(tagStart,end);cursor=end;continue;
+    }
+    let tagEnd=-1,quote='';
+    for(let i=tagStart+1;i<source.length;i++){
+      const ch=source[i];
+      if(quote){
+        if(ch===quote) quote='';
+        continue;
+      }
+      if(ch==='"'||ch==="'"){quote=ch;continue;}
+      if(ch==='>'){tagEnd=i;break;}
+    }
+    if(tagEnd<0){out+=source.slice(tagStart);break;}
+    const tag=source.slice(tagStart,tagEnd+1);
+    out+=tag;
+    const tagMatch=tag.match(/^<\/?\s*([a-z][a-z0-9-]*)\b/i);
+    if(tagMatch){
+      const tagName=tagMatch[1].toLowerCase();
+      if(protectedTags.has(tagName)){
+        if(/^<\//.test(tag)){
+          if(protectedStack[protectedStack.length-1]===tagName) protectedStack.pop();
+        }else if(!/\/\s*>$/.test(tag)) protectedStack.push(tagName);
+      }
+    }
+    cursor=tagEnd+1;
+  }
+  return out;
+}
+function _getCachedRender(text, isUser, options){
+  const linkSessionReferences=!(options&&options.linkSessionReferences===false);
+  let key = _renderCacheKey(text, isUser, linkSessionReferences);
+  if(linkSessionReferences){
+    try{
+      const location=new URL(window.location.href);
+      key+=`|session-link-url:${location.search}${location.hash}`;
+    }catch(_){ }
+  }
   const hit = _renderCache.get(key);
   if(hit !== undefined) return hit;
   const rendered = isUser
     ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
     : renderMd(_stripXmlToolCallsDisplay(String(text)));
+  const finalHtml=linkSessionReferences?_linkBareSessionReferences(rendered):rendered;
   if(_renderCache.size > _renderCacheMax) _renderCache.clear();
-  _renderCache.set(key, rendered);
-  return rendered;
+  _renderCache.set(key, finalHtml);
+  return finalHtml;
 }
 // ── Message-level media snapshot stamping ─────────────────────────────────
 // /api/media serves a file's CURRENT bytes. Since ETag revalidation (#6922),
@@ -2578,6 +2680,14 @@ document.addEventListener('click', e => {
   if(!e.target || !e.target.closest) return;
   const sessionLink=e.target.closest('a.session-link[href]');
   if(sessionLink){
+    if(sessionLink.getAttribute('data-session-ref')==='1'&&typeof _openSessionReference==='function'){
+      e.preventDefault();
+      const sid=sessionLink.getAttribute('data-session-id')||'';
+      const profile=sessionLink.hasAttribute('data-session-profile')
+        ? sessionLink.getAttribute('data-session-profile') : null;
+      void _openSessionReference(sid,profile);
+      return;
+    }
     const href=sessionLink.getAttribute('href')||'';
     const m=href.match(/(?:^|\/)session\/([^?#]+)/i);
     if(m&&typeof loadSession==='function'){
@@ -17207,7 +17317,7 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = _getCachedRender(displayContent, isUser);
+    let bodyHtml = _getCachedRender(displayContent, isUser, {linkSessionReferences:!m._live});
     // Message-level media snapshots: settled assistant messages carry a
     // path→digest map (written at settle time) freezing the file bytes the
     // turn emitted. Stamp it AFTER the text-keyed render cache so identical
@@ -17434,7 +17544,7 @@ function renderMessages(options){
         if(_ERR_MSG_RE.test(String(partDisplayText||'').trim())) orderedSeg.dataset.error='1';
         if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
-        const partBodyHtml=_getCachedRender(partDisplayText,false);
+        const partBodyHtml=_getCachedRender(partDisplayText,false,{linkSessionReferences:!m._live});
         // Message-level media snapshots: transparent ordered segments carry the
         // same per-message path→digest map as the main transcript; stamp it so
         // historical previews freeze (&snap=) instead of following overwrites.

@@ -84,6 +84,35 @@ correct visible session target, not moving execution ownership.
    should still use the stale-route recovery path. A present archived parent with
    a live continuation is not a 404; it is a canonicalization problem.
 
+## Explicit References and Ownership
+
+Rendered references use one of these forms:
+
+- `@session:<sid>` for an unqualified session ID.
+- `@session:<profile>/<sid>` for an explicit profile owner.
+
+The URL equivalent is `/session/<sid>?profile=<profile>`. A single valid
+`?profile` value is authoritative for that navigation; it takes precedence over
+the active profile, default/root aliases, and remembered browser state. A
+duplicate or invalid profile value fails closed: the browser must leave the
+current session visible and must not fall back to an unqualified load.
+
+An explicit open validates the requested session and profile before switching
+profiles, then uses the canonical `switchToProfile()` lifecycle. A same-ID
+selection is a no-op only when the visible session owner matches the active
+profile and any requested owner. Otherwise it performs normal resolution and
+loading. If a metadata response names a continuation, the continuation is the
+next explicit target: its session ID and profile are validated again, and any
+persisted or in-memory live-recovery entry for each resolved cross-profile ID is
+quarantined. Only the accepted final ID is cleared from the recovery store after
+successful navigation; unrelated IDs are untouched.
+
+`messages=1` responses for explicit navigation must include the requested session
+identity and matching owner before messages, tool calls, todos, usage, or cache
+state are changed. A running session with a valid live recovery tail may still
+complete as a degraded load when transcript hydration fails. An explicit load
+without that safe recovery state fails and restores the previous profile/session.
+
 ## Entry Point Matrix
 
 | Entry point | Input | Expected resolution |

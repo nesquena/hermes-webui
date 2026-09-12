@@ -23,10 +23,9 @@ def test_popstate_handler_guards_busy_state():
     prevent.
     """
     src = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
-    popstate_idx = src.find("addEventListener('popstate'")
+    popstate_idx = src.find("function _handleSessionPopstate()")
     assert popstate_idx != -1, "popstate handler missing from sessions.js"
-    # Look at the next ~600 chars of the handler body.
-    body = src[popstate_idx : popstate_idx + 600]
+    body = src[popstate_idx : src.find("\n\nif(typeof window", popstate_idx)]
     assert "S.busy" in body, (
         "popstate handler must check S.busy before calling loadSession() — "
         "otherwise mid-stream users lose their turn when they hit browser Back. "

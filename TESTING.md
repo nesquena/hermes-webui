@@ -172,6 +172,39 @@ Each test has:
 
 Work through sections in order. Each section builds on the previous.
 
+## Explicit Session References and Responsive Navigation
+
+SETUP: Have one session in the default/root profile and another session in a
+different profile. If possible, also use a running session with a visible live
+tail and a compressed session whose parent has a continuation.
+
+STEPS:
+
+1. In a settled assistant or user message, activate `@session:<sid>` and
+   `@session:<profile>/<sid>` at desktop width. Confirm the destination session,
+   profile chip, transcript owner, and URL agree.
+2. Open the destination directly as `/session/<sid>?profile=<profile>`. Repeat
+   with duplicate `?profile` parameters and an invalid value.
+3. Reload while the explicit profile URL is active, then repeat the open from a
+   sidebar row and from a narrow/mobile drawer.
+4. For a continuation parent, open the parent ID and confirm the visible URL and
+   transcript settle on the canonical continuation owner. During a running
+   session, make transcript hydration fail or reload offline only if the live
+   recovery tail is available.
+
+EXPECT: A valid explicit reference switches profile and loads the requested
+owner transactionally. Duplicate/invalid `?profile` input stays on the previous
+session and does not silently fall back to the active profile. A continuation
+uses the same owner and does not consume another profile's live tail. A valid
+running tail remains usable if transcript hydration is degraded; an explicit
+load with neither transcript nor safe recovery fails and restores the previous
+view.
+
+RESPONSIVE CHECK: Verify the same outcome at wide desktop, narrow desktop/tablet,
+and mobile widths. The profile chip, session list, transcript, and drawer must
+not show different owners during or after the switch; no stale skeleton or
+profile label may remain after a failure.
+
 ---
 
 ## Section 1: Initial Load and Empty State
