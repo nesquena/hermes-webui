@@ -472,10 +472,31 @@ _redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
 # thousands of small recurring strings that actually benefit, or balloon RSS.
 _REDACT_CACHE_MAX_TEXT_LEN = 16384
 
+# Strings above that threshold used to bypass memoization entirely and re-run
+# the full ~15-pass redactor on every request. On a real 22MB session that was
+# 59 large strings (29 unique, 0.76MB) costing 1.68s per request — 99.9% of the
+# recurring redaction cost once the small-string cache is warm, paid again by
+# every tab and every poll for a byte-identical result.
+#
+# They get their own small cache instead of sharing the 4096-entry one, so a
+# large blob can never evict the thousands of small recurring strings. Both the
+# entry count and the per-entry size are capped, which bounds retained bytes to
+# roughly _REDACT_LARGE_CACHE_SIZE * _REDACT_LARGE_CACHE_MAX_TEXT_LEN (key plus
+# value). Anything larger stays uncached: unbounded growth is the failure mode
+# this threshold exists to prevent.
+_REDACT_LARGE_CACHE_MAX_TEXT_LEN = 131072
+_REDACT_LARGE_CACHE_SIZE = 64
+
+_redact_fn_large_lru = functools.lru_cache(maxsize=_REDACT_LARGE_CACHE_SIZE)(
+    _redact_fn_uncached
+)
+
 
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
-        return _redact_fn_uncached(text)
+        if len(text) > _REDACT_LARGE_CACHE_MAX_TEXT_LEN:
+            return _redact_fn_uncached(text)
+        return _redact_fn_large_lru(text)
     return _redact_fn_lru(text)
 
 
@@ -559,7 +580,27 @@ _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
 
 
-def _might_contain_sensitive_text(text: str) -> bool:
+# The prefilter runs on every string of every API response — ~74k strings /
+# ~19MB on a real large session — and cProfile showed it costing 2.98s of the
+# 3.7s redaction pass once the redactor's own caches are warm. The work is
+# pure and deterministic (fixed marker tuples, fixed patterns), so identical
+# text always yields the same verdict and is safe to memoize without
+# invalidation, exactly like `_redact_fn_cached` above.
+#
+# Note on what was NOT done: replacing the 71 `in` scans with one compiled
+# alternation looks like the obvious fix, but measured 38% SLOWER on the real
+# payload (2.60s vs 1.88s). CPython's substring search is already a tuned
+# C-level algorithm, and a large regex alternation has to try each branch at
+# each position. Memoizing the verdict avoids the scan entirely instead.
+#
+# Bounds mirror the redaction caches: capping entry count and per-entry size
+# keeps retained bytes to roughly size * max_len, so a burst of giant unique
+# blobs cannot balloon RSS. Oversized strings simply run the scan uncached.
+_SENSITIVE_PREFILTER_CACHE_SIZE = 8192
+_SENSITIVE_PREFILTER_MAX_TEXT_LEN = 16384
+
+
+def _might_contain_sensitive_text_uncached(text: str) -> bool:
     """Cheap prefilter before the full agent+fallback redaction pass."""
     if not isinstance(text, str) or not text:
         return False
@@ -575,6 +616,24 @@ def _might_contain_sensitive_text(text: str) -> bool:
     if "+" in text and _SENSITIVE_PHONE_MARKER_RE.search(text):
         return True
     return False
+
+
+_might_contain_sensitive_text_lru = functools.lru_cache(
+    maxsize=_SENSITIVE_PREFILTER_CACHE_SIZE
+)(_might_contain_sensitive_text_uncached)
+
+
+def _might_contain_sensitive_text(text: str) -> bool:
+    """Memoized wrapper around the prefilter.
+
+    Falls back to the uncached scan for non-strings and oversized text so the
+    cache can never be poisoned by an unhashable value or grow unbounded.
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    if len(text) > _SENSITIVE_PREFILTER_MAX_TEXT_LEN:
+        return _might_contain_sensitive_text_uncached(text)
+    return _might_contain_sensitive_text_lru(text)
 
 
 def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
@@ -956,13 +1015,45 @@ def _redact_value(v, *, _enabled: bool | None = None):
 
     ``_enabled`` is threaded through so a single response-level redact pass
     only reads settings.json once. (Opus pre-release perf fix.)
+
+    Containers are rebuilt only when a descendant actually changed. The
+    overwhelming majority of a transcript carries no credential marker, so the
+    previous unconditional dict/list comprehension deep-copied the entire
+    payload — tens of MB per response — to reproduce an identical structure.
+    That copy is pure CPU under the GIL (allocation and refcounting never
+    release it), which serialized concurrent tab loads on a threaded server.
+
+    Returning the original object when nothing changed is safe because callers
+    treat redacted output as read-only: ``_public_message_projection`` builds a
+    fresh ``item`` dict per message, and ``redact_session_data`` builds a fresh
+    ``result``. Nothing mutates a value returned from here in place, so sharing
+    an unmodified subtree cannot leak a later mutation back into session state.
+    The redacting path is unchanged: as soon as one string is masked, every
+    container on the path to it is rebuilt and the caller's original is left
+    untouched.
     """
     if isinstance(v, str):
         return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {key: _redact_value(value, _enabled=_enabled) for key, value in v.items()}
+        out = None
+        for key, value in v.items():
+            redacted = _redact_value(value, _enabled=_enabled)
+            if redacted is value:
+                continue
+            if out is None:
+                out = dict(v)
+            out[key] = redacted
+        return v if out is None else out
     if isinstance(v, list):
-        return [_redact_value(item, _enabled=_enabled) for item in v]
+        out = None
+        for index, item in enumerate(v):
+            redacted = _redact_value(item, _enabled=_enabled)
+            if redacted is item:
+                continue
+            if out is None:
+                out = list(v)
+            out[index] = redacted
+        return v if out is None else out
     return v
 
 
