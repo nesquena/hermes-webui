@@ -65,7 +65,10 @@ def test_markdown_table_filter_is_gated_to_multi_row_tables_and_preserves_rows()
     messages = _read_static("messages.js")
     helper = messages[messages.index("function enhanceMarkdownTables(root)"):messages.index("function _markdownTableText")]
 
-    assert "if(bodyRows.length>=4&&table.parentElement)" in helper
+    # Filter is gated to multi-row tables; it is inserted above the scroll wrapper
+    # (controlsHost), which #6517 introduced around the table.
+    assert "if(bodyRows.length>=4&&controlsHost)" in helper
+    assert "controlsHost.insertBefore(filter,controlAnchor)" in helper
     assert "filter.type='search'" in helper
     assert "filter.placeholder=filterLabel" in helper
     assert "filter.setAttribute('aria-label',filterLabel)" in helper
