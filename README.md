@@ -235,6 +235,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Breadcrumb navigation with clickable path segments
 - Preview text, code, Markdown (rendered), and images inline
 - Chat links using `workspace://path/to/file` open files in the right-side preview pane
+- The Artifacts tab lists retained tool-produced files. Artifacts outside the active workspace remain visible as display-only metadata. Safe relative paths and absolute paths proven to be inside the active workspace can open in the preview after the session-scoped file check.
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
 - File preview auto-closes on directory navigation (with unsaved-edit guard)

@@ -6493,6 +6493,9 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .workspace-artifact-empty{padding:16px 8px;color:var(--muted);font-size:12px;line-height:1.5;text-align:center;}
 .workspace-artifact-item{display:block;width:100%;text-align:left;background:var(--surface-subtle);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;}
 .workspace-artifact-item:hover{border-color:var(--accent);}
+.workspace-artifact-item-display-only{cursor:default;color:var(--text);}
+.workspace-artifact-item-display-only:hover{border-color:var(--border);}
+.workspace-artifact-explanation{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35;}
   .workspace-artifact-filename{font-family:var(--font-mono);font-size:12px;overflow-wrap:anywhere;}
   .workspace-artifact-directory{display:flex;min-width:0;overflow:hidden;white-space:nowrap;font-family:var(--font-mono);font-size:11px;color:var(--muted);}
   .workspace-artifact-directory-head{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;}
