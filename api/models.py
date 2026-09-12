@@ -2428,12 +2428,50 @@ def _find_existing_assistant_for_journal_content(
     *,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
+    stream_id: str | None = None,
+    turn_start: int | None = None,
 ) -> int | None:
+    """Find an earlier assistant row this journal segment can collapse into.
+
+    Turn-ownership rule (#7388 review): a match is only accepted when the
+    candidate row provably belongs to the turn being recovered — either it
+    sits at/after the pending-user checkpoint (``turn_start``) or it was
+    materialized by THIS stream's own earlier recovery pass
+    (``_recovered_stream_id == stream_id``). An identical answer from an
+    EARLIER turn is a legitimate transcript repetition, not a duplicate, and
+    must not suppress the current turn's row. Rows that cannot prove
+    ownership (e.g. legacy rows predating stream-id tagging, when no pending
+    checkpoint is matchable) are never claimed — recovery appends instead,
+    which errs toward preserving content.
+    """
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
         return None
     messages = session.messages or []
     stop = len(messages) if max_index is None else min(len(messages), max_index)
+
+    def _owns_turn(idx: int) -> bool:
+        message = messages[idx]
+        # Stream-locked rows (recovered by an earlier pass) may only be
+        # claimed by the SAME stream — symmetric with the tool path, and it
+        # closes the cross-stream collapse asymmetry flagged in the #7388
+        # attack review.
+        if stream_id and message.get('_recovered_stream_id') == stream_id:
+            return True
+        if turn_start is not None:
+            # Window is defined: window position suffices for rows that are
+            # NOT stream-tagged (they belong to this turn's core/live state);
+            # stream-tagged rows from OTHER streams were already excluded
+            # above. Earlier turns are legitimate repetition.
+            if message.get('_recovered_stream_id'):
+                return False
+            return idx >= turn_start
+        # No matchable pending checkpoint (quiescent session, or the pending
+        # message has no surviving row): no current-turn boundary exists to
+        # protect, so legacy session-wide matching applies. This preserves
+        # the #3929 reasoning-backfill contract on pre-stream-id transcripts.
+        return True
+
     substring_match = None
     for idx in range(stop):
         if excluded_indexes and idx in excluded_indexes:
@@ -2447,8 +2485,15 @@ def _find_existing_assistant_for_journal_content(
         if not existing:
             continue
         if existing == candidate:
-            return idx
-        if substring_match is None and len(candidate) >= 24 and candidate in existing:
+            if _owns_turn(idx):
+                return idx
+            continue
+        if (
+            substring_match is None
+            and len(candidate) >= 24
+            and candidate in existing
+            and _owns_turn(idx)
+        ):
             substring_match = idx
     return substring_match
 
@@ -2459,6 +2504,7 @@ def _journal_tool_already_present(
     preview: str,
     *,
     stream_id: str | None = None,
+    turn_start: int | None = None,
 ) -> bool:
     """Return True when an equivalent tool card already exists.
 
@@ -2470,12 +2516,13 @@ def _journal_tool_already_present(
       legitimately-repeated tool (e.g. a second ``terminal: ls`` in a
       different turn) would be dropped.
     * If the existing tool card has no ``_recovered_stream_id`` (a live tool
-      card, or a tool card carried over from a core transcript that pre-dates
-      stream-id tagging), the legacy name+preview match still wins.  This
-      preserves the "core transcript already has this tool, don't duplicate
-      it" invariant the original repair path established.
-    * When ``stream_id`` is omitted, the helper degrades cleanly to its
-      pre-fix session-wide behaviour.
+      card), it only suppresses the current tool when turn ownership is
+      proven — the card's ``assistant_msg_idx`` sits at/after the pending-user
+      checkpoint (``turn_start``). An identical untagged tool from an EARLIER
+      turn is legitimate transcript repetition (#7388 review), not a
+      duplicate.
+    * When ``stream_id`` and ``turn_start`` are both omitted, the helper
+      degrades cleanly to its pre-fix session-wide behaviour.
     """
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
@@ -2490,14 +2537,25 @@ def _journal_tool_already_present(
         )
         if existing_preview != candidate_preview:
             continue
-        if candidate_stream is not None:
-            existing_stream = tool_call.get('_recovered_stream_id')
-            # A tool card explicitly tagged with a recovered_stream_id that
-            # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry.  Untagged tool cards (live or carried
-            # over from the core transcript) still match.
-            if existing_stream and str(existing_stream) != candidate_stream:
+        # Ownership check (#7388 re-review) — branch on the EXISTING card's
+        # provenance, not on which arguments the caller supplied:
+        #   * tagged with another stream  -> another recovery's turn: skip.
+        #   * tagged with our stream      -> same-stream idempotency: match.
+        #   * untagged (a live card)      -> only a proven current-turn
+        #     window position (assistant_msg_idx >= turn_start) may match;
+        #     without a window there is nothing proving the card isn't from
+        #     an earlier turn, so it must NOT suppress the current tool.
+        existing_stream = tool_call.get('_recovered_stream_id')
+        if existing_stream:
+            if str(existing_stream) != (candidate_stream or ''):
                 continue
+            return True
+        if turn_start is not None:
+            owner_idx = tool_call.get('assistant_msg_idx')
+            if isinstance(owner_idx, int) and owner_idx >= turn_start:
+                return True
+            continue
+        # Legacy degrade (no stream id and no window): pre-fix behavior.
         return True
     return False
 
@@ -2680,6 +2738,63 @@ def _pending_recovery_turn_start(session) -> int | None:
     return None
 
 
+def _pending_recovery_turn_window_start(session) -> int | None:
+    """First index of the turn being recovered (checkpoint row itself).
+
+    Unlike ``_pending_recovery_turn_start`` (which returns the LAST matching
+    row so error-marker surgery sees the whole recovered tail), turn-scoped
+    dedupe (#7388 review) needs the window's opening edge: rows at/after the
+    checkpoint user message belong to the turn being recovered and may
+    absorb journal output; earlier rows are prior turns and must never be
+    claimed.
+
+    Matching precedence (#7388 re-review): EXACT checkpoint identity
+    (timestamp/source/attachment-aware) is scanned across the whole
+    transcript FIRST; the text-only fallback runs only when no exact
+    checkpoint exists, and then takes the LATEST applicable match — an
+    earlier turn that repeated the same prompt text must never win the
+    window.  Returns None when there is no pending message or no row
+    matches it at all — callers then degrade to stream-tag-only (or, for a
+    quiescent session with no stream id, legacy session-wide) behavior.
+    """
+    pending_text = getattr(session, 'pending_user_message', None)
+    if not pending_text:
+        return None
+    messages = [
+        message for message in (session.messages or [])
+        if isinstance(message, dict)
+    ]
+    # Pass 1: exact checkpoint identity anywhere in the transcript. Which
+    # match owns the window: the LATEST match that is NOT a `_recovered`
+    # repair artifact is the current turn's real submission — recovered rows
+    # are appended by the repair path itself (before journal recovery runs)
+    # and must never act as turn boundaries (#7388 attack A: without this,
+    # the repair's own recovered row re-opens the window at the earliest
+    # identical-prompt turn). If ONLY recovered echoes match, the earliest
+    # echo is the best surviving boundary (#3929 owner-echo keeps its core
+    # row claimable).
+    exact_matches = [
+        idx for idx, message in enumerate(messages)
+        if _message_matches_pending_checkpoint(
+            message,
+            pending_text,
+            session.pending_started_at,
+            session.pending_user_source,
+            session.pending_attachments,
+        )
+    ]
+    if exact_matches:
+        real = [idx for idx in exact_matches
+                if not messages[idx].get('_recovered')]
+        return real[-1] if real else exact_matches[0]
+    # Pass 2: text-only fallback, LATEST applicable match.
+    fallback = None
+    for idx, message in enumerate(messages):
+        if _message_matches_pending_text(message, pending_text):
+            fallback = idx
+    return fallback
+
+
 def _materialize_unsaved_gateway_terminal_error(
     session,
     stream_id: str | None,
@@ -2733,7 +2848,7 @@ def _recover_journaled_output_and_terminal_error(
     session,
     stream_id: str | None,
     *,
-    dedupe_existing: bool = False,
+    dedupe_existing: bool = True,
     terminal_recovery: dict | None = None,
 ) -> tuple[bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error."""
@@ -2787,7 +2902,7 @@ def _append_journaled_partial_output(
     session,
     stream_id: str | None,
     *,
-    dedupe_existing: bool = False,
+    dedupe_existing: bool = True,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -2891,12 +3006,19 @@ def _append_journaled_partial_output(
         if dedupe_existing and content:
             search_excluded = set(claimed_existing_assistant_indexes)
             existing_idx = None
+            # Turn-ownership scope (#7388 review): only rows owned by the
+            # turn being recovered may absorb this journal segment. The
+            # window opens at the FIRST checkpoint-matching row; when no
+            # window exists, _owns_turn degrades to legacy behavior.
+            _turn_start = _pending_recovery_turn_window_start(session)
             while True:
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
                     max_index=initial_message_count,
                     excluded_indexes=search_excluded,
+                    stream_id=stream_id,
+                    turn_start=_turn_start,
                 )
                 if candidate_idx is None:
                     break
@@ -3036,6 +3158,7 @@ def _append_journaled_partial_output(
             preview = str(payload.get('preview') or '')
             if dedupe_existing and _journal_tool_already_present(
                 session, name, preview, stream_id=stream_id,
+                turn_start=_pending_recovery_turn_window_start(session),
             ):
                 current_assistant_idx = anchor_idx
                 continue
@@ -3466,6 +3589,7 @@ def _apply_core_sync_or_error_marker(
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
+                dedupe_existing=True,
                 terminal_recovery=_terminal_recovery,
             )
         )
