@@ -293,7 +293,7 @@ def test_frontend_sends_sidebar_source_param():
 
     assert "function _requestedSessionSidebarSource()" in src
     assert "function _sessionListQueryString()" in src
-    assert "qs.set('sidebar_source', _requestedSessionSidebarSource());" in src
+    assert "if (src !== undefined && src !== null) qs.set('sidebar_source', src);" in src
     assert "_serverWebuiSessionCount" in src
     assert "_serverCliSessionCount" in src
     assert "function _sessionSourceTabCount(" in src
@@ -741,7 +741,7 @@ async function runCase(requestedSource, cachedSource) {{
 }}
 (async () => {{
   const mismatch = await runCase('cli', 'webui');
-  const match = await runCase('webui', 'webui');
+  const match = await runCase('webui', null);
   console.log(JSON.stringify({{ mismatch, match }}));
 }})().catch(error => {{
   console.error(error);
@@ -764,16 +764,16 @@ async function runCase(requestedSource, cachedSource) {{
     assert body["mismatch"]["inflightKeys"] == ["webui-live"]
     assert body["mismatch"]["cleared"] == []
     assert body["mismatch"]["render"]["inflightKeys"] == ["webui-live"]
-    assert body["match"]["sessions"] == ["webui-1"]
+    assert body["match"]["sessions"] == ["null-1"]
     assert body["match"]["scope"] == {
         "profile": "default",
         "allProfiles": False,
-        "sidebarSource": "webui",
+        "sidebarSource": None,
         "excludeHidden": True,
     }
     assert body["match"]["webui"] == 11
     assert body["match"]["cli"] == 5
-    assert body["match"]["render"]["sessions"] == ["webui-1"]
+    assert body["match"]["render"]["sessions"] == ["null-1"]
 
 
 def test_payload_row_count_regression(monkeypatch):
