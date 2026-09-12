@@ -109,6 +109,28 @@ SESSION_CHANNELS_LOCK = threading.Lock()
 _SESSION_CHANNEL_REPLAY_LIMIT = 32
 
 
+def _parse_channel_cursor_watermark(cursor: str | None) -> int | None:
+    """Extract the replay watermark from a synthetic subscribe cursor.
+
+    A synthetic cursor has the shape ``session-channel:<uuid>@<seq>`` where
+    ``<seq>`` is the channel's monotonic replay counter observed at connect
+    time. Returns the integer watermark, or ``None`` when ``cursor`` is not a
+    watermarked synthetic cursor (a real event id, a legacy marker without an
+    ``@seq`` suffix, or anything malformed) so the caller fails closed.
+    """
+    if not cursor or not isinstance(cursor, str):
+        return None
+    if not cursor.startswith("session-channel:"):
+        return None
+    marker, sep, seq_text = cursor.rpartition("@")
+    if not sep or not marker.startswith("session-channel:"):
+        return None
+    try:
+        return int(seq_text)
+    except (TypeError, ValueError):
+        return None
+
+
 class SessionChannel:
     """A long-lived multi-subscriber SSE channel for one WebUI session.
 
@@ -136,9 +158,16 @@ class SessionChannel:
         # Only events with stable event_id values are replayable. This closes the
         # tiny gap between a bounded SSE generation reaching EOF and EventSource
         # opening its replacement without replaying old toasts on a fresh tab.
-        self._history: deque[tuple[str, dict, str]] = deque(
+        # Each retained event carries a monotonic ``seq`` so a fresh/reconnecting
+        # subscriber's cursor can point at a replay watermark WITHOUT occupying a
+        # slot in this bounded deque — fresh-connection churn from other tabs must
+        # never evict another subscriber's still-replayable events (#7105 gate).
+        self._history: deque[tuple[str, dict, str, int]] = deque(
             maxlen=_SESSION_CHANNEL_REPLAY_LIMIT
         )
+        # Monotonic counter over replayable events. A subscribe cursor encodes the
+        # value observed at connect time; reconnect replays only events past it.
+        self._event_seq: int = 0
         now = time.time()
         self.created_at = now
         self.last_event_at = now
@@ -152,9 +181,13 @@ class SessionChannel:
         q: queue.Queue = queue.Queue(maxsize=maxsize)
         with self._lock:
             matched_cursor = False
+            matched_real_id = False
             replay_count = 0
             if after_event_id:
                 history = list(self._history)
+                oldest_seq = history[0][3] if history else None
+                # 1. Real event cursor — the client's Last-Event-ID is a genuine
+                #    event's id. Match it and replay everything after it.
                 match_index = next(
                     (
                         index
@@ -163,24 +196,47 @@ class SessionChannel:
                     ),
                     None,
                 )
+                pending: list[tuple[str, dict, str, int]] = []
                 if match_index is not None:
                     matched_cursor = True
+                    matched_real_id = True
                     pending = [
                         item for item in history[match_index + 1:] if item[0]
                     ]
-                    if len(pending) <= maxsize:
-                        for event, data, _event_id in pending:
-                            q.put_nowait((event, dict(data)))
-                        replay_count = len(pending)
-            if matched_cursor:
+                else:
+                    # 2. Synthetic subscribe cursor — carries an ``@<seq>``
+                    #    watermark instead of occupying a replay slot. Only
+                    #    replay when the watermark is provably contiguous with
+                    #    retained history; a watermark older than the oldest
+                    #    retained event means an intervening event was evicted,
+                    #    so fail closed (fresh marker, replay nothing).
+                    watermark = _parse_channel_cursor_watermark(after_event_id)
+                    if watermark is not None and (
+                        oldest_seq is None or watermark >= oldest_seq - 1
+                    ):
+                        matched_cursor = True
+                        pending = [
+                            item
+                            for item in history
+                            if item[3] > watermark and item[0]
+                        ]
+                if matched_cursor and pending and len(pending) <= maxsize:
+                    for event, data, _event_id, _seq in pending:
+                        q.put_nowait((event, dict(data)))
+                    replay_count = len(pending)
+            if matched_real_id:
+                # Continue from the exact real event id the client last saw.
                 initial_event_id = str(after_event_id)
             else:
-                # A first connection has no Last-Event-ID. Give its `initial`
-                # frame a cursor marker so an event emitted during the later
-                # EOF/reconnect gap can still replay. Unknown/evicted cursors
-                # get a new marker after old history and never replay stale data.
-                initial_event_id = f"session-channel:{uuid.uuid4().hex}"
-                self._history.append(("", {}, initial_event_id))
+                # A first connection (or a synthetic-cursor reconnect) gets a
+                # cursor encoding the CURRENT replay watermark so an event
+                # emitted during the later EOF/reconnect gap can still replay —
+                # without appending anything to the bounded replay history.
+                # Unknown/evicted cursors fall here too and never replay stale
+                # data (fail-closed).
+                initial_event_id = (
+                    f"session-channel:{uuid.uuid4().hex}@{self._event_seq}"
+                )
             q._session_channel_initial_event_id = initial_event_id
             q._session_channel_replay_count = replay_count
             self._subscribers.append(q)
@@ -211,7 +267,8 @@ class SessionChannel:
                 else ""
             )
             if event_id:
-                self._history.append((event, dict(data), event_id))
+                self._event_seq += 1
+                self._history.append((event, dict(data), event_id, self._event_seq))
             subs = list(self._subscribers)
             self.last_event_at = time.time()
         for q in subs:

@@ -452,3 +452,122 @@ def test_gateway_stream_lease_unsubscribes_proxy_acked_client(monkeypatch):
     assert ("Connection", "close") not in handler.sent_headers
     assert b"sessions_changed" in handler.wfile.body
     assert b"keepalive" in handler.wfile.body
+
+
+def test_fresh_subscription_churn_cannot_evict_a_valid_subscribers_gap_event():
+    """>32 fresh subscriptions must not consume another tab's replay capacity.
+
+    Regression for the gate-reproduced SILENT defect: synthetic subscribe
+    cursors used to be appended into the same bounded ``_history`` deque that
+    holds replayable events, so one tab's fresh-connection churn evicted
+    another tab's still-replayable completion. The fix keeps ``_history`` for
+    genuine events only and encodes the subscribe watermark in the cursor.
+    """
+    channel = background_process.SessionChannel("s-churn")
+
+    # Tab A connects fresh, records its cursor, then drops (EOF/reconnect gap).
+    tab_a = channel.subscribe(maxsize=64)
+    cursor_a = tab_a._session_channel_initial_event_id
+    channel.unsubscribe(tab_a)
+
+    # A completion is emitted during Tab A's reconnect gap.
+    channel.emit(
+        "bg_task_complete",
+        {"event_id": "gap-completion", "session_id": "s-churn"},
+    )
+
+    # Far more than the 32-slot replay limit of *fresh* subscriptions churn
+    # through the channel while Tab A is away. Under the old code each of these
+    # appended a synthetic marker and evicted the gap completion.
+    churn = background_process._SESSION_CHANNEL_REPLAY_LIMIT * 3
+    for _ in range(churn):
+        other = channel.subscribe(maxsize=64)
+        channel.unsubscribe(other)
+
+    # The single genuine event is still the only thing in replay history and
+    # still replayable — the churn consumed zero capacity.
+    with channel._lock:
+        assert len(channel._history) == 1
+        assert channel._history[0][2] == "gap-completion"
+
+    # Tab A reconnects with its original cursor and STILL receives its
+    # reconnect-gap completion.
+    replacement = channel.subscribe(maxsize=64, after_event_id=cursor_a)
+    try:
+        event, payload = replacement.get_nowait()
+        assert event == "bg_task_complete"
+        assert payload["event_id"] == "gap-completion"
+        assert replacement.empty()
+    finally:
+        channel.unsubscribe(replacement)
+
+
+def test_synthetic_cursor_fails_closed_when_watermarked_event_was_evicted():
+    """A watermark older than retained history must NOT replay a wrong prefix.
+
+    When genuine events overflow the bounded deque past a subscriber's
+    watermark, the oldest replayable event is gone. Rather than replay a
+    partial/incorrect suffix (or crash), the reconnect must fail closed:
+    fresh marker, replay nothing, no stale/incorrect data.
+    """
+    channel = background_process.SessionChannel("s-evict")
+
+    tab = channel.subscribe(maxsize=64)
+    cursor = tab._session_channel_initial_event_id
+    channel.unsubscribe(tab)
+
+    # Overflow the replay history with genuine events well past the watermark.
+    overflow = background_process._SESSION_CHANNEL_REPLAY_LIMIT + 5
+    for i in range(overflow):
+        channel.emit(
+            "bg_task_complete",
+            {"event_id": f"evt-{i}", "session_id": "s-evict"},
+        )
+
+    replacement = channel.subscribe(maxsize=64, after_event_id=cursor)
+    try:
+        # Fail closed: no replay (the watermarked position was evicted), and a
+        # brand-new synthetic cursor is issued rather than a stale continuation.
+        assert replacement.empty()
+        assert replacement._session_channel_replay_count == 0
+        assert replacement._session_channel_initial_event_id.startswith(
+            "session-channel:"
+        )
+        assert replacement._session_channel_initial_event_id != cursor
+    finally:
+        channel.unsubscribe(replacement)
+
+
+def test_synthetic_cursor_replays_only_gap_events_after_its_watermark():
+    """A synthetic reconnect replays events emitted AFTER connect, not before."""
+    channel = background_process.SessionChannel("s-watermark")
+
+    # An event exists before Tab A ever connects — Tab A must NOT receive it.
+    channel.emit(
+        "bg_task_complete",
+        {"event_id": "pre-connect", "session_id": "s-watermark"},
+    )
+
+    tab = channel.subscribe(maxsize=64)
+    cursor = tab._session_channel_initial_event_id
+    channel.unsubscribe(tab)
+
+    # Two events land during the reconnect gap — both must replay, in order.
+    channel.emit(
+        "bg_task_complete",
+        {"event_id": "gap-1", "session_id": "s-watermark"},
+    )
+    channel.emit(
+        "bg_task_complete",
+        {"event_id": "gap-2", "session_id": "s-watermark"},
+    )
+
+    replacement = channel.subscribe(maxsize=64, after_event_id=cursor)
+    try:
+        first = replacement.get_nowait()
+        second = replacement.get_nowait()
+        assert first[1]["event_id"] == "gap-1"
+        assert second[1]["event_id"] == "gap-2"
+        assert replacement.empty()  # pre-connect event was never replayed
+    finally:
+        channel.unsubscribe(replacement)
