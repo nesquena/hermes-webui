@@ -8768,6 +8768,8 @@ function _preferencesPayloadFromUi(){
   if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
   const pinnedLimitField=$('settingsPinnedSessionsLimit');
   if(pinnedLimitField) payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10);
+  const cliCapField=$('settingsCliVisibleSessionCap');
+  if(cliCapField){const _n=parseInt(cliCapField.value,10);payload.cli_visible_session_cap=(!Number.isFinite(_n)||_n<1)?20:(_n>500?500:_n);}
   const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
   if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
   const defaultMessageModeSel=$('settingsDefaultMessageMode');
@@ -9417,6 +9419,23 @@ async function loadSettingsPanel(){
       window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;
       pinnedLimitField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
       pinnedLimitField.addEventListener('input',()=>{window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;_schedulePreferencesAutosave();},{once:false});
+    }
+    const cliCapField=$('settingsCliVisibleSessionCap');
+    if(cliCapField){
+      const _cliCapParent=document.getElementById('settingsShowCliSessions');
+      const _clampCliCap=(v)=>{const n=parseInt(v,10);if(!Number.isFinite(n)||n<1)return 20;return n>500?500:n;};
+      cliCapField.value=_clampCliCap(settings.cli_visible_session_cap==null?20:settings.cli_visible_session_cap);
+      window._cliVisibleSessionCap=parseInt(cliCapField.value,10);
+      // Initial disabled state must read the SETTINGS value (source of truth), not the
+      // parent checkbox's DOM state — at this point the parent has not yet been hydrated
+      // from settings (that happens further below), and assigning .checked won't fire
+      // 'change'. show_cli_sessions defaults to true when absent (matches the toggle).
+      cliCapField.disabled=(settings.show_cli_sessions===false);
+      // Normalize (clamp blank/oob to [1,500] or default 20) on commit so the saved
+      // value matches the help text and the box never displays a value the server rejected.
+      cliCapField.addEventListener('change',()=>{cliCapField.value=_clampCliCap(cliCapField.value);window._cliVisibleSessionCap=parseInt(cliCapField.value,10);_schedulePreferencesAutosave();},{once:false});
+      cliCapField.addEventListener('input',()=>{window._cliVisibleSessionCap=parseInt(cliCapField.value,10)||20;_schedulePreferencesAutosave();},{once:false});
+      if(_cliCapParent){_cliCapParent.addEventListener('change',function(){cliCapField.disabled=!_cliCapParent.checked;},{once:false});}
     }
     const fadeTextCb=$('settingsFadeTextEffect');
     if(fadeTextCb){
@@ -12767,6 +12786,7 @@ async function saveSettings(andClose){
   const showKanbanSessions=!!($('settingsShowKanbanSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
+  const cliVisibleSessionCap=(()=>{const _n=parseInt(($('settingsCliVisibleSessionCap')||{}).value,10);return(!Number.isFinite(_n)||_n<1)?20:(_n>500?500:_n);})();
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
@@ -12824,6 +12844,7 @@ async function saveSettings(andClose){
   body.show_kanban_sessions=showCliSessions&&showKanbanSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
+  body.cli_visible_session_cap=cliVisibleSessionCap;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;

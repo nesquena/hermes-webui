@@ -48,6 +48,21 @@ from api.process_event_utils import stamp_message_source
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
+
+
+def _cli_visible_session_limit() -> int:
+    """Resolve the non-WebUI sidebar state.db fetch cap from settings (#3347).
+
+    Delegates to the single canonical resolver in api.config so this fetch cap
+    and the route-level visibility cap (CLI_VISIBLE_SESSION_CAP in api/routes.py)
+    always agree. Default stays 20 (legacy); clamped to a safe upper bound.
+    """
+    try:
+        return _cfg.resolve_cli_visible_session_cap()
+    except Exception:
+        return CLI_VISIBLE_SESSION_LIMIT
+
+
 # How many messageful cron sessions to surface in the project-chip layer.
 # Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
 # addressable even when many newer non-cron sessions dominate the default
@@ -7522,6 +7537,7 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
+        _cli_visible_session_limit(),
     )
     return hermes_home, db_path, cli_profile, cache_key
 
@@ -7753,7 +7769,7 @@ def _load_cli_sessions_uncached(
             CRON_PROJECT_CHIP_LIMIT if source_filter == 'cron'
             else WEBHOOK_PROJECT_CHIP_LIMIT if source_filter == 'webhook'
             else KANBAN_PROJECT_CHIP_LIMIT if source_filter == 'kanban'
-            else CLI_VISIBLE_SESSION_LIMIT
+            else _cli_visible_session_limit()
         ),
         log=logger,
         # Background sources have independent bounded passes below. Keeping them
@@ -8067,6 +8083,7 @@ def get_cli_sessions(
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
+            _cli_visible_session_limit(),
         )
     else:
         resolve_kwargs = {}
