@@ -743,6 +743,10 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     # flip to "no key" after upgrading.
     "lmstudio": "LM_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
+    # Bedrock bearer / "Bedrock API Key" (OpenAI-compatible mantle path + SDK).
+    # IAM access-key pairs are handled separately via AWS_ACCESS_KEY_ID /
+    # AWS_SECRET_ACCESS_KEY (see _bedrock_has_iam_keys / set_provider_key).
+    "bedrock": "AWS_BEARER_TOKEN_BEDROCK",
 }
 
 # Read-only legacy env-var aliases.  When `_provider_has_key(pid)` looks up its
@@ -1266,6 +1270,39 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             pass
 
 
+def _bedrock_iam_env_values() -> tuple[str, str]:
+    """Return (access_key_id, secret_access_key) from .env then process env."""
+    env_path = _get_hermes_home() / ".env"
+    env_values = _load_env_file(env_path)
+    access = str(
+        env_values.get("AWS_ACCESS_KEY_ID")
+        or _thread_local_env_value("AWS_ACCESS_KEY_ID")
+        or ""
+    ).strip()
+    secret = str(
+        env_values.get("AWS_SECRET_ACCESS_KEY")
+        or _thread_local_env_value("AWS_SECRET_ACCESS_KEY")
+        or ""
+    ).strip()
+    return access, secret
+
+
+def _bedrock_has_iam_keys() -> bool:
+    access, secret = _bedrock_iam_env_values()
+    return bool(access and secret)
+
+
+def _bedrock_has_bearer_token() -> bool:
+    env_var = _PROVIDER_ENV_VAR.get("bedrock") or "AWS_BEARER_TOKEN_BEDROCK"
+    env_path = _get_hermes_home() / ".env"
+    env_values = _load_env_file(env_path)
+    if _provider_value_counts_as_api_key("bedrock", env_values.get(env_var)):
+        return True
+    return _provider_value_counts_as_api_key(
+        "bedrock", _thread_local_env_value(env_var)
+    )
+
+
 def _provider_has_key(provider_id: str) -> bool:
     """Check whether a provider has a configured API key.
 
@@ -1276,6 +1313,10 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
+    provider_id = (provider_id or "").strip().lower()
+    # Bedrock also accepts a classic IAM access-key pair (no single "API key").
+    if provider_id == "bedrock" and _bedrock_has_iam_keys():
+        return True
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -2800,7 +2841,7 @@ def get_providers() -> dict[str, Any]:
         except Exception:
             provider_base_url = None
         _is_plugin = is_plugin_model_provider(pid)
-        providers.append({
+        entry = {
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
@@ -2820,7 +2861,24 @@ def get_providers() -> dict[str, Any]:
             # command. For providers that don't trim, models_total ==
             # len(models) and the frontend behaves identically to before.
             "models_total": models_total,
-        })
+        }
+        if pid == "bedrock":
+            # Never present Bedrock as OAuth — auth_type is aws_sdk.
+            entry["is_oauth"] = False
+            has_bearer = _bedrock_has_bearer_token()
+            has_iam = _bedrock_has_iam_keys()
+            entry["has_key"] = bool(has_bearer or has_iam)
+            entry["bedrock_has_bearer"] = has_bearer
+            entry["bedrock_has_iam"] = has_iam
+            if has_bearer and has_iam:
+                entry["key_source"] = "env_file"
+            elif has_bearer:
+                entry["key_source"] = "env_file"
+            elif has_iam:
+                entry["key_source"] = "env_file"
+            elif key_source == "oauth":
+                entry["key_source"] = "none"
+        providers.append(entry)
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
     custom_providers_cfg = cfg.get("custom_providers", [])
@@ -2901,11 +2959,33 @@ def get_providers() -> dict[str, Any]:
     return _store_cached_providers(cache_key, result)
 
 
-def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
+def _validate_secret_value(label: str, value: str, *, min_len: int = 8) -> str | None:
+    """Return an error string if invalid, else None. ``value`` must already be stripped."""
+    if "\n" in value or "\r" in value:
+        return f"{label} must not contain newline characters."
+    if len(value) < min_len:
+        return f"{label} appears too short."
+    return None
+
+
+def set_provider_key(
+    provider_id: str,
+    api_key: str | None,
+    *,
+    aws_access_key_id: str | None = None,
+    aws_secret_access_key: str | None = None,
+) -> dict[str, Any]:
     """Set or update the API key for a provider.
 
     Writes the key to ``~/.hermes/.env`` using the standard env var name.
     If ``api_key`` is None or empty, the key is removed.
+
+    For ``bedrock``, also accepts optional IAM access-key fields
+    (``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``). Saving a Bedrock
+    API key clears any stored IAM pair (and vice versa) so stale access keys
+    cannot keep winning boto3 SigV4 after a switch. Passing both in one
+    request keeps both. Passing ``api_key=None`` via remove clears bearer
+    **and** IAM keys.
 
     Returns a status dict with the operation result.
     """
@@ -2929,22 +3009,90 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
                      f"This provider does not have a known env var mapping.",
         }
 
-    # Validate API key format (basic sanity check)
-    if api_key:
-        api_key = api_key.strip()
-        if "\n" in api_key or "\r" in api_key:
-            return {"ok": False, "error": "API key must not contain newline characters."}
-        if len(api_key) < 8:
-            return {"ok": False, "error": "API key appears too short."}
+    iam_provided = aws_access_key_id is not None or aws_secret_access_key is not None
+    access = ("" if aws_access_key_id is None else str(aws_access_key_id)).strip()
+    secret = ("" if aws_secret_access_key is None else str(aws_secret_access_key)).strip()
+    if provider_id == "bedrock" and iam_provided:
+        # Empty strings mean "clear this IAM pair" when both empty; partial update
+        # requires both non-empty.
+        if access or secret:
+            if not access or not secret:
+                return {
+                    "ok": False,
+                    "error": "AWS access key ID and secret access key must be provided together.",
+                }
+            err = _validate_secret_value("AWS access key ID", access, min_len=16)
+            if err:
+                return {"ok": False, "error": err}
+            err = _validate_secret_value("AWS secret access key", secret, min_len=16)
+            if err:
+                return {"ok": False, "error": err}
+
+    # Validate API key format (basic sanity check). For bedrock IAM-only saves,
+    # api_key may be omitted (None) without an explicit clear; exclusive
+    # replace still clears bearer when a new IAM pair is written.
+    clear_bearer = False
+    if api_key is not None:
+        api_key = str(api_key).strip() or None
+        if api_key:
+            err = _validate_secret_value("API key", api_key, min_len=8)
+            if err:
+                return {"ok": False, "error": err}
+        else:
+            clear_bearer = True
 
     env_path = _get_hermes_home() / ".env"
+    updates: dict[str, str | None] = {}
+
+    if provider_id == "bedrock":
+        # Remove-all path: set_provider_key("bedrock", None) with no IAM kwargs.
+        if api_key is None and not iam_provided:
+            updates[env_var] = None
+            updates["AWS_ACCESS_KEY_ID"] = None
+            updates["AWS_SECRET_ACCESS_KEY"] = None
+        else:
+            saving_bearer = bool(api_key) and not clear_bearer
+            saving_iam = bool(iam_provided and access and secret)
+
+            if api_key is not None:
+                updates[env_var] = None if clear_bearer else api_key
+            elif saving_iam:
+                # IAM-only replace: drop leftover bearer so boto3 cannot keep
+                # treating a half-switched env as dual-auth.
+                updates[env_var] = None
+
+            if iam_provided:
+                if saving_iam:
+                    updates["AWS_ACCESS_KEY_ID"] = access
+                    updates["AWS_SECRET_ACCESS_KEY"] = secret
+                else:
+                    updates["AWS_ACCESS_KEY_ID"] = None
+                    updates["AWS_SECRET_ACCESS_KEY"] = None
+            elif saving_bearer:
+                # Bearer-only replace: always clear IAM so deleted access keys
+                # cannot keep signing Bedrock requests.
+                updates["AWS_ACCESS_KEY_ID"] = None
+                updates["AWS_SECRET_ACCESS_KEY"] = None
+        if not updates:
+            return {"ok": False, "error": "No Bedrock credentials provided to update."}
+    else:
+        updates[env_var] = api_key
+
     try:
-        _write_env_file(env_path, {env_var: api_key})
+        _write_env_file(env_path, updates)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
         logger.exception("Failed to write env file for provider %s", provider_id)
         return {"ok": False, "error": f"Failed to save API key: {exc}"}
+
+    if provider_id == "bedrock":
+        try:
+            from agent.bedrock_adapter import reset_client_cache
+
+            reset_client_cache()
+        except Exception:
+            logger.debug("bedrock reset_client_cache unavailable", exc_info=True)
 
     # Invalidate the model cache so the dropdown refreshes on next request.
     # Using invalidate_models_cache() instead of reload_config() to avoid
@@ -2953,11 +3101,13 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     invalidate_account_usage_status_cache(provider_id)
     invalidate_providers_cache()
 
+    action = "updated" if any(v for v in updates.values()) else "removed"
+
     return {
         "ok": True,
         "provider": provider_id,
         "display_name": _PROVIDER_DISPLAY.get(provider_id, provider_id),
-        "action": "updated" if api_key else "removed",
+        "action": action,
     }
 
 
