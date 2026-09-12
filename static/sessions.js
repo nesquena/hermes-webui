@@ -2997,6 +2997,10 @@ function _resolveSessionModelForDisplaySoon(sid){
       S.session.threshold_tokens=data.session.threshold_tokens||0;
       S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
       S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
+      if(S.lastUsage&&typeof S.lastUsage==='object'&&Number(resolvedContextLength)>0){
+        S.lastUsage.context_length=resolvedContextLength;
+        S.lastUsage.threshold_tokens=S.session.threshold_tokens||0;
+      }
       S.session._modelResolutionDeferred=false;
       syncTopbar();
       if(typeof _syncCtxIndicator==='function'){
