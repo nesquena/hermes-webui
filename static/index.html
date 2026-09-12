@@ -1388,6 +1388,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsAutoGreetNewChat" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_auto_greet_new_chat">Greet me when I open a new chat</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_auto_greet_new_chat">When enabled, a fresh blank chat sends one brief greeting request automatically. Off by default because it uses a model call.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_external_sessions">Show non-WebUI sessions</span>
               </label>
