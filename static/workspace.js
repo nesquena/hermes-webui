@@ -679,6 +679,7 @@ const _WS_SKELETON_ROWS = [
 // UNCONDITIONALLY at switch start (even when the workspace panel is closed, since
 // loadDir('.') still runs then), so the stale response is rejected.
 let _wsTreeGen = 0;
+let _wsNavigationGen = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
@@ -730,25 +731,32 @@ function clearWorkspaceTreeSkeleton(){
 async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
-  if(!S.session)return;
+  if(!S.session)return false;
+  const requestedPath=String(path||'.');
   const sessionId=S.session.session_id;
+  const navigationGen=++_wsNavigationGen;
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
                              // from the previous workspace — which would pass the session_id
                              // guard because an empty-session switch reuses the same id — is
                              // rejected here instead of painting the wrong profile's files.
+  const isCurrentNavigation=()=>!!S.session
+    &&S.session.session_id===sessionId
+    &&treeGen===_wsTreeGen
+    &&navigationGen===_wsNavigationGen
+    &&String(S.currentDir||'.')===requestedPath;
   try{
-    if(!path||path==='.'||refreshExpanded){
-      if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
+    if(requestedPath==="."||refreshExpanded){
+      if(typeof _syncWorkspaceBirthtimeSupportScope==="function") _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||"");
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
-    S.currentDir=path||'.';
+    S.currentDir=requestedPath;
     const data=await api(
-      _workspaceRouteForPath(path, 'list') ||
-      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
+      _workspaceRouteForPath(requestedPath, 'list') ||
+      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(requestedPath)}`
     );
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    if(!isCurrentNavigation())return false;
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
       S._dirCache={};
@@ -762,7 +770,7 @@ async function loadDir(path, opts={}){
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
-    if(!path||path==='.'||refreshExpanded){
+    if(requestedPath==='.'||refreshExpanded){
       const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
@@ -771,30 +779,34 @@ async function loadDir(path, opts={}){
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
-        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+        if(!isCurrentNavigation())return false;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree();
     }
     if(!preservePreview&&typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
+        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok&&isCurrentNavigation())clearPreview({keepPanelOpen:true});});
       }else{
         clearPreview({keepPanelOpen:true});
       }
     }else if(preservePreview){
       await refreshOpenPreviewIfMutated();
+      if(!isCurrentNavigation())return false;
     }
     // Fetch git info for workspace root (non-blocking)
-    if(!path||path==='.') _refreshGitBadge();
+    if(requestedPath==='.') _refreshGitBadge();
+    return true;
   }catch(e){
-    const grant = _workspaceEscapeGrantForPath(path);
+    if(!isCurrentNavigation())return false;
+    const grant = _workspaceEscapeGrantForPath(requestedPath);
     if(grant && e && e.status===403){
       _clearWorkspaceEscapeGrant(grant.path);
       showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
-      return;
+      return false;
     }
     console.warn('loadDir',e);
+    return false;
   }
 }
 

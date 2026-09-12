@@ -79,12 +79,19 @@ def _run_node(script: str) -> dict:
     return json.loads(result.stdout)
 
 
+def _context_transition_helpers() -> str:
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+    start = source.index("let _contextTransitionGeneration=0;")
+    end = source.index("\nconst _newSessionPendingText", start)
+    return source[start:end]
+
+
 def _new_session_driver(session_workspace: str, default_workspace: str, switch_workspace: str | None) -> str:
     new_session = _extract_async_function(SESSIONS_JS.read_text(encoding="utf-8"), "newSession")
+    context_helpers = _context_transition_helpers()
     return textwrap.dedent(
         f"""
         let captured=null;
-        var _newSessionInFlight=null;
         var _messagesTruncated=false;
         var _oldestIdx=0;
         var _activeProject=null;
@@ -118,6 +125,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         function syncTopbar(){{}}
         function renderMessages(){{}}
         function loadDir(){{return Promise.resolve();}}
+        {context_helpers}
         {new_session}
         newSession().then(()=>{{
           process.stdout.write(JSON.stringify({{
@@ -229,6 +237,7 @@ def test_parallel_conversations_each_inherit_their_own_workspace():
 @node_test
 def test_busy_workspace_switch_returns_before_session_update():
     switch_to_workspace = _extract_async_function(PANELS_JS.read_text(encoding="utf-8"), "switchToWorkspace")
+    context_helpers = _context_transition_helpers()
     script = textwrap.dedent(
         f"""
         const calls=[];
@@ -236,6 +245,7 @@ def test_busy_workspace_switch_returns_before_session_update():
         function t(key){{return key;}}
         function showToast(message){{calls.push(['toast',message]);}}
         function api(path,opts){{calls.push(['api',path]);return Promise.resolve({{}});}}
+        {context_helpers}
         {switch_to_workspace}
         switchToWorkspace('/new','New').then(()=>{{
           process.stdout.write(JSON.stringify({{calls}}));
