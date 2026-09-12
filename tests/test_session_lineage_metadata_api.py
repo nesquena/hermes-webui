@@ -1,5 +1,6 @@
 """Regression tests for /api/sessions lineage metadata used by sidebar collapse."""
 
+import json
 import sqlite3
 import time
 
@@ -51,7 +52,8 @@ def _ensure_state_db(path):
             message_count INTEGER DEFAULT 0,
             parent_session_id TEXT,
             ended_at REAL,
-            end_reason TEXT
+            end_reason TEXT,
+            model_config TEXT
         );
         """
     )
@@ -62,6 +64,7 @@ def _ensure_messages_table(conn):
     conn.execute(
         """
         CREATE TABLE messages (
+            id INTEGER PRIMARY KEY,
             session_id TEXT,
             role TEXT,
             content TEXT,
@@ -79,14 +82,14 @@ def _insert_state_message(conn, sid, *, role, content, timestamp):
     conn.commit()
 
 
-def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
+def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None, model_config=None):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason, model_config)
+        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?, ?)
         """,
-        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason),
+        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason, model_config),
     )
     conn.commit()
 
@@ -691,5 +694,457 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
             "lineage_api_visible_tip",
             "lineage_api_archived_parent",
         ]
+    finally:
+        conn.close()
+
+
+def test_compression_continuation_tolerates_sub_second_timestamp_overlap(_isolate):
+    """#6931: a compression continuation recorded a few ms BEFORE the parent's
+    ended_at (write-order race) is still one lineage in /api/sessions."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_race_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_race_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_race_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        # child.started_at lands 0.1s BEFORE parent.ended_at — the #6931 race.
+        _insert_state_row(
+            conn,
+            "lineage_race_tip",
+            parent="lineage_race_root",
+            started_at=t0 + 5 - 0.1,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_race_tip"]
+        assert tip.get("parent_session_id") == "lineage_race_root"
+        assert tip.get("_lineage_root_id") == "lineage_race_root"
+        assert tip.get("_lineage_tip_id") == "lineage_race_tip"
+        assert tip.get("_compression_segment_count") == 2
+        assert tip.get("relationship_type") != "child_session"
+    finally:
+        conn.close()
+
+
+def test_materially_overlapping_compression_child_stays_child_session(_isolate):
+    """#6931: a child that started long before the compression parent ended
+    (beyond tolerance, no matching title) must remain a separate child."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_overlap_root", title="Root title", updated_at=t0)
+        _save_webui_session("lineage_overlap_child", title="Child title", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_overlap_root",
+            started_at=t0,
+            ended_at=t0 + 60,
+            end_reason="compression",
+        )
+        # child started 30s before the parent ended — a genuine concurrent child.
+        _insert_state_row(
+            conn,
+            "lineage_overlap_child",
+            parent="lineage_overlap_root",
+            started_at=t0 + 30,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        child = rows["lineage_overlap_child"]
+        assert child.get("relationship_type") == "child_session"
+        assert child.get("parent_session_id") == "lineage_overlap_root"
+        assert "_lineage_root_id" not in child
+        assert "_compression_segment_count" not in child
+    finally:
+        conn.close()
+
+
+def test_same_title_independent_child_outside_tolerance_stays_visible(_isolate):
+    """#7021 re-gate: a same-title independent child started well outside the
+    tolerance window must NOT collapse on the title match — titles are
+    user-controlled and non-unique, so the only continuation evidence is the
+    bounded early-side timestamp window."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_title_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_title_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_title_root",
+            title="Shared conversation",
+            started_at=t0,
+            ended_at=t0 + 60,
+            end_reason="compression",
+        )
+        # Same title, but started 50s before the parent ended — far outside any
+        # handoff race window. Must remain a visible child session.
+        _insert_state_row(
+            conn,
+            "lineage_title_tip",
+            title="Shared conversation",
+            parent="lineage_title_root",
+            started_at=t0 + 10,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_title_tip"]
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_session_id") == "lineage_title_root"
+        assert "_lineage_root_id" not in tip
+        assert "_compression_segment_count" not in tip
+    finally:
+        conn.close()
+
+
+def test_model_config_branched_from_child_stays_visible_within_tolerance(_isolate):
+    """#7021 re-gate: an explicit Agent branch is marked in
+    model_config._branched_from (not session_source). Even when it starts
+    inside the 2s tolerance window of the parent's compression, the real
+    marker must keep it visible instead of collapsing it into the lineage."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_branch_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_branch_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_branch_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        # The reviewer's adversarial probe: an Agent branch starting 1.5s
+        # BEFORE the parent's compression ended_at. No session_source — the
+        # fork identity lives in model_config._branched_from.
+        _insert_state_row(
+            conn,
+            "lineage_branch_tip",
+            parent="lineage_branch_root",
+            started_at=t0 + 5 - 1.5,
+            model_config=json.dumps({"_branched_from": "lineage_branch_root"}),
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_branch_tip"]
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_session_id") == "lineage_branch_root"
+        assert "_lineage_root_id" not in tip
+        assert "_compression_segment_count" not in tip
+    finally:
+        conn.close()
+
+
+def test_model_config_delegate_from_child_stays_visible_within_tolerance(_isolate):
+    """#7021 re-gate: delegate/subagent runs are marked in
+    model_config._delegate_from. A delegate child starting inside the
+    tolerance window of the parent's compression must stay visible."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_delegate_root", title="Shared conversation", updated_at=t0)
+        _save_webui_session("lineage_delegate_tip", title="Shared conversation", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_delegate_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_delegate_tip",
+            parent="lineage_delegate_root",
+            started_at=t0 + 5 - 1.0,
+            model_config=json.dumps({"_delegate_from": "lineage_delegate_root"}),
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        tip = rows["lineage_delegate_tip"]
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_session_id") == "lineage_delegate_root"
+        assert "_lineage_root_id" not in tip
+        assert "_compression_segment_count" not in tip
+    finally:
+        conn.close()
+
+
+def test_continuation_classification_timestamp_tolerance_and_guards():
+    """#6931/#7021 focused unit coverage of _is_continuation_session: bounded
+    tolerance, model_config branch markers, and preserved fork/cross-source/
+    end_reason guards."""
+    from api.agent_sessions import _is_continuation_session
+
+    def make_parent(**over):
+        row = {
+            'id': 'parent-1',
+            'source': 'webui',
+            'end_reason': 'compression',
+            'ended_at': 1000.0,
+            'title': 'Shared conversation',
+        }
+        row.update(over)
+        return row
+
+    def make_child(**over):
+        row = {
+            'id': 'child-1',
+            'source': 'webui',
+            'started_at': 1000.05,
+            'title': 'Shared conversation',
+        }
+        row.update(over)
+        return row
+
+    # Normal non-overlapping ordering: continuation.
+    assert _is_continuation_session(make_parent(), make_child())
+    # Sub-second overlap (observed -0.06..-0.07s in #6931): continuation.
+    assert _is_continuation_session(make_parent(), make_child(started_at=999.95))
+    # Overlap inside the 2s tolerance: continuation.
+    assert _is_continuation_session(make_parent(), make_child(started_at=998.5))
+    # Overlap beyond tolerance: separate child, even with an exact title match
+    # (titles are user-controlled and non-unique — no title fallback).
+    assert not _is_continuation_session(make_parent(), make_child(started_at=950.0))
+    assert not _is_continuation_session(
+        make_parent(), make_child(started_at=950.0, title='Another conversation')
+    )
+    # model_config._branched_from pointing at the parent: never a
+    # continuation, regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=999.95,
+            model_config=json.dumps({'_branched_from': 'parent-1'}),
+        ),
+    )
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=998.5,
+            model_config={'_branched_from': 'parent-1'},
+        ),
+    )
+    # model_config._delegate_from pointing at the parent: never a
+    # continuation, regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=999.95,
+            model_config=json.dumps({'_delegate_from': 'parent-1'}),
+        ),
+    )
+    # A marker pointing at a DIFFERENT session does not disqualify: compression
+    # continuations inherit the rotated agent's model_config verbatim, so a
+    # delegate's continuation still carries the delegate's own marker.
+    assert _is_continuation_session(
+        make_parent(),
+        make_child(
+            started_at=999.95,
+            model_config=json.dumps({'_delegate_from': 'some-other-session'}),
+        ),
+    )
+    # Unparsable model_config degrades to no markers (no crash, no match).
+    assert _is_continuation_session(
+        make_parent(),
+        make_child(started_at=999.95, model_config='not-json'),
+    )
+    assert not _is_continuation_session(
+        make_parent(),
+        make_child(started_at=950.0, model_config='not-json'),
+    )
+    # Fork guard holds regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(), make_child(started_at=999.95, session_source='fork')
+    )
+    # Cross-source guard holds regardless of timing.
+    assert not _is_continuation_session(
+        make_parent(), make_child(started_at=999.95, source='telegram')
+    )
+    # Non-compression/cli_close parents never continue.
+    assert not _is_continuation_session(
+        make_parent(end_reason='user_stop'), make_child(started_at=999.95)
+    )
+    # Missing/unparsable boundary timestamps degrade to False (no crash).
+    assert not _is_continuation_session(make_parent(ended_at='not-a-number'), make_child())
+    assert not _is_continuation_session(make_parent(), make_child(started_at='not-a-number'))
+
+
+def test_state_db_stitch_keeps_branched_child_out_of_parent_transcript(_isolate):
+    """#7021 r2: the open/import transcript stitcher (get_state_db_session_messages
+    with stitch_continuations=True) must apply the same model_config branch-marker
+    guard as the listing classifier. A child whose model_config._branched_from /
+    _delegate_from points at the parent must NOT have its messages stitched into
+    the parent transcript even when it starts inside the tolerance window.
+    """
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        # Compression parent whose child starts INSIDE the 2s tolerance window.
+        _insert_state_row(
+            conn,
+            "stitch_branch_parent",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_message(
+            conn, "stitch_branch_parent", role="user", content="parent turn", timestamp=t0 + 1
+        )
+        # Explicit Agent branch: fork identity lives in model_config, not
+        # session_source. Starting 1.5s before the parent's ended_at — inside
+        # the tolerance — it must still stay out of the parent's transcript.
+        _insert_state_row(
+            conn,
+            "stitch_branch_child",
+            parent="stitch_branch_parent",
+            started_at=t0 + 5 - 1.5,
+            model_config=json.dumps({"_branched_from": "stitch_branch_parent"}),
+        )
+        _insert_state_message(
+            conn, "stitch_branch_child", role="user", content="branch turn", timestamp=t0 + 6
+        )
+
+        msgs = models.get_state_db_session_messages(
+            "stitch_branch_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "branch turn" in contents
+        assert "parent turn" not in contents
+
+        # Control: a genuine compression continuation (no branch marker) starting
+        # inside the same window IS stitched into the parent transcript.
+        _insert_state_row(
+            conn,
+            "stitch_continuation_child",
+            parent="stitch_branch_parent",
+            started_at=t0 + 5 - 0.5,
+        )
+        _insert_state_message(
+            conn,
+            "stitch_continuation_child",
+            role="user",
+            content="continuation turn",
+            timestamp=t0 + 7,
+        )
+        msgs = models.get_state_db_session_messages(
+            "stitch_continuation_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "continuation turn" in contents
+        assert "parent turn" in contents
+    finally:
+        conn.close()
+
+
+def test_state_db_stitch_keeps_delegate_child_out_of_parent_transcript(_isolate):
+    """#7021 r2: same guard for model_config._delegate_from (subagent runs) in
+    the open/import transcript stitcher."""
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        _insert_state_row(
+            conn,
+            "stitch_delegate_parent",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_message(
+            conn, "stitch_delegate_parent", role="user", content="parent turn", timestamp=t0 + 1
+        )
+        _insert_state_row(
+            conn,
+            "stitch_delegate_child",
+            parent="stitch_delegate_parent",
+            started_at=t0 + 5 - 1.0,
+            model_config=json.dumps({"_delegate_from": "stitch_delegate_parent"}),
+        )
+        _insert_state_message(
+            conn, "stitch_delegate_child", role="user", content="delegate turn", timestamp=t0 + 6
+        )
+
+        msgs = models.get_state_db_session_messages(
+            "stitch_delegate_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "delegate turn" in contents
+        assert "parent turn" not in contents
+    finally:
+        conn.close()
+
+
+def test_state_db_stitch_old_schema_without_identity_columns_still_stitches(_isolate):
+    """#7021 r2: older state.db schemas lacking session_source/model_config degrade
+    to NULL and keep the pre-fix behavior — a genuine compression continuation
+    within the tolerance is still stitched, without crashing."""
+    conn = sqlite3.connect(str(_isolate))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            title TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        """
+    )
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    try:
+        conn.execute(
+            """
+            INSERT INTO sessions
+            (id, source, title, started_at, message_count, parent_session_id, ended_at, end_reason)
+            VALUES (?, ?, ?, ?, 2, ?, ?, ?)
+            """,
+            (
+                "stitch_old_parent",
+                "webui",
+                "stitch_old_parent",
+                t0,
+                None,
+                t0 + 5,
+                "compression",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sessions
+            (id, source, title, started_at, message_count, parent_session_id, ended_at, end_reason)
+            VALUES (?, ?, ?, ?, 2, ?, NULL, NULL)
+            """,
+            ("stitch_old_child", "webui", "stitch_old_child", t0 + 4.5, "stitch_old_parent"),
+        )
+        conn.commit()
+        _insert_state_message(
+            conn, "stitch_old_parent", role="user", content="parent turn", timestamp=t0 + 1
+        )
+        _insert_state_message(
+            conn, "stitch_old_child", role="user", content="old child turn", timestamp=t0 + 6
+        )
+
+        msgs = models.get_state_db_session_messages(
+            "stitch_old_child", stitch_continuations=True
+        )
+        contents = [m["content"] for m in msgs]
+        assert "old child turn" in contents
+        assert "parent turn" in contents
     finally:
         conn.close()

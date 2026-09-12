@@ -74,6 +74,77 @@ def test_listing_opens_read_only_and_returns_rows(tmp_path, monkeypatch):
     assert "mode=ro" in calls[0]["target"]
 
 
+def test_listing_keeps_model_config_branch_visible_and_never_leaks_it(tmp_path, monkeypatch):
+    """#7021 re-gate: a CLI/agent branch whose _branched_from marker lives in
+    model_config must stay visible even when it starts inside the 2s
+    compression tolerance window, and model_config must not leak into the
+    returned rows."""
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, title TEXT, model TEXT, message_count INTEGER,
+            started_at REAL, source TEXT, session_source TEXT,
+            parent_session_id TEXT, ended_at REAL, end_reason TEXT,
+            model_config TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO sessions
+        (id, title, model, message_count, started_at, source, session_source,
+         parent_session_id, ended_at, end_reason, model_config)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cli-parent", "Parent conversation", "gpt", 0, 1000.0, "cli", "cli",
+            None, 1100.0, "compression", None,
+        ),
+    )
+    # An explicit Agent branch starting 1.5s BEFORE the parent's compression
+    # ended_at. No session_source — the fork identity lives in model_config.
+    conn.execute(
+        """
+        INSERT INTO sessions
+        (id, title, model, message_count, started_at, source, session_source,
+         parent_session_id, ended_at, end_reason, model_config)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cli-branch", "Branch conversation", "gpt", 0, 1098.5, "cli", "cli",
+            "cli-parent", None, None, '{"_branched_from": "cli-parent"}',
+        ),
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, timestamp REAL)"
+    )
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, timestamp) VALUES (?,?,?)",
+        [
+            ("cli-parent", "user", 1001.0),
+            ("cli-parent", "assistant", 1002.0),
+            ("cli-branch", "user", 1099.0),
+            ("cli-branch", "assistant", 1099.5),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    _record_connects(monkeypatch)
+
+    out = read_importable_agent_session_rows(db, exclude_sources=None)
+    out_ids = {r["id"] for r in out}
+
+    # The branch survives the tolerance window: it is NOT collapsed into the
+    # parent lineage.
+    assert "cli-branch" in out_ids
+    assert "cli-parent" in out_ids
+    # model_config is internal agent state — never exposed on returned rows.
+    for row in out:
+        assert "model_config" not in row
+
+
 def test_listing_read_only_uri_encodes_special_path_chars(tmp_path, monkeypatch):
     db_dir = tmp_path / "state dir #1"
     db_dir.mkdir()
