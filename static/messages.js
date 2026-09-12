@@ -5819,7 +5819,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const _capability=_installTransportCapability(source);
     LIVE_STREAMS[activeSid]={streamId,source,capability:_capability};
     // Ownership of the live transport is now THIS source object. Every
-    // listener below gates on _ownsActiveStreamOrBackground(source) so a
+    // listener below gates on _ownsActiveStreamOrBackground(source,_capability) so a
     // queued callback from a replaced/closed EventSource for the same
     // session+stream pair is rejected (#6381 fresh-reconnect gap).
 
@@ -5840,7 +5840,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
@@ -5865,7 +5865,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
@@ -5949,7 +5949,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
       reasoningText += text;
@@ -5972,7 +5972,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('tool',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
@@ -6009,7 +6009,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('tool_complete',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       if(!S.session||S.session.session_id!==activeSid||S.activeStreamId!==streamId) return;
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
@@ -6055,7 +6055,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Cross-session protection mirrors every other live listener:
     // payload.session_id must match activeSid or the event is dropped.
     source.addEventListener('todo_state',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       let d;
       try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
       if(!d||typeof d!=='object') return;
@@ -6089,7 +6089,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('approval',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
@@ -6098,7 +6098,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('clarify',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       const d=JSON.parse(e.data);
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
@@ -6107,7 +6107,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('state_saved',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6117,7 +6117,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6125,6 +6125,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('title_status',e=>{
+      // #6381: side-effect-only callback must belong to the live transport.
+      // No session-scoped epilogue here (the reviewer's unsupported claim);
+      // this listener mutates shared state only, so an early ownership
+      // return is the correct and complete guard.
+      if(!_isCurrentCapability(_capability)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6140,6 +6145,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('context_status',e=>{
+      // #6381: side-effect-only callback must belong to the live transport.
+      // No session-scoped epilogue here (the reviewer's unsupported claim);
+      // this listener mutates shared state only, so an early ownership
+      // return is the correct and complete guard.
+      if(!_isCurrentCapability(_capability)) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -6168,7 +6178,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     source.addEventListener('goal',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -6187,7 +6197,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('goal_continue',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
@@ -6226,6 +6236,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // `_handleBgTaskCompleteEvent` function below is shared between both
     // paths (dedupe only; the wakeup itself is server-side).
     source.addEventListener('bg_task_complete',e=>{
+      // #6381: side-effect-only callback must belong to the live transport.
+      // No session-scoped epilogue here (the reviewer's unsupported claim);
+      // this listener mutates shared state only, so an early ownership
+      // return is the correct and complete guard.
+      if(!_isCurrentCapability(_capability)) return;
       if(typeof _handleBgTaskCompleteEvent==='function'){
         _handleBgTaskCompleteEvent(e, activeSid, {source:'stream'});
       }
@@ -6234,7 +6249,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source,_capability)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
@@ -6273,7 +6288,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           usage:d.usage||null,
           created_at:d.created_at||null,
         },_doneEvent);
-        _scheduleAnchorRegistryCleanup();
+        _scheduleAnchorRegistryCleanup(600000,_capability);
         _clearAnchorProseIncrementalNode();
         const isActiveSession=_isSessionCurrentPane(activeSid);
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
@@ -6553,13 +6568,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       _clearStreamEndRecovery();
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source,_capability)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
       if(S.activeStreamId===streamId && _liveStreamEndScenePresent()){
-        _scheduleStreamEndRecovery(source);
+        _scheduleStreamEndRecovery(source,180,_capability);
         return;
       }
       // Some replay/journal paths can deliver stream_end without a preceding
@@ -6567,19 +6582,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      const status=await _restoreSettledSession(source,{status:true});
+      const status=await _restoreSettledSession(source,{status:true,capability:_capability});
+      // #6381 post-await ownership re-check: a superseded transport must not
+      // settle or re-arm recovery for a stream the newer install owns.
+      if(!_isCurrentCapability(_capability)) return;
       if(status==='restored'){
         return;
       }
       if(status==='active'&&S.activeStreamId===streamId){
-        _scheduleStreamEndRecovery(source,200);
+        _scheduleStreamEndRecovery(source,200,_capability);
         return;
       }
       _finalizeStreamEndFallback(source);
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
@@ -6605,7 +6623,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressing',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6636,7 +6654,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressed',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       // Context was auto-compressed during this turn. Keep the live timeline
       // honest by transitioning the running divider into a completed divider;
       // final settlement removes live-only compression rows from the Worklog.
@@ -6672,7 +6690,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('metering',e=>{
-      if(!_ownsActiveStreamOrBackground(source)) return;
+      if(!_ownsActiveStreamOrBackground(source,_capability)) return;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -6693,7 +6711,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('apperror',e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source,_capability)) return;
       _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -6734,7 +6752,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(S.session&&eventMatchesCurrent){
         S.activeStreamId=null;
-        _scheduleAnchorRegistryCleanup();
+        _scheduleAnchorRegistryCleanup(600000,_capability);
         clearLiveToolCards();if(!assistantText)removeThinking();
         let isRecoveryControlMessage=false;
         let _anchorRetryTarget=null;
@@ -6796,7 +6814,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isRecoveryControlMessage){
           (async()=>{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true, capability:_capability})) return;
+          if(!_isCurrentCapability(_capability)) return;
+            if(!_isCurrentCapability(_capability)) return;
             if(S.session&&S.session.session_id===activeSid){
               S.messages=_filterRecoveryControlMessages(S.messages||[]);
               _markSessionViewed(activeSid, S.messages.length);
@@ -6820,6 +6840,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('warning',e=>{
+      // #6381: side-effect-only callback must belong to the live transport.
+      // No session-scoped epilogue here (the reviewer's unsupported claim);
+      // this listener mutates shared state only, so an early ownership
+      // return is the correct and complete guard.
+      if(!_isCurrentCapability(_capability)) return;
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
@@ -6838,7 +6863,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
+      if(_bailOutOfTerminalEventsFromStaleStream(source,_capability) && !_streamFinalized){
         return;
       }
       if(_terminalStateReached || _streamFinalized){
@@ -6855,7 +6880,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       if(_deferStreamErrorIfOffline()) return;
-      if(_deferStreamErrorIfPageHidden(source)) return;
+      if(_deferStreamErrorIfPageHidden(source,_capability)) return;
       _closeSource(source);
       // If the user has switched to a different session, don't attempt to
       // reconnect — the old stream's EventSource was closed intentionally
@@ -6876,11 +6901,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _reconnectAttempted=true;
         const _retryDelays=[1500,3000,5000,8000,12000,20000];
         setComposerStatus(`Reconnecting… (1/${_retryDelays.length})`);
-        const _probeReconnect=async(attempt=0)=>{
+        const _probeReconnect=async(attempt=0, capability=_capability)=>{
           if(_terminalStateReached || _streamFinalized) return;
           if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            // #6381 post-await ownership re-check: the transport may have been
+            // replaced while the status probe was in flight; a superseded
+            // generation must not re-wire (or settle) the newer transport.
+            if(!_isCurrentCapability(capability)) return;
             if(st&&st.active){
               setComposerStatus('Reconnected',1000);
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -6894,13 +6923,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true, capability:_capability})) return;
+          if(!_isCurrentCapability(capability)) return;
           if(_deferStreamErrorIfOffline()) return;
-          if(_deferStreamErrorIfPageHidden(source)) return;
+          if(_deferStreamErrorIfPageHidden(source,_capability)) return;
           const nextDelay=_retryDelays[attempt+1];
           if(nextDelay){
             setComposerStatus(`Reconnecting… (${attempt+2}/${_retryDelays.length})`);
-            setTimeout(()=>{void _probeReconnect(attempt+1);}, nextDelay);
+            setTimeout(()=>{void _probeReconnect(attempt+1, capability);}, nextDelay);
             return;
           }
           // Last-ditch: the stream may have finished while we were retrying.
@@ -6911,20 +6941,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           setComposerStatus('Restoring session…');
           let _restoreTimedOut=false;
           const _restoreTimer=setTimeout(()=>{
+            if(!_isCurrentCapability(capability)) return;
             // If _restoreSettledSession hangs (flaky Tailscale), don't leave
             // the UI stuck on "Restoring session…" forever. Fall through to
             // _handleStreamError after 8s.
             _restoreTimedOut=true;
             if(!_terminalStateReached&&!_streamFinalized){
               if(_deferStreamErrorIfOffline()) return;
-              if(_deferStreamErrorIfPageHidden(source)) return;
+              if(_deferStreamErrorIfPageHidden(source,_capability)) return;
               _flushReasoningToAnchor();
-              _scheduleAnchorRegistryCleanup(120000);
-              _handleStreamError(source);
+              _scheduleAnchorRegistryCleanup(120000,_capability);
+              _handleStreamError(source,_capability);
             }
           },8000);
           try{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true, capability:_capability})){
               if(_restoreTimedOut) return; // timer already fired _handleStreamError
               clearTimeout(_restoreTimer);
               return;
@@ -6934,28 +6965,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // _handleStreamError was called there; we return below.
             // Otherwise the code below cancels the timer and calls it directly.
           }
+          if(!_isCurrentCapability(capability)) return;
           if(_restoreTimedOut) return; // timer already fired _handleStreamError
           clearTimeout(_restoreTimer);
           if(_terminalStateReached||_streamFinalized) return;
           if(_deferStreamErrorIfOffline()) return;
-          if(_deferStreamErrorIfPageHidden(source)) return;
+          if(_deferStreamErrorIfPageHidden(source,_capability)) return;
           _flushReasoningToAnchor();
-          _scheduleAnchorRegistryCleanup(120000);
-          _handleStreamError(source);
+          _scheduleAnchorRegistryCleanup(120000,_capability);
+          _handleStreamError(source,_capability);
         };
-        setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
+        setTimeout(()=>{void _probeReconnect(0,_capability);},_retryDelays[0]);
         return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true, capability:_capability})) return;
       if(_deferStreamErrorIfOffline()) return;
-      if(_deferStreamErrorIfPageHidden(source)) return;
+      if(_deferStreamErrorIfPageHidden(source,_capability)) return;
       _flushReasoningToAnchor();
-      _scheduleAnchorRegistryCleanup(120000);
-      _handleStreamError(source);
+      _scheduleAnchorRegistryCleanup(120000,_capability);
+      _handleStreamError(source,_capability);
     });
 
     source.addEventListener('cancel',e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source,_capability)) return;
       _clearStreamEndRecovery();
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -6980,7 +7012,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         message:_cancelData.message||'',
         session_id:_cancelData.session_id||activeSid,
       },e);
-      _scheduleAnchorRegistryCleanup();
+      _scheduleAnchorRegistryCleanup(600000,_capability);
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
@@ -7027,6 +7059,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // This ensures messages stay in sync with server, fixing race condition where local
           // "*Task cancelled.*" message gets lost when done event overwrites S.messages
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          if(!_isCurrentCapability(_capability)) return;
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
@@ -7055,7 +7088,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
-      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+      // #6381: the run-journal cursor is transport-scoped state. Registering the
+      // raw applier lets a superseded transport keep advancing the cursor (and
+      // arming its replay window) after a newer install took over the stream, so a
+      // stale cursor then suppresses replay for the CURRENT transport.
+      source.addEventListener(_runJournalEventName,e=>{
+        if(!_ownsActiveStreamOrBackground(source,_capability)) return;
+        _rememberRunJournalCursor(e);
+      });
     }
   }
 
