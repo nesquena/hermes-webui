@@ -30,9 +30,10 @@ import json
 import logging
 import os
 import re
-import shutil
 import sqlite3
+import stat as stat_module
 import threading
+import uuid
 from contextlib import closing
 from pathlib import Path
 
@@ -398,29 +399,149 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
     }
 
 
-def recover_session(session_path: Path) -> dict:
-    """Restore session_path from its .bak when the bak has more messages.
+def _recovery_source_identity(models, session_path: Path):
+    """Return a CAS token for a valid or malformed live sidecar.
 
-    Returns a status dict identical to ``inspect_session_recovery_status``
-    plus a "restored" boolean.
+    Recovery must be able to replace malformed JSON, but it must not turn a
+    parse failure into an unfenced write. Valid sidecars retain their complete
+    generation/epoch/digest revision; malformed bytes use a tagged raw digest
+    that is re-read immediately before publication under the same SID
+    authority.
     """
-    status = inspect_session_recovery_status(session_path)
-    if status["recommend"] != "restore":
-        return {**status, "restored": False}
-    bak_path = session_path.with_suffix('.json.bak')
-    # Stage the recovery via a tmp copy + atomic replace so a crash mid-restore
-    # cannot leave a half-written session.json.
-    tmp_path = session_path.with_suffix('.json.recover.tmp')
     try:
-        shutil.copyfile(bak_path, tmp_path)
-        tmp_path.replace(session_path)
-    except OSError as exc:
-        logger.warning("recover_session: copy failed for %s: %s", session_path, exc)
+        revision = models._read_sidecar_revision(session_path)
+    except RuntimeError:
+        if not session_path.exists():
+            return None
         try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return {**status, "restored": False, "error": str(exc)}
+            return ('malformed', models._sidecar_content_digest(session_path))
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError(
+                f'Cannot verify recovery source for {session_path.name!r}'
+            ) from exc
+    return ('valid', revision) if revision is not None else None
+
+
+def recover_session(session_path: Path) -> dict:
+    """CAS-restore one sidecar while sharing the runtime SID authority."""
+    from api import models
+
+    session_path = Path(session_path)
+    sid = session_path.stem
+    if not models.is_safe_session_id(sid):
+        return {
+            'session_id': sid,
+            'recommend': 'no_action',
+            'restored': False,
+            'error': 'invalid session id',
+        }
+    bak_path = session_path.with_suffix('.json.bak')
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    with models._session_sidecar_authority(
+        sid,
+        session_dir=session_path.parent,
+    ):
+        status = inspect_session_recovery_status(session_path)
+        try:
+            if models._webui_deleted_session_is_tombstoned(
+                sid,
+                session_dir=session_path.parent,
+                strict=True,
+            ):
+                return {**status, 'restored': False, 'deleted': True}
+        except Exception as exc:
+            return {
+                **status,
+                'restored': False,
+                'error': f'cannot verify delete tombstone: {exc}',
+            }
+        if status["recommend"] != "restore":
+            return {**status, "restored": False}
+
+        source_identity_before = _recovery_source_identity(models, session_path)
+        revision_before = (
+            source_identity_before[1]
+            if source_identity_before is not None
+            and source_identity_before[0] == 'valid'
+            else None
+        )
+        tmp_path = None
+        try:
+            backup_payload = json.loads(bak_path.read_text(encoding='utf-8'))
+            if not isinstance(backup_payload, dict):
+                raise ValueError('backup payload is not a session object')
+            backup_sid = backup_payload.get('session_id')
+            if backup_sid not in (None, sid):
+                raise ValueError('backup session id does not match target')
+            backup_generation = backup_payload.get('_sidecar_generation_v1', 0)
+            if type(backup_generation) is not int or backup_generation < 0:
+                raise ValueError('backup generation is invalid')
+            base_generation = (
+                revision_before[0]
+                if revision_before is not None
+                else backup_generation
+            )
+            epoch = revision_before[1] if revision_before is not None else None
+            if epoch is None:
+                backup_epoch = backup_payload.get('_sidecar_epoch_v1')
+                epoch = (
+                    backup_epoch
+                    if isinstance(backup_epoch, str)
+                    and len(backup_epoch) == 32
+                    and all(char in '0123456789abcdef' for char in backup_epoch)
+                    else uuid.uuid4().hex
+                )
+            backup_payload['session_id'] = sid
+            backup_payload['_sidecar_generation_v1'] = base_generation + 1
+            backup_payload['_sidecar_epoch_v1'] = epoch
+            serialized = json.dumps(
+                backup_payload,
+                ensure_ascii=False,
+                indent=2,
+            ).encode('utf-8')
+            tmp_path = session_path.with_suffix(
+                f'.json.recover.tmp.{os.getpid()}.{threading.current_thread().ident}'
+            )
+            source_mode = stat_module.S_IMODE(
+                (session_path if session_path.exists() else bak_path).stat().st_mode
+            )
+            with open(tmp_path, 'xb') as handle:
+                models._set_file_descriptor_mode(handle.fileno(), source_mode)
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if (
+                _recovery_source_identity(models, session_path)
+                != source_identity_before
+            ):
+                raise RuntimeError('session changed during recovery preparation')
+            if models._webui_deleted_session_is_tombstoned(
+                sid,
+                session_dir=session_path.parent,
+                strict=True,
+            ):
+                raise RuntimeError('session was deleted during recovery')
+            if source_identity_before is None:
+                os.link(str(tmp_path), str(session_path))
+                models._fsync_sidecar_directory(session_path.parent)
+                tmp_path.unlink(missing_ok=True)
+            else:
+                os.replace(tmp_path, session_path)
+                models._fsync_sidecar_directory(session_path.parent)
+            models._invalidate_cached_session_generation(sid)
+        except Exception as exc:
+            logger.warning("recover_session: restore failed for %s: %s", session_path, exc)
+            try:
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return {
+                **status,
+                "restored": False,
+                "stale_generation": isinstance(exc, (FileExistsError, RuntimeError)),
+                "error": str(exc),
+            }
     logger.warning(
         "recover_session: restored %s from .bak (live=%d → bak=%d messages). "
         "See #1558 for the data-loss class this guards against.",
@@ -648,46 +769,81 @@ def _state_db_row_to_sidecar(row: dict) -> dict:
 
 
 def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Path | None) -> dict:
-    """Materialize missing WebUI JSON sidecars from canonical state.db rows."""
+    """Materialize state.db sidecars under the shared SID publication authority."""
+    from api import models
+
     rows = _read_state_db_missing_sidecar_rows(session_dir, state_db_path)
     materialized = 0
     details: list[dict] = []
     session_dir.mkdir(parents=True, exist_ok=True)
     for row in rows:
         sid = str(row.get('id') or '').strip()
-        if not sid:
+        if not sid or not models.is_safe_session_id(sid):
             continue
         target = session_dir / f"{sid}.json"
-        if target.exists():
-            continue
         payload = _state_db_row_to_sidecar(row)
-        # Per-process/per-thread tmp suffix to avoid corruption under
-        # concurrent reconciliation calls (matches api/models.py:484
-        # Session.save() convention).
-        tmp_suffix = f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
-        tmp = target.with_suffix(tmp_suffix)
+        payload['_sidecar_generation_v1'] = 1
+        payload['_sidecar_epoch_v1'] = uuid.uuid4().hex
+        tmp = target.with_suffix(
+            f".json.reconcile.tmp.{os.getpid()}.{threading.current_thread().ident}"
+        )
         detail_recorded = False
-        try:
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-        except OSError as exc:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
-            continue
-        # Atomic create-or-fail: os.link() refuses to overwrite an existing
-        # target. Closes the TOCTOU window between the target.exists() check
-        # above and the rename — a concurrent Session.save() for the same SID
-        # will win and we silently skip rather than overwrite a live sidecar.
         materialized_now = False
         try:
-            os.link(str(tmp), str(target))
-            materialized_now = True
-        except FileExistsError:
-            # Live sidecar appeared between the check and the link — keep it.
-            pass
+            with models._session_sidecar_authority(
+                sid,
+                session_dir=session_dir,
+            ):
+                if target.exists():
+                    details.append({
+                        'session_id': sid,
+                        'materialized': False,
+                        'skipped': 'sidecar_appeared_during_reconcile',
+                    })
+                    continue
+                if models._webui_deleted_session_is_tombstoned(
+                    sid,
+                    session_dir=session_dir,
+                    strict=True,
+                ):
+                    details.append({
+                        'session_id': sid,
+                        'materialized': False,
+                        'skipped': 'deleted_session_tombstone',
+                    })
+                    continue
+                serialized = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                ).encode('utf-8')
+                with open(tmp, 'xb') as handle:
+                    models._set_file_descriptor_mode(handle.fileno(), 0o600)
+                    handle.write(serialized)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if models._webui_deleted_session_is_tombstoned(
+                    sid,
+                    session_dir=session_dir,
+                    strict=True,
+                ):
+                    details.append({
+                        'session_id': sid,
+                        'materialized': False,
+                        'skipped': 'deleted_session_tombstone',
+                    })
+                    continue
+                try:
+                    os.link(str(tmp), str(target))
+                    models._fsync_sidecar_directory(session_dir)
+                    materialized_now = True
+                    models._invalidate_cached_session_generation(sid)
+                except FileExistsError:
+                    pass
         except OSError as exc:
+            details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
+            detail_recorded = True
+        except Exception as exc:
             details.append({'session_id': sid, 'materialized': False, 'error': str(exc)})
             detail_recorded = True
         finally:
@@ -697,9 +853,19 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
                 pass
         if materialized_now:
             materialized += 1
-            details.append({'session_id': sid, 'materialized': True, 'messages': len(payload.get('messages') or [])})
-        elif not detail_recorded:
-            details.append({'session_id': sid, 'materialized': False, 'skipped': 'sidecar_appeared_during_reconcile'})
+            details.append({
+                'session_id': sid,
+                'materialized': True,
+                'messages': len(payload.get('messages') or []),
+            })
+        elif not detail_recorded and not any(
+            detail.get('session_id') == sid for detail in details
+        ):
+            details.append({
+                'session_id': sid,
+                'materialized': False,
+                'skipped': 'sidecar_appeared_during_reconcile',
+            })
     return {'scanned': len(rows), 'materialized': materialized, 'details': details}
 
 

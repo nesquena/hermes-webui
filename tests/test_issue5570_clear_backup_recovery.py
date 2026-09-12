@@ -303,6 +303,39 @@ def test_malformed_live_sidecar_still_recovers_larger_backup(tmp_path):
     assert json.loads(live_path.read_text(encoding="utf-8"))["messages"][0]["content"] == "pre-clear prompt"
 
 
+def test_malformed_live_recovery_rejects_changed_raw_source(monkeypatch, tmp_path):
+    import api.session_recovery as session_recovery
+
+    sid = "issue5570_malformed_live_changed"
+    live_path = tmp_path / f"{sid}.json"
+    bak_path = live_path.with_suffix(".json.bak")
+    live_path.write_text("{not json", encoding="utf-8")
+    _write_json(bak_path, _stale_pre_clear_backup(sid))
+    real_identity = session_recovery._recovery_source_identity
+    calls = 0
+
+    def mutate_after_first_identity(models, path):
+        nonlocal calls
+        identity = real_identity(models, path)
+        calls += 1
+        if calls == 1:
+            live_path.write_text("{changed raw bytes", encoding="utf-8")
+        return identity
+
+    monkeypatch.setattr(
+        session_recovery,
+        "_recovery_source_identity",
+        mutate_after_first_identity,
+    )
+
+    result = recover_session(live_path)
+
+    assert result["restored"] is False
+    assert result["stale_generation"] is True
+    assert result["error"] == "session changed during recovery preparation"
+    assert live_path.read_text(encoding="utf-8") == "{changed raw bytes"
+
+
 def test_manual_compression_recovery_behavior_is_preserved(tmp_path):
     sid = "issue5570_compression"
     live_path = tmp_path / f"{sid}.json"

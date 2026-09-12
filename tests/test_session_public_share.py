@@ -117,6 +117,36 @@ def test_share_revoke_makes_link_unavailable():
         post("/api/session/delete", {"session_id": sid})
 
 
+def test_session_delete_removes_offline_replay_plaintext_artifacts():
+    from api.models import SESSION_DIR
+
+    sid = _make_session_with_messages()
+    sidecar = SESSION_DIR / f"{sid}.json"
+    artifacts = [
+        sidecar.with_name(f"{sidecar.name}.replay-v10.abcdef0123456789.bak"),
+        sidecar.with_name(
+            f"_replay-v10.{sidecar.name}.abcdef0123456789.manifest.json"
+        ),
+        sidecar.with_name(f".{sidecar.name}.replay-v10.tmp.123"),
+        sidecar.with_name(f".{sidecar.name}.replay-v10.restore.123"),
+        sidecar.with_name(
+            f"._replay-v10.{sidecar.name}.abcdef0123456789.manifest.json.tmp.123"
+        ),
+    ]
+    try:
+        for artifact in artifacts:
+            artifact.write_text("plaintext transcript", encoding="utf-8")
+
+        payload, status = post("/api/session/delete", {"session_id": sid})
+
+        assert status == 200, payload
+        assert not any(artifact.exists() for artifact in artifacts)
+    finally:
+        for artifact in artifacts:
+            artifact.unlink(missing_ok=True)
+        post("/api/session/delete", {"session_id": sid})
+
+
 def test_share_revoke_endpoint_hides_share_token_from_session():
     sid = _make_session_with_messages()
     try:
