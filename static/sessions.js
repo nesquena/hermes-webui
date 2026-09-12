@@ -24,6 +24,8 @@ let _loadingSessionId = null;
 // concurrent loads can still race and overwrite each other unless we compare
 // the generation token as well.
 let _loadSessionGeneration = 0;
+let _sessionLoadFailureGeneration = 0;
+let _sessionLoadFailureSid = null;
 // #3306: Snapshot of S.messages captured by loadSession() right before it
 // clears them on a force-reload of the active session. Consumed by
 // _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
@@ -219,6 +221,21 @@ async function _restoreRememberedNewChatDraftSession() {
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
+  let _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  const _handoffOriginalInput = _handoffChildPayload && typeof _isReadOnlyForkOriginalInputForSid === 'function' &&
+    _isReadOnlyForkOriginalInputForSid(sid, text, files);
+  const _handoffSendActive = _handoffChildPayload && typeof _isReadOnlyForkSendActiveForSid === 'function' &&
+    _isReadOnlyForkSendActiveForSid(sid);
+  if (typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
+      typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
+  if (_handoffChildPayload && !_handoffOriginalInput && !_handoffSendActive && !String(text || '') &&
+      !(Array.isArray(files) && files.length) && typeof _retireReadOnlyForkPayload === 'function') {
+    _retireReadOnlyForkPayload(sid);
+    _handoffChildPayload = false;
+  }
+  if (S.session && S.session.session_id === sid &&
+      (_isReadOnlySession(S.session) ||
+       (_handoffChildPayload && (_handoffOriginalInput || _handoffSendActive) && !String(text || '') && !(Array.isArray(files) && files.length)))) return;
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -261,7 +278,22 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
-  if (!sid) return Promise.resolve();
+  const opts = arguments[3] || {};
+  if (!sid) return Promise.resolve(true);
+  let _handoffChildPayload = typeof _hasReadOnlyForkPayloadForSid === 'function' && _hasReadOnlyForkPayloadForSid(sid);
+  const _handoffOriginalInput = _handoffChildPayload && typeof _isReadOnlyForkOriginalInputForSid === 'function' &&
+    _isReadOnlyForkOriginalInputForSid(sid, text, files);
+  const _handoffSendActive = _handoffChildPayload && typeof _isReadOnlyForkSendActiveForSid === 'function' &&
+    _isReadOnlyForkSendActiveForSid(sid);
+  if (typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid) &&
+      typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid);
+  if (_handoffChildPayload && !_handoffOriginalInput && !_handoffSendActive && !String(text || '') &&
+      !(Array.isArray(files) && files.length) && typeof _retireReadOnlyForkPayload === 'function') {
+    _retireReadOnlyForkPayload(sid);
+    _handoffChildPayload = false;
+  }
+  if (S.session && S.session.session_id === sid &&
+      (_isReadOnlySession(S.session) || (_handoffChildPayload && (_handoffOriginalInput || _handoffSendActive) && !String(text || '') && !(Array.isArray(files) && files.length)))) return Promise.resolve(true);
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const normalizedFiles = _composerDraftFilesForPersist(files);
@@ -275,14 +307,18 @@ function _saveComposerDraftNow(sid, text, files) {
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
       && !_composerDraftKnownPayloadSessions.has(sid)) {
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
   return api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+    return true;
+  }).catch((error) => {
+    if (opts && opts.throwOnError) throw error;
+    return false;
+  });
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -297,6 +333,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   const text = (draft && typeof draft.text === 'string') ? draft.text : '';
   const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
+  const currentFiles = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
@@ -310,6 +347,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // local input with an older server draft. Cross-session switches still restore
   // normally so the previous session's composer contents do not leak forward.
   if (preserveActiveInput && current && current !== text) return;
+  if (preserveActiveInput && currentFiles.length) return;
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
@@ -332,17 +370,20 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
+  const opts = arguments[3] || {};
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  if (!opts.preserveOtherDraftTimer) clearTimeout(_draftSaveTimer);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
   return api('/api/session/draft', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
+    body: JSON.stringify({ session_id: sid, text: '', files: [] }),
   }).then(() => {
     _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+  }).catch((error) => {
+    if (opts && opts.throwOnError) throw error;
+  });
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
@@ -1770,6 +1811,11 @@ async function loadSession(sid){
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    const _currentDraftText = ($('msg') || {}).value || '';
+    const _currentDraftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
+    if (typeof _captureReadOnlyForkInputForSid === 'function') {
+      _captureReadOnlyForkInputForSid(currentSid, _currentDraftText, _currentDraftFiles);
+    }
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
     // (rapid switch B→C), _loadingSessionId now points at that newer load —
@@ -1932,6 +1978,10 @@ async function loadSession(sid){
     // session_id.
     const _selfHealedCurrent = (e.status===404) && (currentSid===sid);
     if (_isCurrentLoad()) _loadingSessionId = null;
+    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
+        && typeof startSessionStream === 'function') {
+      startSessionStream(currentSid);
+    }
     // The session stream was stopped unconditionally at the top of this load
     // (mirroring stopApprovalPolling). On the happy path it's restarted ~120
     // lines below, but this failure exit never reaches that point — leaving
@@ -1947,10 +1997,6 @@ async function loadSession(sid){
     // early-returns) because only here can the current session have just
     // self-healed away — re-arming a 404'd/deleted session_id would spin the
     // SSE reconnect loop against a dead session.
-    if (currentSid && !_selfHealedCurrent && _loadingSessionId === null
-        && typeof startSessionStream === 'function') {
-      startSessionStream(currentSid);
-    }
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
@@ -2137,6 +2183,8 @@ async function loadSession(sid){
     try {
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch(e) {
+      _sessionLoadFailureGeneration += 1;
+      _sessionLoadFailureSid = sid;
       if (!_isCurrentLoad()) {
         _rearmActiveSessionStream();
         return;
@@ -2256,6 +2304,8 @@ async function loadSession(sid){
         _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      _sessionLoadFailureGeneration += 1;
+      _sessionLoadFailureSid = sid;
       if (_isCurrentLoad()) _loadingSessionId = null;
       return;
     }
@@ -2374,8 +2424,12 @@ async function loadSession(sid){
   // Pass sid so _restoreComposerDraft can skip if this session is mid-load (guards
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
-  if (_draft && (typeof _restoreComposerDraft === 'function')) {
+  const _acceptedHandoffPendingClear = typeof _hasReadOnlyForkAcceptedPendingClear === 'function' && _hasReadOnlyForkAcceptedPendingClear(sid);
+  if (_draft && !_acceptedHandoffPendingClear && (typeof _restoreComposerDraft === 'function')) {
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
+  }
+  if (typeof _restoreReadOnlyForkPayloadAfterLoad === 'function') {
+    _restoreReadOnlyForkPayloadAfterLoad(sid);
   }
 
   // Clear the in-flight session marker now that this load has completed (#1060).
@@ -2523,12 +2577,12 @@ function _isReadOnlySession(session) {
 
 function _isBranchableReadOnlySession(session) {
   if (!_isReadOnlySession(session)) return false;
-  const sources = [
+  const source = [
     session && session.source_tag,
     session && session.raw_source,
     session && session.source,
-  ].map(v => String(v || '').trim().toLowerCase());
-  return sources.includes('cron');
+  ].map(v => String(v || '').trim().toLowerCase()).find(Boolean);
+  return source === 'cron';
 }
 
 function _sourceKeyForSession(session) {
@@ -2684,6 +2738,7 @@ function _clearHandoffStorageForSession(sid) {
   try { _clearSessionViewedCount(sid); } catch {}
   try { _clearSessionCompletionUnread(sid); } catch {}
   try { _forgetObservedStreamingSession(sid); } catch {}
+  try { if (typeof _retireReadOnlyForkPayload === 'function') _retireReadOnlyForkPayload(sid); } catch {}
 }
 
 function _getHandoffDismissedAt(sid) {
@@ -4354,22 +4409,28 @@ function _renderBatchActionBar(){
     });
     if(!ok)return;
     try{
-      const results=await Promise.all(ids.map(async sid=>{
+      // ids.forEach(_clearHandoffStorageForSession); is replaced by per-success cleanup so failed siblings retain custody.
+      // const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+      const results=await Promise.allSettled(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-        return {response,session:sessionsById.get(sid)||null};
+        _clearHandoffStorageForSession(sid);
+        return {response,session:sessionsById.get(sid)||null,sid};
       }));
-      const retainedCount=_worktreeResponseCount(results);
-      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
-      ids.forEach(_clearHandoffStorageForSession);
-      if(S.session&&ids.includes(S.session.session_id)){
+      const successfulResults=results.filter(result=>result.status==='fulfilled').map(result=>result.value);
+      const failedCount=results.length-successfulResults.length;
+      const retainedCount=_worktreeResponseCount(successfulResults);
+      const cleanupFailedCount=successfulResults.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+      const deletedIds=successfulResults.map(result=>result.sid);
+      if(S.session&&deletedIds.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
-      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+      // if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
+      if(failedCount||cleanupFailedCount) showToast(t('delete_failed')+' ('+(failedCount+cleanupFailedCount)+'/'+ids.length+')',0,'error');
+      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+successfulResults.length+')');
       exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);

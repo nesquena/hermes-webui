@@ -1347,6 +1347,261 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// Live File objects cannot cross the server draft boundary. This cache is
+// passive recovery only, keyed by exactly one source or child SID at a time.
+const _readOnlyForkPayloads = new Map();
+const _READ_ONLY_COMPOSER_REFUSAL = 'Read-only imported sessions cannot be modified.';
+
+function _readOnlyForkPayloadVisible(record, sid, generation) {
+  return !!(record && S.session && S.session.session_id === sid &&
+    (!_loadingSessionId || _loadingSessionId === sid) &&
+    (!Number.isFinite(generation) || _loadSessionGeneration === generation));
+}
+
+function _retainReadOnlyForkPayload(record, sid) {
+  for (const [key, existing] of _readOnlyForkPayloads) {
+    if (existing !== record && existing && existing.sourceSid === record.sourceSid) _readOnlyForkPayloads.delete(key);
+  }
+  _readOnlyForkPayloads.delete(record.sourceSid);
+  if (record.childSid) _readOnlyForkPayloads.delete(record.childSid);
+  _readOnlyForkPayloads.set(sid, record);
+}
+
+function _retireReadOnlyForkPayload(sid) {
+  if (!sid) return;
+  const record = _readOnlyForkRecordForSid(sid);
+  if (!record) {
+    _readOnlyForkPayloads.delete(sid);
+    return;
+  }
+  for (const [key, existing] of _readOnlyForkPayloads) {
+    if (existing === record) _readOnlyForkPayloads.delete(key);
+  }
+}
+
+function _hasReadOnlyForkPayloadForSid(sid) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  return !!(record && record.childSid === sid && record.state !== 'accepted' && record.state !== 'accepted-pending-clear');
+}
+
+function _hasReadOnlyForkAcceptedPendingClear(sid) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  return !!(record && record.childSid === sid && record.state === 'accepted-pending-clear');
+}
+
+function _readOnlyForkRecordForSid(sid) {
+  if (!sid) return null;
+  const direct = _readOnlyForkPayloads.get(sid);
+  if (direct) return direct;
+  for (const record of _readOnlyForkPayloads.values()) {
+    if (record && (record.sourceSid === sid || record.childSid === sid)) return record;
+  }
+  return null;
+}
+
+function _captureReadOnlyForkInputForSid(sid, text, files) {
+  const record = _readOnlyForkRecordForSid(sid);
+  if (!record || record.childSid === sid) return false;
+  record.deferredSourceInput = {text:String(text || ''), files:Array.isArray(files) ? [...files] : []};
+  return true;
+}
+
+function _isReadOnlyForkOriginalInputForSid(sid, text, files) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  if (!record || record.childSid !== sid) return false;
+  const currentFiles = Array.isArray(files) ? files : [];
+  return String(text || '') === record.text && currentFiles.length === record.files.length &&
+    currentFiles.every((file, index) => file === record.files[index]);
+}
+
+function _isReadOnlyForkSendActiveForSid(sid) {
+  const record = sid ? _readOnlyForkPayloads.get(sid) : null;
+  return !!(record && record.childSid === sid && record.sendActive);
+}
+
+function _retryReadOnlyForkDraftClear(record) {
+  if (!record || !record.childSid) return;
+  let attempts = 0;
+  const retry = async () => {
+    if (_readOnlyForkPayloads.get(record.childSid) !== record || record.state !== 'accepted-pending-clear') return;
+    attempts += 1;
+    try {
+        await _clearComposerDraft(record.childSid, record.text, [], {throwOnError:true, preserveOtherDraftTimer:true});
+      if (_readOnlyForkPayloads.get(record.childSid) === record) _readOnlyForkPayloads.delete(record.childSid);
+    } catch (_) {
+      if (attempts < 3) setTimeout(retry, attempts * 1000);
+    }
+  };
+  setTimeout(retry, 1000);
+}
+
+function _restoreReadOnlyForkPayload(record, sid, generation, payload=record, consume=true) {
+  if (!_readOnlyForkPayloadVisible(record, sid, generation)) return false;
+  const input = $('msg');
+  if (!input) return false;
+  const currentText = String(input.value || '');
+  if (currentText.trim() && currentText !== payload.text) return false;
+  if ((S.pendingFiles || []).length) return false;
+  if (!currentText) input.value = payload.text;
+  S.pendingFiles = [...payload.files];
+  if (typeof autoResize === 'function') autoResize();
+  if (typeof renderTray === 'function') renderTray();
+  if (consume) {
+    _readOnlyForkPayloads.delete(sid);
+    if (record.sourceSid !== sid) _readOnlyForkPayloads.delete(record.sourceSid);
+    if (record.childSid && record.childSid !== sid) _readOnlyForkPayloads.delete(record.childSid);
+  }
+  return true;
+}
+
+function _restoreReadOnlyForkPayloadAfterLoad(sid) {
+  const record = _readOnlyForkRecordForSid(sid);
+  if (!record || record.state !== 'recovery') return false;
+  const deferred = record.sourceSid === sid ? record.deferredSourceInput : null;
+  return _restoreReadOnlyForkPayload(record, sid, _loadSessionGeneration, deferred || record, !deferred);
+}
+
+function _readOnlyForkHandoffOwnsPane(record, sid) {
+  return _readOnlyForkPayloadVisible(record, sid, record && record.childGeneration);
+}
+
+function _queueReadOnlyForkConcurrentSend(record, text, files) {
+  if (!record || !record.sourceSid || typeof queueSessionMessage !== 'function') return false;
+  const modelState = typeof _chatPayloadModelState === 'function' ? _chatPayloadModelState() : {};
+  const queueSid = record.concurrentQueueTargetSid || record.sourceSid;
+  const payload = {
+    text:String(text || ''), files:Array.isArray(files) ? [...files] : [],
+    model:modelState.model, model_provider:modelState.model_provider,
+    profile:S.activeProfile || 'default',
+  };
+  if (queueSid === record.sourceSid) payload._readOnlyForkQueuedFor = record.sourceSid;
+  queueSessionMessage(queueSid, payload);
+  if ($('msg')) $('msg').value = '';
+  S.pendingFiles = [];
+  if (typeof autoResize === 'function') autoResize();
+  if (typeof renderTray === 'function') renderTray();
+  if (typeof updateQueueBadge === 'function') updateQueueBadge(queueSid);
+  if (typeof showToast === 'function') showToast(`Queued: "${String(text || '').slice(0,40)}${String(text || '').length>40?'…':''}"`,2000);
+  return true;
+}
+
+function _transferReadOnlyForkConcurrentQueue(record) {
+  if (!record || !record.childSid) return;
+  record.concurrentQueueTargetSid = record.childSid;
+  if (typeof SESSION_QUEUES === 'undefined') return;
+  const sourceQueue = SESSION_QUEUES[record.sourceSid];
+  if (!Array.isArray(sourceQueue)) return;
+  const handoffQueue = sourceQueue.filter(entry => entry && entry._readOnlyForkQueuedFor === record.sourceSid);
+  if (!handoffQueue.length) return;
+  const retainedQueue = sourceQueue.filter(entry => !entry || entry._readOnlyForkQueuedFor !== record.sourceSid);
+  if (retainedQueue.length) {
+    SESSION_QUEUES[record.sourceSid] = retainedQueue;
+    if (typeof _persistSessionQueueStorage === 'function') _persistSessionQueueStorage(record.sourceSid, retainedQueue);
+  } else {
+    delete SESSION_QUEUES[record.sourceSid];
+    if (typeof _clearPersistedSessionQueue === 'function') _clearPersistedSessionQueue(record.sourceSid);
+  }
+  for (const entry of handoffQueue) {
+    const payload = {...entry};
+    delete payload._readOnlyForkQueuedFor;
+    if (typeof queueSessionMessage === 'function') queueSessionMessage(record.childSid, payload);
+  }
+  if (typeof updateQueueBadge === 'function') {
+    updateQueueBadge(record.sourceSid);
+    updateQueueBadge(record.childSid);
+  }
+}
+
+function _recoverReadOnlyForkConcurrentQueue(record) {
+  if (!record || !record.childSid) return;
+  _transferReadOnlyForkConcurrentQueue(record);
+}
+
+function _deferReadOnlyForkHandoff(record) {
+  if (!record) return;
+  _recoverReadOnlyForkConcurrentQueue(record);
+  record.state = 'recovery';
+  _retainReadOnlyForkPayload(record, record.childSid || record.sourceSid);
+  if (typeof renderSessionList === 'function') void renderSessionList();
+}
+
+async function _prepareReadOnlyForkPayload(text, files) {
+  const source = S.session;
+  const record = {sourceSid:source.session_id, sourceGeneration:_loadSessionGeneration,
+    childSid:null, text:String(text || ''), files:Array.isArray(files) ? [...files] : [],
+    serializableFiles:typeof _composerDraftFilesForPersist === 'function' ? _composerDraftFilesForPersist(files) : [],
+    model:source.model || '', model_provider:source.model_provider || null,
+    explicitModelPick:typeof _readPendingSessionModel === 'function' ? _readPendingSessionModel(source.session_id) : null,
+    profile:S.activeProfile || source.profile || 'default', workspace:source.workspace || null,
+    state:'branching'};
+  _retainReadOnlyForkPayload(record, record.sourceSid);
+  $('msg').value = ''; S.pendingFiles = [];
+  if (typeof autoResize === 'function') autoResize();
+  if (typeof renderTray === 'function') renderTray();
+  try {
+    const branch = await api('/api/session/branch', {method:'POST', retries:0,
+      body:JSON.stringify({session_id:record.sourceSid})});
+    if (!branch || !branch.session_id) throw new Error('branch failure before child SID');
+    record.childSid = branch.session_id;
+    record.state = 'drafting';
+    _retainReadOnlyForkPayload(record, record.childSid);
+    await _saveComposerDraftNow(record.childSid, record.text, record.files, {throwOnError:true});
+    record.state = 'child-draft-owned';
+  } catch (error) {
+    const recoverySid = record.state === 'drafting' ? record.sourceSid : (record.childSid || record.sourceSid);
+    _recoverReadOnlyForkConcurrentQueue(record);
+    record.state = 'recovery';
+    if (!_restoreReadOnlyForkPayload(record, recoverySid, record.sourceGeneration)) {
+      _retainReadOnlyForkPayload(record, recoverySid);
+    }
+    if (typeof showToast === 'function' && _readOnlyForkPayloadVisible(record, recoverySid, record.sourceGeneration)) {
+      showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 4000);
+    }
+    return null;
+  }
+  const sourceStillOwns = _readOnlyForkPayloadVisible(record, record.sourceSid, record.sourceGeneration);
+  const newerSourceInput = sourceStillOwns && (String(($('msg') || {}).value || '').trim() || (S.pendingFiles || []).length);
+  if (!sourceStillOwns || newerSourceInput) {
+    record.state = 'recovery';
+    _retainReadOnlyForkPayload(record, record.childSid);
+    if (typeof renderSessionList === 'function') void renderSessionList();
+    if (typeof showToast === 'function' && sourceStillOwns) showToast(typeof t === 'function' ? t('branch_forked') : 'branch_forked', 3000);
+    return null;
+  }
+  const sourceSession = S.session;
+  const generationBeforeLoad = _loadSessionGeneration;
+  const failureBeforeLoad = _sessionLoadFailureGeneration;
+  S.session = null;
+  try { await loadSession(record.childSid, {preserveActiveInput:true}); }
+  catch (error) {
+    S.session = sourceSession; _recoverReadOnlyForkConcurrentQueue(record); record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid);
+    if (typeof showToast === 'function' && _readOnlyForkHandoffOwnsPane(record, record.childSid)) {
+      showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    }
+    return null;
+  }
+  if (_sessionLoadFailureGeneration > failureBeforeLoad && _sessionLoadFailureSid === record.childSid) {
+    _recoverReadOnlyForkConcurrentQueue(record);
+    record.state = 'recovery';
+    _retainReadOnlyForkPayload(record, record.childSid);
+    if (typeof showToast === 'function' && _readOnlyForkHandoffOwnsPane(record, record.childSid)) {
+      showToast(typeof t === 'function' ? t('branch_failed') : 'branch_failed', 3000);
+    }
+    return null;
+  }
+  if (!S.session || S.session.session_id !== record.childSid || _loadingSessionId) {
+    _recoverReadOnlyForkConcurrentQueue(record); record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
+  }
+  _transferReadOnlyForkConcurrentQueue(record);
+  record.childGeneration = _loadSessionGeneration > generationBeforeLoad ? _loadSessionGeneration : null;
+  if ((String(($('msg') || {}).value || '').trim() && String(($('msg') || {}).value || '') !== record.text) || (S.pendingFiles || []).length) {
+    record.state = 'recovery'; _retainReadOnlyForkPayload(record, record.childSid); return null;
+  }
+  _restoreReadOnlyForkPayload(record, record.childSid, record.childGeneration);
+  _retainReadOnlyForkPayload(record, record.childSid);
+  return record;
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1355,6 +1610,20 @@ async function send(){
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
   if (_sendInProgress) {
+    const _activeHandoffRecord = (typeof _readOnlyForkPayloads !== 'undefined'
+      ? [..._readOnlyForkPayloads.values()]
+      : []).find(record =>
+      record && ['branching','drafting','child-draft-owned'].includes(record.state));
+    const _handoffPane = _activeHandoffRecord && (!S.session ||
+      S.session.session_id === _activeHandoffRecord.sourceSid || S.session.session_id === _activeHandoffRecord.childSid);
+    if (_activeHandoffRecord && _handoffPane) {
+      const _handoffText = _composerTextWithPendingSelections().trim();
+      const _handoffPendingFiles = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
+      if (_handoffText || _handoffPendingFiles.length) {
+        _queueReadOnlyForkConcurrentSend(_activeHandoffRecord, _handoffText, _handoffPendingFiles);
+      }
+      return;
+    }
     const _text=_composerTextWithPendingSelections().trim();
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
@@ -1371,6 +1640,7 @@ async function send(){
     return;
   }
   _sendInProgress = true;
+  let _readOnlyForkHandoff = null;
   try{
   const options=arguments[0]||{};
   const literalSlash=!!(options&&options.literalSlash);
@@ -1402,6 +1672,25 @@ async function send(){
   }
 
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  if (S.session && (S.session.read_only || S.session.is_read_only)) {
+    const parsed = typeof parseCommand === 'function' ? parseCommand(text) : null;
+    const branchable = typeof _isBranchableReadOnlySession === 'function' && _isBranchableReadOnlySession(S.session);
+    if (branchable && !parsed && !(S.busy || compressionRunning)) {
+      _readOnlyForkHandoff = await _prepareReadOnlyForkPayload(text, S.pendingFiles);
+      if (!_readOnlyForkHandoff) return;
+      _readOnlyForkHandoff.sendActive = true;
+      text = _readOnlyForkHandoff.text;
+    } else if (branchable && parsed && parsed.name === 'branch') {
+      const command = typeof COMMANDS !== 'undefined' && COMMANDS.find(c => c.name === 'branch');
+      if (command) { $('msg').value = ''; await command.fn(parsed.args); return; }
+    } else {
+      if (typeof showToast === 'function') showToast(_READ_ONLY_COMPOSER_REFUSAL, 3000);
+      return;
+    }
+  }
+  if (S.session && !(S.session.read_only || S.session.is_read_only) && !_readOnlyForkHandoff) {
+    _retireReadOnlyForkPayload(S.session.session_id);
+  }
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
@@ -1465,7 +1754,7 @@ async function send(){
     return;
   }
   if(S.session&&(S.session.read_only||S.session.is_read_only)){
-    if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
+    if(typeof showToast==='function') showToast(_READ_ONLY_COMPOSER_REFUSAL,3000);
     return;
   }
   let _slashDisplayTextOverride=null;
@@ -1644,12 +1933,37 @@ async function send(){
   // window is not clobbered by a delayed text:'' post. Keep the promise so the
   // #5472 failed-send restore can chain its re-persist after this clear resolves.
   let _composerDraftClearPromise=null;
-  if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  if (!_readOnlyForkHandoff) {
+    if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  }
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){
+    if (_readOnlyForkHandoff) {
+      if (_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+        _readOnlyForkHandoff.state='recovery';
+        _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
+        $('msg').value=_readOnlyForkHandoff.text;
+        S.pendingFiles=[..._readOnlyForkHandoff.files];
+        if(typeof autoResize==='function') autoResize();
+        if(typeof renderTray==='function') renderTray();
+      } else {
+        _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+        return;
+      }
+      setComposerStatus(`Upload error: ${e.message}`);
+      return;
+    }
+    if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}
+  }
+  if (_readOnlyForkHandoff &&
+      (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid) ||
+       String(($('msg') || {}).value || '').trim() || (S.pendingFiles || []).length)) {
+    _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+    return;
+  }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -1681,6 +1995,10 @@ async function send(){
         msgText=`${_directive}${_forcedSkillBlock?`\n\n${_forcedSkillBlock}`:''}\n\n${msgText||''}`.trim();
       }
     }
+  }
+  if (_readOnlyForkHandoff && !_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+    _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+    return;
   }
   if(!msgText){setComposerStatus('Nothing to send');return;}
   // Composer textarea + persisted draft were already captured and cleared
@@ -1767,11 +2085,17 @@ async function send(){
   let modelStateForPostStart;
   let explicitPickForPostStart;
   try{
-    const _modelState=_chatPayloadModelState();
+    if (_readOnlyForkHandoff && !_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+      _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+      return;
+    }
+    const _modelState=_readOnlyForkHandoff
+      ? {model:_readOnlyForkHandoff.model, model_provider:_readOnlyForkHandoff.model_provider}
+      : _chatPayloadModelState();
     modelStateForPostStart=_modelState;
-    const _pendingPick=(typeof _readPendingSessionModel==='function')
-      ? _readPendingSessionModel(activeSid)
-      : null;
+    const _pendingPick=_readOnlyForkHandoff
+      ? _readOnlyForkHandoff.explicitModelPick
+      : (typeof _readPendingSessionModel==='function' ? _readPendingSessionModel(activeSid) : null);
     const _pendingPickMatch=_pendingPick
       && _pendingPick.model===_modelState.model
       && String(_pendingPick.model_provider||'')===String(_modelState.model_provider||'');
@@ -1797,21 +2121,69 @@ async function send(){
     // pick. (#3739/#3737, Codex catch)
     if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     explicitPickForPostStart=_explicitPick;
-    const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
+    const startOptions={method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
-      model:_modelState.model,workspace:S.session.workspace,
+      model:_modelState.model,workspace:_readOnlyForkHandoff ? _readOnlyForkHandoff.workspace : S.session.workspace,
       model_provider:_modelState.model_provider,
-      profile:S.activeProfile||S.session.profile||'default',
+      profile:_readOnlyForkHandoff ? _readOnlyForkHandoff.profile : S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
       moa_config:_pendingMoaConfig?true:undefined
-    })});
+    })};
+    if (_readOnlyForkHandoff) startOptions.retries = 0;
+    const startData=await api('/api/chat/start',startOptions); // model:_modelState.model; model_provider:_modelState.model_provider; S.session.model is authoritative for ordinary sends.
+    if (!startData || typeof startData !== 'object' || !startData.stream_id) {
+      throw new Error(typeof t === 'function' ? t('branch_failed') : 'branch_failed');
+    }
     _pendingMoaConfig=null;
     postStartData = startData;
+    if (_readOnlyForkHandoff) {
+      try {
+        await _clearComposerDraft(_readOnlyForkHandoff.childSid, _readOnlyForkHandoff.text, [], {throwOnError:true, preserveOtherDraftTimer:true});
+        _readOnlyForkPayloads.delete(_readOnlyForkHandoff.childSid);
+        _readOnlyForkHandoff.state = 'accepted';
+      } catch (clearError) {
+        _readOnlyForkHandoff.state = 'accepted-pending-clear';
+        _retainReadOnlyForkPayload(_readOnlyForkHandoff, _readOnlyForkHandoff.childSid);
+        _retryReadOnlyForkDraftClear(_readOnlyForkHandoff);
+      }
+      if (!_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+        if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+        const _acceptedInflight=INFLIGHT[activeSid]||{messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+        INFLIGHT[activeSid]=_acceptedInflight;
+        if (typeof markInflight === 'function') markInflight(activeSid, startData.stream_id);
+        if (typeof saveInflightState === 'function') {
+          saveInflightState(activeSid,{streamId:startData.stream_id,messages:_acceptedInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:_acceptedInflight.toolCalls||[]});
+        }
+        return;
+      }
+    }
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    if (_readOnlyForkHandoff) {
+      if (_readOnlyForkHandoffOwnsPane(_readOnlyForkHandoff, activeSid)) {
+        delete INFLIGHT[activeSid];
+        if(typeof clearInflightState==='function') clearInflightState(activeSid);
+        S.messages=S.messages.filter(message=>message!==userMsg);
+        _readOnlyForkHandoff.state='recovery';
+        _retainReadOnlyForkPayload(_readOnlyForkHandoff, activeSid);
+        S.busy = false;
+        if (typeof updateSendBtn === 'function') updateSendBtn();
+        if (!$('msg').value && !(S.pendingFiles||[]).length) {
+          $('msg').value=_readOnlyForkHandoff.text;
+          S.pendingFiles=[..._readOnlyForkHandoff.files];
+          if(typeof autoResize==='function') autoResize();
+          if(typeof renderTray==='function') renderTray();
+        }
+        if(typeof renderMessages==='function') renderMessages();
+        setComposerStatus(`Error: ${errMsg}`);
+      } else {
+        _deferReadOnlyForkHandoff(_readOnlyForkHandoff);
+      }
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not
@@ -1950,7 +2322,10 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
+  }finally{
+    if (_readOnlyForkHandoff) _readOnlyForkHandoff.sendActive = false;
+    _sendInProgress=false; _sendInProgressSid=null;
+  }
 }
 
 async function startRegeneration(sessionId, regenerationRevision){
