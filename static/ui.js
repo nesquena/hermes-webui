@@ -3580,6 +3580,18 @@ function _applySessionModelFallback(sel){
   return null;
 }
 
+// Server-side catalog rows for non-active providers arrive provider-qualified:
+// the dedupe pass rewrites colliding ids as @<provider_id>:<model>. Return the
+// metadata a picker option needs for such a row (bare model id + owning
+// provider) so _modelStateForSelect() can persist the CLEAN model id into a
+// new session instead of leaking the full @provider:model routing id. #7241
+function _qualifiedCatalogOptionMeta(model, providerId){
+  const raw=String(model||'');
+  const provider=String(providerId||'').trim();
+  const prefix=provider?`@${provider}:`:'';
+  if(!raw.startsWith('@')||!raw.includes(':')||!prefix||!raw.toLowerCase().startsWith(prefix.toLowerCase())) return null;
+  return {model:raw.slice(prefix.length),provider};
+}
 async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
@@ -3671,6 +3683,15 @@ async function populateModelDropdown(opts={}){
       for(const m of (Array.isArray(g.models)?g.models:[])){
         const opt=document.createElement('option');
         opt.value=m.id;
+        // Provider-qualified rows (e.g. @custom:omni:… for non-active
+        // providers) must carry the bare model + owning provider as option
+        // metadata; a fresh-session selection otherwise persists the whole
+        // routing id (extraction prefers dataset.model over option.value). #7241
+        const qualifiedMeta=_qualifiedCatalogOptionMeta(m&&m.id,g&&g.provider_id);
+        if(qualifiedMeta){
+          opt.dataset.model=qualifiedMeta.model;
+          opt.dataset.provider=qualifiedMeta.provider;
+        }
         opt.textContent=m.label;
         if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
           opt.dataset.fast='1';
@@ -4159,6 +4180,13 @@ function _appendOverflowOptionsToGroup(group, extraModels){
     }
     const opt=document.createElement('option');
     opt.value=m.id;
+    // Overflow rows of a provider-qualified group keep the same metadata
+    // contract as the catalog rows above (bare model + provider). #7241
+    const qualifiedMeta=_qualifiedCatalogOptionMeta(m.id,group&&group.dataset&&group.dataset.provider);
+    if(qualifiedMeta){
+      opt.dataset.model=qualifiedMeta.model;
+      opt.dataset.provider=qualifiedMeta.provider;
+    }
     opt.textContent=m.label||m.id;
     group.appendChild(opt);
     appended++;
@@ -4434,7 +4462,25 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  // #7400: _modelStateForSelect(sel,sel.value) resolves the SELECTED option to
+  // its canonical (bare model, owning provider) pair via dataset.model /
+  // dataset.provider. A candidate row's m.value is the raw option value, which
+  // for a provider-qualified row is the routing id (@provider:model) — NOT the
+  // bare model. Compare canonical-with-canonical: derive the row's bare model
+  // with the same _qualifiedCatalogOptionMeta() stamping the catalog paths use,
+  // then require BOTH model and provider to match so two providers offering the
+  // same bare model still disambiguate by their owning provider.
+  const _canonicalRowModelForCompare=(m)=>{
+    const _raw=String((m&&m.value)||'');
+    if(!_raw.startsWith('@')||!_raw.includes(':')) return _raw;
+    const _provider=String(_modelProviderForSelectedBadge(m)||'');
+    if(_provider&&typeof _qualifiedCatalogOptionMeta==='function'){
+      const _meta=_qualifiedCatalogOptionMeta(_raw,_provider);
+      if(_meta&&_meta.model) return _meta.model;
+    }
+    return _raw;
+  };
+  const _isSelectedModelRow=(m)=>String(_canonicalRowModelForCompare(m))===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
@@ -4471,6 +4517,25 @@ function renderModelDropdown(){
     // and returns 0 (while still clearing dataset.extraModels) when every overflow
     // model already existed as an option. Bailing on a 0 return would leave those
     // already-present-but-hidden rows unrevealed and the expander dead (#bug3).
+    // Detect BEFORE the append whether any overflow option already lives
+    // OUTSIDE this optgroup. That happens when the selected overflow model was
+    // injected at the <select> ROOT by _ensureModelOptionInDropdown (search
+    // picked a model that was overflow-hidden inside its own provider group):
+    // the dropdown then renders that root option as its own active row with a
+    // Selected badge. The append below MOVES the option into the optgroup, but
+    // the in-place reveal would still build a SECOND active row inside the
+    // group while the stale root row (and its _modelData entry) stays
+    // rendered — two `.model-opt.active` rows and two Selected badges until a
+    // later full re-render (#7400 re-gate). Take the full re-render in that
+    // case: it re-reads the <select>, renders the moved option exactly once
+    // (in its provider group) and drops the orphan root row.
+    let _movedFromRoot=false;
+    try{
+      if(og.parentNode&&typeof og.parentNode.querySelectorAll==='function'){
+        const _rootOptions=Array.from(og.parentNode.querySelectorAll('option')).filter(o=>o&&o.parentNode!==og);
+        _movedFromRoot=extraModels.some(m=>m&&m.id&&_rootOptions.some(o=>String(o.value||'')===String(m.id)));
+      }
+    }catch(_){ /* minimal DOM — fall through to the existing guards */ }
     _appendOverflowOptionsToGroup(og,extraModels);
     // Full re-render fallback — the proven path. Used when the in-place reveal
     // can't run (minimal/headless DOM without CSS.escape/rAF/insertBefore, or any
@@ -4482,6 +4547,7 @@ function renderModelDropdown(){
       const ns=dd.querySelector('.model-search-input');
       if(ns){ ns.value=_term; (ns._listeners&&ns._listeners.input)?ns._listeners.input():ns.dispatchEvent(new Event('input')); }
     };
+    if(_movedFromRoot){ _fullReRender(); return; }
     // IN-PLACE reveal: build the newly-revealed rows and insert them directly into
     // the existing group wrapper (before the "Show more" expander), then remove
     // the expander. No full re-render — so the group stays open, every other

@@ -34,7 +34,12 @@ def test_model_picker_renders_selected_badge_without_replacing_configured_badge(
 
 
 def test_selected_badge_is_keyed_to_current_model_value():
-    assert "String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" in UI_JS
+    # #7400 re-gate: the selected row must be matched by CANONICAL identity —
+    # the bare model derived with _qualifiedCatalogOptionMeta for a
+    # provider-qualified row (@provider:model) — not by comparing the raw
+    # option value against the selected option's canonical dataset.model.
+    assert "const _canonicalRowModelForCompare=(m)=>{" in UI_JS
+    assert "String(_canonicalRowModelForCompare(m))===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')" in UI_JS
 
 
 def test_selected_badge_is_keyed_to_current_model_provider():

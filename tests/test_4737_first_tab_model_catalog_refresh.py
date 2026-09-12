@@ -202,6 +202,14 @@ async function runScenario(currentScenario) {
     defaultRedirectCalls,
     fetchCalls,
     liveFetchCalls,
+    // Metadata actually emitted by the production option-construction loop:
+    // each option's routing value plus the dataset fields the selection
+    // extraction reads (#7400/#7241 regression surface).
+    options: select.options.map((opt) => ({
+      value: opt.value,
+      datasetModel: opt.dataset ? (opt.dataset.model || null) : null,
+      datasetProvider: opt.dataset ? (opt.dataset.provider || null) : null,
+    })),
     optionValues: select.options.map((opt) => opt.value),
   };
 }
@@ -222,8 +230,10 @@ def driver_path(tmp_path_factory):
     return str(path)
 
 
-def _run(driver_path, scenario):
-    marker = "async function populateModelDropdown("
+def _extract_function(marker):
+    """Extract a single top-level function body from UI_JS, from its
+    signature marker through the closing brace (same slicing the sibling
+    drivers use)."""
     start = UI_JS.index(marker)
     paren_depth = 1
     idx = start + len(marker)
@@ -235,7 +245,7 @@ def _run(driver_path, scenario):
             paren_depth -= 1
         idx += 1
     if paren_depth != 0:
-        raise AssertionError("could not locate populateModelDropdown signature")
+        raise AssertionError(f"could not locate {marker!r} signature")
     brace_start = UI_JS.index("{", idx)
     depth = 0
     for idx in range(brace_start, len(UI_JS)):
@@ -245,10 +255,19 @@ def _run(driver_path, scenario):
         elif char == "}":
             depth -= 1
             if depth == 0:
-                fn_source = UI_JS[start : idx + 1]
-                break
-    else:
-        raise AssertionError("could not extract populateModelDropdown")
+                return UI_JS[start : idx + 1]
+    raise AssertionError(f"could not extract {marker!r}")
+
+
+def _run(driver_path, scenario):
+    # The driver evaluates the extracted functions in isolation, so any
+    # helper the code-under-test calls must be extracted alongside it.
+    fn_source = "\n".join(
+        [
+            _extract_function("function _qualifiedCatalogOptionMeta("),
+            _extract_function("async function populateModelDropdown("),
+        ]
+    )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".js", delete=False) as handle:
         handle.write(fn_source)
         fn_source_path = handle.name
@@ -436,3 +455,47 @@ def test_populate_model_dropdown_retry_preserves_custom_redirect_handler(driver_
     assert payload["fetchCalls"][1].endswith("freshness=session_visit")
     assert payload["customRedirectCalls"] == [200, 401]
     assert payload["defaultRedirectCalls"] == []
+
+
+def test_populate_model_dropdown_stamps_qualified_row_metadata(driver_path):
+    """#7400/#7241: a provider-qualified catalog row must keep its routing value
+    while the emitted option carries the bare model id and owning provider.
+
+    Asserted on the options produced by the real populateModelDropdown()
+    (scrubbed from static/ui.js), so deleting the `opt.dataset.model` /
+    `opt.dataset.provider` assignments in production fails this test.
+    """
+    qualified_id = "@custom:omni:antigravity/gemini-3.7-flash-tiered"
+    payload = _run(
+        driver_path,
+        {
+            "fetchResponses": [
+                {
+                    "active_provider": "custom:omni",
+                    "default_model": qualified_id,
+                    "configured_model_badges": {},
+                    "groups": [
+                        {
+                            "provider": "Omni",
+                            "provider_id": "custom:omni",
+                            "models": [
+                                {"id": qualified_id, "label": "Gemini 3.7 Flash Tiered"},
+                                {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    emitted = next(opt for opt in payload["options"] if opt["value"] == qualified_id)
+    assert emitted["value"] == qualified_id
+    assert emitted["datasetModel"] == "antigravity/gemini-3.7-flash-tiered"
+    assert emitted["datasetProvider"] == "custom:omni"
+    # A plain (unqualified) row must stay unstamped: stamping it would rewrite
+    # the persisted model for providers whose ids legitimately contain colons.
+    plain = next(opt for opt in payload["options"] if opt["value"] == "gemini-3.7-flash")
+    assert plain["datasetModel"] is None
+    assert plain["datasetProvider"] is None
+
