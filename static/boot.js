@@ -3296,12 +3296,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     applyEmptyStateSuggestionPref();
     window._hideEmptyStatePanel=s.hide_empty_state_panel===true;
     applyEmptyStatePanelPref();
-    // #4343: transcript virtualization is EXPERIMENTAL/opt-IN (default OFF).
-    // #4346 Phase B (footer-jitter suppression during virtual-scroll
-    // measurement re-renders) resolved the scroll-up flicker root cause,
-    // but virtualization remains opt-in until battle-tested further.
-    // Users can explicitly enable it via Settings → virtualize_transcript.
-    window._virtualizeTranscript=s.virtualize_transcript===true;
+    // Transcript virtualization is default ON (#4346 Phase B resolved the
+    // scroll-up flicker root cause). Users can opt out via Settings.
+    window._virtualizeTranscript=s.virtualize_transcript!==false;
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=s.show_cli_sessions!==false;
@@ -3459,7 +3456,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     applyEmptyStateSuggestionPref();
     window._hideEmptyStatePanel=false;
     applyEmptyStatePanelPref();
-    window._virtualizeTranscript=false;  // settings-load failed: default-OFF (experimental/opt-in) (#4343)
+    window._virtualizeTranscript=true;  // settings-load failed: default-ON (virtualize transcripts for smoother scrolling)
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=true;  // settings-load failed: mirror the True config default (#3988)
@@ -3521,7 +3518,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+    api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000}).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d,{force:_testUpdates});}).catch(()=>{});
   }
   const _bootActiveProfileUnauthRedirectBudget=(()=>{
     const markerKey='hermes-webui-active-profile-bootstrap-401';

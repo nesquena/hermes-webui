@@ -9383,10 +9383,9 @@ async function loadSettingsPanel(){
     }
     const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
     if(virtualizeTranscriptCb){
-      // #4343: EXPERIMENTAL/opt-IN, default OFF. Honor a stored true only when
-      // it came from an explicit post-flip opt-in (===true); a pre-flip true is
-      // already reset to false server-side by the load_settings migration.
-      virtualizeTranscriptCb.checked=settings.virtualize_transcript===true;
+      // Virtualize transcripts is default ON. Honor a stored false as an
+      // explicit opt-out; anything else (undefined, true) = ON.
+      virtualizeTranscriptCb.checked=settings.virtualize_transcript!==false;
       window._virtualizeTranscript=virtualizeTranscriptCb.checked;
       virtualizeTranscriptCb.addEventListener('change',()=>{
         window._virtualizeTranscript=virtualizeTranscriptCb.checked;
@@ -12223,8 +12222,9 @@ async function checkUpdatesNow(channelOverride){
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
-        // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        // Also trigger the update banner. Manual checks are user-requested, so
+        // they bypass the weekly automatic notice cap.
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,{force:true});
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){

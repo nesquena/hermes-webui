@@ -55,7 +55,7 @@ def test_sticky_unpin_blocks_near_bottom_repin_without_downward_scroll():
     assert "elseif(!_messageUserUnpinned)" in compact, (
         "Near-bottom hysteresis re-pin must be gated off while the user is manually unpinned"
     )
-    assert "elseif(movedDown&&nearBottom)" in compact, (
+    assert "elseif(movedDown&&(nearBottom||caughtPrevTail))" in compact, (
         "Re-follow must require explicit downward scroll into the near-bottom zone"
     )
 
