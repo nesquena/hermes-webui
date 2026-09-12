@@ -79,18 +79,6 @@ async function cancelSessionStream(session){
     respOk=!!(r&&r.ok);
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return false;
-  if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
-  session.active_stream_id=null;
-  delete INFLIGHT[sid];
-  clearInflightState(sid);
-  if(S.session&&S.session.session_id===sid){
-    S.activeStreamId=null;
-    if(S.session) S.session.active_stream_id=null;
-    clearInflight();
-    setBusy(false);
-    if(typeof setComposerStatus==='function') setComposerStatus('');
-    else setStatus('');
-  }
   if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
     stopApprovalPolling();
     hideApprovalCard(true);
@@ -98,6 +86,26 @@ async function cancelSessionStream(session){
   if(typeof _clarifySessionId!=='undefined' && _clarifySessionId===sid){
     stopClarifyPolling();
     hideClarifyCard(true, 'cancelled');
+  }
+  if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
+  session.active_stream_id=null;
+  const pending=typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[sid]:null;
+  const delivered= pending&&Array.isArray(pending.deliveredSteers)?pending.deliveredSteers:[];
+  const recovery=pending&&Array.isArray(pending.deliveredSteerRecovery)?pending.deliveredSteerRecovery:[];
+  if(delivered.length||recovery.length){
+    INFLIGHT[sid]={...pending,streamId:null,deliveredSteers:delivered,deliveredSteerRecovery:recovery};
+    if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+  }else{
+    delete INFLIGHT[sid];
+    clearInflightState(sid);
+  }
+  if(S.session&&S.session.session_id===sid){
+    S.activeStreamId=null;
+    if(S.session) S.session.active_stream_id=null;
+    clearInflight();
+    setBusy(false);
+    if(typeof setComposerStatus==='function') setComposerStatus('');
+    else setStatus('');
   }
   if(typeof renderSessionList==='function') renderSessionList();
   return true;

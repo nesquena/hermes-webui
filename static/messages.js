@@ -1198,8 +1198,16 @@ function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   );
   if(hasRuntimeConfirmation) return false;
   if(typeof INFLIGHT==='object'&&INFLIGHT&&sid&&INFLIGHT[sid]){
-    delete INFLIGHT[sid];
-    if(typeof clearInflightState==='function') clearInflightState(sid);
+    const pending=INFLIGHT[sid];
+    const delivered=Array.isArray(pending.deliveredSteers)?pending.deliveredSteers:[];
+    const recovery=Array.isArray(pending.deliveredSteerRecovery)?pending.deliveredSteerRecovery:[];
+    if(delivered.length||recovery.length){
+      INFLIGHT[sid]={profile:pending.profile||S.activeProfile||session.profile||'default',streamId:null,deliveredSteers:delivered,deliveredSteerRecovery:recovery};
+      if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+    }else{
+      delete INFLIGHT[sid];
+      if(typeof clearInflightState==='function') clearInflightState(sid);
+    }
   }
   S.activeStreamId=null;
   if(session) session.active_stream_id=null;
@@ -1706,9 +1714,11 @@ async function send(){
       }
     });
     optimisticMessages=[...S.messages];
+    const priorInflight=INFLIGHT[activeSid];
     INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,INFLIGHT[activeSid],priorInflight);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
+      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[],deliveredSteers:INFLIGHT[activeSid].deliveredSteers||[],deliveredSteerRecovery:INFLIGHT[activeSid].deliveredSteerRecovery||[],profile:S.activeProfile||S.session&&S.session.profile||'default'});
     }
     _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
       if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
@@ -1754,7 +1764,9 @@ async function send(){
     try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
     if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
     optimisticMessages=[...S.messages];
+    const priorInflight=INFLIGHT[activeSid];
     INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,INFLIGHT[activeSid],priorInflight);
     try{setBusy(true);}catch(_){S.busy=true;}
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     S.activeStreamId=null;
@@ -1934,11 +1946,12 @@ async function send(){
     }
     if(!INFLIGHT[activeSid]){
       INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+      INFLIGHT[activeSid]=_preserveDeliveredSteerCacheForNewInflight(activeSid,INFLIGHT[activeSid]);
     }
     const currentInflight=INFLIGHT[activeSid];
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
+      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[],deliveredSteers:currentInflight.deliveredSteers||[],deliveredSteerRecovery:currentInflight.deliveredSteerRecovery||[],profile:S.activeProfile||S.session&&S.session.profile||'default'});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
@@ -2001,6 +2014,292 @@ async function startRegeneration(sessionId, regenerationRevision){
 
 const LIVE_STREAMS={};
 const _STREAM_NOTIFICATION_BACKGROUND={};
+
+function _preserveDeliveredSteerCacheForNewInflight(sid, entry, existingOverride){
+  const existing=arguments.length>2?existingOverride:
+    (typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[sid]:null);
+  const entryProfile=String(entry&&entry.profile||
+    ((typeof S!=='undefined'&&S&&S.activeProfile)||
+      (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default'));
+  const existingProfile=String(existing&&existing.profile||'').trim();
+  if(!existingProfile||!_deliveredSteerProfilesMatch(existingProfile,entryProfile)) return {...entry,profile:entryProfile};
+  const records=existing&&Array.isArray(existing.deliveredSteers)?existing.deliveredSteers:[];
+  const recovery=existing&&Array.isArray(existing.deliveredSteerRecovery)?existing.deliveredSteerRecovery:[];
+  return records.length||recovery.length?{...entry,profile:entryProfile,deliveredSteers:records,deliveredSteerRecovery:recovery}:{...entry,profile:entryProfile};
+}
+
+function _saveInflightWithDeliveredSteerCache(sid, state){
+  if(typeof saveInflightState!=='function') return;
+  const existing=typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[sid]:null;
+  const records=Array.isArray(state&&state.deliveredSteers)
+    ? state.deliveredSteers
+    : (existing&&Array.isArray(existing.deliveredSteers)?existing.deliveredSteers:[]);
+  const recovery=Array.isArray(state&&state.deliveredSteerRecovery)
+    ? state.deliveredSteerRecovery
+    : (existing&&Array.isArray(existing.deliveredSteerRecovery)?existing.deliveredSteerRecovery:[]);
+  saveInflightState(sid,{...(state||{}),deliveredSteers:records,deliveredSteerRecovery:recovery});
+}
+
+function _normalizeDeliveredSteerOwner(value){
+  const source=value&&typeof value==='object'?value:{};
+  const nested=source._deliveredSteerOwner&&typeof source._deliveredSteerOwner==='object'
+    ?source._deliveredSteerOwner:{};
+  const read=(...keys)=>{
+    for(const key of keys){
+      const direct=String(source[key]||'').trim();
+      if(direct)return direct;
+      const inherited=String(nested[key]||'').trim();
+      if(inherited)return inherited;
+    }
+    return '';
+  };
+  return {profile:read('profile','ownerProfile')||'default',session_id:read('session_id','sid','sessionId'),
+    stream_id:read('stream_id','streamId'),user_message_id:read('user_message_id','userMessageId','message_id','messageId','id'),
+    run_id:read('run_id','runId'),turn_id:read('turn_id','turnId')};
+}
+function _deliveredSteerOwnerField(value,key){
+  const source=value&&typeof value==='object'?value:{};
+  const nested=source._deliveredSteerOwner&&typeof source._deliveredSteerOwner==='object'
+    ?source._deliveredSteerOwner:{};
+  const aliases={profile:['profile','ownerProfile'],session_id:['session_id','sid','sessionId'],
+    stream_id:['stream_id','streamId'],user_message_id:['user_message_id','userMessageId','message_id','messageId','id'],
+    run_id:['run_id','runId'],turn_id:['turn_id','turnId']}[key]||[key];
+  for(const alias of aliases){
+    const direct=String(source[alias]||'').trim();
+    if(direct)return direct;
+    const inherited=String(nested[alias]||'').trim();
+    if(inherited)return inherited;
+  }
+  return '';
+}
+function _deliveredSteerOwnerFieldsConflict(left,right){
+  return ['profile','session_id','stream_id','user_message_id','run_id','turn_id'].some(key=>{
+    const a=_deliveredSteerOwnerField(left,key),b=_deliveredSteerOwnerField(right,key);
+    return !!a&&!!b&&a!==b;
+  });
+}
+function _deliveredSteerProfilesMatch(left,right){
+  const a=String(left||'').trim()||'default';
+  const b=String(right||'').trim()||'default';
+  if(a===b)return true;
+  const active=String((typeof S!=='undefined'&&S&&S.activeProfile)||'').trim();
+  if(typeof _profileMatchesActiveProfile==='function'&&active){
+    return (a===active&&_profileMatchesActiveProfile(b,active))||
+      (b===active&&_profileMatchesActiveProfile(a,active));
+  }
+  return false;
+}
+function _compareDeliveredSteerOwners(left,right,requireComplete=true){
+  const a=_normalizeDeliveredSteerOwner(left),b=_normalizeDeliveredSteerOwner(right);
+  if(['profile','session_id'].some(key=>!a[key]||!b[key])) return 'unknown';
+  if(requireComplete&&['user_message_id','turn_id'].some(key=>!a[key]||!b[key])) return 'unknown';
+  if(!_deliveredSteerProfilesMatch(a.profile,b.profile)) return 'unknown';
+  for(const key of ['session_id','stream_id','user_message_id','turn_id','run_id']){
+    if(a[key]&&b[key]&&a[key]!==b[key]) return 'unknown';
+  }
+  return 'match';
+}
+function _mergeDeliveredSteerOwners(primary,secondary){
+  const a=_normalizeDeliveredSteerOwner(primary),b=_normalizeDeliveredSteerOwner(secondary);
+  if(!secondary||typeof secondary!=='object') return a;
+  if(!primary||typeof primary!=='object') return b;
+  if(_compareDeliveredSteerOwners(a,b,false)==='unknown') return null;
+  const merged={...a};
+  for(const key of ['profile','session_id','stream_id','user_message_id','run_id','turn_id']){
+    if(!merged[key]&&b[key])merged[key]=b[key];
+  }
+  return merged;
+}
+function _findDeliveredSteerOwnerUser(messages,context){
+  context=context&&typeof context==='object'?context:{};
+  if(!Array.isArray(messages)) return null;
+  for(let i=messages.length-1;i>=0;i-=1){
+    const message=messages[i];
+    if(!message||message.role!=='user') continue;
+    const scene=message._anchor_activity_scene&&message._anchor_activity_scene.identity||{};
+    const owner=_normalizeDeliveredSteerOwner({...context,...scene,...message});
+    if(owner.user_message_id||owner.turn_id) return owner;
+    // The newest non-compaction user row is the only admissible incomplete
+    // candidate. Never walk back to an older identified turn.
+    return owner;
+  }
+  return null;
+}
+function _deliveredSteerRecoveryRecord(record,reason){
+  return {...(record&&typeof record==='object'?record:{}),recovery_only:true,recovery_reason:String(reason||'unplaceable_delivery')};
+}
+function _deliveredSteerRecordEligible(record,sid,streamId){
+  if(!record||record.recovery_only) return false;
+  const payload=record.payload&&typeof record.payload==='object'?record.payload:{};
+  if(_deliveredSteerOwnerFieldsConflict(record,payload)) return false;
+  const recordProfile=_deliveredSteerOwnerField(record,'profile')||_deliveredSteerOwnerField(payload,'profile');
+  const currentProfile=String((typeof S!=='undefined'&&S&&S.activeProfile)||
+    (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default');
+  if(!recordProfile||!_deliveredSteerProfilesMatch(recordProfile,currentProfile)) return false;
+  const owner=_normalizeDeliveredSteerOwner({...record,...payload});
+  if(!owner.session_id||owner.session_id!==String(sid)) return false;
+  if(!owner.stream_id||owner.stream_id!==String(streamId)) return false;
+  const registries=typeof window!=='undefined'&&window._liveAnchorRegistries;
+  const registry=registries&&typeof registries.get==='function'?registries.get(String(streamId)):null;
+  const identity=registry&&registry.anchor&&registry.anchor.identity||{};
+  const messages=arguments.length>3&&Array.isArray(arguments[3])?arguments[3]:
+    (typeof S!=='undefined'&&S&&Array.isArray(S.messages)?S.messages:[]);
+  const profile=String((typeof S!=='undefined'&&S&&S.activeProfile)||
+    (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default');
+  const runtimeOwner=_mergeDeliveredSteerOwners(
+    {profile,session_id:sid,stream_id:streamId,...identity},
+    _findDeliveredSteerOwnerUser(messages,{profile,session_id:sid,stream_id:streamId})
+  );
+  return !!runtimeOwner&&_compareDeliveredSteerOwners(owner,{...runtimeOwner,session_id:sid,stream_id:streamId},true)==='match';
+}
+
+function _deliveredSteerStreamId(record){
+  if(!record||typeof record!=='object') return '';
+  return String(record.stream_id||((record.payload&&record.payload.stream_id)||'')||'').trim();
+}
+
+function _settledAnchorSourceEventFromRow(row, sceneStreamId, sceneRunId, index){
+  if(!row||typeof row!=='object') return null;
+  const sourceType=String(row.source_event_type||'').trim();
+  if(!sourceType) return null;
+  const payload=row.payload&&typeof row.payload==='object'?{...row.payload}:{};
+  if(row.text&&!payload.text) payload.text=row.text;
+  const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
+  return {
+    ...payload,
+    source_event_type:sourceType,
+    local_id:row.local_id||row.row_id||`settled:${sceneStreamId}:${index}`,
+    event_id:row.event_id||identity.event_id||null,
+    seq:identity.seq??row.seq??undefined,
+    status:row.status||undefined,
+    stream_id:row.stream_id||identity.stream_id||sceneStreamId,
+    run_id:row.run_id||identity.run_id||sceneRunId,
+    created_at:payload.created_at??row.created_at??undefined,
+  };
+}
+
+function _restoreDeliveredSteersIntoSettledMessages(messages, sid, records, onRestored){
+  if(!Array.isArray(messages)||!messages.length||!Array.isArray(records)||!records.length) return false;
+  const api=typeof window!=='undefined'?window.HermesAssistantTurnAnchors:null;
+  if(!api||typeof api.createAssistantTurnAnchorRegistry!=='function'||
+      typeof api.applyAssistantTurnAnchorSourceEvent!=='function'||
+      typeof api.projectAssistantTurnAnchorActivityScene!=='function') return false;
+  const groups=new Map();
+  for(const record of records){
+    if(!record||record.recovery_only) continue;
+    const streamId=_deliveredSteerStreamId(record);
+    if(!streamId) continue;
+    const payload=record.payload&&typeof record.payload==='object'?record.payload:{};
+    if(_deliveredSteerOwnerFieldsConflict(record,payload)) continue;
+    const recordSession=_deliveredSteerOwnerField(record,'session_id')||_deliveredSteerOwnerField(payload,'session_id');
+    const recordProfile=_deliveredSteerOwnerField(record,'profile')||_deliveredSteerOwnerField(payload,'profile');
+    const activeProfile=String((typeof S!=='undefined'&&S&&S.activeProfile)||
+      (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default');
+    if(!recordSession||recordSession!==String(sid)||!recordProfile||
+        !_deliveredSteerProfilesMatch(recordProfile,activeProfile)) continue;
+    const owner=_normalizeDeliveredSteerOwner({...record,...payload,session_id:sid,stream_id:streamId});
+    if(!owner.user_message_id||!owner.turn_id) continue;
+    const ownerKey=[owner.profile,owner.session_id,owner.stream_id,owner.user_message_id,owner.turn_id,owner.run_id].join('|');
+    if(!groups.has(ownerKey)) groups.set(ownerKey,{streamId,owner,records:[]});
+    groups.get(ownerKey).records.push(record);
+  }
+  if(!groups.size) return false;
+  const users=[];
+  for(let i=0;i<messages.length;i+=1){
+    if(messages[i]&&messages[i].role==='user') users.push({message:messages[i],index:i,owner:_normalizeDeliveredSteerOwner({
+      ...messages[i],session_id:sid,
+      profile:(typeof S!=='undefined'&&S&&S.activeProfile)||
+        (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default',
+    })});
+  }
+  let changed=false;
+  for(const group of groups.values()){
+    const streamId=group.streamId;
+    const streamRecords=group.records;
+    const recordOwner=group.owner;
+    const user=users.slice().reverse().find(candidate=>_compareDeliveredSteerOwners(recordOwner,candidate.owner)==='match');
+    if(!user) continue;
+    const nextAssistant=messages.slice(user.index+1).findIndex((message,index)=>{
+      if(message&&message.role==='user') return false;
+      return !!(message&&message.role==='assistant');
+    });
+    const nextUser=messages.slice(user.index+1).findIndex(message=>message&&message.role==='user');
+    const assistantAfterUser=nextAssistant>=0&&
+      (nextUser<0||nextAssistant<nextUser);
+    let target=assistantAfterUser?{message:messages[user.index+1+nextAssistant],index:user.index+1+nextAssistant}:null;
+    if(!target){
+      messages.splice(user.index+1,0,{role:'assistant',content:'',_deliveredSteerOwner:recordOwner});
+      target={message:messages[user.index+1],index:user.index+1};
+    }
+    if(!target) continue;
+    const existing=target.message._anchor_activity_scene&&typeof target.message._anchor_activity_scene==='object'
+      ? target.message._anchor_activity_scene
+      : null;
+    const existingIdentity=existing&&existing.identity&&typeof existing.identity==='object'?existing.identity:{};
+    const runId=String((existing&&(existing.run_id||existingIdentity.run_id))||recordOwner.run_id||streamRecords[0].run_id||'').trim()||null;
+    const registry=api.createAssistantTurnAnchorRegistry({
+      session_id:sid,
+      stream_id:streamId,
+      run_id:runId,
+      turn_id:String((existing&&existing.turn_id)||recordOwner.turn_id||target.message.local_id||`settled:${sid}:${streamId}`),
+    });
+    const events=[];
+    const pushEvents=(items, layer)=>{
+      if(!Array.isArray(items)) return;
+      for(let index=0;index<items.length;index+=1){
+        const sourceEvent=_settledAnchorSourceEventFromRow(items[index],streamId,runId,index);
+        if(sourceEvent) events.push({sourceEvent,layer,index});
+      }
+    };
+    pushEvents(existing&&existing.activity_rows,'activity');
+    pushEvents(existing&&existing.artifacts,'artifact');
+    pushEvents(existing&&existing.side_effects,'side_effect');
+    for(let index=0;index<streamRecords.length;index+=1){
+      const record=streamRecords[index];
+      const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+      events.push({
+        sourceEvent:{
+          ...record,
+          source_event_type:'steer_delivered',
+          local_id:record.local_id||payload.local_id||null,
+          stream_id:streamId,
+          run_id:record.run_id||payload.run_id||runId,
+          turn_id:record.turn_id||payload.turn_id||null,
+        },
+        layer:'steer',
+        index,
+      });
+    }
+    events.sort((left,right)=>{
+      const leftTime=Number(left.sourceEvent&&left.sourceEvent.created_at);
+      const rightTime=Number(right.sourceEvent&&right.sourceEvent.created_at);
+      if(Number.isFinite(leftTime)&&Number.isFinite(rightTime)&&leftTime!==rightTime) return leftTime-rightTime;
+      return left.layer==='steer'&&right.layer!=='steer'?1:(left.layer!=='steer'&&right.layer==='steer'?-1:left.index-right.index);
+    });
+    let applied=false;
+    for(const item of events){
+      try{
+        const result=api.applyAssistantTurnAnchorSourceEvent(registry,item.sourceEvent,{session_id:sid,stream_id:streamId,run_id:runId});
+        if(item.layer==='steer') applied=applied||!!(result&&result.applied||result&&result.reason==='duplicate');
+      }catch(_){ }
+    }
+    if(!applied&&!existing) continue;
+    let scene;
+    try{scene=api.projectAssistantTurnAnchorActivityScene(registry,{mode:(existing&&existing.mode)||'compact_worklog'});}catch(_){scene=null;}
+    if(!scene) continue;
+    target.message._anchor_activity_scene={
+      ...scene,
+      mode:(existing&&existing.mode)||scene.mode||'compact_worklog',
+      final_answer:(existing&&existing.final_answer)||String(target.message.content||''),
+      final_message_ref:(existing&&existing.final_message_ref)||target.message.local_id||null,
+      terminal_state:(existing&&existing.terminal_state)||'completed',
+    };
+    target.message._anchor_stream_id=streamId;
+    if(typeof onRestored==='function') onRestored(streamRecords,streamId);
+    changed=true;
+  }
+  return changed;
+}
 
 // #4416: track whether the tab was hidden at ANY point during a live stream, so
 // the response-complete notification fires for a backgrounded tab even when
@@ -2097,6 +2396,8 @@ function closeLiveStream(sessionId, streamId, source){
         currentActivityBurstId:INFLIGHT[sessionId].currentActivityBurstId||0,
         currentLiveSegmentSeq:INFLIGHT[sessionId].currentLiveSegmentSeq||0,
         activityBurstAnchors:Array.isArray(INFLIGHT[sessionId].activityBurstAnchors)?INFLIGHT[sessionId].activityBurstAnchors:[],
+        deliveredSteers:Array.isArray(INFLIGHT[sessionId].deliveredSteers)?INFLIGHT[sessionId].deliveredSteers:[],
+        deliveredSteerRecovery:Array.isArray(INFLIGHT[sessionId].deliveredSteerRecovery)?INFLIGHT[sessionId].deliveredSteerRecovery:[],
       });
     }
   }
@@ -2264,6 +2565,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _ownsCurrentStream(){
+    return !_isActiveSession() || S.activeStreamId===streamId;
+  }
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
@@ -2299,8 +2603,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _clearOwnerInflightState(){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
-    delete INFLIGHT[activeSid];
-    clearInflightState(activeSid);
+    const existing=INFLIGHT[activeSid];
+    const existingStreamId=String(existing&&existing.streamId||'');
+    if(existing&&existingStreamId&&existingStreamId!==String(streamId)) return;
+    const deliveredSteers=existing&&Array.isArray(existing.deliveredSteers)
+      ? existing.deliveredSteers
+      : [];
+    const deliveredSteerRecovery=existing&&Array.isArray(existing.deliveredSteerRecovery)
+      ? existing.deliveredSteerRecovery
+      : [];
+    if(deliveredSteers.length||deliveredSteerRecovery.length){
+      // The anchor registry may already be gone when terminal cleanup runs. Keep
+      // the browser-only delivery cache until settled projection or reload consumes it.
+      INFLIGHT[activeSid]={...existing,profile:existing&&existing.profile||S.activeProfile||S.session&&S.session.profile||'default',streamId:existingStreamId||String(streamId),deliveredSteers,deliveredSteerRecovery};
+      if(typeof saveInflightState==='function') saveInflightState(activeSid,INFLIGHT[activeSid]);
+    }else{
+      delete INFLIGHT[activeSid];
+      clearInflightState(activeSid);
+    }
     _clearActivePaneInflightIfOwner();
     _resumeSessionStreamAfterLiveChat(activeSid);
   }
@@ -2369,6 +2689,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!inflight||typeof saveInflightState!=='function') return;
     saveInflightState(activeSid,{
       streamId,
+      profile:inflight.profile||S.activeProfile||S.session&&S.session.profile||'default',
       messages:inflight.messages||[],
       uploaded:inflight.uploaded||[...uploaded],
       toolCalls:inflight.toolCalls||[],
@@ -2381,6 +2702,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       currentActivityBurstId:inflight.currentActivityBurstId||0,
       currentLiveSegmentSeq:inflight.currentLiveSegmentSeq||0,
       activityBurstAnchors:Array.isArray(inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[],
+      deliveredSteers:Array.isArray(inflight.deliveredSteers)?inflight.deliveredSteers:[],
+      deliveredSteerRecovery:Array.isArray(inflight.deliveredSteerRecovery)?inflight.deliveredSteerRecovery:[],
       todos:Array.isArray(inflight.todos)?inflight.todos:S.todos,
       todoStateMeta:inflight.todoStateMeta||S.todoStateMeta||null,
     });
@@ -2429,7 +2752,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(assistantText||assistantRow) return true;
     if(String(liveReasoningText||reasoningText||'').trim()) return true;
     const inflight=INFLIGHT[activeSid];
+    if(inflight&&Array.isArray(inflight.deliveredSteers)&&inflight.deliveredSteers.length) return true;
+    if(inflight&&Array.isArray(inflight.deliveredSteerRecovery)&&inflight.deliveredSteerRecovery.length) return true;
     if(inflight&&Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return true;
+    if(_anchorRegistry&&Array.isArray(_anchorRegistry.anchor&&_anchorRegistry.anchor.activity_events)&&
+        _anchorRegistry.anchor.activity_events.some(event=>event&&event.source_event_type==='steer_delivered')) return true;
     if(!_isActiveSession()||typeof document==='undefined') return false;
     const turn=$('liveAssistantTurn');
     return !!(turn&&turn.querySelector(
@@ -2445,6 +2772,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
   }
   function _finalizeStreamEndFallback(source){
+    if(!_ownsCurrentStream()){
+      _clearStreamEndRecovery();
+      _closeSource(source);
+      return;
+    }
     _clearStreamEndRecovery();
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
@@ -2454,10 +2786,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-    _clearOwnerInflightState();
     _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _clearStreamNotificationBackground(activeSid, streamId);
     _flushReasoningToAnchor();
+    if(_isActiveSession()) _attachProjectedAnchorSceneToLastAssistant(S.messages);
+    _clearOwnerInflightState();
     _scheduleAnchorRegistryCleanup();
     _clearAnchorProseIncrementalNode();
     _clearApprovalForOwner();
@@ -2749,11 +3082,90 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorShadowWarned=false;
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
+  let _anchorRegistryCleanupTimer=null;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  if(typeof window!=='undefined'&&_anchorRegistry){
+    // #3058 slice 3: commands.js records a delivered steer straight onto this
+    // stream's anchor and needs the in-flight prose segment sealed first, exactly
+    // the way the interim_assistant path seals it, so the settled scene reads
+    // assistant -> steer -> assistant.
+    const _sealers=window._liveAnchorProseSealers||(window._liveAnchorProseSealers=new Map());
+    _sealers.set(String(streamId),function(){
+      if(_isActiveSession()&&S.activeStreamId!==streamId) return false;
+      // Flush before the boundary. Bare recordActivityBoundary/_resetAssistantSegment
+      // is what master uses only on switched-away branches; here a delta still sitting
+      // in the deferred render would never reach live-prose:{stream}:{segmentSeq}, and
+      // _resetAssistantSegment then moves segmentStart past it, so the settled Worklog
+      // loses the text between the last flush and the steer.
+      const parsed=(typeof _parseStreamState==='function')?_parseStreamState():null;
+      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow){
+        ensureAssistantRow(true);
+        _flushPendingSegmentRender({force:true});
+      }
+      recordActivityBoundary();
+      _resetAssistantSegment();
+      return true;
+    });
+    // One stable entry point dispatching over the per-stream map. A bare closure in
+    // a single window slot would leave the newest attach owning it, so a steer to a
+    // concurrently running older stream would hit the stale-id guard and silently
+    // not seal, and the last closure would be retained for the life of the page.
+    window._sealLiveAnchorProseSegmentForStream=function(requestedStreamId){
+      const map=window._liveAnchorProseSealers;
+      const seal=map&&map.get(String(requestedStreamId||''));
+      return typeof seal==='function'?!!seal():false;
+    };
+  }
+  // Hydrate the persisted scene before replaying newer browser-only delivery
+  // records, so the reattached timeline keeps its original event order.
+  _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
+  // Re-apply delivered-steer records cached in INFLIGHT so a reattach before
+  // settlement rebuilds the row. Idempotent through each record's local_id.
+  if(_anchorRegistry&&_anchorApi&&typeof _anchorApi.applyAssistantTurnAnchorSourceEvent==='function'){
+    const _cachedDeliveredSteers=(INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].deliveredSteers))
+      ? INFLIGHT[activeSid].deliveredSteers
+      : [];
+    const _runtimeMessages=INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].messages)
+      ? INFLIGHT[activeSid].messages
+      : (typeof S!=='undefined'&&S.session&&S.session.session_id===activeSid&&Array.isArray(S.messages)?S.messages:[]);
+    for(const _cachedSteer of _cachedDeliveredSteers){
+      if(!_cachedSteer||typeof _cachedSteer!=='object') continue;
+      const _cachedSteerStreamId=String(
+        _cachedSteer.stream_id||(_cachedSteer.payload&&_cachedSteer.payload.stream_id)||''
+      );
+      if(_cachedSteerStreamId!==String(streamId)) continue;
+      if(typeof _deliveredSteerRecordEligible==='function'&&
+          !_deliveredSteerRecordEligible(_cachedSteer,activeSid,streamId,_runtimeMessages)) continue;
+      try{
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(
+          _anchorRegistry,
+          _cachedSteer,
+          {session_id:activeSid,stream_id:streamId}
+        );
+      }catch(err){
+        if(typeof console!=='undefined'&&console.warn) console.warn('delivered steer replay failed',err);
+      }
+    }
+  }
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
-    setTimeout(()=>{
-      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+    if(_anchorRegistryCleanupTimer) clearTimeout(_anchorRegistryCleanupTimer);
+    _anchorRegistryCleanupTimer=setTimeout(()=>{
+      _anchorRegistryCleanupTimer=null;
+      if(_anchorRegistryMap.get(streamId)!==_anchorRegistry) return;
+      const stillActive=!!(
+        (S.activeStreamId===streamId)
+        || (S.session&&S.session.session_id===activeSid&&S.session.active_stream_id===streamId)
+        || (INFLIGHT[activeSid]&&INFLIGHT[activeSid].streamId===streamId)
+      );
+      if(stillActive){
+        _scheduleAnchorRegistryCleanup(delayMs);
+        return;
+      }
+      _anchorRegistryMap.delete(streamId);
+      // The seal closure retains this whole attachLiveStream scope, so it expires
+      // on the same identity-guarded path as the registry it seals into.
+      if(typeof window!=='undefined'&&window._liveAnchorProseSealers) window._liveAnchorProseSealers.delete(String(streamId));
     },delayMs);
   }
   // Backstop: schedule an identity-guarded cleanup at creation so this shadow
@@ -3770,9 +4182,61 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _persistSettledAnchorScene(message, scene, messageIndex){
     if(!activeSid||!message||!scene||typeof api!=='function') return;
+    const deliveredSteers=Array.isArray(scene.activity_rows)
+      ? scene.activity_rows
+        .filter(row=>row&&row.source_event_type==='steer_delivered')
+        .map((row,index)=>_settledAnchorSourceEventFromRow(row,streamId,null,index))
+        .filter(Boolean)
+      : [];
+    const deliveryCacheKey=(record)=>{
+      const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+      const recordStream=String(record&&record.stream_id||payload.stream_id||'');
+      const localId=String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'');
+      return `${recordStream}|${localId}`;
+    };
+    const persistedDeliveryKeys=new Set(deliveredSteers.map(deliveryCacheKey));
+    if(deliveredSteers.length&&typeof INFLIGHT!=='undefined'&&INFLIGHT){
+      const existing=INFLIGHT[activeSid];
+      const existingRecords=existing&&Array.isArray(existing.deliveredSteers)?existing.deliveredSteers:[];
+      const retainedOtherStreams=existingRecords.filter(record=>_deliveredSteerStreamId(record)!==String(streamId));
+      INFLIGHT[activeSid]={
+        ...(existing||{}),
+        profile:(existing&&existing.profile)||((typeof S!=='undefined'&&S&&S.activeProfile)||
+          (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default'),
+        streamId:String(existing&&existing.streamId||streamId),
+        deliveredSteers:[...retainedOtherStreams,...deliveredSteers],
+      };
+      if(typeof saveInflightState==='function') saveInflightState(activeSid,INFLIGHT[activeSid]);
+    }
+    const clearPersistedDeliveryCache=()=>{
+      const pending=typeof INFLIGHT!=='undefined'&&INFLIGHT?INFLIGHT[activeSid]:null;
+      if(!pending||!Array.isArray(pending.deliveredSteers)) return;
+      if(String(pending.streamId||'')!==String(streamId||'')) return;
+      const retained=pending.deliveredSteers.filter(record=>!persistedDeliveryKeys.has(deliveryCacheKey(record)));
+      if(retained.length){
+        pending.deliveredSteers=retained;
+        if(typeof saveInflightState==='function') saveInflightState(activeSid,pending);
+        return;
+      }
+      const hasOtherState=Object.keys(pending).some(key=>[
+        'streamId','deliveredSteers','updated_at'
+      ].indexOf(key)<0&&pending[key]!=null&&(
+        !Array.isArray(pending[key])||pending[key].length||
+        (typeof pending[key]==='string'&&pending[key].length)
+      ));
+      if(hasOtherState) return;
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+    };
+    const reportFailure=(err)=>{
+      if(!_persistAnchorSceneWarned&&typeof console!=='undefined'&&console.warn){
+        _persistAnchorSceneWarned=true;
+        console.warn('anchor activity scene persistence failed',err);
+      }
+    };
     try{
       const messageOffset=_anchorSceneMessageOffsetForPersist();
-      api('/api/session/anchor-scene',{
+      const request=api('/api/session/anchor-scene',{
         method:'POST',
         timeoutMs:8000,
         timeoutToast:false,
@@ -3785,22 +4249,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           message_ref:_anchorSceneMessageRef(message),
           scene,
         }),
-      }).catch(err=>{
-        if(!_persistAnchorSceneWarned&&typeof console!=='undefined'&&console.warn){
-          _persistAnchorSceneWarned=true;
-          console.warn('anchor activity scene persistence failed',err);
-        }
       });
-    }catch(err){
-      if(!_persistAnchorSceneWarned&&typeof console!=='undefined'&&console.warn){
-        _persistAnchorSceneWarned=true;
-        console.warn('anchor activity scene persistence failed',err);
+      if(request&&typeof request.then==='function'){
+        request.then(clearPersistedDeliveryCache).catch(reportFailure);
+      }else{
+        clearPersistedDeliveryCache();
       }
+    }catch(err){
+      reportFailure(err);
     }
   }
   function _anchorSceneHasWorklogWorthyRows(scene){
-    if(scene&&scene.mode==='hide_all_activity') return false;
-    if(typeof window!=='undefined'&&typeof window.isFinalAnswerOnlyMode==='function'&&window.isFinalAnswerOnlyMode()) return false;
+    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+    const hasDeliveredSteer=rows.some(row=>row&&String(row.source_event_type||'')==='steer_delivered');
+    if(scene&&scene.mode==='hide_all_activity'&&!hasDeliveredSteer) return false;
+    if(typeof window!=='undefined'&&typeof window.isFinalAnswerOnlyMode==='function'&&window.isFinalAnswerOnlyMode()&&!hasDeliveredSteer) return false;
     // A worklog (the collapsible "已处理 …" rail) is only meaningful when the turn
     // actually DID worklog-worthy work — a tool call, a thinking/reasoning pass, or
     // a compression lifecycle card. A turn that only streamed prose (e.g. a long
@@ -3810,10 +4273,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // shrinks the transcript by the full streamed height → the browser clamps a
     // bottom-pinned viewport back to the top (the "jump back" report). Require at least
     // one genuinely worklog-worthy row before promoting the turn to a worklog.
-    const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
     for(const row of rows){
       if(!row||typeof row!=='object') continue;
       const role=String(row.role||'');
+      // #3058: a turn whose only non-prose activity is a delivered steer must still
+      // show a Worklog, or the steer vanishes at settle. Gated on the source event
+      // type, NOT on the role and NOT on control rows generally — a broader clause
+      // would let a bare approval/clarify row promote all-prose turns, the exact
+      // regression this guard exists to prevent.
+      if(String(row.source_event_type||'')==='steer_delivered') return true;
       if(role==='tool'||role==='thinking') return true;
       if(role==='lifecycle'){
         const source=String(row.source_event_type||'');
@@ -3829,14 +4297,42 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       || (Array.isArray(scene&&scene.side_effects)&&scene.side_effects.length)
     );
   }
+  function _hasCurrentTurnAssistantResponse(messages, assistantText){
+    if(String(assistantText||'').trim()) return true;
+    if(!Array.isArray(messages)) return false;
+    let lastUserIndex=-1;
+    for(let i=messages.length-1;i>=0;i-=1){
+      if(messages[i]&&messages[i].role==='user'){
+        lastUserIndex=i;
+        break;
+      }
+    }
+    for(let i=lastUserIndex+1;i<messages.length;i+=1){
+      const message=messages[i];
+      if(message&&message.role==='assistant'&&String(message.content||'').trim()) return true;
+    }
+    return false;
+  }
   function _attachProjectedAnchorSceneToLastAssistant(messages, targetMessage=null, targetIndex=null){
     if(!_anchorRegistry||!Array.isArray(messages)) return false;
+    const projectedScene=_projectLiveAnchorActivityScene();
+    const projectedRows=Array.isArray(projectedScene&&projectedScene.activity_rows)
+      ? projectedScene.activity_rows
+      : [];
+    const hasDeliveredSteer=projectedRows.some(row=>row&&row.source_event_type==='steer_delivered');
     let lastAsst=targetMessage;
     let lastAsstIndex=Number.isInteger(targetIndex)?targetIndex:-1;
     if(lastAsst){
       if(lastAsstIndex<0||messages[lastAsstIndex]!==lastAsst) return false;
     }else{
-      for(let i=messages.length-1;i>=0;i--){
+      let lastUserIndex=-1;
+      for(let i=messages.length-1;i>=0;i-=1){
+        if(messages[i]&&messages[i].role==='user'){
+          lastUserIndex=i;
+          break;
+        }
+      }
+      for(let i=messages.length-1;i>lastUserIndex;i-=1){
         const candidate=messages[i];
         if(candidate&&candidate.role==='assistant'){
           lastAsst=candidate;
@@ -3845,8 +4341,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
     }
+    if(!lastAsst&&hasDeliveredSteer){
+      messages.push({role:'assistant',content:''});
+      lastAsst=messages[messages.length-1];
+      lastAsstIndex=messages.length-1;
+    }
     if(!lastAsst) return false;
-    const projectedScene=_projectLiveAnchorActivityScene();
     const scene=_completeSettledAnchorSceneForTurn(messages,lastAsstIndex,projectedScene);
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
@@ -4307,12 +4807,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         payload.activityBurstId=payload.activityBurstId||row.group.activity_burst_id;
       }
       const rowIdentity=(row.identity&&typeof row.identity==='object')?row.identity:{};
+      const sourceSeq=sourceType==='steer_delivered'&&rowIdentity.seq!=null
+        ? rowIdentity.seq
+        : row.seq;
       const sourceEvent={
         ...payload,
         source_event_type:sourceType,
         local_id:row.local_id||row.row_id||`snapshot:${sceneStreamId}:${i}`,
         event_id:row.event_id||null,
-        seq:row.seq??undefined,
+        seq:sourceSeq??undefined,
         status:row.status||undefined,
         stream_id:row.stream_id||rowIdentity.stream_id||sceneStreamId,
         run_id:row.run_id||rowIdentity.run_id||sceneRunId,
@@ -4334,8 +4837,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _anchorRegistry._hydrated_activity_scene_key=sceneKey;
     return true;
   }
-  _hydrateAnchorRegistryFromActivityScene(INFLIGHT[activeSid]&&INFLIGHT[activeSid].anchorActivityScene);
-
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
     const byTid=new Map();
@@ -6295,7 +6796,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
             }
           }
-          _attachProjectedAnchorSceneToLastAssistant(S.messages);
           const hasMessageToolMetadata=S.messages.some(m=>{
             if(!m||m.role!=='assistant') return false;
             const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -6330,7 +6830,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           clearLiveToolCards({preserveDom:true});
           S.busy=false;
           // No-reply guard (#373): if agent returned nothing, show inline error
-          if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+          if(!_hasCurrentTurnAssistantResponse(S.messages,assistantText)){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+          _attachProjectedAnchorSceneToLastAssistant(S.messages);
           if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
           if(isSessionViewed) _markSessionViewed(completedSid, completedMessageCount);
           // Cooldown: prevent refreshActiveSessionIfExternallyUpdated from
@@ -6994,6 +7495,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      if(typeof _ownsCurrentStream==='function'&&!_ownsCurrentStream()){
+        _closeSource(source);
+        return returnStatus?'stale':false;
+      }
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -7008,7 +7513,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      _clearOwnerInflightState();
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup();
       _closeSource(source);
@@ -7025,6 +7529,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
+        if(S.session&&S.session.session_id){
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+        }
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
         const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
         const _stagedMessages=_carryForwardEphemeralTurnFields(_currentMessages, _nextMsgs3018);
@@ -7048,11 +7556,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
+        _clearOwnerInflightState();
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
-        if(S.session&&S.session.session_id){
-          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
-          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-        }
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
@@ -7169,12 +7674,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Reattach path can carry stale stream ids after server restart; preflight
     // status avoids opening a dead SSE URL that will 404 in the console.
     let replayOnly=false;
+    let replayParams='';
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
         if(!st.active&&st.replay_available){
           replayOnly=true;
+          replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
         }else if(!st.active){
+          const hasSteerRecovery=!!(
+            (INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].deliveredSteers)&&INFLIGHT[activeSid].deliveredSteers.length)
+            || (_anchorRegistry&&Array.isArray(_anchorRegistry.anchor&&_anchorRegistry.anchor.activity_events)&&
+              _anchorRegistry.anchor.activity_events.some(event=>event&&event.source_event_type==='steer_delivered'))
+          );
+          if(hasSteerRecovery&&!_hasCurrentTurnAssistantResponse(S.messages,'')){
+            S.messages.push({role:'assistant',content:''});
+          }
+          if(hasSteerRecovery) _attachProjectedAnchorSceneToLastAssistant(S.messages);
           _clearOwnerInflightState();
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');
@@ -7203,7 +7719,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
+    replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId,{
       startedAt:_extensionTurnStartedAt,
     });

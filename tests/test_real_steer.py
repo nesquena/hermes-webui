@@ -335,6 +335,10 @@ class TestFrontendWiring:
         assert idx >= 0
         body = _source_between(cmds, "async function _trySteer(", "\nasync function cmdTitle")
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
+        assert "const ownerProfile=typeof S!=='undefined'&&(S.activeProfile||'default');" in body
+        assert "const initiatingUser=typeof _findDeliveredSteerOwnerUser==='function'" in body
+        assert "ownerEnvelope" in body and "initiatingUser" in body
+        assert "_recordDeliveredSteer(ownerSid,acceptedStreamId,originalMsg,pendingFilesSnapshot,ownerEnvelope)" in body
         assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
         assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
         assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
@@ -343,6 +347,17 @@ class TestFrontendWiring:
         assert "_clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot)" in body
         assert "if(_steerOwnerIsCurrent(ownerSid))" in body
         assert "S.pendingFiles=_remaining" in body, "accepted steer should clear the delivered files (by identity) after paths are injected"
+
+    def test_send_snapshots_inflight_delivery_before_replacing_the_entry(self):
+        start = self.msgs.find("async function send(")
+        assert start >= 0
+        end = self.msgs.find("\nasync function ", start + 1)
+        assert end > start
+        body = self.msgs[start:end]
+        prior_idx = body.find("const priorInflight=INFLIGHT[activeSid];")
+        assign_idx = body.find("INFLIGHT[activeSid]={messages:optimisticMessages")
+        assert 0 <= prior_idx < assign_idx, "send must snapshot the previous inflight cache before replacing it"
+        assert "_preserveDeliveredSteerCacheForNewInflight(activeSid,INFLIGHT[activeSid],priorInflight)" in body
 
     def test_file_steer_does_not_read_live_session_after_upload_await(self):
         cmds = self.cmds
@@ -422,7 +437,7 @@ class TestFrontendWiring:
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
-        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        subprocess.run([node], input=script, check=True, capture_output=True, text=True)
 
     def test_attachment_only_steer_indicator_uses_file_label(self):
         import json
@@ -838,7 +853,7 @@ class TestFrontendWiring:
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
-        subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        subprocess.run([node], input=script, check=True, capture_output=True, text=True)
 
     def test_send_busy_steer_accepts_file_only_input(self):
         idx = self.msgs.find("if(S.busy||compressionRunning)")

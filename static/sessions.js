@@ -856,8 +856,16 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   if (S.busy) { S.busy=false; changed=true; }
   if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
   if (INFLIGHT&&INFLIGHT[sid]) {
-    delete INFLIGHT[sid];
-    if (typeof clearInflightState==='function') clearInflightState(sid);
+    const pending=INFLIGHT[sid];
+    const delivered=Array.isArray(pending.deliveredSteers)?pending.deliveredSteers:[];
+    const recovery=Array.isArray(pending.deliveredSteerRecovery)?pending.deliveredSteerRecovery:[];
+    if(delivered.length||recovery.length){
+      INFLIGHT[sid]={...pending,streamId:pending.streamId||null,deliveredSteers:delivered,deliveredSteerRecovery:recovery};
+      if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+    }else{
+      delete INFLIGHT[sid];
+      if (typeof clearInflightState==='function') clearInflightState(sid);
+    }
     changed=true;
   }
   if (S.session) {
@@ -953,6 +961,13 @@ function _purgeStaleInflightEntries() {
     }
     const s = sessionsById.get(sid);
     if (!s.is_streaming) {
+      // A delivered steer remains browser-owned until the anchor scene write
+      // succeeds, so an idle sidebar refresh must not purge its recovery copy.
+      if(typeof _inflightHasVisibleLiveState==='function'&&_inflightHasVisibleLiveState(INFLIGHT[sid])&&
+          ((Array.isArray(INFLIGHT[sid].deliveredSteers)&&INFLIGHT[sid].deliveredSteers.length)||
+            (Array.isArray(INFLIGHT[sid].deliveredSteerRecovery)&&INFLIGHT[sid].deliveredSteerRecovery.length))){
+        continue;
+      }
       // Session exists but is not streaming — purge it.
       delete INFLIGHT[sid];
       if (typeof clearInflightState === 'function') clearInflightState(sid);
@@ -998,6 +1013,8 @@ function _rememberRenderedStreamingState(s, isStreaming) {
 
 function _inflightHasVisibleLiveState(inflight) {
   if (!inflight || typeof inflight !== 'object') return false;
+  if (Array.isArray(inflight.deliveredSteers) && inflight.deliveredSteers.length) return true;
+  if (Array.isArray(inflight.deliveredSteerRecovery) && inflight.deliveredSteerRecovery.length) return true;
   if (String(inflight.lastAssistantText || '').trim()) return true;
   if (String(inflight.lastReasoningText || '').trim()) return true;
   if (String(inflight.liveTurnHtml || '').trim()) return true;
@@ -1083,6 +1100,11 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
 }
 
 function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
+  const activeProfile=String((typeof S!=='undefined'&&S&&S.activeProfile)||
+    (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default').trim()||'default';
+  const localProfile=String(localInflight&&localInflight.profile||'').trim();
+  if(localProfile&&typeof _profileMatchesActiveProfile==='function'&&
+      !_profileMatchesActiveProfile(localProfile,activeProfile)) return serverLiveSnapshot||null;
   if(!serverLiveSnapshot) return localInflight||null;
   if(!localInflight||!_inflightHasVisibleLiveState(localInflight)) return serverLiveSnapshot;
 
@@ -1092,20 +1114,63 @@ function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeSt
   const localId=String(localInflight.streamId||'').trim();
   const serverId=String(serverLiveSnapshot.streamId||'').trim();
   const activeId=requestedActiveId||serverId;
-  const selectDurableSnapshot=()=>{
-    if(activeId&&localId===activeId&&Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
-      return {...serverLiveSnapshot,todos:localInflight.todos,todoStateMeta:localInflight.todoStateMeta};
+  const sid=String((typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||'').trim();
+  const localMessages=Array.isArray(localInflight.messages)?localInflight.messages:
+    (typeof S!=='undefined'&&S&&Array.isArray(S.messages)?S.messages:[]);
+  const localDeliveryState=()=>{
+    const delivered=Array.isArray(localInflight.deliveredSteers)?localInflight.deliveredSteers:[];
+    const recovery=Array.isArray(localInflight.deliveredSteerRecovery)
+      ?localInflight.deliveredSteerRecovery.slice(-50):[];
+    const eligible=typeof _deliveredSteerRecordEligible==='function'
+      ?delivered.filter(record=>_deliveredSteerRecordEligible(record,sid,activeId,localMessages))
+      :delivered.filter(record=>String(record&&record.stream_id||record&&record.payload&&record.payload.stream_id||'')===activeId);
+    const rejected=delivered.filter(record=>!eligible.includes(record));
+    return {
+      deliveredSteers:eligible,
+      deliveredSteerRecovery:[...recovery,...rejected.map(record=>typeof _deliveredSteerRecoveryRecord==='function'
+        ?_deliveredSteerRecoveryRecord(record,'runtime_owner_not_proven'):record)].slice(-50),
+    };
+  };
+  const selectLocalSnapshot=()=>{
+    const delivery=localDeliveryState();
+    if(!delivery.deliveredSteers.length&&!delivery.deliveredSteerRecovery.length&&
+        !Array.isArray(localInflight.deliveredSteers)&&!Array.isArray(localInflight.deliveredSteerRecovery)){
+      return localInflight;
     }
-    return serverLiveSnapshot;
+    return {...localInflight,...delivery};
+  };
+  const selectDurableSnapshot=()=>{
+    const carried={};
+    // Carry only records whose complete owner matches this profile and stream;
+    // uncertain records remain recovery-only and never enter anchor replay.
+    if(Array.isArray(localInflight.deliveredSteers)&&localInflight.deliveredSteers.length){
+      const eligible=typeof _deliveredSteerRecordEligible==='function'
+        ? localInflight.deliveredSteers.filter(record=>_deliveredSteerRecordEligible(record,sid,activeId,localMessages))
+        : localInflight.deliveredSteers.filter(record=>String(record&&record.stream_id||record&&record.payload&&record.payload.stream_id||'')===activeId);
+      if(eligible.length) carried.deliveredSteers=eligible;
+      const rejected=localInflight.deliveredSteers.filter(record=>!eligible.includes(record));
+      if(rejected.length) carried.deliveredSteerRecovery=rejected.map(record=>typeof _deliveredSteerRecoveryRecord==='function'
+        ?_deliveredSteerRecoveryRecord(record,'runtime_owner_not_proven'):record).slice(-50);
+    }
+    if(Array.isArray(localInflight.deliveredSteerRecovery)&&localInflight.deliveredSteerRecovery.length){
+      carried.deliveredSteerRecovery=localInflight.deliveredSteerRecovery.slice(-50);
+    }
+    if(activeId&&localId===activeId){
+      if(Array.isArray(localInflight.todos)&&localInflight.todoStateMeta){
+        carried.todos=localInflight.todos;
+        carried.todoStateMeta=localInflight.todoStateMeta;
+      }
+    }
+    return Object.keys(carried).length?{...serverLiveSnapshot,...carried}:serverLiveSnapshot;
   };
   if(requestedActiveId&&serverId&&serverId!==requestedActiveId){
-    return localId===requestedActiveId?localInflight:null;
+    return localId===requestedActiveId?selectLocalSnapshot():null;
   }
   if(activeId&&localId!==activeId) return selectDurableSnapshot();
 
   const localSeq=Math.max(0,Number(localInflight.lastRunJournalSeq)||0);
   const serverSeq=Math.max(0,Number(serverLiveSnapshot.lastRunJournalSeq)||0);
-  return serverSeq>=localSeq?selectDurableSnapshot():localInflight;
+  return serverSeq>=localSeq?selectDurableSnapshot():selectLocalSnapshot();
 }
 
 function _anchorActivitySceneStreamId(scene){
@@ -1686,6 +1751,18 @@ async function _switchProfileForSessionLoad(profile){
   }
 }
 
+function _preserveSettledDeliveredSteersForRecovery(sid, records, recoveryRecords=[]){
+  if(!sid||(!Array.isArray(records)||!records.length)&&(!Array.isArray(recoveryRecords)||!recoveryRecords.length)) return false;
+  const existing=INFLIGHT[sid];
+  if(existing&&existing.streamId) return false;
+  const firstRecord=(Array.isArray(records)&&records[0])||(Array.isArray(recoveryRecords)&&recoveryRecords[0])||{};
+  const firstPayload=firstRecord&&firstRecord.payload&&typeof firstRecord.payload==='object'?firstRecord.payload:{};
+  INFLIGHT[sid]={streamId:null,profile:String(firstRecord.profile||firstPayload.profile||
+    (typeof S!=='undefined'&&S&&S.activeProfile)||'default'),deliveredSteers:Array.isArray(records)?records:[],deliveredSteerRecovery:Array.isArray(recoveryRecords)?recoveryRecords.slice(-50):[]};
+  if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+  return true;
+}
+
 async function loadSession(sid){
   const opts = arguments[1] || {};
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
@@ -2035,6 +2112,33 @@ async function loadSession(sid){
   // so a server_turn_started that attaches a live stream MID-RELOAD is honored
   // by the attach/idle decision instead of being clobbered by the stale snapshot.
   let activeStreamId=S.session.active_stream_id||null;
+  let settledDeliveredSteers=[];
+  let settledDeliveredSteerRecovery=[];
+  if(!activeStreamId){
+    S.busy=false;
+    S.activeStreamId=null;
+    const localDeliveredSteers=INFLIGHT[sid]&&Array.isArray(INFLIGHT[sid].deliveredSteers)
+      ? INFLIGHT[sid].deliveredSteers
+      : [];
+    const storedIdleState=typeof loadInflightState==='function'?loadInflightState(sid):null;
+    const storedDeliveredSteers=storedIdleState&&Array.isArray(storedIdleState.deliveredSteers)
+      ? storedIdleState.deliveredSteers
+      : [];
+    const localDeliveredSteerRecovery=INFLIGHT[sid]&&Array.isArray(INFLIGHT[sid].deliveredSteerRecovery)
+      ? INFLIGHT[sid].deliveredSteerRecovery
+      : [];
+    const storedDeliveredSteerRecovery=storedIdleState&&Array.isArray(storedIdleState.deliveredSteerRecovery)
+      ? storedIdleState.deliveredSteerRecovery
+      : [];
+    settledDeliveredSteers=localDeliveredSteers.length?localDeliveredSteers:storedDeliveredSteers;
+    settledDeliveredSteerRecovery=localDeliveredSteerRecovery.length
+      ?localDeliveredSteerRecovery:storedDeliveredSteerRecovery;
+  }
+  const preserveSettledDeliveredSteers=()=>{
+    if(typeof _preserveSettledDeliveredSteersForRecovery==='function'){
+      _preserveSettledDeliveredSteersForRecovery(sid,settledDeliveredSteers,settledDeliveredSteerRecovery);
+    }
+  };
   // If the server says the session is idle, reset browser-side streaming flags
   // NOW — BEFORE _acknowledgeSessionVisit() below (whose sidebar repaint would
   // otherwise inherit the PREVIOUS session's busy/stream state) and before the
@@ -2053,6 +2157,7 @@ async function loadSession(sid){
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
     }
+    preserveSettledDeliveredSteers();
   }
 
   // and syncs the polling snapshot so a deferred /api/sessions poll landing
@@ -2079,6 +2184,8 @@ async function loadSession(sid){
     if(stored){
       INFLIGHT[sid]={
         streamId:String(stored.streamId||''),
+        profile:String(stored.profile||((typeof S!=='undefined'&&S&&S.activeProfile)||
+          (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default')),
         messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
@@ -2096,6 +2203,11 @@ async function loadSession(sid){
         lastRunJournalEventId:String(stored.lastRunJournalEventId||''),
         journalReplayFromStart:!!stored.journalReplayFromStart,
         anchorActivityScene:(stored.anchorActivityScene&&stored.anchorActivityScene.version==='activity_scene_v1')?stored.anchorActivityScene:null,
+        // #3058: the delivered-steer records are browser-observed, so this cache is
+        // their only copy until settlement writes the anchor scene. This whitelist
+        // is what a reload reads, so omitting the field loses the row permanently.
+        deliveredSteers:Array.isArray(stored.deliveredSteers)?stored.deliveredSteers:[],
+        deliveredSteerRecovery:Array.isArray(stored.deliveredSteerRecovery)?stored.deliveredSteerRecovery:[],
         currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
         currentLiveSegmentSeq:Number(stored.currentLiveSegmentSeq||0)||0,
         activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
@@ -2104,8 +2216,18 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]&&INFLIGHT[sid].journalReplayFromStart&&activeStreamId){
+    const replayDeliveredSteers=Array.isArray(INFLIGHT[sid].deliveredSteers)
+      ? INFLIGHT[sid].deliveredSteers
+      : [];
+    const replayDeliveredSteerRecovery=Array.isArray(INFLIGHT[sid].deliveredSteerRecovery)
+      ? INFLIGHT[sid].deliveredSteerRecovery : [];
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
+    if(replayDeliveredSteers.length||replayDeliveredSteerRecovery.length){
+      INFLIGHT[sid]={streamId:activeStreamId,profile:(typeof S!=='undefined'&&S&&S.activeProfile)||
+        (typeof S!=='undefined'&&S&&S.session&&S.session.profile)||'default',deliveredSteers:replayDeliveredSteers,deliveredSteerRecovery:replayDeliveredSteerRecovery,reattach:true};
+      if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+    }
   }
 
   if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
@@ -2138,6 +2260,7 @@ async function loadSession(sid){
       await _ensureMessagesLoaded(sid, {force:_keepStaleUntilLoaded, loadGeneration:_loadGeneration});
     } catch(e) {
       if (!_isCurrentLoad()) {
+        preserveSettledDeliveredSteers();
         _rearmActiveSessionStream();
         return;
       }
@@ -2257,10 +2380,19 @@ async function loadSession(sid){
       }
       if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
       if (_isCurrentLoad()) _loadingSessionId = null;
+      preserveSettledDeliveredSteers();
       return;
     }
     // Stale? A newer loadSession() call has already started (#1060).
-    if (!_isCurrentLoad()) return;
+    if (!_isCurrentLoad()) {
+      preserveSettledDeliveredSteers();
+      return;
+    }
+
+    // Re-read ownership before consuming the idle snapshot. A stream can start
+    // for this session while the message request is awaiting; its recovery cache
+    // must take the live path instead of being projected as a stale idle scene.
+    activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
 
     // Restore any queued message that survived page refresh or tab restore.
     if(typeof queueSessionMessage==='function'){
@@ -2305,6 +2437,47 @@ async function loadSession(sid){
     // same-session stream into activeStreamId so the existing attach branch
     // (and all its `attachLiveStream(sid, activeStreamId, ...)` calls) keeps it.
     activeStreamId = activeStreamId || ((S.activeStreamId && S.session && S.session.session_id===sid) ? S.activeStreamId : null);
+
+    if(!activeStreamId&&settledDeliveredSteers.length&&typeof _restoreDeliveredSteersIntoSettledMessages==='function'){
+      const restoredRecords=[];
+      const restoredSettledSteers=_restoreDeliveredSteersIntoSettledMessages(
+        S.messages,
+        sid,
+        settledDeliveredSteers,
+        records=>{ if(Array.isArray(records)) restoredRecords.push(...records); },
+      );
+      if(restoredSettledSteers){
+        if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+        const restoredKeys=new Set(restoredRecords.map(record=>{
+          const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+          return `${String(record&&record.stream_id||payload.stream_id||'')}|${String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'')}`;
+        }));
+        const remaining=settledDeliveredSteers.filter(record=>{
+          const payload=record&&record.payload&&typeof record.payload==='object'?record.payload:{};
+          const key=`${String(record&&record.stream_id||payload.stream_id||'')}|${String(record&&record.local_id||payload.local_id||record&&record.event_id||payload.event_id||'')}`;
+          return !restoredKeys.has(key);
+        });
+        const recovery=remaining.map(record=>typeof _deliveredSteerRecoveryRecord==='function'
+          ? _deliveredSteerRecoveryRecord(record,'exact_owner_turn_not_found') : record);
+        if(remaining.length){
+          INFLIGHT[sid]={streamId:null,profile:S.activeProfile||S.session&&S.session.profile||'default',deliveredSteers:[],deliveredSteerRecovery:recovery};
+          if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+        }else{
+          delete INFLIGHT[sid];
+          if(typeof clearInflightState==='function') clearInflightState(sid);
+        }
+      }
+      if(!restoredSettledSteers&&settledDeliveredSteers.length){
+        const recovery=settledDeliveredSteers.map(record=>typeof _deliveredSteerRecoveryRecord==='function'
+          ? _deliveredSteerRecoveryRecord(record,'exact_owner_turn_not_found') : record);
+        INFLIGHT[sid]={streamId:null,profile:S.activeProfile||S.session&&S.session.profile||'default',deliveredSteers:[],deliveredSteerRecovery:recovery.slice(-50)};
+        if(typeof saveInflightState==='function') saveInflightState(sid,INFLIGHT[sid]);
+      }
+    }
+    const recoveryRecords=INFLIGHT[sid]&&Array.isArray(INFLIGHT[sid].deliveredSteerRecovery)
+      ? INFLIGHT[sid].deliveredSteerRecovery
+      : settledDeliveredSteerRecovery;
+    if(typeof _showDeliveredSteerRecoveryNotice==='function') recoveryRecords.slice(-50).forEach(_showDeliveredSteerRecoveryNotice);
 
     if(activeStreamId){
       S.busy=true;
