@@ -163,6 +163,7 @@ def _run_turn_context_node() -> dict:
     assert NODE, "node is required for the turn-context harness"
     fns = _collect_functions(
         [
+            "_hasHiddenProcessWakeupBoundaryBefore",
             "_assistantTurnFinalVisibleContentMap",
             "_assistantTurnVisibleContentMap",
             "_assistantVisibleContentForReasoningCompare",
