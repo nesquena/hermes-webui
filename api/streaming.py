@@ -1715,43 +1715,158 @@ def _coerce_current_turn_user_idx(value):
     return idx if idx >= 0 else None
 
 
-def _resolve_active_turn_authority(identity, *, result=None, agent=None):
+def _callable_boundary_contract(agent):
+    """Turn-boundary contract version declared by the Agent callable (0 = none).
+
+    Read from the callable itself — BEFORE invoking it and again for every
+    replacement Agent a retry lane constructs — never inferred from the keys an
+    individual result envelope happens to carry.
+    """
+    return _coerce_contract_version(getattr(agent, 'TURN_BOUNDARY_CONTRACT', 0))
+
+
+def _coerce_contract_version(value):
+    if isinstance(value, bool):
+        return 0
+    try:
+        version = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return version if version > 0 else 0
+
+
+def _resolve_active_turn_authority(identity, *, result=None, agent=None, contract=None):
+    """Bind the WebUI's pending-turn identity to ONE coherent producer coordinate.
+
+    Contract >= 2 (declared by the callable): the result envelope must carry
+    ``turn_boundary_contract >= 2``, a ``turn_id`` equal to the live Agent's
+    ``_current_turn_id`` (unavailable or different → rejected), and a
+    ``messages_projection``; ``current_turn_user_idx`` is honoured only when the
+    addressed row carries the same ``_turn_id`` marker the Agent stamped on this
+    turn's user row (never validated by prompt text). A missing/None/malformed
+    coordinate leaves the turn capable-but-unproven: consumers fail closed. The
+    mutable Agent-instance index is never combined with a result ``turn_id``.
+
+    Contract < 2: the only coordinate is the Agent-instance pair
+    (``_persist_user_message_idx`` / ``_current_turn_id``), which the lookup honours
+    only while ``previous_context`` is still a prefix of the result. Result keys
+    from such producers are ignored (their index is text-derived).
+    """
     if not isinstance(identity, dict):
         return identity
     resolved = dict(identity)
-    resolved.pop('agent_turn_boundary_resolved', None)
-    resolved.pop('agent_turn_boundary_source', None)
-
-    # Treat the boundary as one coherent pair. In particular, do not retain the
-    # failed Agent instance's index/turn when credential self-heal creates a
-    # fresh Agent whose compacted projection has a different current-user index.
-    # The returned-result pair is authoritative when exported; current paired
-    # Agents keep the same pair on the instance instead.
+    for key in (
+        'agent_turn_boundary_resolved', 'agent_turn_boundary_source',
+        'producer_capability', 'producer_contract', 'messages_projection',
+    ):
+        resolved.pop(key, None)
+    _contract = _callable_boundary_contract(agent) if contract is None else _coerce_contract_version(contract)
+    _live_turn_id = (
+        str(getattr(agent, '_current_turn_id', '') or '').strip() if agent is not None else ''
+    )
+    resolved['producer_contract'] = _contract
+    resolved['producer_capability'] = 'turn_boundary' if _contract >= 2 else 'unproven'
+    resolved['messages_projection'] = None
     _boundary_idx = None
     _boundary_turn_id = ''
     _boundary_source = ''
-    if isinstance(result, dict):
-        _result_idx = _coerce_current_turn_user_idx(result.get('current_turn_user_idx'))
-        _result_turn_id = str(result.get('turn_id') or '').strip()
-        if _result_idx is not None and _result_turn_id:
-            _boundary_idx = _result_idx
-            _boundary_turn_id = _result_turn_id
-            _boundary_source = 'result'
-    if agent is not None:
+    if _contract >= 2:
+        if isinstance(result, dict):
+            _result_turn_id = str(result.get('turn_id') or '').strip()
+            _projection = result.get('messages_projection')
+            _bound = (
+                _coerce_contract_version(result.get('turn_boundary_contract')) >= 2
+                and bool(_result_turn_id)
+                and bool(_live_turn_id)
+                and _result_turn_id == _live_turn_id
+                and _projection in ('full', 'delta')
+            )
+            if _bound:
+                resolved['messages_projection'] = _projection
+                _result_idx = _coerce_current_turn_user_idx(result.get('current_turn_user_idx'))
+                if _result_idx is not None:
+                    _boundary_idx = _result_idx
+                    _boundary_turn_id = _result_turn_id
+                    _boundary_source = 'result'
+    elif agent is not None:
         _agent_idx = _coerce_current_turn_user_idx(
             getattr(agent, '_persist_user_message_idx', None)
         )
-        _agent_turn_id = str(getattr(agent, '_current_turn_id', '') or '').strip()
-        if _agent_idx is not None and _agent_turn_id and not _boundary_source:
+        if _agent_idx is not None and _live_turn_id:
             _boundary_idx = _agent_idx
-            _boundary_turn_id = _agent_turn_id
+            _boundary_turn_id = _live_turn_id
             _boundary_source = 'agent'
     if _boundary_source:
         resolved['current_turn_user_idx'] = _boundary_idx
         resolved['turn_id'] = _boundary_turn_id
         resolved['agent_turn_boundary_resolved'] = True
         resolved['agent_turn_boundary_source'] = _boundary_source
+    if _boundary_source == 'result' and not _stamp_result_exported_checkpoint(
+        result.get('messages'), resolved
+    ):
+        # The producer's index does not address its own marked row: malformed,
+        # so the turn stays capable-but-unproven.
+        for key in ('agent_turn_boundary_resolved', 'agent_turn_boundary_source'):
+            resolved.pop(key, None)
+        resolved['current_turn_user_idx'] = None
     return resolved
+
+
+def _producer_exports_turn_boundary(identity):
+    """True for any resolved pending-turn identity: ownership is proven or not claimed.
+
+    Kept as a named predicate so call sites read as "strict mode"; there is no
+    heuristic mode any more — a caller without an identity is the only path that
+    still uses text/role inference (legacy callers outside the streaming route).
+    """
+    return isinstance(identity, dict)
+
+
+def _result_is_delta_projection(identity, result_messages):
+    """Is ``result_messages`` an output-only delta (no history, no user row)?
+
+    Only a bound contract-v2 envelope can say so (``messages_projection ==
+    'delta'``); ``'full'`` is never a delta, even when it holds only historical
+    assistant/tool rows, and an unbound/unknown projection is never a delta.
+    Role-derived detection survives only for callers without an identity.
+    """
+    if isinstance(identity, dict):
+        return identity.get('messages_projection') == 'delta'
+    return bool(result_messages) and all(
+        _is_context_compression_marker(message)
+        or (isinstance(message, dict) and message.get('role') in ('assistant', 'tool'))
+        for message in result_messages or []
+    )
+
+
+def _stamp_result_exported_checkpoint(result_messages, identity):
+    """Carry the WebUI token onto the row the Agent exported as this turn's user message.
+
+    The row must be a user row carrying the same ``_turn_id`` marker the Agent
+    stamped at append time (contract v2); prompt text plays no part. Stamped in the
+    exact ``result["messages"]`` projection before marker cleaning or dedupe shifts
+    indexes, so every later consumer proves the current turn by token.
+    """
+    if not isinstance(result_messages, list) or not isinstance(identity, dict):
+        return False
+    if not identity.get('token'):
+        return False
+    if _active_turn_has_checkpoint(result_messages, identity):
+        return True
+    idx = identity.get('current_turn_user_idx')
+    if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0 or idx >= len(result_messages):
+        return False
+    row = result_messages[idx]
+    if (
+        not isinstance(row, dict)
+        or row.get('role') != 'user'
+        or _is_synthetic_control_message(row)
+        or not identity.get('turn_id')
+        or row.get('_turn_id') != identity.get('turn_id')
+    ):
+        return False
+    _mark_active_turn_checkpoint(row, identity)
+    return True
 
 
 def _active_turn_boundary_is_valid(identity):
@@ -1829,20 +1944,22 @@ def _owner_projection_current_turn_row(messages, identity):
 def _find_active_turn_checkpoint_index(result_messages, previous_context, identity, msg_text):
     """Locate the current turn's user row inside ``result_messages``.
 
-    Exactly one declared index domain is supported. The WebUI token is the
-    strongest proof and wins when it survives the Agent projection. Otherwise
-    the Agent-resolved ``current_turn_user_idx`` addresses ``result["messages"]``
-    directly, so only that exact index is validated. With a repeated prompt a
-    shifted probe (``current_turn_user_idx - len(previous_context)``) can land
-    on an identical historical user row and leak historical assistant prose
-    into the current turn, so no alternative projection is ever probed. If a
-    shifted projection is ever genuinely required, the Agent must carry an
-    explicit projection-origin/base-length discriminator instead.
+    Only proven coordinates are honoured:
 
-    ``previous_context`` is retained for call-site compatibility only; it does
-    not participate in index resolution.
+    * the WebUI token, stamped on the row the WebUI inserted or on the row the
+      Agent exported for this exact ``result["messages"]`` projection;
+    * an Agent-instance index (``_persist_user_message_idx``) only while
+      ``previous_context`` is still a prefix of ``result_messages``: it was
+      captured before the Agent's iteration-time sequence repair, so after a
+      non-prefix rewrite it can address a different projection.
+
+    Either index is accepted only when the addressed row is a user row carrying
+    this turn's text. There is no text-only or role-only inference: after the
+    Agent rewrote history, a repeated prompt's historical row would otherwise be
+    relabelled as the current turn and its old answer claimed as this turn's.
+    Callers fail closed on ``None``.
     """
-    del previous_context  # single declared index domain: result_messages only
+    previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not isinstance(identity, dict):
         return None
@@ -1852,18 +1969,28 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
                 return idx
     if not _active_turn_boundary_is_valid(identity):
         return None
+    if (
+        identity.get('agent_turn_boundary_source') != 'result'
+        and previous_context
+        and not _messages_have_prefix(result_messages, previous_context)
+    ):
+        # A capable producer exports the pair on the envelope when the row is
+        # proven; falling back to its instance index after a non-prefix rewrite
+        # would trust a coordinate captured before the rewrite. Legacy producers
+        # keep the exact-index validation below (their only coordinate).
+        return None
     expected_text = identity.get('text') if identity.get('text') is not None else msg_text
     idx = identity['current_turn_user_idx']
-    if idx < 0 or idx >= len(result_messages):
-        return None
-    message = result_messages[idx]
-    if (
-        isinstance(message, dict)
-        and message.get('role') == 'user'
-        and _normalize_user_text(_message_text(message.get('content')))
-        == _normalize_user_text(expected_text)
-    ):
-        return idx
+    if 0 <= idx < len(result_messages):
+        message = result_messages[idx]
+        if (
+            isinstance(message, dict)
+            and message.get('role') == 'user'
+            and not _is_synthetic_control_message(message)
+            and _normalize_user_text(_message_text(message.get('content')))
+            == _normalize_user_text(expected_text)
+        ):
+            return idx
     return None
 
 
@@ -1900,7 +2027,22 @@ def _materialize_active_turn_user(identity, msg_text, source):
 
 
 def _settle_current_turn_boundary(previous_context, result_messages, identity, msg_text, source):
-    """Insert the pending turn before assistant/tool output when it is absent."""
+    """Insert the pending turn before assistant/tool output when it is absent.
+
+    Placement is proven or not done at all:
+
+    * a located checkpoint (token, or a validated Agent coordinate) is refreshed
+      in place;
+    * a delta-only result (only assistant/tool rows and compression markers)
+      gets the turn at its front — the Agent index addresses the full history,
+      never a delta;
+    * a full-history result that still carries ``previous_context`` as a prefix
+      gets the turn right after that prefix;
+    * anything else is returned unchanged. No index arithmetic
+      (``idx - len(previous_context)``), no trailing-role inference: both can
+      put the pending user before historical assistant rows and claim them as
+      this turn's output.
+    """
     result_messages = list(result_messages or [])
     if not result_messages or not isinstance(identity, dict):
         return result_messages
@@ -1925,26 +2067,14 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             _mark_active_turn_checkpoint(existing_checkpoint, identity)
         return result_messages
     previous_context = list(previous_context or [])
-    if _messages_have_prefix(result_messages, previous_context):
-        insert_at = len(previous_context)
-    elif _active_turn_boundary_is_valid(identity):
-        insert_at = identity['current_turn_user_idx'] - len(previous_context)
-        if insert_at < 0 or insert_at > len(result_messages):
-            insert_at = identity['current_turn_user_idx']
-        if insert_at < 0 or insert_at > len(result_messages):
-            insert_at = None
-    else:
-        insert_at = None
-    if insert_at is None and all(
-        _is_context_compression_marker(message)
-        or (isinstance(message, dict) and message.get('role') in ('assistant', 'tool'))
-        for message in result_messages
-    ):
+    if _result_is_delta_projection(identity, result_messages):
         insert_at = 0
         while insert_at < len(result_messages) and _is_context_compression_marker(result_messages[insert_at]):
             insert_at += 1
-    if insert_at is None:
-        return result_messages
+    elif _messages_have_prefix(result_messages, previous_context):
+        insert_at = len(previous_context)
+    else:
+        return result_messages  # fail closed: no proven place for the current turn
     return (
         result_messages[:insert_at]
         + [_materialize_active_turn_user(identity, msg_text, source)]
@@ -1982,15 +2112,45 @@ def _align_current_turn_display(previous_display, previous_context, identity):
     return display, context
 
 
+_PRODUCER_TURN_ROW_MARKER = '_turn_id'
+
+
+def _strip_producer_turn_markers(messages):
+    """Copy rows that carry the producer's ``_turn_id`` marker without it.
+
+    By the time settlement runs, ``_stamp_result_exported_checkpoint`` has
+    converted the producer's authority into the WebUI-owned
+    ``_active_turn_token``; the marker must not reach durable WebUI state
+    (session sidecar) or public projections. Rows are copied, never mutated, so
+    result-envelope consumers that still read ``result["messages"]`` are
+    unaffected.
+    """
+    stripped = []
+    for message in messages or []:
+        if isinstance(message, dict) and _PRODUCER_TURN_ROW_MARKER in message:
+            stripped.append({
+                key: value for key, value in message.items() if key != _PRODUCER_TURN_ROW_MARKER
+            })
+        else:
+            stripped.append(message)
+    return stripped
+
+
 def _prepare_marker_clean_writeback(
     previous_context_messages,
     result_messages,
     active_turn_identity=None,
 ):
-    """Return marker-cleaned rows, next context rows, and nudge provenance."""
+    """Return marker-cleaned rows, next context rows, and nudge provenance.
+
+    Both projections derive from ``cleaned``: synthetic control rows removed and
+    the producer's ``_turn_id`` marker stripped (its authority already lives in
+    the WebUI token stamped by ``_stamp_result_exported_checkpoint``).
+    """
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
+    cleaned = _strip_producer_turn_markers(cleaned)
     provenance = {
         'verification_nudge_seen': has_verification_nudge,
         'active_turn_identity': copy.deepcopy(active_turn_identity),
@@ -2056,6 +2216,7 @@ def _settle_result_messages(
             previous_context_messages,
             next_context_messages,
             msg_text,
+            active_turn_identity=active_turn_identity,
         )
         next_context_messages = _settle_current_turn_boundary(
             previous_context_messages,
@@ -6128,8 +6289,15 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
-    """Keep model context append-only without replayed blocks/summaries."""
+def _dedupe_replayed_context_messages(
+    previous_context, result_messages, msg_text=None, active_turn_identity=None,
+):
+    """Keep model context append-only without replayed blocks/summaries.
+
+    For a capable producer (turn-boundary contract) the repaired boundary row
+    must carry the WebUI token and a delta is only what the producer declared;
+    legacy producers keep the text/role heuristics.
+    """
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
@@ -6165,7 +6333,12 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
                     previous_context=previous_context,
                 )
             )
-            if is_stale_merge or _looks_like_current_user_turn(boundary_row, msg_text):
+            _boundary_proven = (
+                _active_turn_token_matches(boundary_row, active_turn_identity)
+                if _producer_exports_turn_boundary(active_turn_identity)
+                else _looks_like_current_user_turn(boundary_row, msg_text)
+            )
+            if is_stale_merge or _boundary_proven:
                 if is_stale_merge:
                     # Clean only the stale-merged boundary row; leave all prior
                     # history in previous_context untouched.
@@ -6183,13 +6356,8 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
                 if candidates:
                     candidates = _strip_replayed_context_items(previous_context, candidates)
                 return previous_context + candidates
-        assistant_or_tool_only_result = bool(result_messages) and all(
-            _is_context_compression_marker(m)
-            or (
-                isinstance(m, dict)
-                and m.get('role') in ('assistant', 'tool')
-            )
-            for m in result_messages
+        assistant_or_tool_only_result = _result_is_delta_projection(
+            active_turn_identity, result_messages,
         )
         if assistant_or_tool_only_result:
             candidates = _strip_replayed_prefix(previous_context, result_messages)
@@ -6983,14 +7151,19 @@ def _merge_display_messages_after_agent_result(
             candidates = _strip_replayed_prefix(previous_display, candidates)
             candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
-        current_user_idx = _find_current_user_turn(result_messages, msg_text)
-        assistant_or_tool_only_result = bool(result_messages) and all(
-            _is_context_compression_marker(m)
-            or (
-                isinstance(m, dict)
-                and m.get('role') in ('assistant', 'tool')
+        if _producer_exports_turn_boundary(_active_turn_identity):
+            # Rewritten (non-prefix) result from a capable producer: only a
+            # proven boundary — the WebUI token or a validated Agent coordinate —
+            # may claim rows as this turn. A text match would select a repeated
+            # historical prompt and display its old answer as current; fail
+            # closed instead. Legacy producers keep the historical text search.
+            current_user_idx = _find_active_turn_checkpoint_index(
+                result_messages, previous_context, _active_turn_identity, msg_text,
             )
-            for m in result_messages
+        else:
+            current_user_idx = _find_current_user_turn(result_messages, msg_text)
+        assistant_or_tool_only_result = _result_is_delta_projection(
+            _active_turn_identity, result_messages,
         )
         turn_candidates = (
             result_messages[current_user_idx:]
@@ -7129,12 +7302,32 @@ def _stamp_missing_message_timestamps(messages, *, now: float | None = None) -> 
     return stamped
 
 
-def _assistant_reply_added_after_current_turn(result_messages, previous_context, msg_text) -> bool:
-    """Return True only when the just-finished turn produced assistant text."""
+def _assistant_reply_added_after_current_turn(
+    result_messages, previous_context, msg_text, active_turn_identity=None,
+) -> bool:
+    """Return True only when the just-finished turn produced assistant text.
+
+    For a non-prefix (rewritten) result the current turn must be proven by the
+    active-turn identity; without one the answer is ``False`` (fail closed) so a
+    historical assistant row is never classified as this turn's reply.
+    """
     result_messages = list(result_messages or [])
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
+    elif _producer_exports_turn_boundary(active_turn_identity):
+        current_user_idx = _find_active_turn_checkpoint_index(
+            result_messages, previous_context, active_turn_identity, msg_text,
+        )
+        if current_user_idx is None:
+            return False
+        candidates = result_messages[current_user_idx + 1:]
+        next_user = next(
+            (i for i, m in enumerate(candidates) if isinstance(m, dict) and m.get('role') == 'user'),
+            None,
+        )
+        if next_user is not None:
+            candidates = candidates[:next_user]
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
         candidates = result_messages[current_user_idx + 1:] if current_user_idx is not None else result_messages
@@ -7187,7 +7380,11 @@ def _turn_transcript_lacks_final_assistant_answer(
         None,
     )
     current_user_idx = current_user_token_idx
-    if current_user_idx is None:
+    _token_owned = (
+        _producer_exports_turn_boundary(active_turn_identity)
+        and bool(active_turn_identity.get('token'))
+    )
+    if current_user_idx is None and not _token_owned:
         current_user_idx = _find_current_user_turn(merged_messages, msg_text)
     if current_user_idx is None or (
         current_user_token_idx is None
@@ -10737,11 +10934,13 @@ def _run_agent_streaming(
                 )
                 _run_conversation_kwargs["user_message"] = user_message
             _result_partial_pre_call_context = list(_previous_context_messages)
+            _boundary_contract = _callable_boundary_contract(agent)
             result = agent.run_conversation(**_run_conversation_kwargs)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
                 agent=agent,
+                contract=_boundary_contract,
             )
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
@@ -11041,6 +11240,7 @@ def _run_agent_streaming(
                     _all_result_messages,
                     _previous_context_messages,
                     msg_text,
+                    active_turn_identity=_active_turn_identity,
                 )
                 _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                 # #5940: if the Agent aborted on a non-retryable provider error
@@ -11228,11 +11428,13 @@ def _run_agent_streaming(
                                 _result_partial_pre_call_context = list(
                                     _heal_context_messages
                                 )
+                                _boundary_contract = _callable_boundary_contract(agent)
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
                                     result=_heal_result,
                                     agent=agent,
+                                    contract=_boundary_contract,
                                 )
                                 if _result_reports_compression_snapshot_stale(_heal_result):
                                     _heal_stale_classification = _classify_provider_error(
@@ -12526,11 +12728,13 @@ def _run_agent_streaming(
                         _result_partial_pre_call_context = list(
                             _heal_context_messages
                         )
+                        _boundary_contract = _callable_boundary_contract(_heal_agent)
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         _active_turn_identity = _resolve_active_turn_authority(
                             _active_turn_identity,
                             result=_heal_result,
                             agent=_heal_agent,
+                            contract=_boundary_contract,
                         )
                         _heal_stale_classification = None
                         if _result_reports_compression_snapshot_stale(_heal_result):

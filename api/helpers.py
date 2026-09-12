@@ -23,6 +23,9 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_active_turn_token",
     "_active_turn_user",
     "_fork_child_turn",
+    # Producer-owned current-turn row marker (hermes-agent turn-boundary contract v2).
+    # Settlement converts it into the WebUI token and strips it; never public.
+    "_turn_id",
 })
 
 
