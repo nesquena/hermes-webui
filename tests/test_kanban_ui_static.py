@@ -1114,7 +1114,9 @@ def test_kanban_sse_eventsource_subscription_is_default():
     replaced 30s polling with SSE for ~300ms latency parity with the
     agent dashboard's WebSocket /events). 30s polling remains as the
     auto-fallback after repeated SSE failures."""
-    assert "new EventSource" in PANELS
+    # Constructed via the shared tab-context helper so the stream carries the
+    # per-tab profile context (#6559).
+    assert "_tabContextEventSource(url)" in PANELS
     assert "/api/kanban/events/stream" in PANELS
     assert "_kanbanStartEventStream" in PANELS
     assert "addEventListener('hello'" in PANELS

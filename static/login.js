@@ -62,6 +62,8 @@ document.addEventListener('DOMContentLoaded', function () {
     var pw = input.value;
     hideErr();
     try {
+      // The login page is pre-profile: authentication happens before any tab
+      // context exists, and workspace.js is not loaded here (#6559).
       var res = await fetch('api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

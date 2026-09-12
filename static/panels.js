@@ -2808,7 +2808,7 @@ function _kanbanStartEventStream(){
   let url = '/api/kanban/events/stream' + _kanbanBoardQuery({since: since});
   let es;
   try {
-    es = new EventSource(url);
+    es = _tabContextEventSource(url);
   } catch(e) {
     _kanbanEventSourceFailures += 1;
     if (_kanbanEventSourceFailures < 3 && !_kanbanPollTimer) {
@@ -2838,6 +2838,18 @@ function _kanbanStartEventStream(){
       try { es.close(); } catch(_) {}
       _kanbanEventSource = null;
       if (!_kanbanPollTimer) _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+      return;
+    }
+    // #6559: a stream refused for a stale per-tab profile context closes for
+    // good (readyState 2) instead of auto-reconnecting, so nothing would ever
+    // reopen it. Reissue a context bound to this tab and reopen once; the
+    // failure counter above still bounds the retries.
+    if (es.readyState === 2 && _kanbanEventSource === es) {
+      void _revalidateTabContextAfterSseError().then((hadContext) => {
+        if (!hadContext || _kanbanEventSource !== es) return;
+        _kanbanStartEventStream();
+      });
+      return;
     }
     // EventSource auto-reconnects under the hood; nothing more to do here
     // until we hit the failure limit.
@@ -6858,8 +6870,19 @@ function renderProfileDropdown(data) {
     : (data.active || 'default');
   const profiles = allProfiles.filter(p => p && (p.visible !== false || p.name === active));
   for (const p of profiles) {
-    const opt = document.createElement('div');
+    const profileHref = _profileTabUrl(p.name);
+    const opt = document.createElement('a');
+    opt.href = profileHref;
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
+    // Open in new tab: let native browser behavior handle ctrl/cmd/middle-click
+    // Plain click: prevent default and switch in-place
+    opt.addEventListener('click', function(e) {
+      if (e.button !== 0 || e.ctrlKey || e.shiftKey || e.metaKey || e.altKey) return; // let native new-tab flow
+      e.preventDefault();
+      closeProfileDropdown();
+      if (p.name === active) return;
+      switchToProfile(p.name);
+    });
     const meta = [];
     if (typeof p.model === 'string' && p.model) meta.push(p.model.split('/').pop());
     if (p.total_skills && p.total_skills > 0) meta.push(t('profile_skill_count', p.total_skills).replace(String(p.total_skills), `${p.enabled_skills} / ${p.total_skills}`));
@@ -6868,11 +6891,6 @@ function renderProfileDropdown(data) {
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
     opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
-    opt.onclick = async () => {
-      closeProfileDropdown();
-      if (p.name === active) return;
-      await switchToProfile(p.name);
-    };
     dd.appendChild(opt);
   }
   // Divider + Manage link (hidden in single profile mode)
@@ -7067,6 +7085,10 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // #6559: this tab's profile context outranks the shared cookie, so leaving
+    // the old token attached would resolve every request below (and every
+    // request after the switch) back to the PREVIOUS profile. Rebind first.
+    if (typeof _rebindTabContext === 'function') await _rebindTabContext(S.activeProfile);
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -10092,6 +10114,8 @@ async function _checkExtensionSidecarHealth(sidecar,index,seq){
       controller=new AbortController();
       timeoutId=setTimeout(()=>controller.abort(),2500);
     }
+    // Exempt from the tab context (#6559): this probes an EXTERNAL sidecar's
+    // own health URL, not the Hermes API, and deliberately sends no credentials.
     const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined});
     if(seq!==_extensionsSidecarMonitorSeq) return;
     if(res.ok){

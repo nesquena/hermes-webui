@@ -486,7 +486,7 @@ function _connectTerminalOutput(){
   }
   const url=new URL('api/terminal/output',document.baseURI||location.href);
   url.searchParams.set('session_id',sid);
-  const source=new EventSource(url.href,{withCredentials:true});
+  const source=_tabContextEventSource(url.href,{withCredentials:true});
   TERMINAL_UI.source=source;
   source.addEventListener('output',ev=>{
     if(TERMINAL_UI.source!==source)return;
@@ -537,6 +537,9 @@ function _connectTerminalOutput(){
     if(closed){
       try{if(source&&source.readyState!==2)source.close();}catch(_){}
       TERMINAL_UI.source=null;
+      // #6559: a refused per-tab profile context also closes the stream for
+      // good. Reissue now so the next connect attempt carries a live token.
+      void _revalidateTabContextAfterSseError();
     }
   });
 }
@@ -764,7 +767,12 @@ async function _resizeComposerTerminal(){
 window.addEventListener('beforeunload',()=>{
   if(TERMINAL_UI.source)try{if(TERMINAL_UI.source&&TERMINAL_UI.source.readyState!==2)TERMINAL_UI.source.close();}catch(_){}
   if(TERMINAL_UI.sessionId){
-    const url=new URL('api/terminal/close',document.baseURI||location.href).href;
+    // #6559: attach this tab's profile context to the unload write. The
+    // terminal session belongs to a profile, so a close that arrives without
+    // one is resolved through the browser-wide cookie. Attach-only, no
+    // recovery: the document is going away, and neither sendBeacon() nor a
+    // keepalive fetch can await a reissue-and-replay round trip.
+    const url=_tabContextUrl(new URL('api/terminal/close',document.baseURI||location.href).href);
     const body=JSON.stringify({session_id:TERMINAL_UI.sessionId});
     try{
       navigator.sendBeacon(url,new Blob([body],{type:'application/json'}));

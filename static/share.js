@@ -58,6 +58,9 @@ async function _shareLoad(){
     return;
   }
   try{
+    // Exempt from the tab context (#6559): a public share page has no profile
+    // identity — no tab context is issued for it, and the share token itself
+    // scopes the read. workspace.js is not loaded here.
     const data=await fetch(new URL(`/api/share/${encodeURIComponent(token)}`,window.location.origin).href,{credentials:'same-origin',cache:'no-store'});
     if(!data.ok){
       let message='The link may have expired or been revoked.';
