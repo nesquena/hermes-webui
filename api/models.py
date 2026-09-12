@@ -10135,6 +10135,7 @@ def merge_session_messages_append_only(
     *,
     truncation_watermark=None,
     truncation_boundary=None,
+    incoming_provenance: Literal["unverified", "state_db"] = "unverified",
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -10711,7 +10712,21 @@ def merge_session_messages_append_only(
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
         seen_visible_keys.add(visible_key)
-        merged_messages.append(msg)
+        # This terminal path is shared by state.db reconciliation and by ordered
+        # sidecar stitching (notably compression continuations). Only the caller
+        # that read state.db may authorize timestamp-based recovery placement;
+        # stable child-sidecar sequence remains authoritative even when an
+        # archived parent was restamped later.
+        if (
+            incoming_provenance == "state_db"
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp < max_sidecar_timestamp
+        ):
+            if not _insert_state_message_chronologically(merged_messages, msg):
+                merged_messages.append(msg)
+        else:
+            merged_messages.append(msg)
         _remember_merged_message(msg, source="state")
     return merged_messages
 
@@ -10831,6 +10846,7 @@ def reconciled_state_db_messages_for_session(
         state_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
     )
     return _state_db_session_messages_result(
         reconciled_messages,

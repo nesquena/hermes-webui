@@ -9108,6 +9108,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
     )
     if cache_key is not None:
         _state_key = cache_key[4]

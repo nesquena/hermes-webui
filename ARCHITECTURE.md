@@ -236,6 +236,29 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Session transcript reconciliation with `state.db`
+
+`reconciled_state_db_messages_for_session()` uses
+`merge_session_messages_append_only()` to combine a WebUI sidecar or context
+projection with active Agent `state.db` rows. Its explicit
+`incoming_provenance="state_db"` fence permits a state-only row whose timestamp
+predates the sidecar tail to use a safe chronological slot. Paginated
+`msg_limit` consumers rely on this merged order directly rather than applying a
+later timestamp sort.
+
+The same merge helper also stitches ordered child sidecars onto archived
+compression parents. Those calls leave incoming provenance unverified, so their
+stable message sequence remains append-only even when parent rows carry later,
+restamped timestamps. Timestamp alone is never authority to move a continuation
+inside its parent transcript.
+
+If an older row could only be placed before the first surviving sidecar/context
+row, the insertion helper declines it to avoid resurrecting compacted history.
+Reconciliation then appends that row instead of dropping it; rows without a
+usable timestamp and rows at or after the sidecar tail also append normally.
+The fallback therefore preserves an accepted state-only row when exact ordering
+is ambiguous, while safely placeable recovery rows remain chronological.
+
 #### Imported `state.db` sidebar projection
 
 `api.models.get_cli_sessions()` projects conversations from the active Hermes
