@@ -96,17 +96,21 @@ def test_desktop_side_rails_can_shrink_to_resize_minima():
     assert collapsed_rightpanel.get("min-width") == "0 !important"
 
 
-def test_compact_breakpoint_900px_remains_hidden_right_panel_boundary():
+def test_compact_breakpoint_900px_keeps_panel_openable():
     assert "@media(max-width:900px)" in CSS or "@media (max-width: 900px)" in CSS
 
-    compact = _media_block("max-width", 900, ".rightpanel{display:none}")
-    rightpanel = _declarations(_rule_body(compact, ".rightpanel"))
+    compact = _media_block("max-width", 900, ".workspace-toggle-btn")
     workspace_toggle = _declarations(_rule_body(compact, ".workspace-toggle-btn"))
     mobile_files = _declarations(_rule_body(compact, ".mobile-files-btn"))
 
-    assert rightpanel.get("display") == "none"
     assert workspace_toggle.get("display") == "inline-flex!important"
     assert mobile_files.get("display") == "inline-flex!important"
+    # The compact 900px breakpoint must NOT force .rightpanel{display:none}:
+    # the 641-900px band uses the off-canvas slide-over instead (see
+    # tests/test_workspace_panel_641_900.py).
+    assert ".rightpanel{display:none}" not in _normalize_css(compact), (
+        ".rightpanel must NOT be display:none at max-width:900px — the 641-900px band uses the slide-over"
+    )
 
 
 def test_mobile_slide_over_breakpoint_640px_remains_intact():
@@ -130,5 +134,7 @@ def test_no_unmatched_desktop_hide_breakpoint_above_900():
         if re.search(r"\.rightpanel\s*\{\s*display\s*:\s*none", block):
             hidden_widths.append(width_px)
 
-    assert 900 in hidden_widths
-    assert all(width_px <= 900 for width_px in hidden_widths)
+    # The workspace panel is never hard-hidden by a breakpoint anymore:
+    # the 641-900px band uses the off-canvas slide-over and 640px-and-below
+    # uses the drawer, so no display:none breakpoint may remain.
+    assert hidden_widths == [], f"unexpected display:none breakpoints: {hidden_widths}"
