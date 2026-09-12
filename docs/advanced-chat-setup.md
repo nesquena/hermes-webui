@@ -152,3 +152,47 @@ locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
+
+### Usage and context-window accounting
+
+A gateway-backed session builds no in-process agent or `ContextCompressor`, so
+the only usage data it ever sees is what the OpenAI-compat terminal chunk
+carries. WebUI now persists that into durable per-session totals and forwards
+enough of it for the browser context ring to size itself correctly:
+
+- `input_tokens`, `output_tokens`, `estimated_cost`, `cache_read_tokens`, and
+  `cache_write_tokens` accumulate into session lifetime totals on every
+  terminal chunk. `static/messages.js` derives each turn's own badge by
+  subtracting the pre-turn session totals, so these fields are cumulative by
+  design, not per-turn.
+- `last_prompt_tokens` / `threshold_tokens` are presence-sensitive, not
+  truthiness-sensitive: an explicit `0` from the gateway (the compressor's
+  post-compaction clamp) is trusted outright and overwrites the previous
+  numerator, exactly like any other real value — WebUI can tell "genuinely
+  zero right now" apart from "this gateway never sent the field" only by
+  checking whether the key is present in the payload at all, so a plain
+  falsy check can't be used here the way it is for the billing/cache
+  counters above. A gateway that omits the key entirely (older versions
+  before hermes-agent#105905) leaves the previous numerator exactly where it
+  was; WebUI does not attempt to infer one from `input_tokens` or from
+  whether any tool-progress events were observed for the turn. That
+  inference used to exist and was removed: an empty tool-call list only
+  proves no tool-progress *events* arrived, not that no tools ran — a
+  gateway or intermediate proxy that doesn't emit those optional events
+  would report a multi-call aggregate as if it were a single real prompt,
+  which is a confidently wrong numerator and worse than a stale one.
+- `context_length` (the ring's denominator) is resolved once per session from
+  the connected model/provider and persisted, so a browser reload does not
+  re-derive it. `256000` is the resolver's "unknown model" fallback and is
+  deliberately never persisted, so an unrecognized model can still resolve
+  correctly once its metadata becomes available instead of being pinned wrong
+  forever. `threshold_tokens` mirrors the gateway's real compression
+  threshold when sent, or defaults to 75% of `context_length` — the same
+  default `ContextCompressor` uses — so the "Auto-compress at X" tooltip has
+  a number instead of hiding.
+- `@provider:model` route hints are parsed with the shared
+  `_split_provider_qualified_model` grammar (`api/routes.py`, #6722) at both
+  the outgoing request body and the context-length lookup, so a model tag
+  with its own colon (`@openrouter:meta/llama-4:free`) or a custom provider
+  slug derived from a host:port authority
+  (`@custom:10.8.71.41:8080:Qwen3`) resolve to the same lane both places.
