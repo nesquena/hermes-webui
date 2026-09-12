@@ -115,14 +115,24 @@ def test_live_footer_timer_is_re_synced_after_message_rerender():
     )
 
 
-def test_compact_worklog_hides_bottom_live_footer_timer():
+def test_only_pure_compact_worklog_hides_bottom_live_footer_timer():
     show = UI_JS.split("function showLiveRunStatus", 1)[1].split("function _renderLiveRunStatusContent", 1)[0]
     sync = UI_JS.split("function _syncLiveRunStatusAfterRender", 1)[1].split("function hideLiveRunStatus", 1)[0]
 
-    assert "isCompactWorklogMode" in show
+    assert "chatActivityMode()==='compact_worklog'" in show
+    assert "isCompactWorklogMode" not in show
     assert "if(el){el.hidden=true;el.innerHTML='';}" in show
-    assert "isCompactWorklogMode" in sync
+    assert "chatActivityMode()==='compact_worklog'" in sync
+    assert "isCompactWorklogMode" not in sync
     assert "if(el){el.hidden=true;el.innerHTML='';}" in sync
+
+
+def test_hybrid_mode_keeps_live_status_footer_available():
+    show = UI_JS.split("function showLiveRunStatus", 1)[1].split("function _renderLiveRunStatusContent", 1)[0]
+
+    assert "transparent-live/compact-settled" in show
+    assert "optional runtime metadata can enrich the same footer" in show
+    assert "chatActivityMode()==='compact_worklog'" in show
 
 
 def test_processed_elapsed_anchor_is_i18n_driven():
