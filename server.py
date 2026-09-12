@@ -106,6 +106,7 @@ from api.helpers import (
     get_profile_cookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
+    MAX_BODY_BYTES,
 )
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
@@ -290,11 +291,41 @@ class QuietHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+class _BodyTrackingReader:
+    """Counts body bytes consumed per request so unread bodies can be drained.
+
+    Responses that exit before ``read_body`` (401/403/30x) would otherwise
+    leave body bytes on the socket, which the keep-alive loop parses as the
+    next request line (observed as 400/501 corruption behind reverse proxies).
+
+    Only ``read``/``readinto`` are counted: the request line and headers are
+    read via ``readline`` through the passthrough below and must not count
+    toward the body total.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.count = 0
+
+    def read(self, *args):
+        data = self._inner.read(*args)
+        self.count += len(data) if data else 0
+        return data
+
+    def readinto(self, b):
+        n = self._inner.readinto(b)
+        self.count += n if n else 0
+        return n
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class Handler(BaseHTTPRequestHandler):
     # HTTP/1.1 keep-alive stays on, so every response must declare framing.
     protocol_version = "HTTP/1.1"
     timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
-    
+
     def setup(self):
         """Set socket options for each accepted connection."""
         super().setup()
@@ -395,6 +426,71 @@ class Handler(BaseHTTPRequestHandler):
                 self._safe_webui_print(traceback.format_exc())
         finally:
             clear_request_profile()
+
+    def handle_one_request(self) -> None:
+        """Track body bytes per request and drain unread bodies at one chokepoint.
+
+        The wrapper is installed once per connection with its counter reset
+        each request. Draining in the finally covers every method: responses
+        that exit before ``read_body`` (401/403/30x) would otherwise leave
+        body bytes on the socket, parsed as the next request line (400/501
+        corruption). ``headers`` is cleared per request so a request that
+        fails before header parsing can never inherit the previous request's
+        framing — ``_drain_unread_body`` fails such a connection closed.
+        """
+        if isinstance(self.rfile, _BodyTrackingReader):
+            self.rfile.count = 0
+        else:
+            self.rfile = _BodyTrackingReader(self.rfile)
+        self.headers = None
+        try:
+            super().handle_one_request()
+        finally:
+            self._drain_unread_body()
+
+    def _drain_unread_body(self) -> None:
+        """Consume any unread request body so keep-alive stays in sync.
+
+        Fails the connection closed whenever the framing cannot be trusted
+        or the body cannot be drained safely: no current headers, already
+        closing, any Transfer-Encoding (the server implements no transfer
+        framing), malformed length, or a length ``read_body`` itself would
+        refuse (mirrors its MAX_BODY_BYTES cap so a giant claimed body can
+        never pin a thread draining).
+        """
+        try:
+            if getattr(self, "close_connection", False):
+                return
+            if getattr(self, "headers", None) is None:
+                self.close_connection = True
+                return
+            # The server implements no transfer framing, so a TE body cannot
+            # be drained reliably — treat every nonempty Transfer-Encoding
+            # (chunked or not) as unresynchronizable and fail closed.
+            if (self.headers.get("Transfer-Encoding") or "").strip():
+                self.close_connection = True
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except (TypeError, ValueError):
+                self.close_connection = True
+                return
+            if length < 0 or length > MAX_BODY_BYTES:
+                # Malformed framing (some stdlib versions parse a negative
+                # length without rejecting), or a body read_body would refuse
+                # to consume — either way the socket cannot be resynced by
+                # draining, so fail closed.
+                self.close_connection = True
+                return
+            remaining = length - getattr(self.rfile, "count", 0)
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    self.close_connection = True  # peer closed mid-body
+                    return
+                remaining -= len(chunk)
+        except Exception:
+            self.close_connection = True
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
