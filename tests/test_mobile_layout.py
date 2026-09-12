@@ -1720,3 +1720,176 @@ def test_mobile_enter_does_not_affect_desktop_logic():
     # The else branch (desktop, sends on Enter without Shift) must still be present
     assert "if(!e.shiftKey){e.preventDefault();send();" in boot_js, \
         "Desktop Enter-to-send logic (else branch) must still be present in boot.js"
+
+
+def test_resize_only_closes_dropdowns_when_phone_boundary_crossed():
+    """Executed listener harness: composer dropdown state must reset ONLY when
+    the phone/desktop (640px) boundary is crossed.
+
+    Drives the real registration + handler code from static/ui.js under node
+    with a fake MediaQueryList: repeated same-mode resizes must produce zero
+    closes, the first boundary change after load must still deliver (no
+    uninitialized-state miss), and both directions must reset the composer
+    menu family exactly once per crossing.
+    """
+    import json
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        pytest.skip("node is not available for executing the JS listener harness")
+
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    # Extract the registration block: from the _phoneWidthQuery declaration
+    # through the closing brace of the addEventListener/addListener if-chain
+    # (the block ends at the "\n}\n" that closes the outer if after the
+    # addListener fallback line).
+    start = ui_js.index("const _phoneWidthQuery=")
+    tail = ui_js.index("addListener(_onPhoneBoundaryChange);", start)
+    end = ui_js.index("\n}", tail) + 2
+    block = ui_js[start:end]
+
+    script = """
+// ── fake close functions with call counts ──
+const calls = { mobile: 0, model: 0, reasoning: 0, ws: 0 };
+function closeMobileComposerConfig(){ calls.mobile++; }
+function closeModelDropdown(){ calls.model++; }
+function closeReasoningDropdown(){ calls.reasoning++; }
+// closeWsDropdown must be undefined -> exercises the typeof guard, counts via ws
+// ── fake MediaQueryList ──
+let _matches = false; // page loads at 804px -> not phone
+const listeners = [];
+const mql = {
+  get matches(){ return _matches; },
+  addEventListener: (type, fn) => { if (type === 'change') listeners.push(fn); },
+};
+globalThis.window = { matchMedia: (q) => mql };
+// ── the real registration block from static/ui.js ──
+__BLOCK__
+function fireBoundary(){
+  _matches = !_matches;
+  for (const fn of listeners) fn({ matches: _matches });
+}
+// ── scenario ──
+// 1. keyboard-style resizes at constant 804px: no boundary change, zero closes
+  ;(function resizeBurst(){ })();
+// (resize events are not even observable to this listener — nothing to fire)
+const before = JSON.stringify(calls);
+// 2. FIRST boundary change after load (no prior resize): must deliver
+fireBoundary(); // 804 -> 640 (fold)
+const afterFold = JSON.stringify(calls);
+// 3. same-mode events must never fire the listener (guard: listeners only run on change)
+// 4. second crossing (unfold)
+fireBoundary(); // 640 -> 804
+const afterUnfold = JSON.stringify(calls);
+// 5. third crossing (fold again)
+fireBoundary();
+const afterThird = JSON.stringify(calls);
+console.log(JSON.stringify({ before, afterFold, afterUnfold, afterThird, listeners: listeners.length }));
+""".replace("__BLOCK__", block)
+
+    r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    st = json.loads(r.stdout.strip())
+    # exactly one change listener registered
+    assert st["listeners"] == 1, "exactly one boundary-change listener must be registered"
+    # no closes before any boundary change (keyboard resizes are invisible)
+    assert st["before"] == '{"mobile":0,"model":0,"reasoning":0,"ws":0}'
+    # first crossing after load: every close runs exactly once (no missed first transition)
+    assert st["afterFold"] == '{"mobile":1,"model":1,"reasoning":1,"ws":0}', \
+        "first fold must close mobile config, model, and reasoning dropdowns once each"
+    # ws stays 0: closeWsDropdown is undefined, so the typeof guard must skip it
+    # both directions close
+    assert st["afterUnfold"] == '{"mobile":2,"model":2,"reasoning":2,"ws":0}', \
+        "unfold must also reset the composer menu family (both-directions policy)"
+    assert st["afterThird"] == '{"mobile":3,"model":3,"reasoning":3,"ws":0}'
+
+
+def test_burger_mode_transition_closes_composer_menus():
+    """Executed fit harness: cf-burger transitions (which can happen at a
+    CONSTANT width, e.g. 760px, with no 640px boundary crossing) must close
+    the composer menu family exactly once per real transition, and no-op fit
+    passes (unchanged stage) must produce zero closes.
+
+    Drives the real _fitComposerFooter under node with a fake footer/left
+    pair whose clientWidth/scrollWidth are controlled per scenario — always
+    above the 640px phone boundary, so the MediaQueryList path is never
+    involved and the burger transition is the only trigger.
+    """
+    import json
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        pytest.skip("node is not available for executing the JS fit harness")
+
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    fit_fn = "function _fitComposerFooter(){" + _js_function_body(ui_js, "_fitComposerFooter") + "}"
+    boundary_fn = "function _onPhoneBoundaryChange(){" + _js_function_body(ui_js, "_onPhoneBoundaryChange") + "}"
+
+    script = """
+// ── fake close functions with call counts ──
+const calls = { mobile: 0, model: 0, reasoning: 0 };
+function closeMobileComposerConfig(){ calls.mobile++; }
+function closeModelDropdown(){ calls.model++; }
+function closeReasoningDropdown(){ calls.reasoning++; }
+
+__FIT_FN__
+__BOUNDARY_FN__
+
+// ── fake DOM: footer + left with controlled geometry ──
+const classes = new Set();
+let clientW = 400, scrollW = 300; // start NON-burger (no overflow)
+const footer = {
+  style: {},
+  classList: {
+    contains: (c) => classes.has(c),
+    remove: (...cs) => cs.forEach(c => classes.delete(c)),
+    add: (...cs) => cs.forEach(c => classes.add(c)),
+    toggle: (c, force) => { if (force) classes.add(c); else classes.delete(c); },
+  },
+  getBoundingClientRect: () => ({ height: 42 }),
+  querySelector: (sel) => (sel === '.composer-left' ? left : null),
+  _classes: classes,
+};
+const left = {
+  get clientWidth(){ return clientW; },
+  get scrollWidth(){ return scrollW; },
+};
+globalThis.document = { querySelector: (sel) => (sel === '.composer-footer' ? footer : null) };
+
+// scenario — everything above the 640px boundary:
+// 1. baseline fit at no-overflow: no transition, zero closes
+_fitComposerFooter();
+const afterBaseline = JSON.stringify(calls);
+// 2. no-op refit (same geometry): zero closes
+_fitComposerFooter();
+const afterNoop = JSON.stringify(calls);
+// 3. content grows -> overflow -> burger transition: one cleanup
+scrollW = 700; // now overflows at cf-icons AND cf-burger stage
+_fitComposerFooter();
+const afterEnterBurger = JSON.stringify(calls) + " burger=" + classes.has('cf-burger');
+// 4. refit while still burger: zero additional closes
+_fitComposerFooter();
+const afterStayBurger = JSON.stringify(calls);
+// 5. content shrinks -> leave burger: one more cleanup
+scrollW = 300;
+_fitComposerFooter();
+const afterLeaveBurger = JSON.stringify(calls) + " burger=" + classes.has('cf-burger');
+console.log(JSON.stringify({ afterBaseline, afterNoop, afterEnterBurger, afterStayBurger, afterLeaveBurger }));
+""".replace("__FIT_FN__", fit_fn).replace("__BOUNDARY_FN__", boundary_fn)
+
+    r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    st = json.loads(r.stdout.strip())
+    # baseline + no-op refit: zero closes (unchanged stage is harmless)
+    assert st["afterBaseline"] == '{"mobile":0,"model":0,"reasoning":0}'
+    assert st["afterNoop"] == '{"mobile":0,"model":0,"reasoning":0}'
+    # entering burger: exactly one cleanup of the composer menu family
+    assert st["afterEnterBurger"] == '{"mobile":1,"model":1,"reasoning":1} burger=true', \
+        "entering burger mode must close the composer menu family exactly once"
+    # staying burger: no additional closes
+    assert st["afterStayBurger"] == '{"mobile":1,"model":1,"reasoning":1}', \
+        "unchanged-geometry refits must not re-fire the cleanup"
+    # leaving burger: exactly one more cleanup (both-directions policy)
+    assert st["afterLeaveBurger"] == '{"mobile":2,"model":2,"reasoning":2} burger=false', \
+        "leaving burger mode must also close the composer menu family exactly once"
+
