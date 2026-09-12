@@ -14587,6 +14587,13 @@ def handle_get(handler, parsed) -> bool:
             data["linked_files"] = {}
         return j(handler, data)
 
+    # ── Hindsight API (GET) ──
+    if parsed.path == "/api/hindsight/status":
+        from api.hindsight import handle_status as _hs_status
+        return _hs_status(handler)
+    if parsed.path == "/api/hindsight/memories":
+        from api.hindsight import handle_list_memories as _hs_list
+        return _hs_list(handler, parsed)
     # ── Memory API (GET) ──
     if parsed.path == "/api/memory":
         return _handle_memory_read(handler, parsed)
@@ -16574,6 +16581,17 @@ def handle_post(handler, parsed) -> bool:
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":
         return _handle_memory_write(handler, body)
+
+    # ── Hindsight API (POST) ──
+    if parsed.path == "/api/hindsight/recall":
+        from api.hindsight import handle_recall as _hs_recall
+        return _hs_recall(handler, body or {})
+    if parsed.path == "/api/hindsight/reflect":
+        from api.hindsight import handle_reflect as _hs_reflect
+        return _hs_reflect(handler, body or {})
+    if parsed.path == "/api/hindsight/retain":
+        from api.hindsight import handle_retain as _hs_retain
+        return _hs_retain(handler, body or {})
 
     if parsed.path in {"/api/gateway/start", "/api/gateway/stop", "/api/gateway/restart"}:
         return _handle_gateway_lifecycle(handler, parsed.path.rsplit("/", 1)[-1], body)
@@ -22181,6 +22199,22 @@ def _handle_memory_read(handler, parsed=None):
         else ""
     )
     project_context = _read_active_project_context(_memory_project_context_workspace(parsed))
+    # Hindsight status (for first-class Memory tab)
+    hindsight_info = {}
+    try:
+        from api.hindsight import _hindsight_config as _hs_cfg
+        hs = _hs_cfg()
+        hindsight_info = {
+            "hindsight_enabled": bool(hs.get("enabled")),
+            "hindsight_provider": hs.get("provider") or "",
+            "hindsight_api_url": hs.get("api_url") or "",
+            "hindsight_bank_id": hs.get("bank_id") or "",
+            "hindsight_has_key": bool(hs.get("api_key_present")),
+            "hindsight_mode": hs.get("mode") or "",
+            "hindsight_budget": hs.get("recall_budget") or "mid",
+        }
+    except Exception:
+        hindsight_info = {"hindsight_enabled": False}
     return j(
         handler,
         {
@@ -22200,6 +22234,7 @@ def _handle_memory_read(handler, parsed=None):
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
             "external_notes_enabled": _external_notes_sources_enabled(cfg),
+            **hindsight_info,
         },
     )
 
