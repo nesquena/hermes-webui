@@ -17,13 +17,21 @@ from api.streaming import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from tests.js_source_loader import read_extraction_source, read_js_source  # noqa: E402
+
 
 def _read(relpath: str) -> str:
-    return (ROOT / relpath).read_text(encoding="utf-8")
+    return read_js_source(ROOT / relpath)
+
+
+def _read_messages_js() -> str:
+    # messages.js blocks are sliced for extraction downstream, so the read
+    # must enforce the registered EOF tail (issue #6972).
+    return read_extraction_source(ROOT / "static" / "messages.js")
 
 
 def _compressed_listener_block() -> str:
-    src = _read("static/messages.js")
+    src = _read_messages_js()
     start = src.find("source.addEventListener('compressed'")
     assert start != -1, "compressed SSE listener not found"
     end = src.find("source.addEventListener('metering'", start)
@@ -32,7 +40,7 @@ def _compressed_listener_block() -> str:
 
 
 def _compressing_listener_block() -> str:
-    src = _read("static/messages.js")
+    src = _read_messages_js()
     start = src.find("source.addEventListener('compressing'")
     assert start != -1, "compressing SSE listener not found"
     end = src.find("source.addEventListener('compressed'", start)
