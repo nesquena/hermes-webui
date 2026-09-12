@@ -248,6 +248,9 @@ function _setWorkspacePanelMode(mode){
   if(!layout||!panel)return;
   _workspacePanelMode=(mode==='browse'||mode==='preview')?mode:'closed';
   const open=_workspacePanelMode!=='closed';
+  // #6675: if the workspace panel closes while a preview is fullscreen (fixed
+  // overlay or native), exit so the overlay never lingers over the app.
+  if(!open&&typeof _exitPreviewFullscreen==='function') _exitPreviewFullscreen();
   document.documentElement.dataset.workspacePanel=open?'open':'closed';
   // Persist open/closed across refreshes (browse/preview → open; closed → closed)
   // Do NOT overwrite the user's "keep open" preference — only track runtime state
@@ -2218,6 +2221,8 @@ $('importFileInput').onchange=async(e)=>{
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
 function clearPreview(opts={}){
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
+  // #6675: leave fullscreen (native or overlay) before tearing the preview down
+  if(typeof _exitPreviewFullscreen==='function') _exitPreviewFullscreen();
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   const closePanelAfter=_workspacePanelMode==='preview'&&!keepPanelOpen;

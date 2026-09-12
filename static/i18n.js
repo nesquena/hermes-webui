@@ -729,6 +729,8 @@ const LOCALES = {
     composer_control_toolsets: 'Toolsets',
     composer_control_status: 'Status',
     open_in_browser: 'Open in browser',
+    preview_fullscreen: 'Fullscreen',
+    preview_fullscreen_exit: 'Exit fullscreen',
     settings_dropdown_conversation: 'Conversation',
     settings_dropdown_appearance: 'Appearance',
     settings_dropdown_preferences: 'Preferences',
