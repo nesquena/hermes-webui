@@ -10228,11 +10228,10 @@ def _atomic_write_settings_text(path: Path, text: str) -> None:
     tempfile+fsync+os.replace pattern already used by
     ``webui_session_db.WebUIJsonSessionDB._atomic_write``.
 
-    The existing file's mode is carried onto the replacement: ``os.replace``
-    swaps in the temp file's inode, and a plain ``open`` respects the umask
-    (typically 0644), so without this an operator-hardened ``settings.json``
-    (chmod 0600 because it holds the password hash) would be silently loosened
-    on the next save.  New files fall back to the umask-adjusted default.
+    ``settings.json`` contains the login password hash and is always installed
+    with explicit private mode 0600.  This applies to both new files and
+    replacements, including an existing file that was accidentally loosened
+    by a permissive umask.
 
     A symlinked target is written through to its referent (same follow-through
     as the ``Path.write_text`` this replaces), rather than replacing the link
@@ -10244,15 +10243,14 @@ def _atomic_write_settings_text(path: Path, text: str) -> None:
         f".{write_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
     try:
-        mode = os.stat(write_path).st_mode & 0o777
-    except FileNotFoundError:
-        mode = 0o666 & ~_current_umask()
-    try:
         with open(tmp, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
+        # chmod the inode before os.replace installs it.  A permissive umask
+        # must never make the password-bearing settings file readable by
+        # group/other, even during an atomic replacement.
+        os.chmod(tmp, 0o600)
         os.replace(tmp, write_path)
     finally:
         try:

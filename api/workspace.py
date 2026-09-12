@@ -38,6 +38,33 @@ from api.config import (
 from api.subprocess_utils import windows_hide_flags
 
 
+_PRIVATE_STATE_FILE_MODE = 0o600
+
+
+def _atomic_write_private_text(path: Path, text: str) -> None:
+    """Atomically write private workspace metadata with an explicit mode."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_path = path.resolve(strict=False) if path.is_symlink() else path
+    tmp = write_path.with_name(
+        f".{write_path.name}.{os.getpid()}.{threading.current_thread().ident}.tmp"
+    )
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # The temporary inode is what os.replace installs.  chmod it before
+        # the rename so the process umask cannot briefly expose metadata.
+        os.chmod(tmp, _PRIVATE_STATE_FILE_MODE)
+        os.replace(tmp, write_path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 # ── Profile-aware path resolution ───────────────────────────────────────────
 
 def _profile_state_dir() -> Path:
@@ -342,8 +369,9 @@ def _migrate_global_workspaces() -> list:
         cleaned = _clean_workspace_list(raw)
         if len(cleaned) != len(raw):
             # Rewrite the cleaned version so future reads are already clean
-            _GLOBAL_WS_FILE.write_text(
-                json.dumps(cleaned, ensure_ascii=False, indent=2), encoding='utf-8'
+            _atomic_write_private_text(
+                _GLOBAL_WS_FILE,
+                json.dumps(cleaned, ensure_ascii=False, indent=2),
             )
         return cleaned
     except Exception:
@@ -359,8 +387,9 @@ def load_workspaces() -> list:
             if len(cleaned) != len(raw):
                 # Persist the cleaned version so stale entries don't keep reappearing
                 try:
-                    ws_file.write_text(
-                        json.dumps(cleaned, ensure_ascii=False, indent=2), encoding='utf-8'
+                    _atomic_write_private_text(
+                        ws_file,
+                        json.dumps(cleaned, ensure_ascii=False, indent=2),
                     )
                 except Exception:
                     logger.debug("Failed to persist cleaned workspace list")
@@ -386,7 +415,10 @@ def load_workspaces() -> list:
 def save_workspaces(workspaces: list) -> None:
     ws_file = _workspaces_file()
     ws_file.parent.mkdir(parents=True, exist_ok=True)
-    ws_file.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding='utf-8')
+    _atomic_write_private_text(
+        ws_file,
+        json.dumps(workspaces, ensure_ascii=False, indent=2),
+    )
 
 
 def get_profile_default_workspace() -> str:
@@ -468,7 +500,7 @@ def set_last_workspace(path: str) -> None:
     try:
         lw_file = _last_workspace_file()
         lw_file.parent.mkdir(parents=True, exist_ok=True)
-        lw_file.write_text(str(path), encoding='utf-8')
+        _atomic_write_private_text(lw_file, str(path))
     except Exception:
         logger.debug("Failed to set last workspace")
 
