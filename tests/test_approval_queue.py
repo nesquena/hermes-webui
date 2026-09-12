@@ -123,6 +123,8 @@ def test_chat_stream_approval_listener_renders_received_count():
     script = f"""
     const rendered = [];
     let activeSid = 'sid-browser';
+    let _capability = null;
+    function _ownsActiveStreamOrBackground() {{ return true; }}
     const source = {{ listeners: {{}}, addEventListener(name, cb) {{ this.listeners[name] = cb; }} }};
     function _applyToAnchor() {{}}
     function showApprovalForSession(sid, data, count) {{ rendered.push({{sid, data, count}}); }}

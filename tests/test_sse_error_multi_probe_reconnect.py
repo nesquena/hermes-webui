@@ -65,7 +65,7 @@ def test_staged_retry_delays_present():
 def test_probe_reconnect_helper_defined():
     # The staged retry is driven by a recursive _probeReconnect(attempt) closure.
     compact = _compact(MESSAGES_JS)
-    assert "const_probeReconnect=async(attempt=0)=>{" in compact
+    assert "const_probeReconnect=async(attempt=0,capability=_capability)=>{" in compact
 
 
 def test_first_probe_scheduled_from_retry_delays_head():
@@ -73,7 +73,7 @@ def test_first_probe_scheduled_from_retry_delays_head():
     # hard-coded 1500 — i.e. the old `setTimeout(async()=>{...},1500)` single
     # probe is gone.
     compact = _compact(MESSAGES_JS)
-    assert "setTimeout(()=>{void_probeReconnect(0);},_retryDelays[0]);" in compact
+    assert "setTimeout(()=>{void_probeReconnect(0,_capability);},_retryDelays[0]);" in compact
 
 
 def test_stage_counter_starts_at_one():
@@ -104,7 +104,7 @@ def test_next_stage_is_scheduled_before_giving_up():
     compact = _compact(MESSAGES_JS)
     assert "constnextDelay=_retryDelays[attempt+1];" in compact
     assert "if(nextDelay){" in compact
-    assert "setTimeout(()=>{void_probeReconnect(attempt+1);},nextDelay);" in compact
+    assert "setTimeout(()=>{void_probeReconnect(attempt+1,capability);},nextDelay);" in compact
 
 
 def test_handle_stream_error_only_after_retry_window_exhausted():
