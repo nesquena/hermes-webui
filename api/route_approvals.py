@@ -367,6 +367,18 @@ def reconcile_gateway_pending_mirror_locked(session_key: str) -> tuple[dict | No
     if deferred_run_entries:
         rebuilt.extend(deferred_run_entries)
 
+    # Every entry that survives reconciliation must carry a stable, actionable
+    # approval_id. Legacy/fallback agent paths can write an idless approval
+    # dict straight into the shared `tools.approval._pending` queue (bypassing
+    # WebUI's identity-assigning wrappers) — e.g. the Tirith mass-deletion
+    # guard. Without an id the browser cannot capture a response owner, so
+    # Allow/Deny no-op, the X dismissal cannot be namespaced, and the next
+    # `/api/approval/pending` poll re-renders the same card forever (#7242).
+    for entry in rebuilt:
+        if not str(entry.get("approval_id") or "").strip():
+            entry["approval_id"] = uuid.uuid4().hex
+            changed = True
+
     if rebuilt:
         if rebuilt != queue_list:
             _pending[session_key] = rebuilt
@@ -516,15 +528,26 @@ def retire_gateway_pending_mirror(
                               and str(entry.get("approval_id") or "").strip() == approval_id), None)
             retired = [match] if match else []
         else:
-            retired = [
-                entry for entry in entries
-                if _is_gateway_mirror_entry(entry)
-                and str(entry.get("run_id") or "").strip() == normalized_run_id
-            ] if normalized_run_id else [
-                entry for entry in entries
-                if _is_gateway_mirror_entry(entry)
-                and not str(entry.get("run_id") or "").strip()
-            ]
+            if normalized_run_id:
+                # Retire every pending entry bound to this run — mirrors AND
+                # plain local entries — so a run that terminated (completed,
+                # failed, cancelled, or a 60s BLOCKED timeout) cannot leave a
+                # stale pending head that re-opens the flyout (#7242).
+                retired = [
+                    entry for entry in entries
+                    if str(entry.get("run_id") or "").strip() == normalized_run_id
+                ]
+            else:
+                # Session teardown retires no-run gateway mirrors only. Plain
+                # local entries must survive: their producer is an embedded
+                # agent thread that may still be blocked on the approval, and
+                # dropping the entry would orphan it (the card must be able to
+                # come back when the session is revisited).
+                retired = [
+                    entry for entry in entries
+                    if _is_gateway_mirror_entry(entry)
+                    and not str(entry.get("run_id") or "").strip()
+                ]
             if normalized_run_id:
                 retained_gateway_queue = []
                 for entry in gateway_queue:

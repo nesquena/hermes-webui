@@ -7671,6 +7671,13 @@ function showApprovalCard(pending, pendingCount) {
     responding ? (_approvalResponding.controlChoice || _approvalResponding.choice) : null,
     responding,
   );
+  if (!_approvalCurrentId || !_approvalDisplayedOwner) {
+    // No actionable identity (legacy idless producer): render the card as an
+    // explicit unresolved state — action buttons disabled so they cannot
+    // silently no-op; X hides locally but never emits a response (an
+    // identityless deny would consume an unidentified FIFO head). (#7242)
+    _setApprovalControlsDisabled(null, true);
+  }
   _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
   _syncApprovalCollapseButton(card);
@@ -7685,9 +7692,172 @@ function showApprovalCard(pending, pendingCount) {
 
 function dismissApprovalCard() {
   const sid = _approvalSessionId;
-  if (_approvalCurrentId) _markApprovalDismissed(sid, _approvalCurrentId);
+  const approvalId = _approvalCurrentId;
+  // Guard: an approval with an in-flight Allow/Deny response owner is already
+  // being settled — the X must never race it into a concurrent deny. (#7242)
+  if (approvalId && _approvalResponseMatches(sid, approvalId)) return;
+  const owner = _captureApprovalResponseOwner();
+  if (!owner) {
+    // Idless/legacy card (no actionable approval_id) or no longer owned by
+    // the active session: hide locally but NEVER emit a response — an
+    // identityless deny would consume whatever head the legacy FIFO path pops
+    // next, denying an approval the user never saw. (#7242)
+    hideApprovalCard(true);
+    if (sid) _clearApprovalPendingForSession(sid);
+    return;
+  }
+  const {sid: ownerSid, approvalId: ownerApprovalId} = owner;
+  // Snapshot the local projection so a failed request can restore the card.
+  const entry = _approvalPendingBySession.get(ownerSid);
+  const snapshot = entry ? {pending: entry.pending, pendingCount: entry.pendingCount} : null;
+  // Durable dismissal: resolve the matching server-side pending entry (deny)
+  // so the same stale head is not re-rendered by the next poll and gateway-
+  // backed producers are unblocked instead of waiting out their 60s BLOCKED
+  // timeout. The hide is optimistic, but the local dismissal is settled ONLY
+  // from the authoritative response — a silent failure must never leave the
+  // server approval pending while the dismissal marker suppresses re-render.
+  // (#7242)
+  _markApprovalDismissed(ownerSid, ownerApprovalId);
+  _approvalClearedOwner = null;
+  // Claim the response owner BEFORE hiding so hideApprovalCard preserves the
+  // displayed owner (needed to restore the card if the deny fails).
+  _approvalResponding = {...owner, choice: "deny"};
+  _approvalResponding.controlChoice = "deny";
   hideApprovalCard(true);
-  if (sid) _clearApprovalPendingForSession(sid);
+  if (ownerSid) _clearApprovalPendingForSession(ownerSid);
+  const restoreAfterFailure = (errMsg) => {
+    _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+    if (snapshot && !_approvalPendingBySession.has(ownerSid)) {
+      _approvalPendingBySession.set(ownerSid, snapshot);
+    }
+    _restoreFailedApprovalResponse(owner, errMsg);
+  };
+  const body = {session_id: ownerSid, choice: "deny", approval_id: ownerApprovalId};
+  if (owner.runId) body.run_id = owner.runId;
+  if (owner.mirrorToken) body.mirror_token = owner.mirrorToken;
+  api("/api/approval/respond", {
+    method: "POST",
+    body: JSON.stringify(body),
+    timeoutToast: false,
+  })
+    .then(result => {
+      if (result && result.ok) {
+        // Authoritative success — the marker, hidden card and cleared
+        // projection stand; a queued successor will re-render on its own.
+        _releaseApprovalResponseOwner(owner);
+        return;
+      }
+      const errMsg = (result && result.error) ||
+        "Approval dismissal not accepted — the approval is still pending. Try again.";
+      restoreAfterFailure(errMsg);
+    })
+    .catch(err => {
+      // Parse the structured error BEFORE deciding terminality: an HTTP 409
+      // alone is not proof of settlement. The respond contract returns
+      // RETRYABLE 409s — `gateway_approval_in_progress` while another
+      // response owns the run, `gateway_run_unavailable` while the exact
+      // mirror can remain pending/retryable — and a 409 with no JSON body or
+      // unrecognized code is a proxy artifact, never backend settlement.
+      // Treating every 409 as terminal released the local response owner but
+      // kept the dismissal marker, so the fallback poll suppressed the
+      // still-pending approval and the user lost the retry affordance
+      // (re-gate 09/08).
+      let errorPayload = null;
+      if (err && typeof err.body === "string") {
+        try { errorPayload = JSON.parse(err.body); } catch (_) { /* non-JSON HTTP error body */ }
+      }
+      if (err && err.status === 404) {
+        // Authoritative: the entry (or its session) no longer exists
+        // server-side — it can never re-render. Keep it hidden. (#7242)
+        _releaseApprovalResponseOwner(owner);
+        return;
+      }
+      const code = errorPayload && errorPayload.code;
+      const errMsg = (errorPayload && (errorPayload.error || errorPayload.message))
+        || (err && err.message)
+        || "Approval dismissal not accepted.";
+      if (err && err.status === 409) {
+        if (code === "gateway_approval_in_progress") {
+          // Another response owns the run right now — the exact approval is
+          // NOT settled. Unmark/re-show/re-enable so the user (or the poll)
+          // can retry once the winner finishes.
+          restoreAfterFailure(errMsg);
+          return;
+        }
+        if (code === "gateway_run_unavailable") {
+          // The exact mirror may be gone (another actor settled it) or merely
+          // out of the current head while still pending. Re-fetch the
+          // authoritative pending state before deciding: restore when the
+          // captured tuple is still pending, render a live successor head,
+          // and keep the dismissal hidden ONLY when the re-fetch positively
+          // shows the captured tuple is absent/settled. A re-fetch that
+          // fails or answers without a pending field is not authoritative,
+          // so it must never be read as "settled".
+          void (async () => {
+            let pending = null;
+            let pendingCount = 1;
+            let fetched = false;
+            try {
+              const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(ownerSid), {timeoutToast: false});
+              if (data && typeof data === "object" && "pending" in data) {
+                pending = data.pending;
+                pendingCount = data.pending_count || 1;
+                fetched = true;
+              }
+            } catch (_) { /* re-fetch failed: not authoritative either way */ }
+            if (!fetched) {
+              // Fail closed: a rejected, 5xx or malformed re-fetch proves
+              // nothing about the captured tuple, so the untouched
+              // `pending === null` must never be read as "settled". Restore
+              // the retry affordance — the restore is a no-op when our owner
+              // is no longer current, but dropping the marker is not.
+              restoreAfterFailure(errMsg + " Try again.");
+              return;
+            }
+            if (!_approvalResponseOwnerIsCurrent(owner)) {
+              // A successor or a parallel poll took over while we re-fetched
+              // — that flow owns the card now; just release our owner.
+              _releaseApprovalResponseOwner(owner);
+              return;
+            }
+            const sameRun = !owner.runId || (
+              String((pending && pending.run_id) || "").trim() === owner.runId &&
+              String((pending && pending._gateway_mirror_token) || "").trim() === owner.mirrorToken
+            );
+            if (pending && pending.approval_id === ownerApprovalId && sameRun) {
+              // Still pending/retryable — bring the card back.
+              restoreAfterFailure(errMsg);
+              return;
+            }
+            if (pending && pending.approval_id === ownerApprovalId) {
+              // Same approval_id under a DIFFERENT run/mirror ownership: the
+              // server reused the id for another tuple, so the marker we just
+              // set (keyed by session + approval_id) would suppress a
+              // successor the user never dismissed. Drop it before rendering.
+              _unmarkApprovalDismissed(ownerSid, ownerApprovalId);
+            }
+            if (pending) {
+              // A different queue head is live now: render it so the deny
+              // affordance survives. The captured tuple stays dismissed by
+              // its own marker, which this branch never clears.
+              showApprovalForSession(ownerSid, pending, pendingCount);
+              _releaseApprovalResponseOwner(owner);
+              return;
+            }
+            // Fetched and authoritatively absent/settled — the dismissal
+            // stands hidden.
+            _releaseApprovalResponseOwner(owner);
+          })();
+          return;
+        }
+        // A 409 without a recognized retryable code is not authoritative
+        // backend settlement — restore with a retry affordance.
+        restoreAfterFailure(errMsg + " Try again.");
+        return;
+      }
+      // Network / 5xx / other — never authoritative.
+      restoreAfterFailure(errMsg + " Try again.");
+    });
 }
 
 function _syncApprovalCollapseButton(card) {
@@ -7880,7 +8050,16 @@ function _startApprovalFallbackPoll(sid) {
     _approvalFallbackPollInFlight = true;
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
-      if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
+      if (data.pending) {
+        if (data.pending.approval_id && _isApprovalDismissed(sid, data.pending.approval_id)) {
+          // Durable dismissal: the server-side head still lingers (best-effort
+          // deny may have been stale), but this tab must not re-render it or
+          // keep the attention indicator lit. (#7242)
+          _clearApprovalPendingForSession(sid);
+        } else {
+          showApprovalForSession(sid, data.pending, data.pending_count||1);
+        }
+      }
       else if (!_approvalPollingSessionMissingOrMismatched(sid)) {
         const _resolvedEntry = _approvalPendingBySession.get(sid);
         _clearApprovalPendingForSession(sid);
