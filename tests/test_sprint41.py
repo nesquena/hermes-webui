@@ -110,9 +110,10 @@ class TestIssue495TitleStreaming(unittest.TestCase):
 
     def test_streaming_emits_stream_end_event(self):
         self.assertIn(
-            "put_event('stream_end', {'session_id': session_id})",
+            "put_event('stream_end', {'session_id': stream_owner_id or session_id})",
             STREAMING_PY,
-            "background title path should end the SSE stream with stream_end",
+            "background title path should end the SSE stream with stream_end "
+            "(stream_owner_id is the original stream-owner session id)",
         )
 
     def test_frontend_listens_for_title_event(self):

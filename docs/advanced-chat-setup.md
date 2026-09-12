@@ -93,6 +93,24 @@ The WebUI's `auto_title_refresh_every` setting remains a separate control for
 periodic refreshes of already-generated titles; it does not re-enable
 automatic generation when the auxiliary flag is off.
 
+### Invalid model output and title recovery
+
+A title model occasionally replies with an options menu instead of one title
+(for example `Good title options: "A", "B"`). WebUI rejects structurally
+multi-candidate replies — a menu preamble followed by two or more list
+entries or quoted items — instead of persisting the raw menu as the title.
+A preamble with a single remaining phrase (for example
+`Title Suggestions: Migration Strategy`) is kept, since that is a legitimate
+title.
+
+While a rejected reply leaves the automatic title unresolved, the provisional
+title stays in place and the next completed exchange is used as the source for
+a retry, so a session that opens with a warm-up message can still get a real
+title from the substantive request that follows. The same recovery applies to
+sessions that already persisted a menu-style title before this behavior
+existed: they re-enter self-heal on the next turn. Manual renames always win;
+recovery never overrides a user-set title.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced

@@ -8,6 +8,7 @@ import queue
 import hashlib
 import sys
 import threading
+import time
 import types
 from unittest import mock
 
@@ -2454,6 +2455,14 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
     ]
     queued_events = [item[0] for item in list(stream_queue.queue)]
     assert "done" in queued_events
+    # The PR's unresolved-title recovery picks this session's latest completed
+    # exchange ("hello" / "Stream reply"), so the background title thread now
+    # runs and owns stream_end (emitted in its finally block, after the aux
+    # title attempt). Wait for it instead of sampling the queue synchronously.
+    deadline = time.monotonic() + 10.0
+    while "stream_end" not in queued_events and time.monotonic() < deadline:
+        threading.Event().wait(0.05)
+        queued_events = [item[0] for item in list(stream_queue.queue)]
     assert "stream_end" in queued_events
     assert "cancel" not in queued_events
 
@@ -2651,3 +2660,90 @@ def test_process_wakeup_pause_does_not_suppress_explicit_non_wakeup_turn(tmp_pat
     assert saved is not None
     assert saved.process_wakeup_pause["suppressed_count"] == 2
     assert "last_suppressed_at" not in saved.process_wakeup_pause
+
+def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monkeypatch):
+    """After context compression rotates the session ID mid-stream, the
+    background title worker must load/persist the title on the continuation
+    session but emit stream_end with the ORIGINAL _run_agent_streaming
+    session id. The client captured activeSid = original id and its
+    stream_end fence (static/messages.js) rejects mismatched ids, which
+    would leave the EventSource open forever."""
+    stream_id = "streaming-rotated-title-owner"
+    session_id = "streaming_rotated_title_owner"
+    continuation_id = "streaming_rotated_title_owner_cont"
+    stream_queue = queue.Queue()
+    config.STREAMS[stream_id] = stream_queue
+
+    previous_messages = [{"role": "user", "content": "before", "timestamp": 1.0}]
+    session = Session(
+        session_id=session_id,
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="test-provider",
+        messages=list(previous_messages),
+        context_messages=list(previous_messages),
+        active_stream_id=stream_id,
+        pending_user_message="hello",
+        pending_user_source="webui",
+    )
+    session.save()
+    models.SESSIONS[session_id] = session
+
+    class _RotatingAgent(_MockAgent):
+        """Simulates compression rotating the agent session id."""
+
+        def run_conversation(self, **kwargs):
+            self.session_id = continuation_id
+            return {
+                "messages": [
+                    {"role": "user", "content": "hello", "timestamp": 2.0},
+                    {"role": "assistant", "content": "Stream reply", "timestamp": 3.0},
+                ]
+            }
+
+    captured_kwargs = {}
+    real_update = streaming._run_background_title_update
+
+    def _recording_update(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return real_update(*args, **kwargs)
+
+    monkeypatch.setattr(streaming, "_run_background_title_update", _recording_update)
+    monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux",
+                        lambda *a, **k: ("Rotated Title Owner", "llm_aux", "Rotated Title Owner"))
+
+    with mock.patch.object(streaming, "_get_ai_agent", return_value=_RotatingAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        streaming._run_agent_streaming(
+            session_id=session_id,
+            msg_text="hello",
+            model="test-model",
+            model_provider="test-provider",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    # Wait (bounded) for the background title thread terminal events.
+    deadline = time.monotonic() + 15.0
+    end_payloads = []
+    while time.monotonic() < deadline:
+        end_payloads = [
+            item[1].get("session_id")
+            for item in list(stream_queue.queue)
+            if item[0] == "stream_end"
+        ]
+        if end_payloads:
+            break
+        threading.Event().wait(0.05)
+
+    assert captured_kwargs.get("stream_owner_id") == session_id, (
+        "spawn site must pass the ORIGINAL _run_agent_streaming session id as "
+        "stream_owner_id, not the rotated continuation id"
+    )
+    assert end_payloads, "stream_end was never emitted by the background title worker"
+    assert end_payloads[-1] == session_id, (
+        f"stream_end carried {end_payloads[-1]!r} instead of the original stream "
+        f"owner {session_id!r}; the client SSE fence would reject it and the "
+        "EventSource would stay open"
+    )

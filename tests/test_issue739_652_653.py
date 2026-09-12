@@ -106,9 +106,12 @@ class TestStreamEndSessionId:
 
     def test_background_title_thread_stream_end_uses_session_id_param(self):
         """Background title thread also emits stream_end with original session_id."""
-        # In _run_background_title_update: put_event('stream_end', {'session_id': session_id})
-        # The session_id param is passed from the caller with the original value
-        assert "put_event('stream_end', {'session_id': session_id})" in streaming_src
+        # In _run_background_title_update: put_event('stream_end', {'session_id': stream_owner_id})
+        # stream_owner_id is the ORIGINAL _run_agent_streaming session id passed
+        # by the spawn site (kwargs={'stream_owner_id': session_id}) — it stays
+        # the original value even when compression rotates the title-target id.
+        assert "put_event('stream_end', {'session_id': stream_owner_id or session_id})" in streaming_src
+        assert "kwargs={'stream_owner_id': session_id}" in streaming_src
 
     def test_s_session_id_not_used_in_stream_end(self):
         """s.session_id (which may be rotated after compaction) must not appear in stream_end."""
