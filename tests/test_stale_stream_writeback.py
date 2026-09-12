@@ -150,6 +150,15 @@ def test_stale_stream_clear_trusts_completed_run_journal_instead_of_adding_marke
     s.active_stream_id = stream_id
     s.pending_user_message = "new prompt"
     s.pending_started_at = 1000.0
+    # Round 5 (2026-09-08 re-gate): missing timestamps now FAIL CLOSED — the
+    # production eager checkpoint stamps timestamp + active-turn token
+    # (routes._checkpoint_user_message_for_eager_session_save), so the
+    # current-turn tail row must carry that identity for the completed-stream
+    # suppress decision to recognize it as already materialized.
+    s.messages[-2]["timestamp"] = 1000.0
+    s.messages[-2]["_active_turn_token"] = models.build_active_turn_token(
+        stream_id, 1000.0,
+    )
     s.save()
     models.SESSIONS[sid] = s
     append_run_event(sid, stream_id, "done", {"session": {"session_id": sid}})

@@ -141,6 +141,58 @@ On startup, for each journal file:
   - add a visible interruption marker, not a fake assistant answer.
 - Existing `.json.bak` and `state.db` recovery still run first so the sidecar is as complete as possible before journal reconciliation.
 
+## Recovery repair identity and dedupe contract
+
+Repair paths that replay journaled output into an existing transcript
+(`_recover_journaled_output_and_terminal_error`) must pass
+`dedupe_existing=True` whenever the repair can run more than once for the same
+stream (stale-pending repair, lazy retry, completed-stream repair). Every
+`get_session()` cache-miss repair that replays without dedupe appends a fresh
+batch of recovered rows; repeated repairs then grow the transcript
+exponentially (observed: 1024 duplicate empty `_recovered_from_run_journal`
+rows after 10 repair triggers).
+
+When dedupe is enabled, the repair reuses an existing transcript row instead of
+appending a duplicate. The matching rules are identity-scoped, not content-only:
+
+- **Turn identity is token-first.** The authoritative owner of the current turn
+  is the active-turn token built from `(stream_id, pending_started_at)`
+  (`build_active_turn_token()`), stamped by `stamp_message_source()` on
+  materialized rows as `_active_turn_token`. A message belongs to the current
+  turn when its token equals the session's current token. Full-precision
+  `pending_started_at` is preserved end-to-end; callers must not truncate it
+  (`int()`, whole-second rounding) before ownership checks.
+- **Checkpoint fallback is full identity, not text.** When the token is
+  unavailable (legacy sidecars, pre-stamping rows), ownership falls back to the
+  pending checkpoint: normalized text + exact full-precision timestamp +
+  source + attachments, all equal. A missing, non-finite, or imprecise
+  timestamp fails closed toward appending the row; a duplicate row is
+  recoverable, a lost user prompt is not.
+- **Pure text equality is never ownership evidence.** An earlier turn with an
+  identical prompt must not be treated as the current turn, and
+  `_pending_user_row_already_materialized()` may skip appending the pending
+  user turn only on token identity or full checkpoint identity — never on text
+  alone.
+- **Content dedupe is stream- and turn-scoped.** Assistant content lookup
+  (`_find_existing_assistant_for_journal_content`) only matches rows recovered
+  from the same stream (`_recovered_stream_id`/`_stream_id`) and only rows at
+  or after the current-turn boundary (`current_turn_min_idx`), so a stale
+  stream's journal output cannot suppress or relocate the current turn's
+  recovered output.
+- **Tool-card dedupe proves ownership.** `_journal_tool_already_present()`
+  matches tagged cards only within the same stream. Untagged cards must prove
+  current-turn ownership through a valid integer `assistant_msg_idx` anchor at
+  or after the turn boundary that resolves to an assistant row owning the
+  current turn; an invalid, out-of-bounds, or unprovable anchor fails closed
+  toward appending the recovered card. Legacy replay mode (no authoritative
+  token, no pending metadata — e.g. lazy retry after reopen) accepts the
+  boundary-bounds check as proof so a retry does not re-append the persisted
+  card.
+
+These rules exist to keep one assistant-turn owner per recovered turn: dedupe
+must never consume the current turn's recovered content, and failure to prove
+ownership must append, not suppress.
+
 ## Audit additions
 
 `audit_session_recovery()` can report:
