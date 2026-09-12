@@ -116,8 +116,7 @@ def test_handle_chat_steer_leaves_mismatched_cached_agent_untouched(monkeypatch)
         "_close_cached_agent_entry_at_session_boundary",
         lambda session_id, entry: closed_entries.append((session_id, entry)),
     )
-    config.SESSION_AGENT_CACHE.clear()
-    config.SESSION_AGENT_CACHE["requested"] = (wrong_agent, "sig")
+    monkeypatch.setattr(config, "SESSION_AGENT_CACHE", {"requested": (wrong_agent, "sig")})
     handler = Handler()
 
     _handle_chat_steer(handler, {"session_id": "requested", "text": "please steer"})
@@ -128,5 +127,3 @@ def test_handle_chat_steer_leaves_mismatched_cached_agent_untouched(monkeypatch)
     assert config.SESSION_AGENT_CACHE["requested"] == (wrong_agent, "sig")
     assert closed_entries == []
     assert steered == []
-
-    config.SESSION_AGENT_CACHE.clear()
