@@ -2216,7 +2216,13 @@ $('importFileInput').onchange=async(e)=>{
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
+// Preview lifecycle transition: advance the preview generation and invalidate
+// cached raw-content authority so in-flight openFile reads or delayed saves
+// fail closed as stale and cannot repopulate preview state or copy controls
+// after the user closed the preview.
 function clearPreview(opts={}){
+  if(typeof bumpPreviewGeneration==='function') bumpPreviewGeneration();
+  if(typeof invalidatePreviewRawContent==='function') invalidatePreviewRawContent();
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
