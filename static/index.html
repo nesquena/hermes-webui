@@ -19,6 +19,7 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <script>(function(){try{var _hadAppearance=localStorage.getItem('hermes-theme')!==null||localStorage.getItem('hermes-skin')!==null;var themes={light:1,dark:1,system:1},skins={codex:1,terracotta:1,default:1,ares:1,mono:1,graphite:1,github:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1,'neon-soft':1,'neon-paint':1,zeus:1,'verdigris':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark');var pendingExt=s&&s!=='default'&&!skins[s]&&!legacy[s];var skin=skins[s]?s:(pendingExt?s:(m?m[1]:'default'));if(_hadAppearance){localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);}if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
 <script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
+<script>(function(){try{var w=localStorage.getItem('hermes-content-width');if(w&&w!=='default'&&(w==='wide'||w==='full'))document.documentElement.dataset.contentWidth=w;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
@@ -621,8 +622,33 @@
                 <path d="M18 5v14"/>
                 <path d="M22 10v4"/>
               </svg>
-            </button>
-            <div class="composer-divider" aria-hidden="true"></div>
+              </button>
+              <div class="composer-content-width-wrap" id="composerContentWidthWrap">
+              <button class="icon-btn composer-content-width-btn has-tooltip" id="composerContentWidthBtn" type="button" data-tooltip="Message width: Default" aria-label="Message width: Default" aria-haspopup="listbox" aria-expanded="false" aria-controls="composerContentWidthPopup">
+              <svg class="content-width-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <line class="content-width-icon-line" x1="3" y1="6" x2="21" y2="6"></line>
+                <line class="content-width-icon-line" x1="3" y1="12" x2="21" y2="12"></line>
+                <line class="content-width-icon-line" x1="3" y1="18" x2="21" y2="18"></line>
+                <line class="content-width-icon-boundary" x1="3" y1="4" x2="3" y2="20"></line>
+                <line class="content-width-icon-boundary" x1="21" y1="4" x2="21" y2="20"></line>
+              </svg>
+              </button>
+              <div class="composer-content-width-popup" id="composerContentWidthPopup" role="listbox" aria-label="Message width" hidden>
+              <button type="button" role="option" data-content-width-value="default" aria-label="Default message width" aria-selected="false">
+                <svg class="content-width-icon" viewBox="0 0 24 24" aria-hidden="true"><line class="content-width-icon-line" x1="3" y1="6" x2="21" y2="6"></line><line class="content-width-icon-line" x1="3" y1="12" x2="21" y2="12"></line><line class="content-width-icon-line" x1="3" y1="18" x2="21" y2="18"></line><line class="content-width-icon-boundary" x1="3" y1="4" x2="3" y2="20"></line><line class="content-width-icon-boundary" x1="21" y1="4" x2="21" y2="20"></line></svg>
+                <span>Default</span>
+              </button>
+              <button type="button" role="option" data-content-width-value="wide" aria-label="Wide message width" aria-selected="false">
+                <svg class="content-width-icon" viewBox="0 0 24 24" aria-hidden="true"><line class="content-width-icon-line" x1="3" y1="6" x2="21" y2="6"></line><line class="content-width-icon-line" x1="3" y1="12" x2="21" y2="12"></line><line class="content-width-icon-line" x1="3" y1="18" x2="21" y2="18"></line><line class="content-width-icon-boundary" x1="3" y1="4" x2="3" y2="20"></line><line class="content-width-icon-boundary" x1="21" y1="4" x2="21" y2="20"></line></svg>
+                <span>Wide</span>
+              </button>
+              <button type="button" role="option" data-content-width-value="full" aria-label="Full message width" aria-selected="false">
+                <svg class="content-width-icon" viewBox="0 0 24 24" aria-hidden="true"><line class="content-width-icon-line" x1="3" y1="6" x2="21" y2="6"></line><line class="content-width-icon-line" x1="3" y1="12" x2="21" y2="12"></line><line class="content-width-icon-line" x1="3" y1="18" x2="21" y2="18"></line><line class="content-width-icon-boundary" x1="3" y1="4" x2="3" y2="20"></line><line class="content-width-icon-boundary" x1="21" y1="4" x2="21" y2="20"></line></svg>
+                <span>Full</span>
+              </button>
+              </div>
+              </div>
+              <div class="composer-divider" aria-hidden="true"></div>
             <button class="yolo-pill" id="yoloPill" type="button" onclick="cmdYolo()" style="display:none" title="YOLO mode — click to disable" data-i18n-title="yolo_pill_title_active">
               <span class="yolo-pill-icon" aria-hidden="true">⚡</span>
               <span class="yolo-pill-label" data-i18n="yolo_pill_label">YOLO</span>

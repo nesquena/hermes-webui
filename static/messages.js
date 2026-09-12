@@ -407,6 +407,16 @@ function enhanceMarkdownTables(root){
     table.setAttribute('data-markdown-table-enhanced','1');
     bodyRows.forEach((row,idx)=>{ row.dataset.markdownTableOriginalIndex=String(idx); });
 
+    // Keep wide markdown tables usable without forcing every cell to nowrap.
+    // The filter belongs inside the same surface so it stays aligned with the
+    // table while the table itself scrolls horizontally on narrow layouts.
+    if(table.parentElement&&!table.closest('.md-table-scroll')){
+      const wrap=document.createElement('div');
+      wrap.className='md-table-scroll';
+      table.parentElement.insertBefore(wrap,table);
+      wrap.appendChild(table);
+    }
+
     if(bodyRows.length>=4&&table.parentElement){
       const filter=document.createElement('input');
       filter.type='search';

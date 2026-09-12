@@ -103,6 +103,9 @@ Use three explicit font tokens:
   `var(--font-ui)` in `static/style.css`
 - `--font-mono`: code, file paths, command lines, tool payloads, technical logs,
   and terminal output
+- `--font-emoji`: color emoji fallback; Apple platforms use Apple Color Emoji,
+  Chrome/Edge can load the self-hosted Noto Color Emoji COLRv1 font, and Segoe
+  UI Emoji remains the last Windows fallback
 
 Use semantic tokens for typography. Keep prose on `--font-conversation` by
 default so it tracks `--font-ui` whenever a skin intentionally retunes UI type.

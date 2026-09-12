@@ -9839,6 +9839,7 @@ _SETTINGS_DEFAULTS = {
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
+    "content_width": "default",  # default | wide | full — message content width preset
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "render_user_markdown": False,  # opt-in: render full markdown in user messages (#3870)
     "large_text_paste_as_attachment": True,  # convert very large composer text pastes into .md attachments by default
@@ -10128,6 +10129,7 @@ _SETTINGS_ENUM_VALUES = {
     "sidebar_density": {"compact", "detailed"},
     "update_channel": {"stable", "experimental"},
     "font_size": {"small", "default", "large", "xlarge"},
+    "content_width": {"default", "wide", "full"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "default_message_mode": {"queue", "interrupt", "steer"},
     "chat_activity_display_mode": {"compact_worklog", "transparent_stream", "hide_all_activity"},

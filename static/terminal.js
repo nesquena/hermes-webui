@@ -122,7 +122,7 @@ function _terminalTheme(){
 function _terminalMonoFont(){
   return _terminalCssVar(
     '--font-mono',
-    'ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace'
+    'ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono","Apple Color Emoji","Noto Color Emoji","Segoe UI Emoji","Segoe UI Symbol",monospace'
   );
 }
 
