@@ -9,7 +9,7 @@ Tests cover the four new branches in _apply_update_inner():
   4. pull fails + generic fallback  → raw git output truncated at 300 chars
 """
 from pathlib import Path
-from unittest.mock import patch, call, MagicMock
+from unittest.mock import patch, MagicMock
 import subprocess
 
 import pytest

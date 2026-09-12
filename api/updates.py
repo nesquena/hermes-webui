@@ -1759,7 +1759,6 @@ def _schedule_restart(delay: float = 2.0) -> None:
     from api.config import enter_restart_drain, exit_restart_drain
 
     def _do():
-        import time
         # Enter the drain state BEFORE waiting: from this moment new local and
         # Gateway run admission is refused (RunAdmissionDrainingError /
         # 503 restart_draining), so no work can start that this process would

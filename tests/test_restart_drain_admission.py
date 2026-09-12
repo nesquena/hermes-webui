@@ -177,7 +177,6 @@ def test_schedule_restart_enters_drain_before_wait(monkeypatch, tmp_path):
     from api import config, updates
 
     monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
-    marker = tmp_path / f"{os.getpid()}.json"
     assert not config.restart_drain_active()
 
     milestones = []
