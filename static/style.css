@@ -3631,6 +3631,11 @@ body.resizing .sidebar{transition:none!important;}
   animation:wlpulse 1.3s ease-in-out infinite;
 }
 .tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+/* ── Kaomoji busy indicator (ported from hermes-cli TUI) ── */
+.kaomoji-busy{display:inline-block;font-family:inherit;line-height:1;vertical-align:middle;opacity:.85;min-width:2.2em;text-align:center;}
+.thinking-card-icon.kaomoji-busy{font-size:15px;}
+.agent-kaomoji{font-size:12px;}
+.tool-card-kaomoji{font-size:12px;margin-right:4px;}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
