@@ -673,7 +673,7 @@ def test_scene_renderer_allows_prose_tool_prose_tool_interleaving():
 
     assert "currentTools=null;" in render
     assert render.index("if(row.role==='tool')") < render.index("}else{")
-    assert render.index("currentTools=null;") < render.index("list.appendChild(node);")
+    assert render.index("currentTools=null;") < render.index("children.push(node);")
 
 
 def test_anchor_tool_preview_slot_stays_empty_for_result_text():
@@ -1199,7 +1199,7 @@ def test_live_anchor_scene_snapshot_renders_transparent_rows_before_compact_gate
     assert "turn.setAttribute('data-anchor-scene-live-owner','1')" in transparent
     assert "turn.setAttribute('data-anchor-stream-id',String(streamId||''))" in transparent
     assert "turn.setAttribute('data-live-assistant-turn','1')" in transparent
-    assert "_anchorSceneTransparentNodeForRow(row,{" in transparent
+    assert "_anchorSceneTransparentNodeForRow(row,rowOpts)" in transparent
     assert "live:true" in transparent
     assert "streamId:streamId||S.activeStreamId||''" in transparent
     assert "sessionId:S.session&&S.session.session_id" in transparent
@@ -1422,7 +1422,10 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_rehydrateTransparentLiveRow'));
     eval(extractFunc('_refreshTransparentThinkingLiveRow'));
     eval(extractFunc('_refreshTransparentLiveRow'));
-    eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
+    document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneDataRowKey'));
+eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const existingTurn=global._createAssistantTurn();
 existingTurn.id='liveAssistantTurn';

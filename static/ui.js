@@ -12559,8 +12559,11 @@ function _applyTransparentRowFading(turn){
     // Newest = full opacity; each step back drops by 1 (floors at 5).
     const stepsFromEnd=total-1-i;
     if(stepsFromEnd<=0){row.removeAttribute('data-transparent-fade');continue;}
-    const step=Math.min(5,stepsFromEnd);
-    row.setAttribute('data-transparent-fade',String(step));
+    const step=String(Math.min(5,stepsFromEnd));
+    // Prose updates do not change recency: avoid no-op attribute mutations.
+    if(row.getAttribute('data-transparent-fade')!==step){
+      row.setAttribute('data-transparent-fade',step);
+    }
   }
 }
 // Resolve the assistant message that carries a transparent turn's settled
@@ -13389,33 +13392,78 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
+// Tool DOM is expensive and usually immutable while prose streams. Keep the
+// signature on the node, not in a global cache: removing a turn drops its cache,
+// and HTML-restored nodes take the normal build/rehydration path once. Include
+// the full row so in-place result/argument corrections cannot reuse stale HTML.
+function _anchorSceneToolRenderSignature(row, opts){
+  if(!row||row.role!=='tool') return null;
+  return JSON.stringify([row,opts||{},document.documentElement.lang,
+    typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
+}
+function _anchorSceneDataRowKey(row, streamId){
+  const id=String(row.row_id||row.local_id||'').trim();
+  if(!id) return '';
+  return `${String(streamId||'').trim()}\u0000${id}\u0000${String(row.role||'activity').trim()}\u0000${String(row.source_event_type||'').trim()}`;
+}
+function _anchorScenePlaceChildren(parent, nodes){
+  let next=null;
+  for(let i=nodes.length-1;i>=0;i--){
+    const node=nodes[i];
+    if(node.parentNode!==parent||node.nextSibling!==next) parent.insertBefore(node,next);
+    next=node;
+  }
+  const keep=new Set(nodes);
+  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
+}
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
-  list.innerHTML='';
-  let wrote=false;
+  const existing=new Map();
+  list.querySelectorAll('[data-anchor-scene-row="1"]').forEach(node=>{
+    const key=_transparentLiveRowKey(node,'');
+    if(key) existing.set(key,node);
+  });
+  const children=[];
   let currentTools=null;
+  let toolNodes=[];
+  const flushTools=()=>{
+    if(currentTools){
+      const mounted=Array.from(currentTools.querySelectorAll('[data-anchor-row-role="tool"]'));
+      const unchanged=mounted.length===toolNodes.length&&mounted.every((node,i)=>node===toolNodes[i]);
+      if(!unchanged) _anchorScenePlaceChildren(currentTools,toolNodes);
+      currentTools._anchorSceneToolsStable=unchanged;
+    }
+    currentTools=null;
+    toolNodes=[];
+  };
   for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,opts);
+    const key=_anchorSceneDataRowKey(row,'');
+    const previous=key?existing.get(key):null;
+    const signature=_anchorSceneToolRenderSignature(row,opts);
+    const node=signature&&previous&&previous._anchorToolRenderSignature===signature
+      ? previous : _anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    if(signature) node._anchorToolRenderSignature=signature;
     if(row.role==='tool'){
       if(!currentTools){
-        currentTools=document.createElement('div');
+        const parent=previous&&previous.closest('.wl-step-tools[data-worklog-tools="1"]');
+        currentTools=parent&&parent.parentElement===list&&!children.includes(parent)
+          ? parent : document.createElement('div');
         currentTools.className='wl-step-tools tool-worklog-tools';
         currentTools.setAttribute('data-worklog-tools','1');
-        list.appendChild(currentTools);
+        children.push(currentTools);
       }
-      currentTools.appendChild(node);
+      toolNodes.push(node);
     }else{
-      currentTools=null;
-      list.appendChild(node);
+      flushTools();
+      children.push(node);
     }
-    wrote=true;
   }
-  if(wrote){
-    _syncToolCallGroupSummary(group);
-  }
-  return wrote;
+  flushTools();
+  _anchorScenePlaceChildren(list,children);
+  if(children.length) _syncToolCallGroupSummary(group);
+  return !!children.length;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -13655,8 +13703,14 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
+  const activityKey=`live:${streamId||S.activeStreamId||'anchor'}`;
+  const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
     el.setAttribute('aria-hidden','true');
@@ -13748,12 +13802,21 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const renderedRows=[];
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
-    const node=_anchorSceneTransparentNodeForRow(row,{
+    const rowOpts={
       live:true,
       settled:false,
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
-    });
+    };
+    const signature=_anchorSceneToolRenderSignature(row,rowOpts);
+    const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
+    const cached=dataKey?preserveByKey.get(dataKey):null;
+    if(signature&&cached&&cached._anchorToolRenderSignature===signature){
+      preserveByKey.delete(dataKey);
+      renderedRows.push(cached);
+      continue;
+    }
+    const node=_anchorSceneTransparentNodeForRow(row,rowOpts);
     if(!node) continue;
     const key = _transparentLiveRowKey(node, activeStreamId);
     const existing = key ? preserveByKey.get(key) : null;
@@ -13764,13 +13827,18 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
+    if(signature) renderedNode._anchorToolRenderSignature=signature;
     renderedRows.push(renderedNode);
   }
-  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
-    node &&
-    node.parentElement===blocks &&
-    node.nextSibling===expectedNextSibling
-  );
+  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>{
+    if(!node||node.parentElement!==blocks) return false;
+    let next=node.nextSibling;
+    // Streaming may insert a hidden legacy prose anchor between visible rows.
+    // It owns stream metadata, not scene order; moving an unchanged tool past
+    // it needlessly clears selection in Safari/Chromium.
+    while(next&&next.nodeType===1&&next.hidden&&next.getAttribute('data-live-assistant')==='1') next=next.nextSibling;
+    return next===expectedNextSibling;
+  };
   let expectedNextSibling=(liveFooter&&liveFooter.parentElement===blocks) ? liveFooter : null;
   for(let i=renderedRows.length-1;i>=0;i--){
     const renderedNode=renderedRows[i];
@@ -18747,6 +18815,9 @@ function _toolGroupIcon(rows){
 }
 function _syncToolRowsContainer(tools, isLiveWorklog){
   if(!tools) return;
+  // Scene reconciliation already proved these exact card nodes unchanged.
+  // Do not detach them just to recreate an identical disclosure wrapper.
+  if(tools._anchorSceneToolsStable) return;
   const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
   const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);

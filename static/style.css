@@ -3618,7 +3618,8 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-@keyframes wlpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-bg-strong);}50%{box-shadow:0 0 0 5px rgba(255,215,0,0);}}
+/* Opacity avoids repainting the surrounding scene on every pulse frame. */
+@keyframes wlpulse{0%,100%{opacity:.45;}50%{opacity:1;}}
 .tool-card-running-dot{
   display:inline-block;
   width:7px;
@@ -3631,6 +3632,9 @@ body.resizing .sidebar{transition:none!important;}
   animation:wlpulse 1.3s ease-in-out infinite;
 }
 .tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+@media (prefers-reduced-motion:reduce){
+  .tool-card-running-dot,.tl-rundot{animation:none;}
+}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
@@ -4337,9 +4341,14 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-progress::after{
   content:none;
 }
+/* The running segment is 60% of the track. Translate it across the clip
+   instead of changing offsets and relaying out the transcript each frame. */
 @keyframes transparent-progress-shimmer{
-  0%{left:0;right:100%;}
-  100%{left:100%;right:0;}
+  0%{transform:translateX(-100%);}
+  100%{transform:translateX(200%);}
+}
+@media (prefers-reduced-motion:reduce){
+  .transparent-event-progress[data-progress-running="1"]::before{animation:none;}
 }
 .transparent-event-row + .transparent-event-row::before{
   content:none;
