@@ -1421,6 +1421,13 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_kanban_sessions">Surface kanban worker runs as conversations in the sidebar. Only active when non-WebUI sessions are enabled. Defaults off; worker runs are internal and can flood the sidebar.</div>
             </div>
+            <div class="settings-field" id="settingsShowSubagentSessionsField" style="margin-left:24px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowSubagentSessions" style="width:15px;height:15px;accent-color:var(--accent)" checked>
+                <span data-i18n="settings_label_subagent_sessions">Show delegated subagent sessions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_subagent_sessions">Surface delegated subagent (child) sessions in the sidebar. When disabled, subagent sessions spawned by delegate_task are hidden from the conversation list but remain accessible through their parent.</div>
+            </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowPreviousMessagingSessions" style="width:15px;height:15px;accent-color:var(--accent)">
