@@ -716,9 +716,9 @@ def main() -> None:
 
     try:
         signal.signal(signal.SIGTERM, _request_shutdown)
+        signal.signal(signal.SIGINT, _request_shutdown)  # Ctrl-C / ctl.sh daemons (#7078)
     except (ValueError, OSError):
-        # Not on the main thread (e.g. embedded/test harness); skip handler.
-        logger.debug("Could not install SIGTERM handler", exc_info=True)
+        logger.debug("Could not install shutdown signal handlers", exc_info=True)
 
     try:
         httpd.serve_forever()
