@@ -38,6 +38,7 @@ from api.config import (
     _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
+    peek_stream,
     stream_owner_session_id,
     session_writeback_owner,
     clear_session_writeback_owner_if_owned,
@@ -189,17 +190,40 @@ def _compact_for_echo_compare(value: str) -> str:
 
 
 def _strip_compact_echo_suffix(value: str, suffix: str, *, search_window: int = 4096) -> tuple[str, bool]:
-    """Remove ``suffix`` from ``value`` when they match after whitespace folding."""
+    """Remove ``suffix`` from ``value`` when they match after whitespace folding.
+
+    The search window is folded once and the cut point is then located by
+    walking backwards across the echo itself. The previous implementation
+    probed every candidate cut index and re-folded the whole remaining tail for
+    each probe, which is quadratic in the window size: a 6000-character final
+    message cost seconds of CPU, held under the GIL, stalling every other
+    stream in the process.
+
+    ``str.isspace`` is used for the backwards walk instead of the ``\\s``
+    pattern used by :func:`_compact_for_echo_compare`. The two agree on every
+    Unicode code point, so the folded view and the walk stay consistent.
+    """
     raw = str(value or '')
     candidate = _compact_for_echo_compare(suffix)
     if not raw or not candidate:
         return raw, False
     tail = raw[-max(len(str(suffix or '')) * 3, search_window):]
     offset = len(raw) - len(tail)
-    for idx in range(len(tail) + 1):
-        if _compact_for_echo_compare(tail[idx:]) == candidate:
-            return raw[: offset + idx].rstrip(), True
-    return raw, False
+    compact_tail = _compact_for_echo_compare(tail)
+    if len(candidate) > len(compact_tail) or not compact_tail.endswith(candidate):
+        return raw, False
+    # Consume exactly as many non-whitespace characters as the folded suffix
+    # holds; ``idx`` then sits on the first character of the echo. Whitespace
+    # sitting between the kept text and the echo is removed by ``rstrip``,
+    # which is why this lands on the same result as the leftmost cut index the
+    # probing loop used to return.
+    remaining = len(candidate)
+    idx = len(tail)
+    while remaining and idx:
+        idx -= 1
+        if not tail[idx].isspace():
+            remaining -= 1
+    return raw[: offset + idx].rstrip(), True
 
 
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
@@ -1867,6 +1891,44 @@ def _find_active_turn_checkpoint_index(result_messages, previous_context, identi
     return None
 
 
+def _active_turn_boundary(result_messages, previous_context, identity, msg_text):
+    """Index in ``result_messages`` where the current turn starts (0 = all current).
+
+    Proof: active-turn token/index authority, else the last prompt-matching user
+    row AT OR AFTER a content-matching previous-context prefix; else 0 (fail closed).
+    """
+    result_messages = list(result_messages or [])
+    if not result_messages:
+        return 0
+    checkpoint_idx = _find_active_turn_checkpoint_index(
+        result_messages, previous_context, identity, msg_text,
+    )
+    if checkpoint_idx is not None:
+        return checkpoint_idx
+    # A content-only prefix is NOT ownership proof: _message_identity ignores
+    # ids/timestamps, so a compacted current-only result can echo old context.
+    previous_context = list(previous_context or [])
+    candidate_start = 0
+    if (
+        previous_context
+        and len(result_messages) > len(previous_context)
+        and _messages_have_prefix(result_messages, previous_context)
+    ):
+        candidate_start = len(previous_context)
+    expected_text = identity.get('text') if isinstance(identity, dict) else None
+    expected = _normalize_user_text(expected_text if expected_text is not None else msg_text)
+    if expected:
+        for idx in range(len(result_messages) - 1, candidate_start - 1, -1):
+            message = result_messages[idx]
+            if (
+                isinstance(message, dict)
+                and message.get('role') == 'user'
+                and _normalize_user_text(_message_text(message.get('content'))) == expected
+            ):
+                return idx
+    return 0
+
+
 def _materialize_active_turn_user(identity, msg_text, source):
     checkpoint = identity.get('checkpoint') if isinstance(identity, dict) else None
     message = (
@@ -1986,8 +2048,9 @@ def _prepare_marker_clean_writeback(
     previous_context_messages,
     result_messages,
     active_turn_identity=None,
+    msg_text=None,
 ):
-    """Return marker-cleaned rows, next context rows, and nudge provenance."""
+    """Return marker-cleaned rows, next context rows, nudge provenance, boundary."""
     cleaned, has_verification_nudge = _clean_synthetic_control_messages_with_provenance(
         result_messages
     )
@@ -2000,14 +2063,23 @@ def _prepare_marker_clean_writeback(
             cleaned,
             list(previous_context_messages or []),
             provenance,
+            0,
         )
     if cleaned:
+        # The boundary is resolved BEFORE any restoration and reused by every
+        # restore below, so the contract is decided once per settle.
+        boundary = _active_turn_boundary(
+            cleaned, previous_context_messages, active_turn_identity, msg_text,
+        )
         return (
             cleaned,
-            _restore_reasoning_metadata(previous_context_messages, cleaned),
+            _restore_reasoning_metadata_before_boundary(
+                previous_context_messages, cleaned, boundary,
+            ),
             provenance,
+            boundary,
         )
-    return [], list(previous_context_messages or []), provenance
+    return [], list(previous_context_messages or []), provenance, 0
 
 
 def _annotate_media_snapshots_for_settled_messages(messages) -> None:
@@ -2041,10 +2113,12 @@ def _settle_result_messages(
         result_messages,
         next_context_messages,
         verification_nudge_provenance,
+        current_turn_boundary,
     ) = _prepare_marker_clean_writeback(
         previous_context_messages,
         result_messages,
         active_turn_identity,
+        msg_text,
     )
     if result_messages:
         _assign_stable_message_ids(
@@ -2085,7 +2159,9 @@ def _settle_result_messages(
     session.messages = _merge_display_messages_after_agent_result(
         previous_display_for_writeback,
         previous_context_messages,
-        _restore_display_reasoning_metadata(previous_messages, result_messages),
+        _restore_display_reasoning_metadata(
+            previous_messages, result_messages, current_turn_boundary=current_turn_boundary,
+        ),
         msg_text,
         source=source,
         verification_nudge_provenance=verification_nudge_provenance,
@@ -2748,11 +2824,11 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
 # the _run_agent_streaming thread (concurrent tool batches use
 # contextvars.copy_context() so children inherit this binding); binding the
 # context-local here makes the capture task/thread-local and race-immune.
-def _set_turn_session_identity(session_id: str):
+def _set_turn_session_identity(session_id: str, workspace: str = ""):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
-    Binds three context-locals so every session-key / UI-owner consumer is
+    Binds four context-locals so every session-key / UI-owner consumer is
     covered without a race:
       * ``tools.approval._approval_session_key`` — checked FIRST by
         ``get_current_session_key`` (the exact call terminal_tool.py makes for
@@ -2763,6 +2839,18 @@ def _set_turn_session_identity(session_id: str):
         return address stamped onto ProcessSession.origin_ui_session_id and
         completion events by modern hermes-agent builds. Authoritative for
         wakeup routing when present (see ``_resolve_completion_target``).
+      * ``agent.runtime_cwd._SESSION_CWD`` — this turn's workspace, when
+        *workspace* is given. The WebUI runs the agent IN-PROCESS, so
+        ``os.getcwd()`` is the server's launch directory, not the workspace the
+        user selected. Anything resolving a default working directory from the
+        process therefore lands in the Hermes install tree: measured, every
+        conductor child spawned from a WebUI session recorded
+        ``workdir=~/.hermes/hermes-agent`` while the selected workspace was
+        ``~/workspace``, which also fed those children the install tree's own
+        contributor ``AGENTS.md`` as workspace doctrine. ``TERMINAL_CWD`` is
+        already set per turn for the same purpose but is a process-global that
+        concurrent turns overwrite; this contextvar is task-local, so it is
+        race-immune for exactly the reason the three bindings above are.
 
     It deliberately does NOT call ``gateway.session_context.set_session_vars``:
     that blanket setter also zeroes the platform/chat_id/user contextvars,
@@ -2787,6 +2875,16 @@ def _set_turn_session_identity(session_id: str):
         tokens["ui_session_id"] = _UI_SID.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
+    if workspace:
+        # Bound via the ContextVar directly, not ``set_session_cwd``, so the
+        # reset below can use reset-token semantics like every sibling above.
+        # ``clear_session_cwd()`` would instead pin "" and mask the CLI/cron
+        # env fallback for a reused thread-pool worker.
+        try:
+            from agent.runtime_cwd import _SESSION_CWD as _SCWD
+            tokens["session_cwd"] = _SCWD.set(str(workspace))
+        except Exception:
+            logger.debug("per-turn _SESSION_CWD bind failed", exc_info=True)
     return tokens
 
 
@@ -2801,6 +2899,13 @@ def _reset_turn_session_identity(tokens) -> None:
     """
     if not tokens:
         return
+    tok = tokens.get("session_cwd")
+    if tok is not None:
+        try:
+            from agent.runtime_cwd import _SESSION_CWD as _SCWD
+            _SCWD.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_CWD reset failed", exc_info=True)
     tok = tokens.get("ui_session_id")
     if tok is not None:
         try:
@@ -3820,6 +3925,71 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     return stripped.strip()
 
 
+_TITLE_ATTACHMENT_SUFFIX_RE = re.compile(
+    r'(?:\n\n|\r\n\r\n)\[Attached files(?: for this steer)?: [^\]]+\]\s*$'
+)
+
+
+def _strip_title_attachment_suffix(text) -> str:
+    """Remove one exact WebUI-generated terminal attachment suffix."""
+    return _TITLE_ATTACHMENT_SUFFIX_RE.sub('', str(text or ''))
+
+
+def _strip_title_input_metadata(text) -> str:
+    """Remove only internal title metadata from one selected text value."""
+    value = _strip_title_attachment_suffix(text)
+    return _strip_workspace_prefix(value).strip()
+
+
+def _title_structured_text_parts(
+    content, allowed_types, *, normalize_types: bool = False
+) -> list[str]:
+    """Sanitize accepted structured title parts without mutating the content."""
+    parts = []
+    workspace_prefix_stripped = False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get('type') or '').lower() if normalize_types else part.get('type')
+        if part_type not in allowed_types:
+            continue
+        text = (
+            str(part.get('text') or '')
+            if not normalize_types
+            else _message_content_part_text(part)
+        )
+        if text.strip() and not workspace_prefix_stripped:
+            text = _strip_title_input_metadata(text)
+            workspace_prefix_stripped = bool(text)
+        parts.append(text)
+    return parts
+
+
+def _title_input_text(content) -> str:
+    """Extract raw title text using the same content rules as title_from."""
+    if content is None:
+        return ''
+    if isinstance(content, list):
+        return ' '.join(
+            _title_structured_text_parts(content, ('text',), normalize_types=False)
+        ).strip()
+    return _strip_title_input_metadata(str(content))
+
+
+_TITLE_MIXED_PART_TYPES = ('', 'text', 'input_text', 'output_text')
+
+
+def _title_exchange_input_text(content) -> str:
+    """Extract sanitized first/latest-exchange title input text."""
+    if isinstance(content, list):
+        return '\n'.join(
+            _title_structured_text_parts(
+                content, _TITLE_MIXED_PART_TYPES, normalize_types=True
+            )
+        ).strip()
+    return _strip_title_input_metadata(str(content or '').strip())
+
+
 def _looks_like_current_user_turn(msg, msg_text) -> bool:
     """Match the current human turn even if an internal workspace tag leaked mid-text.
 
@@ -3854,7 +4024,7 @@ def _first_exchange_snippets(messages):
             continue
         role = m.get('role')
         if role == 'user':
-            candidate = _message_text(m.get('content'))
+            candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
             if not user_text and candidate:
                 user_text = candidate
                 continue
@@ -3895,9 +4065,13 @@ def _latest_exchange_snippets(messages):
                 continue
             if candidate:
                 asst_text = candidate
-        elif role == 'user' and not user_text:
-            candidate = _message_text(m.get('content'))
-            if candidate:
+        elif role == 'user':
+            candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
+            if not candidate:
+                user_text = ''
+                asst_text = ''
+                break
+            if not user_text:
                 user_text = candidate
         if user_text and asst_text:
             break
@@ -3930,14 +4104,51 @@ def _get_title_refresh_interval() -> int:
 
 def _is_provisional_title(current_title: str, messages) -> bool:
     """Heuristic: title equals first-message substring placeholder."""
-    derived = title_from(messages, '') or ''
-    if not derived:
+    first_user_text = ''
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        first_user_text = _title_input_text(message.get('content'))
+        if first_user_text:
+            break
+    if not first_user_text:
         return False
+    sanitized_derived = title_from([{'role': 'user', 'content': first_user_text}], '') or ''
+    raw_derived = title_from(messages or [], '') or ''
+    if not sanitized_derived:
+        return False
+
+    def _normalize_candidate(value):
+        return re.sub(r'\s+', ' ', str(value or '')[:64]).strip()
+
     current = re.sub(r'\s+', ' ', str(current_title or '')).strip()
-    candidate = re.sub(r'\s+', ' ', str(derived[:64] or '')).strip()
-    if not current or not candidate:
+    candidates = (
+        _normalize_candidate(sanitized_derived),
+        _normalize_candidate(raw_derived),
+    )
+    if not current:
         return False
-    return current == candidate
+    return any(candidate and current == candidate for candidate in candidates)
+
+
+def _background_title_generation_inputs(session):
+    """Return sanitized first-exchange inputs when background title generation is eligible."""
+    messages = getattr(session, 'messages', None) or []
+    title = getattr(session, 'title', '')
+    invalid_existing_title = _looks_invalid_generated_title(title)
+    eligible_title = (
+        title == 'Untitled'
+        or title == 'New Chat'
+        or not title
+        or _is_provisional_title(title, messages)
+        or invalid_existing_title
+    )
+    if not eligible_title or (
+        getattr(session, 'llm_title_generated', False) and not invalid_existing_title
+    ):
+        return None
+    user_text, assistant_text = _first_exchange_snippets(messages)
+    return (user_text, assistant_text) if user_text and assistant_text else None
 
 
 def _detect_title_language(text: str) -> str:
@@ -4436,12 +4647,12 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         if 'max_output_tokens' in codex_kwargs:
                             codex_kwargs['max_output_tokens'] = max_tokens
                         resp = agent._run_codex_stream(codex_kwargs)
-                        assistant_message, _ = agent._normalize_codex_response(resp)
-                        raw = (assistant_message.content or '') if assistant_message else ''
+                        normalized = agent._get_transport('codex_responses').normalize_response(resp)
+                        raw = (normalized.content or '') if normalized else ''
                         if not raw:
                             empty_status = 'llm_empty'
                     elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
-                        from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
+                        from agent.anthropic_adapter import build_anthropic_kwargs
                         ant_kwargs = build_anthropic_kwargs(
                             model=agent.model,
                             messages=api_messages,
@@ -4453,10 +4664,10 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                             base_url=getattr(agent, '_anthropic_base_url', None),
                         )
                         resp = agent._anthropic_messages_create(ant_kwargs)
-                        assistant_message, _ = normalize_anthropic_response(
+                        normalized = agent._get_transport().normalize_response(
                             resp, strip_tool_prefix=getattr(agent, '_is_anthropic_oauth', False)
                         )
-                        raw = (assistant_message.content or '') if assistant_message else ''
+                        raw = (normalized.content or '') if normalized else ''
                         if not raw:
                             empty_status = 'llm_empty'
                     else:
@@ -4537,7 +4748,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
     return None, 'llm_invalid', str(raw)[:120]
 
 
-def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False, conversation_id: str = '') -> tuple[Optional[str], str, str]:
     """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result.
 
     When use_agent_model is False (default), the auxiliary client resolves
@@ -4545,6 +4756,11 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
     prevents the session's chat model (e.g. a Chinese model) from overriding
     the dedicated title model.  When True, the agent's attrs are passed through
     (legacy fallback behaviour).
+
+    conversation_id republishes the webui session id as the Agent's ambient
+    conversation context for the duration of the aux call, so OpenCode relay
+    targets receive the same ``x-opencode-session`` sticky key as the session's
+    main turns (#7470). The context is reset in all exit paths.
     """
     if use_agent_model and agent:
         provider = getattr(agent, 'provider', '')
@@ -4554,13 +4770,30 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider = ''
         model = ''
         base_url = ''
-    raw, status = generate_title_raw_via_aux(
-        user_text,
-        assistant_text,
-        provider=provider,
-        model=model,
-        base_url=base_url,
-    )
+    ctx_token = None
+    if conversation_id:
+        try:
+            from agent.portal_tags import set_conversation_context
+            ctx_token = set_conversation_context(str(conversation_id))
+        except Exception:
+            # Older/absent agent runtime: proceed without conversation context
+            # (previous behaviour) rather than failing title generation.
+            ctx_token = None
+    try:
+        raw, status = generate_title_raw_via_aux(
+            user_text,
+            assistant_text,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+        )
+    finally:
+        if ctx_token is not None:
+            try:
+                from agent.portal_tags import reset_conversation_context
+                reset_conversation_context(ctx_token)
+            except Exception:
+                pass
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
@@ -4710,9 +4943,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             source = llm_status
@@ -4808,9 +5041,9 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         if not next_title:
@@ -4873,7 +5106,7 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     with profiles_api.profile_env_for_background_worker(session, "manual title regeneration", logger_override=logger):
         if not _aux_title_generation_enabled():
             return None, 'title_generation_disabled', ''
-        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, conversation_id=getattr(session, 'session_id', '') or '')
     if next_title:
         return next_title, llm_status, raw_preview
     fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
@@ -5673,17 +5906,31 @@ def _assign_stable_message_ids(result_messages, *existing_arrays):
         for m in arr or []:
             if isinstance(m, dict):
                 mid = m.get('id')
-                # bool is an int subclass; exclude it so a stray True/False id
-                # can never seed the counter.
-                if isinstance(mid, int) and not isinstance(mid, bool) and mid > seed:
+                if _is_stable_message_id(mid) and mid > seed:
                     seed = mid
     stamped = 0
     for m in result_messages:
-        if isinstance(m, dict) and m.get('id') is None:
+        # Invalid ids (True, 1.0, "3", 0, -1) are re-minted, never kept: they
+        # compare equal to minted integers and would forge successor identity.
+        if isinstance(m, dict) and not _is_stable_message_id(m.get('id')):
             seed += 1
             m['id'] = seed
             stamped += 1
     return stamped
+
+
+def _is_stable_message_id(value) -> bool:
+    """Stable-id contract: a positive ``int`` only (no bool/float/str/0/<0)."""
+    return type(value) is int and value > 0
+
+
+def _stable_id_counts(messages) -> dict:
+    """Count how many rows carry each valid stable id (1 == sole owner)."""
+    counts: dict = {}
+    for m in messages:
+        if isinstance(m, dict) and _is_stable_message_id(m.get('id')):
+            counts[m['id']] = counts.get(m['id'], 0) + 1
+    return counts
 
 
 _POST_COMPRESSION_TOOL_RESULT_TOTAL_TOKENS = 4096
@@ -5876,6 +6123,13 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     `timestamp` can be re-stamped with the current time on every new assistant
     response, making prior messages appear to "move" in time.
     """
+    return _restore_reasoning_metadata_before_boundary(previous_messages, updated_messages)
+
+
+def _restore_reasoning_metadata_before_boundary(
+    previous_messages, updated_messages, current_turn_boundary=None,
+):
+    """Boundary-aware core: rows at/after ``current_turn_boundary`` get nothing historical."""
     if not previous_messages or not updated_messages:
         return updated_messages
     updated_messages = list(updated_messages)
@@ -5896,7 +6150,9 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         return projected
 
     safe_pos = 0
-    while safe_pos < len(prev_safe):
+    # Rows at/after the active-turn boundary belong to the current turn: never
+    # carry historical ids/metadata onto them (same-content successor forgery).
+    while safe_pos < len(prev_safe) and (current_turn_boundary is None or safe_pos < current_turn_boundary):
         prev_idx, _ = prev_safe[safe_pos]
         prev_msg = previous_messages[prev_idx]
         cur_msg = updated_messages[safe_pos] if safe_pos < len(updated_messages) else None
@@ -5928,23 +6184,59 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     return updated_messages
 
 
-def _restore_display_reasoning_metadata(previous_messages, updated_messages):
+def _restore_display_reasoning_metadata(previous_messages, updated_messages, *, current_turn_boundary=None):
     """Restore display-only thinking rows for visible transcript persistence."""
-    updated_messages = _restore_reasoning_metadata(previous_messages, updated_messages)
+    updated_messages = _restore_reasoning_metadata_before_boundary(
+        previous_messages, updated_messages, current_turn_boundary,
+    )
     if not previous_messages or not updated_messages:
         return updated_messages
     prev_safe = _api_safe_message_positions(previous_messages)
     safe_indices = {idx for idx, _ in prev_safe}
+    # Stable-id ownership (#context-message-stable-id) must be one-to-one:
+    # an id reused by another API-safe row in either projection proves nothing.
+    prev_ids = _stable_id_counts(previous_messages[idx] for idx in safe_indices)
+    updated_ids = _stable_id_counts(
+        updated_messages[idx] for idx, _ in _api_safe_message_positions(updated_messages)
+    )
     inserted_reasoning_only = 0
     for prev_idx, prev_msg in enumerate(previous_messages):
         if _is_empty_partial_activity_message(prev_msg):
             continue
         if prev_idx in safe_indices or not _is_reasoning_only_assistant_message(prev_msg):
             continue
-        safe_pos = sum(1 for idx, _ in prev_safe if idx < prev_idx) + inserted_reasoning_only
+        anchor_pos = sum(1 for idx, _ in prev_safe if idx < prev_idx)
+        # A historical reasoning-only row never restores into the current-turn slice.
+        if current_turn_boundary is not None and anchor_pos >= current_turn_boundary:
+            continue
+        safe_pos = anchor_pos + inserted_reasoning_only
         existing = updated_messages[safe_pos] if safe_pos < len(updated_messages) else None
         if isinstance(existing, dict) and _is_reasoning_only_assistant_message(existing):
             continue
+        # Restore only in front of the row's own API-safe successor. A compacted
+        # result has no aligned slot; inserting past its end would append the
+        # historical row after the new reply and re-add it every turn.
+        if anchor_pos >= len(prev_safe) or not isinstance(existing, dict):
+            continue
+        successor = previous_messages[prev_safe[anchor_pos][0]]
+        # Stable ids (#context-message-stable-id) win over content identity:
+        # repeated prompts ("continue") make a distinct current row look like
+        # the historical successor and misplace every anchor before it.
+        successor_id = successor.get('id')
+        existing_id = existing.get('id')
+        if 'id' in successor or 'id' in existing:
+            if not (
+                _is_stable_message_id(successor_id)
+                and _is_stable_message_id(existing_id)
+                and successor_id == existing_id
+                and prev_ids.get(successor_id) == 1
+                and updated_ids.get(successor_id) == 1
+            ):
+                continue
+        else:
+            anchor_key = _message_identity(successor)
+            if anchor_key is None or anchor_key != _message_identity(existing):
+                continue
         updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))
         inserted_reasoning_only += 1
     return updated_messages
@@ -8418,14 +8710,19 @@ def _attempt_credential_self_heal(
 def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
     """Return the cache-signature component for runtime credentials.
 
-    Credential-pool providers can legitimately hand WebUI a different runtime
-    token on each request (round-robin pools, OAuth refresh, auth self-heal).
-    The AIAgent object is also where cross-turn memory-provider state lives, so
-    using the volatile token itself in the cache signature silently defeats the
-    per-session agent cache and drops warmed Hindsight prefetch results.
+    Credential-pool providers and callable key_cmd sources can legitimately
+    hand WebUI a different runtime token on each request (round-robin pools,
+    OAuth refresh, auth self-heal). The AIAgent object is also where cross-turn
+    memory-provider state lives, so using a volatile token in the cache
+    signature silently defeats the per-session agent cache and drops warmed
+    Hindsight prefetch results.
     """
     if credential_pool is not None:
         return 'credential-pool'
+    if not isinstance(resolved_api_key, str) and callable(resolved_api_key):
+        # key_cmd credentials are resolved by the client at request time; do
+        # not mint or stringify a potentially secret token for cache identity.
+        return 'dynamic-credential'
     import hashlib as _hashlib
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
 
@@ -8680,7 +8977,7 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
-    q = STREAMS.get(stream_id)
+    q = peek_stream(stream_id)
     if q is None:
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
@@ -9148,7 +9445,17 @@ def _run_agent_streaming(
         # captures THIS session, not a concurrent turn's process-global env).
         # Co-located with the existing env-restore lifecycle: set here, reset
         # in the outer finally next to _clear_thread_env().
-        _turn_session_identity_tokens = _set_turn_session_identity(session_id)
+        # Resolved the same way as `s.workspace` below so the bound cwd and the
+        # session's own record cannot disagree. Guarded: a turn must not die
+        # here because a workspace path is malformed.
+        try:
+            _turn_workspace_cwd = str(Path(workspace).expanduser().resolve())
+        except Exception:
+            _turn_workspace_cwd = ""
+            logger.debug("per-turn workspace cwd resolve failed", exc_info=True)
+        _turn_session_identity_tokens = _set_turn_session_identity(
+            session_id, workspace=_turn_workspace_cwd
+        )
         s = get_session(session_id)
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
@@ -11523,17 +11830,7 @@ def _run_agent_streaming(
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)
-                _looks_default = (s.title == 'Untitled' or s.title == 'New Chat' or not s.title)
-                _looks_provisional = _is_provisional_title(s.title, s.messages)
-                _invalid_existing_title = _looks_invalid_generated_title(s.title)
-                _should_bg_title = (
-                    (_looks_default or _looks_provisional or _invalid_existing_title)
-                    and (not getattr(s, 'llm_title_generated', False) or _invalid_existing_title)
-                )
-                _u0 = ''
-                _a0 = ''
-                if _should_bg_title:
-                    _u0, _a0 = _first_exchange_snippets(s.messages)
+                _bg_title_inputs = _background_title_generation_inputs(s)
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
@@ -12295,10 +12592,10 @@ def _run_agent_streaming(
                 # misbehaving log handler here would otherwise skip the
                 # background-title thread spawn below. (#4923 gate hardening)
                 pass
-            if _should_bg_title and _u0 and _a0:
+            if _bg_title_inputs:
                 threading.Thread(
                     target=_run_background_title_update,
-                    args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
+                    args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
                     daemon=True,
                 ).start()
             else:

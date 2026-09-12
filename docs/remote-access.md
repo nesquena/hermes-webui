@@ -34,202 +34,57 @@ The Hermes Web UI is fully responsive with a mobile-optimized layout
 (hamburger sidebar, sidebar top tabs in the drawer, touch-friendly controls),
 so it works well as a daily-driver agent interface from your phone.
 
-### Preferred on a single-operator or access-restricted tailnet: Tailscale Serve
-
-[Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) exposes
-the WebUI at a tailnet-only HTTPS/MagicDNS URL while Hermes keeps listening on
-`127.0.0.1`. Serve owns the network front door; continue launching Hermes
-WebUI through the maintained `start.sh` or systemd path.
-
-Hermes currently sees every Serve login request as coming from the local proxy,
-so password and passkey logins share one five-attempt, 60-second rate-limit
-bucket across all clients. Use this path for a single operator, or restrict
-access to the Serve node to the intended operator with [tailnet access-control
-rules](https://tailscale.com/docs/features/access-control). On a broader
-multi-user tailnet, use the SSH tunnel above or the direct-IP fallback below
-until Hermes can safely attribute login attempts per Serve client. If the
-shared bucket is reached, wait 60 seconds before trying again.
+**Preferred setup: Tailscale Serve**
 
 1. Install [Tailscale](https://tailscale.com/download) on your server and
    your iPhone/Android.
-2. Before publishing anything, enable application authentication. Prefer
-   configuring a strong password through Settings while reaching WebUI only
-   over loopback or an SSH tunnel; Settings stores a password hash rather than
-   a plaintext password. Keep the Serve cookie setting in the checkout's
-   owner-only `.env`:
-
-   ```bash
-   umask 077
-   touch .env
-   chmod 600 .env
-   ```
-
-   ```dotenv
-   HERMES_WEBUI_SECURE=1
-   ```
-
-   If Settings is unavailable, the same owner-only file can carry the password:
-
-   ```dotenv
-   HERMES_WEBUI_PASSWORD='replace-with-a-long-random-password'
-   HERMES_WEBUI_SECURE=1
-   ```
-
-   `start.sh` sources `.env` as shell syntax. Keep the password single-quoted
-   and do not use a literal single quote in this path; use Settings for an
-   arbitrary generated password. Serve terminates HTTPS before proxying to the
-   local HTTP backend, so `HERMES_WEBUI_SECURE=1` keeps the session cookie
-   HTTPS-only.
-3. Restart WebUI through the same lifecycle owner that already manages it. A
-   process listening on `0.0.0.0:8787` also answers the loopback health probe,
-   so `start.sh` would otherwise report "already running" without applying the
-   new host or reloading `HERMES_WEBUI_SECURE=1`.
-
-   For a daemon started by `ctl.sh`, keep ownership with the controller:
-
-   ```bash
-   ./ctl.sh stop
-   ./ctl.sh start 8787 --host 127.0.0.1
-   ```
-
-   For a direct `start.sh` launch, stop the exact listener using the PID
-   instructions that `start.sh` prints, verify it has stopped, then run:
-
-   ```bash
-   ./start.sh 8787 --host 127.0.0.1
-   ```
-
-   For a supervisor-managed service, run its matching stop command, update the
-   configured launch command with `8787 --host 127.0.0.1`, then use the same
-   owner to start it again:
-
-   - systemd: `systemctl --user stop hermes-webui.service`, then
-     `systemctl --user daemon-reload` and
-     `systemctl --user start hermes-webui.service`.
-   - launchd: `launchctl unload ~/Library/LaunchAgents/com.parantoux.hermes-webui.plist`,
-     update that plist's `ProgramArguments`, then run
-     `launchctl load ~/Library/LaunchAgents/com.parantoux.hermes-webui.plist`.
-     If you customized the label or plist path, use the actual installed plist
-     for both commands.
-   - supervisord: `sudo supervisorctl stop hermes-webui`, then
-     `sudo supervisorctl reread`, `sudo supervisorctl update`, and
-     `sudo supervisorctl start hermes-webui`.
-   - runit: `sv down <service-directory>`, edit
-     `<service-directory>/run` so its `exec` invokes
-     `/bin/bash /path/to/hermes-webui/start.sh 8787 --host 127.0.0.1 --foreground`,
-     then run `sv up <service-directory>`.
-   - s6: `s6-svc -d <service-directory>`, apply the same `exec` change in
-     `<service-directory>/run`, then run `s6-svc -u <service-directory>`.
-
-   The [supervisor guide](supervisor.md) shows the corresponding launch-command
-   locations. Do not launch `start.sh` directly while a supervisor owns the
-   service. For example, a systemd unit uses:
-
-   ```ini
-   ExecStart=/bin/bash %h/hermes-webui/start.sh 8787 --host 127.0.0.1 --foreground
-   ```
-
-   Keep the password (unless it is already configured through Settings) and
-   `HERMES_WEBUI_SECURE=1` in the checkout's `.env`; do not rely on systemd
-   `Environment=` entries to override that later-loaded file. Do not continue
-   until the selected lifecycle owner reports the new process running.
-
-   For a different trusted reverse proxy that sets `X-Forwarded-Proto: https`,
-   `HERMES_WEBUI_TRUST_FORWARDED_PROTO=1` is the alternative. Keep the explicit
-   `HERMES_WEBUI_SECURE=1` setting for Tailscale Serve.
-4. Open `http://127.0.0.1:8787` locally or through an SSH tunnel and confirm
-   that an unauthenticated browser receives the login screen. Do not publish
-   the Serve endpoint until this check succeeds. Use the local HTTP URL only
-   for this preflight; sign in through the HTTPS Serve URL after publishing.
-
-5. On Linux, allow the unprivileged account that runs WebUI to manage
-   Tailscale. This is a one-time administrator action:
-
-   ```bash
-   sudo tailscale set --operator="$USER"
-   ```
-
-6. As that operator account, publish the loopback service in the background:
-
-   ```bash
-   tailscale serve --bg 8787
-   ```
-
-   The command prints the tailnet-only HTTPS URL to open on your phone.
-   Background Serve configuration persists across device reboots and
-   `tailscale down` / `tailscale up` restarts.
-
-7. Verify the active mapping:
-
-   ```bash
-   tailscale serve status
-   ```
-
-   To remove all Serve mappings from this device, run:
-
-   ```bash
-   tailscale serve reset
-   ```
-
-Serve requires HTTPS support in the tailnet. If it is not enabled yet, the
-command can print an interactive consent URL for enabling the prerequisite.
-Tailnet encryption and access-control rules narrow exposure, but they do not
-replace `HERMES_WEBUI_PASSWORD`.
-
-> **Serve, not Funnel:** Serve is available only inside your tailnet.
-> [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel) is
-> public on the internet and is not the recommended path for Hermes WebUI.
-
-For the full CLI and Linux permission contracts, see the official
-[`tailscale serve` reference](https://tailscale.com/docs/reference/tailscale-cli/serve)
-and [Linux operator permission guide](https://tailscale.com/docs/reference/troubleshooting/linux/linux-operator-permission).
-The Simplified Chinese companion tracked in
-[#7393](https://github.com/nesquena/hermes-webui/issues/7393) should mirror the
-`HERMES_WEBUI_SECURE=1` Serve requirement when translated.
-
-### Fallback: direct tailnet IP
-
-If Serve is disabled for your tailnet or you cannot configure an operator,
-complete the password setup and login-screen check above, bind WebUI to all
-interfaces with an explicit launcher override, then access it through the
-server's Tailscale IP. Because this fallback uses plain HTTP, change the cookie
-setting before restarting WebUI while preserving the authentication path you
-already configured.
-
-If you configured the password through Settings, change only the cookie setting
-in the owner-only `.env`:
-
-```dotenv
-HERMES_WEBUI_SECURE=0
-```
-
-Do not add `HERMES_WEBUI_PASSWORD` in this case: the environment value takes
-precedence over the password hash stored by Settings and would replace that
-login credential. If you chose the `.env` password path instead, keep its
-password non-empty and single-quoted:
-
-```dotenv
-HERMES_WEBUI_PASSWORD='replace-with-a-long-random-password'
-HERMES_WEBUI_SECURE=0
-```
-
-Stop and restart through the same lifecycle owner described in step 3, changing
-that owner's host argument to `0.0.0.0`. For a direct launch only, run:
+2. Keep the WebUI bound to localhost and enable password auth:
 
 ```bash
-./start.sh 8787 --host 0.0.0.0
+HERMES_WEBUI_PASSWORD=your-secret ./start.sh
 ```
 
-Open `http://<server-tailscale-ip>:8787` in your phone's browser (find the IP
-in the Tailscale app or with `tailscale ip -4` on the server).
+3. Publish the local WebUI port through Tailscale Serve:
 
-Never bind Hermes WebUI to `0.0.0.0` without confirmed application
-authentication. For the `.env` password path, keep `HERMES_WEBUI_PASSWORD`
-non-empty; for the Settings path, preserve the stored password hash instead.
-`0.0.0.0` listens on every interface, not only Tailscale, so keep the host
-firewall restricted as well. Traffic inside the tailnet is encrypted, but the
-application still needs its own authentication boundary. You can add the page
-to your home screen for an app-like experience.
+```bash
+tailscale serve --bg 8787
+```
+
+4. Open the HTTPS MagicDNS URL that Tailscale prints in your phone's browser.
+
+Tailscale Serve keeps WebUI on loopback while giving your tailnet an HTTPS
+MagicDNS hostname. On Linux, changing Serve configuration may require elevated
+permissions. If `tailscale serve --bg 8787` reports `Access denied: serve
+config denied`, either run it with sudo:
+
+```bash
+sudo -S -p '' tailscale serve --bg 8787
+```
+
+Or allow the supervised non-root WebUI/Hermes user to manage Tailscale:
+
+```bash
+sudo -S -p '' tailscale set --operator=$USER
+tailscale serve --bg 8787
+```
+
+**Fallback: direct tailnet IP**
+
+Use direct tailnet access when Tailscale Serve is unavailable, disabled, or not
+permitted. Because this binds WebUI beyond loopback, always enable password
+auth:
+
+```bash
+HERMES_WEBUI_HOST=0.0.0.0 HERMES_WEBUI_PASSWORD=your-secret ./start.sh
+```
+
+Then open `http://<server-tailscale-ip>:8787` in your phone's browser (find
+your server's Tailscale IP in the Tailscale app or with `tailscale ip -4` on
+the server).
+
+That's it. Traffic is encrypted end-to-end by WireGuard, and password auth
+protects the UI at the application level. You can add it to your home screen
+for an app-like experience.
 
 ### Community field report: ARM64 Android via AVF
 

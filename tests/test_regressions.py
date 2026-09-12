@@ -642,8 +642,8 @@ def test_chat_start_persists_pending_turn_metadata_for_reload_recovery(cleanup_t
 def test_session_detail_uses_runtime_streaming_state(cleanup_test_sessions):
     """GET /api/session must agree with /api/sessions on live stream ownership."""
     routes_src = (REPO_ROOT / "api/routes.py").read_text()
-    session_route = routes_src.split('if parsed.path == "/api/session":', 1)[1].split(
-        'if parsed.path == "/api/session/lineage/report":', 1
+    session_route = routes_src.split('def _handle_session_get(', 1)[1].split(
+        'def handle_get(', 1
     )[0]
     assert "active_stream_ids = _active_stream_ids()" in session_route
     assert "s.compact(" in session_route
