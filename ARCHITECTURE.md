@@ -384,10 +384,12 @@ safe_resolve(root, requested):
     - Calls .relative_to(root) to assert the result is inside root
     - Raises ValueError on path traversal (../../etc/passwd)
 
-list_dir(workspace, rel='.'):
+list_dir(workspace, rel='.', limit=200, offset=0):
     - Calls safe_resolve, then iterdir()
     - Sorts: directories first, then files, case-insensitive alpha within each group
-    - Returns up to 200 entries with {name, path, type, size}
+    - Returns one page of up to 200 entries {name, path, type, size} plus total,
+      has_more, limit and offset so large directories paginate instead of being
+      silently truncated (#6645)
 
 read_file_content(workspace, rel):
     - Calls safe_resolve
