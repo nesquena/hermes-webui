@@ -19,7 +19,7 @@ import api.agent_sessions as agent_sessions
 from api.agent_sessions import read_importable_agent_session_rows
 
 
-def _make_db(path, *, with_index=True):
+def _make_db(path, *, with_index=True, with_covering_index=None):
     conn = sqlite3.connect(str(path))
     conn.execute(
         """
@@ -43,6 +43,14 @@ def _make_db(path, *, with_index=True):
     )
     if with_index:
         conn.execute("CREATE INDEX idx_messages_session ON messages(session_id, timestamp)")
+    # The projection primes two indexes; "index present" means both, otherwise
+    # the second prime still opens a writable connection. Defaults to matching
+    # `with_index` so existing callers describe a fully-primed db.
+    if with_index if with_covering_index is None else with_covering_index:
+        conn.execute(
+            "CREATE INDEX idx_messages_session_ts_role "
+            "ON messages(session_id, timestamp, role)"
+        )
     conn.commit()
     conn.close()
 
@@ -142,3 +150,29 @@ def test_missing_index_self_heals_via_separate_connection(tmp_path, monkeypatch)
     finally:
         verify.close()
     assert "idx_messages_session" in names
+
+
+def test_missing_covering_index_self_heals_read_only_path(tmp_path, monkeypatch):
+    """The role-aggregate prime obeys the same contract as idx_messages_session.
+
+    Sibling case: the candidate-ordering index is present but the covering
+    index is not. The listing must still read through the read-only handle and
+    confine the write to a separate short-lived connection.
+    """
+    db = tmp_path / "state.db"
+    _make_db(db, with_index=True, with_covering_index=False)
+    calls = _record_connects(monkeypatch)
+
+    out = read_importable_agent_session_rows(db, exclude_sources=None)
+
+    assert "cli-1" in {r["id"] for r in out}
+    writable = [c for c in calls if not c["uri"] and "mode=ro" not in c["target"]]
+    assert len(writable) == 1, calls
+    assert any(c["uri"] and "mode=ro" in c["target"] for c in calls), calls
+
+    verify = sqlite3.connect(str(db))
+    try:
+        names = {row[1] for row in verify.execute("PRAGMA index_list(messages)")}
+    finally:
+        verify.close()
+    assert "idx_messages_session_ts_role" in names
