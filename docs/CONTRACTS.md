@@ -214,6 +214,10 @@ does not match the touched subsystem.
 
 ## Quick redline checklist
 
+The experimental Bot groups bridge has an additional installation-owner,
+exact-approval and read-only display-cache contract in
+[`bot-groups.md`](bot-groups.md#state-and-transport-contract).
+
 Before opening a change for review, confirm:
 
 - The change solves one logical problem; unrelated refactors are split out.

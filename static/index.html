@@ -153,6 +153,7 @@
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
     <button class="rail-btn nav-tab active has-tooltip" data-panel="chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="botGroups" hidden onclick="switchPanel('botGroups',{fromRailClick:true})" data-tooltip="Bot groups" data-i18n-title="bot_groups_title" data-i18n-aria-label="bot_groups_title" aria-label="Bot groups"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="9" cy="7" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 4a3 3 0 0 1 0 6m2 4a5 5 0 0 1 3 4v3"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" aria-label="Kanban"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills" aria-label="Skills"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
@@ -172,6 +173,7 @@
     </button>
     <div class="sidebar-nav">
       <button class="nav-tab active has-tooltip has-tooltip--bottom" data-panel="chat" data-label="Chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+      <button class="nav-tab" data-panel="botGroups" hidden onclick="switchPanel('botGroups',{fromRailClick:true})" data-i18n="bot_groups_title">Bot groups</button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="kanban" data-label="Kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="skills" data-label="Skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
@@ -202,6 +204,14 @@
       </div>
       <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" type="search" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
+    </div>
+    <div class="panel-view" id="panelBotGroups">
+      <div class="panel-head"><span data-i18n="bot_groups_title">Bot groups</span></div>
+      <div class="bot-groups-toolbar">
+        <button id="botGroupsCreate" class="bot-groups-button" type="button" disabled data-i18n="bot_groups_create">New group</button>
+        <button id="botGroupsRefresh" class="bot-groups-button" type="button" data-i18n="bot_groups_refresh">Refresh</button>
+      </div>
+      <div id="botGroupsList" class="bot-groups-list"></div>
     </div>
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
@@ -834,6 +844,26 @@
         <div class="main-view-empty-sub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
       </div>
     </div>
+    <section id="mainBotGroups" class="main-view" aria-label="Bot groups" data-i18n-aria-label="bot_groups_title">
+      <header class="main-view-header">
+        <div><h2 id="botGroupsTitle" class="main-view-title" data-i18n="bot_groups_title">Bot groups</h2><p id="botGroupsStatus" class="bot-groups-muted" aria-live="polite"></p></div>
+        <button id="botGroupsStop" class="bot-groups-button" type="button" disabled data-i18n="bot_groups_stop">Stop group</button>
+      </header>
+      <p id="botGroupsError" class="bot-groups-error" role="alert"></p>
+      <form id="botGroupsCreateForm" class="bot-groups-create" hidden>
+        <label><span data-i18n="bot_groups_name">Group name</span><input name="name" maxlength="120" required autocomplete="off"></label>
+        <fieldset><legend data-i18n="bot_groups_select_members">Choose 2–6 Agent profiles</legend><div id="botGroupsProfileChoices"></div></fieldset>
+        <div class="bot-groups-toolbar"><button id="botGroupsSave" class="bot-groups-button" type="submit" data-i18n="bot_groups_create">New group</button><button id="botGroupsCancelCreate" class="bot-groups-button" type="button" data-i18n="cancel">Cancel</button></div>
+      </form>
+      <div id="botGroupsMembers" class="bot-groups-toolbar"></div>
+      <div id="botGroupsMessages" class="bot-groups-messages" aria-label="Group messages" data-i18n-aria-label="bot_groups_messages"></div>
+      <div id="botGroupsActions" class="bot-groups-actions"></div>
+      <form id="botGroupsComposer" class="bot-groups-composer" hidden>
+        <label for="botGroupsText" class="bot-groups-muted" data-i18n="bot_groups_compose_hint">@ a member, or send to everyone. A new message redirects the current discussion.</label>
+        <textarea id="botGroupsText" name="text" rows="3" maxlength="32000" data-i18n-placeholder="bot_groups_placeholder" placeholder="Message your Agents…"></textarea>
+        <button id="botGroupsSend" class="bot-groups-button" type="submit" data-i18n="send">Send</button>
+      </form>
+    </section>
     <div id="mainKanban" class="main-view">
       <div class="main-view-header">
         <div>
@@ -1780,6 +1810,7 @@
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/extension_settings.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/bot_groups.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/outline.js?v=__WEBUI_VERSION__" defer></script>

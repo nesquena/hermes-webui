@@ -1688,6 +1688,11 @@ CSS: .resize-handle with position:absolute, width:5px, cursor:col-resize.
 body.resizing added during drag to suppress text selection.
 
 
+## Experimental Bot groups
+
+For the opt-in, installation-owner `groups.*` presentation bridge and its
+separate state ownership boundary, see [Bot groups](docs/bot-groups.md).
+
 ## Workspace path trust levels
 
 `api/workspace.py` has two distinct trust functions — do not collapse them:
