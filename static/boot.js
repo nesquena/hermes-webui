@@ -3348,6 +3348,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._autoScrollFollow=_persistAutoScrollFollow(s.auto_scroll_follow!==false);
     window._largeTextPasteAsAttachment=s.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!s.project_quick_create_buttons;
+    window._sidebarGroupByProject=!!s.sidebar_group_by_project;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(s);
     window._composerControlOrder=_sanitizeComposerControlOrder(s.composer_control_order);
     _applyComposerControlOrder(window._composerControlOrder);
@@ -3493,6 +3494,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // mirror is global (matches the one global settings.json), so it is read
     // synchronously here — no profile resolution or deferral needed.
     window._autoScrollFollow=_readPersistedAutoScrollFollow();
+    window._sidebarGroupByProject=false;
     window._composerControlVisibility=_composerControlVisibilityFromSettings(null);
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
