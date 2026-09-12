@@ -74,28 +74,38 @@ def _messages_indexes(path):
     return {r[0] for r in rows}
 
 
-def test_prime_creates_missing_index(tmp_path):
-    """A db missing idx_messages_session gets it primed on the first scan."""
+def test_listing_does_not_create_missing_index(tmp_path, monkeypatch):
+    """A missing index must never turn a sidebar read into a schema write.
+
+    CREATE INDEX on a multi-GiB ``messages`` table holds the SQLite writer lock
+    for minutes; index maintenance belongs to the explicit drained tool
+    (``scripts/ensure_state_db_read_indexes.py``), not to a listing.
+    """
     db = tmp_path / "state.db"
     _full_schema_db(db)
     assert "idx_messages_session" not in _messages_indexes(db)
+    connect_calls = []
+    real_connect = agent_sessions.sqlite3.connect
+
+    def recording_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(agent_sessions.sqlite3, "connect", recording_connect)
 
     rows = agent_sessions.read_importable_agent_session_rows(
         db, limit=20, exclude_sources=None
     )
+    # Snapshot before the verifier below opens its own (non-listing) handle.
+    listing_connect_calls = list(connect_calls)
 
     # Listing still returns the sessions ...
     assert {r["id"] for r in rows} == {"sess0", "sess1", "sess2"}
-    # ... and the index now exists on (session_id, timestamp).
-    assert "idx_messages_session" in _messages_indexes(db)
-    conn = sqlite3.connect(str(db))
-    try:
-        sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE name='idx_messages_session'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert "session_id" in sql and "timestamp" in sql
+    # ... without mutating the schema or opening a write-capable connection.
+    assert "idx_messages_session" not in _messages_indexes(db)
+    assert len(listing_connect_calls) == 1
+    assert "mode=ro" in str(listing_connect_calls[0][0][0])
+    assert listing_connect_calls[0][1].get("uri") is True
 
 
 def test_prime_is_noop_when_index_exists(tmp_path):
