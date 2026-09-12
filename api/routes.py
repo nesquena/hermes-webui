@@ -10542,6 +10542,7 @@ from api.workspace import (
     read_file_content,
     read_authorized_escape_file_content,
     safe_resolve_ws,
+    resolve_docker_sandbox_mirror,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
     resolve_implicit_workspace_with_recovery,
@@ -18036,12 +18037,42 @@ def _handle_list_dir(handler, parsed):
                 )
                 workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
-        entries = list_dir(Path(workspace), rel_path)
+        listing_root = Path(workspace)
+        listing_rel = rel_path
+        mirror = (
+            _docker_sandbox_mirror_target(rel_path)
+            if str(rel_path).lstrip().startswith("/")
+            else None
+        )
+        if mirror is not None:
+            listing_root, mirror_target, container_root = mirror
+            listing_rel = mirror_target.relative_to(listing_root).as_posix() or "."
+            entries = list_dir(listing_root, listing_rel)
+            entries = _virtualize_docker_mirror_entries(
+                entries,
+                listing_root,
+                container_root,
+            )
+        else:
+            try:
+                entries = list_dir(listing_root, listing_rel)
+            except FileNotFoundError:
+                mirror = _docker_sandbox_mirror_target(rel_path)
+                if mirror is None:
+                    raise
+                listing_root, mirror_target, container_root = mirror
+                listing_rel = mirror_target.relative_to(listing_root).as_posix() or "."
+                entries = list_dir(listing_root, listing_rel)
+                entries = _virtualize_docker_mirror_entries(
+                    entries,
+                    listing_root,
+                    container_root,
+                )
         return j(
             handler,
             {
                 "entries": serialize_workspace_entries_for_browser(entries),
-                "signature": dir_signature(Path(workspace), rel_path, entries),
+                "signature": dir_signature(listing_root, listing_rel, entries),
                 "path": rel_path,
                 "workspace": str(workspace),
                 "workspace_recovered": recovered,
@@ -20711,6 +20742,44 @@ def _handle_media(handler, parsed):
     return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
 
 
+def _docker_sandbox_mirror_target(rel: str) -> tuple[Path, Path, str] | None:
+    """Return a contained host mirror target for an active persistent Docker profile."""
+    try:
+        terminal_cfg = (get_config() or {}).get("terminal", {})
+        return resolve_docker_sandbox_mirror(
+            get_active_hermes_home(),
+            terminal_cfg,
+            rel,
+        )
+    except Exception:
+        logger.debug("Failed to resolve Docker sandbox mirror path", exc_info=True)
+        return None
+
+
+def _virtualize_docker_mirror_entries(
+    entries: list[dict],
+    mirror_root: Path,
+    container_root: str,
+) -> list[dict]:
+    """Translate host mirror paths back to the paths recorded by the container."""
+    virtualized = []
+    for entry in entries:
+        item = dict(entry)
+        entry_path = str(item.get("path") or "").lstrip("/")
+        item["path"] = f"{container_root}/{entry_path}".rstrip("/")
+        target = item.get("target")
+        if target:
+            try:
+                target_rel = Path(str(target)).resolve().relative_to(mirror_root)
+                item["target"] = f"/{container_root}/{target_rel.as_posix()}".rstrip(
+                    "/"
+                )
+            except (OSError, RuntimeError, ValueError):
+                item.pop("target", None)
+        virtualized.append(item)
+    return virtualized
+
+
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
     """Resolve /api/file/raw paths from the workspace or this session's uploads."""
     workspace_root = Path(session.workspace)
@@ -20730,9 +20799,21 @@ def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
         attachment_root = _session_attachment_dir(sid)
         attachment_target = safe_resolve(attachment_root, rel)
     except Exception:
-        return None
-    if attachment_target.exists() and attachment_target.is_file():
+        attachment_root = None
+        attachment_target = None
+    if (
+        attachment_root is not None
+        and attachment_target is not None
+        and attachment_target.exists()
+        and attachment_target.is_file()
+    ):
         return attachment_root, attachment_target
+
+    mirror = _docker_sandbox_mirror_target(rel)
+    if mirror is not None:
+        mirror_root, mirror_target, _container_root = mirror
+        if mirror_target.exists() and mirror_target.is_file():
+            return mirror_root, mirror_target
     return None
 
 
@@ -20952,7 +21033,26 @@ def _handle_file_read(handler, parsed):
     if not rel:
         return bad(handler, "path is required")
     try:
-        return j(handler, read_file_content(Path(s.workspace), rel))
+        mirror = (
+            _docker_sandbox_mirror_target(rel)
+            if str(rel).lstrip().startswith("/")
+            else None
+        )
+        if mirror is not None:
+            mirror_root, mirror_target, _container_root = mirror
+            mirror_rel = mirror_target.relative_to(mirror_root).as_posix() or "."
+            payload = read_file_content(mirror_root, mirror_rel)
+        else:
+            try:
+                payload = read_file_content(Path(s.workspace), rel)
+            except FileNotFoundError:
+                mirror = _docker_sandbox_mirror_target(rel)
+                if mirror is None:
+                    raise
+                mirror_root, mirror_target, _container_root = mirror
+                mirror_rel = mirror_target.relative_to(mirror_root).as_posix() or "."
+                payload = read_file_content(mirror_root, mirror_rel)
+        return j(handler, payload)
     except ImportError as e:
         return bad(handler, str(e), 503)
     except (FileNotFoundError, ValueError) as e:

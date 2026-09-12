@@ -417,6 +417,16 @@ Both are documented in `api/startup.py::fix_credential_permissions()`.
 
 If you must use a bind mount: pick a host path, then mount it to `/opt/hermes` in the agent container AND `/home/hermeswebui/.hermes/hermes-agent` in the WebUI container.
 
+### Docker terminal artifacts outside the session workspace
+
+When the Hermes terminal backend uses persistent Docker storage, artifacts
+recorded under `/root/...` or `/workspace/...` can be opened from the WebUI file
+browser. The file routes map those container paths to the active profile's
+host-side sandbox mirror, including a custom `TERMINAL_SANDBOX_DIR`, while
+preserving the same containment and symlink checks used for ordinary workspace
+files. Other absolute container paths and non-persistent Docker filesystems are
+not exposed through this fallback.
+
 ### 5. "Tools (git, node, etc.) missing in two-container setup" (#681)
 
 **Symptom**: You ask the agent to run `git status` in chat and it errors with `command not found`.
@@ -627,6 +637,7 @@ volumes:
 - #668 — auto-detect UID/GID from mounted volume
 - #569 — UID/GID detection priority order
 - #7027 — state dir probed before `/workspace` in UID/GID detection (see [#9 above](#9-failed-to-verify-state-directory--restart-loop-on-a-bind-mounted-state-dir-7027))
+- #7097 — persistent Docker terminal artifacts outside the session workspace
 
 If you hit a new failure mode not covered here, please [open an issue](https://github.com/nesquena/hermes-webui/issues/new) with:
 
