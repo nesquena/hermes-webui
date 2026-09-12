@@ -1,6 +1,7 @@
 """Regression checks for #856 background completion unread markers."""
 
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -85,6 +86,16 @@ def test_background_done_uses_rotated_session_id_for_completion_unread():
         "context compression can rotate session_id before done; unread/read state must "
         "attach to the visible final row, not the old SSE activeSid"
     )
+
+
+def test_manual_completion_state_is_preserved_on_later_completion_mark():
+    """Manual markers are not downgraded to regular completion markers when a later
+    completion event updates the same session while the user keeps a manual intent."""
+    block = _sessions_function_block("_markSessionCompletionUnread", "_markSessionCompletionUnreadIfBackground")
+    assert "const existing = unread[sid]" in block
+    assert "const hasManual = Boolean(existing" in block
+    assert "else if (hasManual)" in block
+    assert "entry.manual = true" in block
 
 
 def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
@@ -487,6 +498,75 @@ def test_switching_away_counts_as_background_completion():
     )
 
 
+
+
+def _extract_js_function(js: str, name: str, prefix: str = "function") -> str:
+    marker = f"{prefix} {name}("
+    start = js.find(marker)
+    if start == -1:
+        raise AssertionError(f"{name} function not found")
+    brace = js.find("{", start)
+    if brace == -1:
+        raise AssertionError(f"{name} opening brace not found")
+    depth = 1
+    i = brace + 1
+    while i < len(js) and depth > 0:
+        ch = js[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        raise AssertionError(f"{name} function braces unbalanced")
+    return js[start:i]
+
+
+def _extract_session_helpers(name: str) -> str:
+    names = [
+        '_getSessionCompletionUnread',
+        '_saveSessionCompletionUnread',
+        '_migrateSessionCompletionUnreadToFinalSession',
+    ]
+    if name in names:
+        block = _extract_js_function(SESSIONS_JS, name)
+    elif name == 'session_storage_var':
+        block = "const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';\nlet _sessionCompletionUnread = null;\n"
+    else:
+        raise AssertionError(f'unsupported helper block: {name}')
+    return block
+
+
+def _run_node_for_completion_marker(initial_unread: dict, old_sid: str, final_sid: str):
+    helper_src = "\n".join([
+        _extract_session_helpers('session_storage_var').strip(),
+        _extract_session_helpers('_getSessionCompletionUnread').strip(),
+        _extract_session_helpers('_saveSessionCompletionUnread').strip(),
+        _extract_session_helpers('_migrateSessionCompletionUnreadToFinalSession').strip(),
+    ])
+    script = f"""
+const _localStorage = {{}};
+const localStorage = {{
+  getItem: (key) => Object.prototype.hasOwnProperty.call(_localStorage, key) ? _localStorage[key] : null,
+  setItem: (key, value) => {{ _localStorage[key] = String(value); }},
+}};
+
+{helper_src}
+
+const initial = {json.dumps(initial_unread)};
+_sessionCompletionUnread = null;
+const existing = _getSessionCompletionUnread();
+for (const [key, value] of Object.entries(initial)) {{
+  existing[key] = value;
+}}
+_saveSessionCompletionUnread();
+_migrateSessionCompletionUnreadToFinalSession('{old_sid}','{final_sid}');
+console.log(JSON.stringify(_getSessionCompletionUnread(), null, 2));
+"""
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    return json.loads(proc.stdout.strip())
+
+
 def test_restore_settled_background_stream_marks_completion_unread():
     restore_idx = MESSAGES_JS.find("async function _restoreSettledSession(source")
     assert restore_idx != -1, "_restoreSettledSession(source) not found"
@@ -496,9 +576,70 @@ def test_restore_settled_background_stream_marks_completion_unread():
     assert "const completedSid=session.session_id||activeSid;" in restore_block
     assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in restore_block
     assert "_markSessionCompletionUnread(completedSid, session.message_count);" in restore_block
+    assert "_migrateSessionCompletionUnreadToFinalSession(activeSid, completedSid)" in restore_block
     assert "if(isSessionViewed) _markSessionViewed(completedSid" in restore_block, (
         "restore-settled fallback must not mark a hidden/background completion read"
     )
+
+
+def test_restore_settled_path_migrates_manual_completion_unread_to_new_session_id():
+    initial = {
+        "old-stream": {
+            "message_count": 4,
+            "completed_at": 1000,
+            "manual": True,
+            "manual_pending": True,
+            "source": "legacy",
+        },
+        "new-stream": {
+            "message_count": 9,
+            "completed_at": 1002,
+            "source": "terminal-stream-end",
+            "profile": "production",
+        },
+    }
+    updated = _run_node_for_completion_marker(initial, 'old-stream', 'new-stream')
+    assert 'old-stream' not in updated
+    assert 'new-stream' in updated
+    assert updated['new-stream']['manual'] is True
+    assert updated['new-stream']['manual_pending'] is True
+    assert updated['new-stream']['message_count'] == 9
+    assert updated['new-stream']['source'] == 'terminal-stream-end'
+    assert updated['new-stream']['profile'] == 'production'
+
+
+def test_apperror_continuation_path_migrates_manual_completion_unread_to_new_session_id():
+    apperror_start = MESSAGES_JS.find("source.addEventListener('apperror',")
+    apperror_end = MESSAGES_JS.find("source.addEventListener('warning'", apperror_start)
+    apperror_test_block = MESSAGES_JS[apperror_start:apperror_end]
+    assert "_migrateSessionCompletionUnreadToFinalSession(currentSid, completionSid)" in apperror_test_block
+    assert "const completionSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||eventSid||currentSid;" in apperror_test_block
+
+    initial = {
+        "old-continuation": {
+            "message_count": 2,
+            "completed_at": 1000,
+            "manual": True,
+            "manual_pending": False,
+            "source": "legacy",
+        },
+        "new-continuation": {
+            "message_count": 11,
+            "completed_at": 1100,
+            "source": "gateway",
+            "profile": "default",
+            "manual": True,
+            "manual_pending": True,
+        },
+    }
+    updated = _run_node_for_completion_marker(initial, 'old-continuation', 'new-continuation')
+    assert 'old-continuation' not in updated
+    assert 'new-continuation' in updated
+    assert updated['new-continuation']['manual'] is True
+    assert updated['new-continuation']['message_count'] == 11
+    assert updated['new-continuation']['source'] == 'gateway'
+    assert updated['new-continuation']['profile'] == 'default'
+    assert updated['new-continuation']['manual_pending'] is True
 
 
 def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker():
@@ -508,10 +649,11 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
 
     assert "if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;" in return_block
     assert "_markSessionViewed(S.session.session_id" in return_block
-    assert "_clearSessionCompletionUnread(S.session.session_id)" in return_block, (
-        "returning to a visible/focused tab must clear the explicit unread marker "
-        "for the active session the user is now viewing"
-    )
+    assert "_markSessionViewed(S.session.session_id" in return_block
+    assert "_clearSessionCompletionUnread(S.session.session_id)" not in return_block
+    # Returning to a visible/focused tab now clears via _markSessionViewed(...)
+    # (which routes through _setSessionViewedCount and respects manual-unread guard
+    # semantics).
     assert "renderSessionListFromCache()" in return_block
     assert "document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);" in MESSAGES_JS
     assert "window.addEventListener('focus', _markActiveSessionViewedOnReturn);" in MESSAGES_JS
@@ -544,10 +686,10 @@ def test_completion_unread_clears_only_when_session_is_opened():
     )
     # The acknowledge helper is what clears completion unread on visit, via
     # _setSessionViewedCount (#3020 stale-marker clear).
-    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0)" in SESSIONS_JS
+    assert "function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, consumeManualOnVisit = true)" in SESSIONS_JS
     ack_body_start = SESSIONS_JS.find("function _acknowledgeSessionVisit(")
     ack_body = SESSIONS_JS[ack_body_start:SESSIONS_JS.find("function _sessionVisitHasUnreadState", ack_body_start)]
-    assert "_setSessionViewedCount(sid, messageCount);" in ack_body
+    assert "_setSessionViewedCount(sid, messageCount, consumeManualOnVisit);" in ack_body
 
 
 def test_historical_sessions_are_not_marked_unread_on_list_render():
