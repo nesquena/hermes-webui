@@ -120,3 +120,11 @@ jobs:
       - name: Run browser smoke
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py
+
+      - name: Run persistent snapshot-video cache behavior gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_persistent_video_cache.py
+
+      - name: Run persistent snapshot-video cache mutation gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/mutate_persistent_video_cache.py

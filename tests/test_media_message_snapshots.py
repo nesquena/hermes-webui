@@ -16,6 +16,8 @@ overwritten AND deleted, while a request WITHOUT a snap keeps serving the live
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -139,6 +141,7 @@ def test_anchored_file_leaf_uses_binary_open_flag(monkeypatch, tmp_path):
     assert seen["flags"] & workspace._O_BINARY
 
 
+
 def test_anchored_directory_does_not_use_binary_open_flag(monkeypatch, tmp_path):
     """Directory opens keep their directory-only flag contract."""
     from api import workspace
@@ -177,6 +180,36 @@ def test_capture_snapshot_dedupes_identical_content(snap_dir, tmp_path):
     # One .snap blob only (the dedup contract); the source-binding sidecar
     # (.src.json) is a separate small file and does not count as a blob.
     assert len(list(snap_dir.glob("*.snap"))) == 1
+
+
+def test_capture_snapshot_repairs_corrupt_existing_object(snap_dir, tmp_path):
+    """A digest-shaped filename is not proof that the existing bytes match."""
+    import hashlib
+
+    from api.media_snapshots import capture_snapshot
+
+    source = tmp_path / "source.mp4"
+    expected = b"verified-snapshot-bytes"
+    source.write_bytes(expected)
+    digest = hashlib.sha256(expected).hexdigest()
+    corrupt = snap_dir / f"{digest}.snap"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_bytes(b"wrong-existing-bytes")
+
+    assert capture_snapshot(source) == digest
+    assert corrupt.read_bytes() == expected
+
+
+def test_snapshot_path_for_digest_rejects_tampered_named_object(snap_dir, tmp_path):
+    from api.media_snapshots import capture_snapshot, snapshot_path_for_digest
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"original-bytes")
+    digest = capture_snapshot(source)
+    assert digest
+    (snap_dir / f"{digest}.snap").write_bytes(b"tampered-bytes")
+
+    assert snapshot_path_for_digest(digest) is None
 
 
 def test_capture_snapshot_skips_missing_and_over_cap(snap_dir, tmp_path):
@@ -335,6 +368,54 @@ def test_handle_media_missing_snap_falls_back_to_live(routes, monkeypatch, snap_
     assert bytes(missing.body) == b"live-bytes"
 
 
+def test_handle_media_tampered_snapshot_falls_back_without_attestation(
+    routes, monkeypatch, snap_dir, tmp_path
+):
+    from api.media_snapshots import capture_snapshot
+
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"snapshot-v1")
+    digest = capture_snapshot(target)
+    assert digest
+    (snap_dir / f"{digest}.snap").write_bytes(b"wrong-body")
+    target.write_bytes(b"live-v2")
+
+    served = _media_get(routes, monkeypatch, target, query_extra=f"&snap={digest}")
+
+    assert served.status == 200
+    assert bytes(served.body) == b"live-v2"
+    assert not served.header("X-Hermes-Media-Snapshot")
+
+
+def test_handle_media_serves_the_bytes_verified_before_attestation(
+    routes, monkeypatch, snap_dir, tmp_path
+):
+    """An in-place rewrite after hashing cannot change the attested body."""
+    from api.media_snapshots import capture_snapshot
+
+    target = tmp_path / "clip.mp4"
+    expected = b"verified-snapshot"
+    replacement = b"tampered-snapshot"
+    assert len(expected) == len(replacement)
+    target.write_bytes(expected)
+    digest = capture_snapshot(target)
+    assert digest
+    snapshot = snap_dir / f"{digest}.snap"
+    original_open = routes._open_verified_snapshot_fd
+
+    def rewrite_after_verify(*args, **kwargs):
+        opened = original_open(*args, **kwargs)
+        snapshot.write_bytes(replacement)
+        return opened
+
+    monkeypatch.setattr(routes, "_open_verified_snapshot_fd", rewrite_after_verify)
+    served = _media_get(routes, monkeypatch, target, query_extra=f"&snap={digest}")
+
+    assert served.status == 200
+    assert bytes(served.body) == expected
+    assert served.header("X-Hermes-Media-Snapshot") == digest
+
+
 def test_handle_media_snap_does_not_bypass_deny(routes, monkeypatch, snap_dir, tmp_path):
     """snap= must never widen the path allow-list: a denied path stays denied
     even when a valid snapshot digest is supplied."""
@@ -377,6 +458,84 @@ def test_handle_media_denies_direct_store_path(routes, monkeypatch, tmp_path):
 
     denied = _media_get(routes, monkeypatch, store_file)
     assert denied.status == 403
+
+
+def test_preverified_snapshot_reuses_digest_etag_without_second_hash(routes, monkeypatch, tmp_path):
+    payload = bytearray(b"verified-once")
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(payload)
+    fd = routes._open_file_read_fd(source, tmp_path)
+
+    def forbidden_hash(_data):
+        raise AssertionError("attested snapshot was hashed again for ETag")
+
+    monkeypatch.setattr(routes, "_bytes_etag", forbidden_hash)
+    handler = _FakeHandler()
+    routes._serve_file_bytes(
+        handler, source, "video/mp4", "inline", "private, immutable",
+        opened_fd=fd, opened_snapshot=payload, opened_etag='W/"preverified"',
+    )
+
+    assert handler.status == 200
+    assert bytes(handler.body) == bytes(payload)
+    assert handler.header("ETag") == 'W/"preverified"'
+
+
+def test_open_verified_snapshot_fd_rejects_non_regular_opened_fd(
+    monkeypatch, routes, snap_dir
+):
+    """The opened object, not pre-open path metadata, decides eligibility."""
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    candidate = snap_dir / f"{'0' * 64}.snap"
+    read_fd, write_fd = os.pipe()
+    routes._close_fd_quietly(write_fd)
+    monkeypatch.setattr(routes.os, "supports_dir_fd", set())
+    monkeypatch.setattr(routes.os, "open", lambda *_args, **_kwargs: read_fd)
+    with pytest.raises(ValueError, match="not a regular file"):
+        routes._open_snapshot_read_fd(candidate, snap_dir)
+
+
+def test_snapshot_open_requests_nonblocking_leaf(monkeypatch, routes, snap_dir, tmp_path):
+    """The final snapshot component cannot block a worker if raced into a FIFO."""
+    nonblocking = 0x08000000
+    source = snap_dir / "regular.snap"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"x")
+    seen = []
+    original_open = os.open
+
+    def tracked_open(path, flags, *args, **kwargs):
+        seen.append(flags)
+        return original_open(source, os.O_RDONLY)
+
+    monkeypatch.setattr(routes.os, "supports_dir_fd", set())
+    monkeypatch.setattr(routes.os, "O_NONBLOCK", nonblocking, raising=False)
+    monkeypatch.setattr(routes.os, "open", tracked_open)
+    fd = routes._open_snapshot_read_fd(source, snap_dir)
+    try:
+        assert seen[-1] & nonblocking
+    finally:
+        routes._close_fd_quietly(fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO behavior")
+def test_snapshot_fifo_open_never_blocks_worker(routes, snap_dir, tmp_path):
+    """A raced-in FIFO is opened non-blocking and rejected by opened-fd type."""
+    fifo = tmp_path / "raced.snap"
+    os.mkfifo(fifo)
+    code = (
+        "from pathlib import Path; from api import routes; "
+        f"routes._open_snapshot_read_fd(Path({str(fifo)!r}), Path({str(tmp_path)!r}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=2,
+        check=False,
+    )
+    assert result.returncode != 0
 
 
 def test_handle_media_snapshot_range_request(routes, monkeypatch, snap_dir, tmp_path):

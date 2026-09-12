@@ -26,6 +26,7 @@ const SHELL_ASSETS = [
   './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,
+  './static/media-cache.js' + VQ,
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
@@ -47,7 +48,7 @@ const SHELL_ASSETS = [
 function deleteOldShellCaches() {
   return caches.keys().then((keys) =>
     Promise.all(
-      keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
+      keys.filter((k) => k.startsWith('hermes-shell-') && k !== CACHE_NAME).map((k) => caches.delete(k))
     )
   );
 }
