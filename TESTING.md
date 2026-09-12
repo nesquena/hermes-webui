@@ -91,6 +91,21 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+### Playwright dependency and rollback
+
+Playwright is a development-only dependency, pinned in `requirements-dev.txt`,
+because these regressions need a real Chromium runtime; it is not installed by
+`requirements.txt` and is never part of the production server. `scripts/test.sh`
+installs the matching Chromium binary when its cache is absent.
+
+Remove it only when the browser regressions have moved to a separate CI-only
+profile or been replaced by the repository's standard browser harness. Then
+remove `playwright==…` from `requirements-dev.txt`, `playwright` from
+`missing_dev_deps`, and the Chromium provisioning block in `scripts/test.sh`.
+The browser tests use `pytest.importorskip`, so this rollback skips only that
+coverage; it does not alter runtime dependencies. Optional local cache cleanup:
+`python -m playwright uninstall --all`.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
@@ -1978,7 +1993,7 @@ same `HERMES_HOME` (when applicable) and verify identical effect.
 
 - [ ] `/help` — dropdown lists 25+ commands; selecting `/help` posts an assistant message listing them.
 - [ ] `/new` (and alias `/reset`) — starts fresh session.
-- [ ] `/clear` — clears current transcript display (webui-only meaning, distinct from CLI's "clear screen").
+- [ ] `/clear` — durably empties the active WebUI session while preserving its session ID (and pin/project metadata). Reload immediately, then send a new message: the old transcript must not reappear.
 - [ ] `/title <name>` — renames active session, topbar + sidebar update; `/title` alone shows current title.
 - [ ] `/status` — assistant message shows session_id, model, workspace, message count.
 - [ ] `/usage` — assistant message shows token counts; the "show token usage" setting is unchanged (toggle still in Settings panel).

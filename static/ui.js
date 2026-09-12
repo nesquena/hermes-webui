@@ -16755,7 +16755,9 @@ function renderMessages(options){
   // During session switch, S.messages is intentionally cleared while the full
   // message fetch is still in flight. Other async updates can still call
   // renderMessages() in this window. Keep the existing loading placeholder.
-  if(_loadingSessionId===sid&&msgCount===0&&inner) return;
+  // An empty persisted session has no transcript fetch to wait for. Its loading
+  // placeholder must therefore be replaced with the normal blank transcript.
+  if(_loadingSessionId===sid&&msgCount===0&&inner&&Number(S.session&&S.session.message_count)>0) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
