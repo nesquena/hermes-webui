@@ -20136,6 +20136,7 @@ def _handle_tts(handler, parsed):
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
+        "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
         "id-ID-GadisNeural",
     }
     if voice not in allowed:
