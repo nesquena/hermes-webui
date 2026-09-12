@@ -15536,6 +15536,18 @@ def handle_post(handler, parsed) -> bool:
                 model_id = str(body.get("model") or "").strip() or None
                 provider_id = str(body.get("provider") or "").strip() or None
                 base_url = str(body.get("base_url") or "").strip() or None
+                session_id = str(body.get("session_id") or "").strip() or None
+                if session_id:
+                    # Per-chat override: store on the session, leave global default untouched.
+                    # NOTE: no local `from api.models import Session` here — a function-local
+                    # import would shadow the outer Session binding for this entire handler
+                    # and break the /api/session/branch path below (UnboundLocalError).
+                    session = Session.load(session_id)
+                    if session is None:
+                        return bad(handler, f"session '{session_id}' not found")
+                    session.reasoning_effort = str(effort) if effort else None
+                    session.save(touch_updated_at=False)
+                    return j(handler, {"session_id": session_id, "reasoning_effort": session.reasoning_effort or ""})
                 return j(
                     handler,
                     set_reasoning_effort(
