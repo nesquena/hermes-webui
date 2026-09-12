@@ -586,6 +586,7 @@ def read_importable_agent_session_rows(
 
         parent_expr = _optional_col('parent_session_id', session_cols)
         session_source_expr = _optional_col('session_source', session_cols)
+        pinned_expr = 's.pinned' if 'pinned' in session_cols else '0'
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -705,7 +706,7 @@ def read_importable_agent_session_rows(
 
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
-                   s.started_at, s.source,
+                   s.started_at, s.source, {pinned_expr} AS pinned,
                    {session_source_expr},
                    {user_id_expr},
                    {chat_id_expr},
@@ -735,8 +736,36 @@ def read_importable_agent_session_rows(
             # Oversampling preserves room for hidden compression segments or
             # other rows filtered after projection.
             candidate_limit = max(result_limit * 8, result_limit)
+            # Pinned sessions are explicit user discovery signals, not merely
+            # recent activity. Merge their bounded metadata rows with the normal
+            # recency candidates so an older pin remains addressable without
+            # turning the hot sidebar path into a full-history transcript scan.
+            pinned_candidates_cte = ""
+            pinned_params: list[object] = []
+            if 'pinned' in session_cols:
+                pinned_candidates_cte = (
+                    ", pinned_candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    WHERE {where_clause} AND COALESCE(s.pinned, 0) != 0\n"
+                    "                )"
+                ).format(where_clause=" AND ".join(where_clauses))
+                pinned_params = list(params)
             if latest_messages_cte:
                 candidate_cte = (
+                    "WITH {latest_messages_cte}, recent_candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    LEFT JOIN latest_messages lm ON lm.session_id = s.id\n"
+                    "                    WHERE {where_clause}\n"
+                    "                    {candidate_order_clause}\n"
+                    "                    LIMIT ?\n"
+                    "                ){pinned_candidates_cte}, candidates AS (\n"
+                    "                    SELECT id FROM recent_candidates\n"
+                    "                    UNION\n"
+                    "                    SELECT id FROM pinned_candidates\n"
+                    "                )"
+                    if pinned_candidates_cte else
                     "WITH {latest_messages_cte}, candidates AS (\n"
                     "                    SELECT s.id\n"
                     "                    FROM sessions s\n"
@@ -749,9 +778,22 @@ def read_importable_agent_session_rows(
                     latest_messages_cte=latest_messages_cte,
                     where_clause=" AND ".join(where_clauses),
                     candidate_order_clause=candidate_order_clause,
+                    pinned_candidates_cte=pinned_candidates_cte,
                 )
             else:
                 candidate_cte = (
+                    "WITH recent_candidates AS (\n"
+                    "                    SELECT s.id\n"
+                    "                    FROM sessions s\n"
+                    "                    WHERE {where_clause}\n"
+                    "                    {candidate_order_clause}\n"
+                    "                    LIMIT ?\n"
+                    "                ){pinned_candidates_cte}, candidates AS (\n"
+                    "                    SELECT id FROM recent_candidates\n"
+                    "                    UNION\n"
+                    "                    SELECT id FROM pinned_candidates\n"
+                    "                )"
+                    if pinned_candidates_cte else
                     "WITH candidates AS (\n"
                     "                    SELECT s.id\n"
                     "                    FROM sessions s\n"
@@ -762,6 +804,7 @@ def read_importable_agent_session_rows(
                 ).format(
                     where_clause=" AND ".join(where_clauses),
                     candidate_order_clause=candidate_order_clause,
+                    pinned_candidates_cte=pinned_candidates_cte,
                 )
 
             cur.execute(
@@ -774,7 +817,7 @@ def read_importable_agent_session_rows(
                 {group_by_clause}
                 {order_by_clause}
                 """,
-                [*params, candidate_limit],
+                [*params, candidate_limit, *pinned_params],
             )
         else:
             cur.execute(
@@ -789,11 +832,20 @@ def read_importable_agent_session_rows(
                 params,
             )
         projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
+        for row in projected:
+            row['pinned'] = bool(row.get('pinned'))
         projected = [_with_normalized_source(row) for row in projected]
         projected = [row for row in projected if is_cli_session_row_visible(row)]
         if limit is None:
             return projected
         selected = projected[:max(0, int(limit))]
+        # Keep explicit pins in addition to the ordinary recency window. The
+        # CTE above already bounds the extra DB work to pinned metadata rows.
+        selected_ids = {row.get('id') for row in selected}
+        selected.extend(
+            row for row in projected
+            if bool(row.get('pinned')) and row.get('id') not in selected_ids
+        )
 
         # The recency slice is per-row, but subagent rows are only renderable as
         # children: the sidebar nests a child under its parent solely when that
