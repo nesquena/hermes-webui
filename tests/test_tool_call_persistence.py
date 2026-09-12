@@ -33,6 +33,34 @@ def test_extract_tool_calls_from_openai_message_linkage():
     assert result[0]["snippet"] == "file.txt"
 
 
+def test_extract_tool_calls_ignores_explicit_null_tool_calls_in_history():
+    """Legacy assistant rows with tool_calls=None must not abort later turns."""
+    messages = [
+        {"role": "assistant", "content": "An old TickTick response", "tool_calls": None},
+        {"role": "user", "content": "continue"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-current",
+                "function": {"name": "terminal", "arguments": '{"command":"pwd"}'},
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-current",
+            "content": '{"output":"/workspace","exit_code":0}',
+        },
+    ]
+
+    result = _extract_tool_calls_from_messages(messages)
+
+    assert len(result) == 1
+    assert result[0]["name"] == "terminal"
+    assert result[0]["assistant_msg_idx"] == 2
+    assert result[0]["snippet"] == "/workspace"
+
+
 def test_tool_result_snippet_allows_frontend_show_more_threshold_but_stays_bounded():
     """Persisted snippets should be long enough for frontend Show more but capped."""
     medium_output = "m" * 1200
