@@ -133,7 +133,7 @@ def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
     visible_idx = render_body.index("const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end")
     move_idx = render_body.index("const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible")
     final_idx = render_body.index("activeIndex:shouldMoveSidebarToActive?activeIndex:-1")
-    anchor_idx = render_body.index("if(shouldMoveSidebarToActive&&virtualWindow.virtualized){")
+    anchor_idx = render_body.index("if(shouldMoveSidebarToActive&&(virtualWindow.virtualized||virtualWindow.batched)){")
 
     assert before_idx < visible_idx < move_idx < final_idx < anchor_idx
     assert "activeIndex:-1" in render_body[before_idx:visible_idx]
