@@ -35,6 +35,7 @@ def _reset_models_memory_cache(monkeypatch):
     monkeypatch.setattr(cfg, "_available_models_cache_ts", 0.0, raising=False)
     monkeypatch.setattr(cfg, "_available_models_live_rebuild_ts", 0.0, raising=False)
     monkeypatch.setattr(cfg, "_available_models_cache_source_fingerprint", None, raising=False)
+    monkeypatch.setattr(cfg, "_available_models_cache_authority", None, raising=False)
     monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
 
 
@@ -149,7 +150,7 @@ def test_session_visit_overlapping_stale_calls_coalesce_to_single_live_rebuild(t
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
 
     def _load_stale_models_cache_from_disk():
         ident = threading.get_ident()
@@ -203,7 +204,7 @@ def test_force_refresh_sync_followers_wait_past_legacy_timeout(tmp_path, monkeyp
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
 
     def _wait_for(self, predicate, timeout=None):
         if self is not cfg._cache_build_cv:
@@ -215,6 +216,7 @@ def test_force_refresh_sync_followers_wait_past_legacy_timeout(tmp_path, monkeyp
             cfg._available_models_cache_ts = published_at
             cfg._available_models_live_rebuild_ts = published_at
             cfg._available_models_cache_source_fingerprint = fingerprint
+            cfg._available_models_cache_authority = cfg._models_cache_authority()
             cfg._cache_build_in_progress = False
             return True
         if timeout == 60.0:
@@ -261,7 +263,7 @@ def test_force_refresh_sync_followers_retry_after_failed_active_rebuild(tmp_path
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
 
     def _wait_for(self, predicate, timeout=None):
         if self is not cfg._cache_build_cv:
@@ -312,7 +314,7 @@ def test_force_refresh_bounded_followers_wait_only_remaining_budget(tmp_path, mo
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
 
     def _wait_for(self, predicate, timeout=None):
         if self is not cfg._cache_build_cv:
@@ -365,7 +367,7 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
 
     def _load_stale_models_cache_from_disk():
         ident = threading.get_ident()
@@ -427,7 +429,7 @@ def test_session_visit_force_refresh_ignores_plain_disk_publish_started_after_re
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: None)
 
     def _load_stale_models_cache_from_disk():
         ident = threading.get_ident()
@@ -485,6 +487,7 @@ def test_session_visit_fresh_disk_hit_does_not_overwrite_newer_memory_cache(tmp_
         cfg._available_models_cache = rebuilt_catalog
         cfg._available_models_cache_ts = time.monotonic()
         cfg._available_models_cache_source_fingerprint = fingerprint
+        cfg._available_models_cache_authority = cfg._models_cache_authority()
         return stale_catalog
 
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", _disk_hit_after_newer_memory_publish)
@@ -521,7 +524,7 @@ def test_force_refresh_keeps_build_flag_set_until_disk_save_finishes(tmp_path, m
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
     monkeypatch.setattr(cfg, "_invoke_models_rebuild", lambda _builder: rebuilt_catalog)
 
-    def _save_and_observe(_cache):
+    def _save_and_observe(_cache, **_kwargs):
         observed.append(cfg._cache_build_in_progress)
 
     monkeypatch.setattr(cfg, "_save_models_cache_to_disk", _save_and_observe)
@@ -549,7 +552,7 @@ def test_default_disk_hit_does_not_restamp_stale_cache_for_session_visit(tmp_pat
     monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: stale_catalog)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: {"profile": "demo"})
     monkeypatch.setattr(cfg, "_cfg_mtime", 0.0, raising=False)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: (_ for _ in ()).throw(
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda *_a, **_k: (_ for _ in ()).throw(
         AssertionError("plain disk hits must not rewrite the models cache file")
     ))
 
@@ -713,3 +716,68 @@ def test_boot_model_dropdown_clears_cached_ready_on_401():
     consumed_idx = body.index("if(_bootActiveProfileUnauthRedirectBudget.isConsumed()) return true;")
 
     assert status_idx < clear_idx < consumed_idx
+
+
+def test_session_visit_discards_disk_snapshot_superseded_between_read_and_publish(
+    tmp_path, monkeypatch
+):
+    """A disk snapshot invalidated after the pre-lock read must not be published.
+
+    #7007: ``get_available_models_for_session_visit()`` reads the disk cache
+    OUTSIDE ``_available_models_cache_lock``, then publishes it INSIDE the lock
+    with a fresh timestamp *and* a fresh source fingerprint.  An
+    ``invalidate_models_cache()`` landing in that window (the user
+    authenticates a provider) otherwise leaves the pre-auth catalog served for
+    the full ``_AVAILABLE_MODELS_CACHE_TTL`` (24h).  The fingerprint guard in
+    ``_get_fresh_memory_models_cache()`` cannot reject it either, because the
+    publish stamps the *current* fingerprint onto the superseded payload.
+    ``get_available_models()`` already carries this fence; this is its sibling.
+    """
+    import api.config as cfg
+
+    _reset_models_memory_cache(monkeypatch)
+    superseded = _catalog("pre-auth-model")
+    rebuilt = _catalog("post-auth-model")
+
+    cache_path = tmp_path / "models_cache.profile.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    now = time.time()
+    os.utime(cache_path, (now, now))
+
+    monkeypatch.setattr(cfg, "_SESSION_VISIT_MODELS_FRESHNESS_SECONDS", 300.0, raising=False)
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: {"profile": "demo"})
+    monkeypatch.setattr(cfg, "_available_models_cache_generation", 5, raising=False)
+
+    # The read returns a snapshot that was current *as of the read*, but an
+    # invalidation lands before this thread can take the lock.  Bumping the
+    # generation from inside the loader is the deterministic equivalent of that
+    # interleaving -- no sleeps and no thread scheduling, so the ordering under
+    # test is guaranteed rather than hoped for.
+    def _read_then_invalidated():
+        cfg._available_models_cache_generation += 1
+        return superseded
+
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", _read_then_invalidated)
+
+    rebuild_calls: list[dict] = []
+
+    def _live_rebuild(**kwargs):
+        rebuild_calls.append(kwargs)
+        return rebuilt
+
+    monkeypatch.setattr(cfg, "get_available_models", _live_rebuild)
+
+    result = cfg.get_available_models_for_session_visit()
+
+    assert result["default_model"] == "post-auth-model", (
+        "superseded pre-auth catalog was served instead of rebuilding"
+    )
+    assert rebuild_calls and rebuild_calls[0].get("force_refresh") is True, (
+        "a superseded disk snapshot must fall through to a real rebuild"
+    )
+    published = cfg._available_models_cache
+    assert published is None or published.get("default_model") != "pre-auth-model", (
+        "superseded snapshot was published into the memory cache"
+    )

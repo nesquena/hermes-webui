@@ -114,7 +114,7 @@ def test_stale_model_readers_collapse_to_single_reload_when_models_are_requested
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
     monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(config, "_load_stale_models_cache_from_disk", lambda: None)
-    monkeypatch.setattr(config, "_save_models_cache_to_disk", lambda _data: None)
+    monkeypatch.setattr(config, "_save_models_cache_to_disk", lambda *_a, **_k: None)
     monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"config": "test"})
 
     config.reload_config()

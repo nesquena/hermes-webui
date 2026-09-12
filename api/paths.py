@@ -231,16 +231,19 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 os.unlink(tmp)
                 _write_in_place()
                 return
-        if mode is not None and hasattr(os, "fchmod"):
-            os.fchmod(fd, mode)
-        elif mode is not None:
-            os.chmod(tmp, mode)
         f = os.fdopen(fd, "w", encoding=encoding)
         owns_fd = False
         with f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+            # Writes can clear set-id bits even if they were applied before
+            # content was written. Restore the complete original mode only
+            # after the durable write, while the replacement inode is private.
+            if mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(f.fileno(), mode)
+            elif mode is not None:
+                os.chmod(tmp, mode)
         _verify_symlink_target()
         os.replace(tmp, write_path)
         _fsync_directory(write_path.parent)

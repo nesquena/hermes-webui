@@ -5201,11 +5201,213 @@ _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
+_available_models_cache_authority: str | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
-_available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
+_available_models_cache_lock = threading.RLock()
+# Generation bumped by invalidate_models_cache() so a detached rebuild
+# (models-catalog-rebuild thread) that started before invalidation can
+# detect it and discard its stale publish.
+_available_models_cache_generation: int = 0
+
+# Identifies THIS process run for diagnostics. It is not durable invalidation
+# authority: process identity necessarily changes across a restart.
+_PROCESS_RUN_ID: str = uuid.uuid4().hex
+
+# Provider auth-status enumeration cache. ``list_available_providers()``
+# (core) probes EVERY known provider's credential source serially — AWS IMDS
+# dial, gh CLI subprocess, token exchange, per-endpoint /models — and the
+# webui re-runs it on every catalog rebuild even though auth status only
+# changes when the user edits credentials. Cache the enumeration briefly
+# (keyed by profile) so a rebuild after the first one skips the probes
+# entirely. Credential edits must call ``invalidate_models_cache()`` so
+# the next rebuild does not keep serving the old snapshot for the rest of
+# the TTL. The caller still re-checks ``get_auth_status`` per authenticated
+# provider below.
+_PROVIDER_ENUM_CACHE: collections.OrderedDict[str, tuple[float, list]] = collections.OrderedDict()
+_PROVIDER_ENUM_CACHE_MAX_ENTRIES = 64
+_PROVIDER_ENUM_CACHE_INFLIGHT: dict[str, threading.Event] = {}
+_PROVIDER_ENUM_CACHE_TTL_SECONDS = 120.0
+# Total time a follower will wait across re-contentions before failing open
+# (see _list_available_providers_cached) rather than looping on a hung owner
+# forever in 30s increments.
+_PROVIDER_ENUM_CACHE_FOLLOWER_DEADLINE_SECONDS = 60.0
+_PROVIDER_ENUM_CACHE_LOCK = threading.Lock()
+# Bumped by invalidate_models_cache() so an in-flight probe that started
+# before invalidation cannot write its stale result back into the cache.
+_PROVIDER_ENUM_CACHE_EPOCH = 0
+
+
+def _clear_provider_enum_cache_locked() -> list[threading.Event]:
+    """Drop cached enumerations and take ownership of in-flight waiters.
+
+    Caller must hold ``_PROVIDER_ENUM_CACHE_LOCK``.  The returned events
+    must be ``.set()`` *after* the lock is released so waiters can re-check
+    the now-empty cache without nesting lock acquisitions.
+    """
+    global _PROVIDER_ENUM_CACHE_EPOCH
+    _PROVIDER_ENUM_CACHE.clear()
+    pending = list(_PROVIDER_ENUM_CACHE_INFLIGHT.values())
+    _PROVIDER_ENUM_CACHE_INFLIGHT.clear()
+    _PROVIDER_ENUM_CACHE_EPOCH += 1
+    return pending
+
+
+def _list_available_providers_cached(profile_key: str) -> list:
+    """Return ``list_available_providers()``, cached per profile for a short TTL.
+
+    The uncached core call can take seconds (serial per-provider probes).
+    Keep the cache small and TTL-bounded so memory stays flat.  Concurrent
+    misses for the same profile are coalesced so only one caller performs
+    the expensive probe.  ``invalidate_models_cache()`` drops this cache
+    immediately after credential edits.
+
+    Cached and returned values are isolated snapshots: the cache stores a
+    deep copy of each enumeration and every caller receives its own deep
+    copy, so mutating a returned list or nested row can never corrupt the
+    cached state.
+
+    A follower's total wait across re-contentions is capped by
+    ``_PROVIDER_ENUM_CACHE_FOLLOWER_DEADLINE_SECONDS``: re-looping on every
+    30s timeout with no overall bound meant a genuinely hung owner (a probe
+    that never returns) wedged every follower forever, 30s at a time. Past
+    the deadline this fails open with the last known enumeration for the
+    profile (even if past its TTL) rather than an unauthenticated-looking
+    empty catalog, since a stale provider list is far less disruptive than
+    silently dropping every provider from the picker.
+    """
+    _deadline = time.monotonic() + _PROVIDER_ENUM_CACHE_FOLLOWER_DEADLINE_SECONDS
+    while True:
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            now = time.monotonic()
+            hit = _PROVIDER_ENUM_CACHE.get(profile_key)
+            if hit is not None and now - hit[0] < _PROVIDER_ENUM_CACHE_TTL_SECONDS:
+                # LRU: promote hit to most-recently-used.
+                try:
+                    _PROVIDER_ENUM_CACHE.move_to_end(profile_key)
+                except KeyError:
+                    pass
+                return copy.deepcopy(hit[1])
+            wait_for = _PROVIDER_ENUM_CACHE_INFLIGHT.get(profile_key)
+            if wait_for is None:
+                wait_for = threading.Event()
+                _PROVIDER_ENUM_CACHE_INFLIGHT[profile_key] = wait_for
+                epoch = _PROVIDER_ENUM_CACHE_EPOCH
+                am_owner = True
+            else:
+                am_owner = False
+        if not am_owner:
+            remaining = _deadline - time.monotonic()
+            if remaining <= 0:
+                with _PROVIDER_ENUM_CACHE_LOCK:
+                    fallback = _PROVIDER_ENUM_CACHE.get(profile_key)
+                return copy.deepcopy(fallback[1]) if fallback is not None else []
+            # A different caller owns this profile's cold refresh.  Do not
+            # hold the cache lock while waiting; unrelated profiles remain
+            # independent. Bounded wait so a hung owner probe cannot wedge
+            # followers past our overall deadline — on timeout we re-loop to
+            # re-contend (and re-check the deadline above).
+            wait_for.wait(timeout=min(30, remaining))
+            continue
+
+        try:
+            from hermes_cli.models import list_available_providers as _lap
+
+            result = _lap()
+            completed_at = time.monotonic()
+        except BaseException:
+            # Never leave waiters blocked, and allow the next caller to retry
+            # after a failed probe rather than caching a partial/failed result.
+            # Identity guard: only pop/signal our exact event — never a
+            # replacement owner installed after an invalidation.
+            with _PROVIDER_ENUM_CACHE_LOCK:
+                if _PROVIDER_ENUM_CACHE_INFLIGHT.get(profile_key) is wait_for:
+                    _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key, None)
+                    wait_for.set()
+            raise
+
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            # A concurrent invalidate_models_cache() bumps the epoch and
+            # drops inflight waiters.  Do not republish the stale probe.
+            if epoch == _PROVIDER_ENUM_CACHE_EPOCH:
+                _PROVIDER_ENUM_CACHE[profile_key] = (completed_at, copy.deepcopy(result))
+                _PROVIDER_ENUM_CACHE.move_to_end(profile_key)
+                while len(_PROVIDER_ENUM_CACHE) > _PROVIDER_ENUM_CACHE_MAX_ENTRIES:
+                    _PROVIDER_ENUM_CACHE.popitem(last=False)
+            # Identity-owned cleanup: only the caller whose exact event is
+            # still installed may pop/signal it.  If an invalidation retired
+            # our event and a newer owner installed its own, popping/signaling
+            # that replacement would let a third caller launch yet another
+            # probe (ABA).
+            if _PROVIDER_ENUM_CACHE_INFLIGHT.get(profile_key) is wait_for:
+                _PROVIDER_ENUM_CACHE_INFLIGHT.pop(profile_key, None)
+                wait_for.set()
+            current_epoch = _PROVIDER_ENUM_CACHE_EPOCH
+        if epoch == current_epoch:
+            return copy.deepcopy(result)
+        # Epoch mismatch: an invalidation landed while we probed.  The result
+        # is stale — discard it and re-enter the lookup loop so this caller
+        # waits on (or becomes) the current generation's owner instead of
+        # returning a pre-invalidation snapshot to the outer catalog builder.
+        continue
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
+
+# ── Build ownership (#7007 round 5) ─────────────────────────────────────────
+# `_available_models_cache_generation` alone cannot tell two builds STARTED
+# under the same generation apart (a timed-out follower used to barge into
+# the cold-rebuild path and start a second worker while the first was still
+# live, since nothing there checked `_cache_build_in_progress` before setting
+# it). `_active_build_owner` is `(generation, token, durable_authority)` for
+# whichever build is
+# currently live, or None. Every finalizer (success publish, disk commit,
+# error/timeout cleanup) must own this exact tuple before it may mutate
+# `_cache_build_in_progress` / the caches — a stale build's finalizer running
+# after a newer owner (or an invalidation) has taken over becomes a no-op
+# instead of retiring state it doesn't own.
+_cache_build_owner_token: int = 0
+_active_build_owner: "tuple[int, int, str | None] | None" = None
+
+
+def _try_claim_build_owner() -> "tuple[int, int, str | None] | None":
+    """Attempt to become the sole owner of a fresh catalog rebuild.
+
+    Caller must hold `_cache_build_cv`. Returns `(generation, token,
+    durable_authority)`, or None if a build is already live for the current
+    generation.
+    """
+    global _cache_build_in_progress, _cache_build_owner_token, _active_build_owner
+    if _cache_build_in_progress:
+        return None
+    _cache_build_in_progress = True
+    _cache_build_owner_token += 1
+    owner = (
+        _available_models_cache_generation,
+        _cache_build_owner_token,
+        _models_cache_authority(),
+    )
+    _active_build_owner = owner
+    return owner
+
+
+def _release_build_owner_if_current(owner: "tuple[int, int, str | None]") -> None:
+    """Clear the in-progress flag and wake waiters, but ONLY if `owner` is
+    still the live build. A stale/retired owner's call becomes a no-op —
+    this is what stops a late failed/timed-out worker from clearing a
+    newer owner's flag out from under it (#7007 round 5 finding 2).
+    """
+    global _cache_build_in_progress, _active_build_owner
+    with _cache_build_cv:
+        if _active_build_owner != owner:
+            return
+        _cache_build_in_progress = False
+        _active_build_owner = None
+        _cache_build_cv.notify_all()
+
+
+def _is_current_build_owner(owner: "tuple[int, int, str | None]") -> bool:
+    """Caller must hold `_cache_build_cv`."""
+    return _active_build_owner == owner and owner[2] == _models_cache_authority()
 
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
@@ -6351,6 +6553,53 @@ def _delete_models_cache_on_disk() -> None:
         pass  # already absent
 
 
+def _models_cache_authority_path() -> Path:
+    """Return the durable invalidation-authority sidecar for the disk cache."""
+    cache_path = _get_models_cache_path()
+    return cache_path.with_name(f"{cache_path.name}.authority")
+
+
+def _models_cache_authority() -> str | None:
+    """Read the current durable cache authority, creating an initial token.
+
+    An unavailable sidecar fails closed: a cache without comparable authority
+    is rebuilt rather than accepted after a restart.
+    """
+    path = _models_cache_authority_path()
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return None
+    token = uuid.uuid4().hex
+    try:
+        _paths._atomic_write_text(path, f"{token}\n")
+    except OSError:
+        return None
+    return token
+
+
+def _advance_models_cache_authority() -> str | None:
+    """Durably retire every snapshot captured before this invalidation.
+
+    Removing the old sidecar before publishing the replacement is intentional:
+    if the replacement cannot be persisted (or the process crashes mid-change),
+    the next boot creates a different authority and rejects every existing cache
+    rather than accepting a stale snapshot under the old authority.
+    """
+    path = _models_cache_authority_path()
+    try:
+        path.unlink(missing_ok=True)
+        token = uuid.uuid4().hex
+        _paths._atomic_write_text(path, f"{token}\n")
+    except OSError:
+        return None
+    return token
+
+
 def _is_valid_models_cache(cache: object) -> bool:
     """Return True when a cache payload has the full /api/models shape.
 
@@ -6422,6 +6671,37 @@ def _is_loadable_disk_cache(cache: object) -> bool:
             cached_sources,
             runtime_sources,
         )
+        return False
+    # #7007 round 5/6: _load_models_cache_from_disk() is deliberately called
+    # BEFORE acquiring _available_models_cache_lock (perf — lets concurrent
+    # requests skip entirely), so it can race a stale build's disk write/
+    # delete-if-invalidated finalizer: the delete only stops FUTURE reads,
+    # it cannot retroactively un-read a file a concurrent reader already
+    # loaded in the gap between the write completing and the delete landing.
+    # Stamping every write with the generation live at BUILD START and
+    # rejecting a mismatch here closes that gap without needing a lock
+    # around the disk read: a file written by a build whose generation has
+    # since been bumped (invalidated) can never pass this check, regardless
+    # of exactly when the concurrent reader's file open landed relative to
+    # the writer's own delete. Missing field (pre-fix cache, or the rare
+    # early-init save before this stamp could be resolved) is treated as a
+    # mismatch, same convention as the `_webui_version` stamp above — worst
+    # case one extra rebuild, never a resurrected stale catalog.
+    # Generation is useful within one process, but resets after restart. The
+    # durable sidecar authority advances with every invalidation and closes the
+    # crash window where a stale writer renames after invalidation then dies
+    # before delete-on-lost-ownership cleanup. Process identity cannot bypass it.
+    if cache.get("_run_id") == _PROCESS_RUN_ID:
+        if cache.get("_generation") != _available_models_cache_generation:
+            logger.debug(
+                "models cache rejected: generation=%r vs runtime=%r",
+                cache.get("_generation"),
+                _available_models_cache_generation,
+            )
+            return False
+    authority = _models_cache_authority()
+    if authority is None or cache.get("_authority") != authority:
+        logger.debug("models cache rejected: durable invalidation authority changed")
         return False
     return True
 
@@ -6530,7 +6810,9 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         return None
 
 
-def _save_models_cache_to_disk(cache: dict) -> None:
+def _save_models_cache_to_disk(
+    cache: dict, *, generation: int | None = None, authority: str | None = None
+) -> None:
     """Save cache to disk so it survives server restarts.
 
     Stamps the payload with `_webui_version` and `_schema_version` (#1633) so
@@ -6545,6 +6827,29 @@ def _save_models_cache_to_disk(cache: dict) -> None:
     a mismatch (since runtime_version is non-None on every subsequent call),
     so this is safe — at worst we write one cache file that gets rejected
     once on the next boot.
+
+    Owner-gated callers (`_publish_models_result`, the legacy sync rebuild
+    path) call this exact function unchanged — several existing tests
+    monkeypatch it directly to observe/suppress the write — and then
+    re-check build ownership AFTER it returns, deleting the file via
+    `_delete_models_cache_on_disk()` if ownership was lost during the write
+    (#7007 round 5 finding 1: an invalidation landing mid-write must not let
+    a stale rename's result survive on disk).
+
+    `generation` (#7007 round 6): stamps the payload with the generation
+    that was live when the CALLER'S BUILD STARTED (its captured
+    `_build_owner[0]`, not whatever `_available_models_cache_generation` is
+    right now) — the whole point is to record what generation this data is
+    actually FROM, so `_is_loadable_disk_cache` can reject it later if an
+    invalidation has bumped the live generation since, independent of
+    whether this write's own delete-on-mismatch cleanup ran in time (see
+    that function's docstring for why the write/delete pair alone can't
+    close the race by itself). Defaults to the live generation at save time
+    when omitted, so every existing direct call site (there are many, in
+    tests exercising the disk-cache save/load round trip with no build-
+    ownership context at all) keeps behaving exactly as before — passing
+    the true build-start value is what production's two owner-gated
+    finalizers do, and is what actually matters for the fix.
     """
     try:
         if not _is_valid_models_cache(cache):
@@ -6552,11 +6857,19 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         payload = {
             "_schema_version": _MODELS_CACHE_SCHEMA_VERSION,
             "_source_fingerprint": _models_cache_source_fingerprint(),
+            "_run_id": _PROCESS_RUN_ID,
+            "_authority": authority if authority is not None else _models_cache_authority(),
+            "_generation": (
+                generation if generation is not None
+                else _available_models_cache_generation
+            ),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
         }
+        if not isinstance(payload["_authority"], str) or not payload["_authority"]:
+            return
         runtime_version = _current_webui_version()
         if runtime_version is not None:
             payload["_webui_version"] = runtime_version
@@ -6572,22 +6885,25 @@ def _save_models_cache_to_disk(cache: dict) -> None:
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
     """Return a valid fresh in-memory /api/models cache, or clear stale shapes."""
     global _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _available_models_cache_authority
     if _available_models_cache is None:
         return None
     if (now - _available_models_cache_ts) >= _AVAILABLE_MODELS_CACHE_TTL:
         return None
+    current_authority = _models_cache_authority()
     current_sources = _models_cache_source_fingerprint()
-    if _available_models_cache_source_fingerprint != current_sources:
+    if (
+        _available_models_cache_source_fingerprint != current_sources
+        or _available_models_cache_authority != current_authority
+    ):
         logger.debug(
-            "models memory cache rejected: source_fingerprint=%r vs runtime=%r",
-            _available_models_cache_source_fingerprint,
-            current_sources,
+            "models memory cache rejected: source/authority no longer match runtime"
         )
         _available_models_cache = None
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
+        _available_models_cache_authority = None
         _sync_models_cache_provenance()
         return None
     if _is_valid_models_cache(_available_models_cache):
@@ -6596,6 +6912,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     _available_models_cache_ts = 0.0
     _available_models_live_rebuild_ts = 0.0
     _available_models_cache_source_fingerprint = None
+    _available_models_cache_authority = None
     _sync_models_cache_provenance()
     return None
 
@@ -6613,22 +6930,54 @@ def invalidate_models_cache():
     that call invalidate_models_cache() still get back the previous test's
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
+
+    Also drops the provider-enumeration cache. Credential edits and the
+    autouse test fixture both go through this function; leaving the 120s
+    provider-auth snapshot in place would serve stale list_available_providers()
+    results after the outer catalog cache was cleared.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _available_models_cache_authority, _cache_build_cv
+    global _available_models_cache_generation, _active_build_owner
     with _available_models_cache_lock:
+        _advance_models_cache_authority()
         _available_models_cache = None
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
+        _available_models_cache_authority = None
+        _available_models_cache_generation += 1
         _sync_models_cache_provenance()
         _cache_build_in_progress = False
+        # Retire whoever was building — even though the generation bump above
+        # already invalidates any in-flight build's finalizer checks, clearing
+        # this explicitly is a cheap defensive belt-and-suspenders (#7007
+        # round 5): no stale build can ever be mistaken for the current owner.
+        _active_build_owner = None
         _cache_build_cv.notify_all()
         # Clear the credential pool cache too (all profiles). Without this,
         # tests (and live provider key edits) see a stale CredentialPool from a
         # prior auth_store payload — the test_credential_pool_providers suite was
         # hitting this directly. A full reset is intentionally profile-wide.
         _CREDENTIAL_POOL_CACHE.clear()
+        # Drop the provider-enumeration cache while STILL holding the outer
+        # lock so the outer/inner freshness transition is atomic: a concurrent
+        # rebuild that lands between the two clears could otherwise reuse the
+        # pre-credential-change enumeration and publish a catalog missing the
+        # newly authenticated provider. Lock order stays outer→provider,
+        # matching the legacy synchronous cold build path (get_available_models
+        # holds the outer lock while calling _list_available_providers_cached).
+        # The bounded (default) path uses a detached `models-catalog-rebuild`
+        # thread that does NOT hold the outer RLock, so its publish is also
+        # guarded by _available_models_cache_generation — an invalidation
+        # bumps the generation and the stale publish is discarded.
+        # The captured in-flight events are woken only after BOTH locks are
+        # released so waiters re-check the now-empty cache without nested
+        # acquisitions.
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            pending_provider_enum = _clear_provider_enum_cache_locked()
+    for _event in pending_provider_enum:
+        _event.set()
     # Also delete the disk cache so the next cold build starts fresh.
     # Disk delete is outside the lock — file I/O shouldn't block other readers.
     _delete_models_cache_on_disk()
@@ -6671,17 +7020,32 @@ def invalidate_provider_models_cache(provider_id: str):
     get_available_models() call, _provider_models_invalidated_ts[provider_id]
     is cleared so the provider's fresh models are used.
 
+    This is the invalidation path POST /api/models/refresh uses right after a
+    provider is authenticated — it must clear the provider-enumeration cache
+    and bump the generation exactly like invalidate_models_cache() does.
+    Without this, a detached rebuild started before this call can't detect
+    the invalidation and publishes a catalog missing the just-authenticated
+    provider, and _list_available_providers_cached() keeps serving the old
+    enumeration (without the new provider) for up to its 120s TTL.
+
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
     global _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _available_models_cache_authority, _CREDENTIAL_POOL_CACHE
+    global _available_models_cache_generation, _cache_build_in_progress, _active_build_owner
     with _available_models_cache_lock:
+        _advance_models_cache_authority()
         _available_models_cache = None
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
+        _available_models_cache_authority = None
+        _available_models_cache_generation += 1
         _sync_models_cache_provenance()
+        _cache_build_in_progress = False
+        _active_build_owner = None  # retire any in-flight build (#7007 round 5)
+        _cache_build_cv.notify_all()
         _provider_models_invalidated_ts[provider_id] = time.time()
         # Also evict the credential pool so the next cold path re-loads it.
         # Must evict both the original key and its canonical form (load_pool
@@ -6690,6 +7054,15 @@ def invalidate_provider_models_cache(provider_id: str):
         _cp_tag = _credential_pool_profile_tag()
         _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
         _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
+        # Drop the provider-enumeration cache while STILL holding the outer
+        # lock, same atomicity rationale as invalidate_models_cache(): a
+        # concurrent rebuild landing between the two clears could otherwise
+        # reuse the pre-auth enumeration and publish a catalog missing the
+        # provider this call exists to refresh.
+        with _PROVIDER_ENUM_CACHE_LOCK:
+            pending_provider_enum = _clear_provider_enum_cache_locked()
+    for _event in pending_provider_enum:
+        _event.set()
     _delete_models_cache_on_disk()
 
 
@@ -6926,7 +7299,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     contract for every existing caller.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _available_models_cache_authority, _cache_build_cv
+    global _active_build_owner
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -7174,10 +7548,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         _hermes_auth_used = False
         try:
-            from hermes_cli.models import list_available_providers as _lap
             from hermes_cli.auth import get_auth_status as _gas
 
-            for _p in _lap():
+            for _p in _list_available_providers_cached(_active_profile_name or "default"):
                 if not _p.get("authenticated"):
                     continue
                 try:
@@ -8449,6 +8822,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # so only one thread rebuilds while others wait.
     disk_groups = None
     stale_disk_groups = None
+    # Snapshot the generation BEFORE the read (#7007 round 6): whatever this
+    # read returns describes the catalog as of AT MOST this generation. The
+    # read-time stamp check in `_is_loadable_disk_cache` proves the file was
+    # current when it was opened, but this read happens outside the lock, so
+    # an invalidation can still land between it and the in-lock publish
+    # below. Capturing before (not after) the read is the conservative side:
+    # an invalidation that lands *during* the read also fails the comparison.
+    disk_load_generation = _available_models_cache_generation
     if _available_models_cache is None and not force_refresh:
         disk_groups = _load_models_cache_from_disk()
         if disk_groups is None:
@@ -8547,11 +8928,24 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
 
-        # Cold path: disk cache hit — use it (fast, no lock contention)
-        if disk_groups is not None and not force_refresh:
+        # Cold path: disk cache hit — use it (fast, no lock contention).
+        # Re-check the generation captured before the pre-lock read (#7007
+        # round 6): the read-time stamp check cannot see an invalidation that
+        # lands AFTER the read returns but before we take the lock. Without
+        # this, that superseded snapshot would be published into the memory
+        # cache with a fresh timestamp and served to every subsequent reader
+        # for the full TTL — the exact "catalog missing a just-authenticated
+        # provider" symptom invalidation exists to prevent. On a mismatch,
+        # drop it and fall through to a real rebuild for the live generation.
+        if (
+            disk_groups is not None
+            and not force_refresh
+            and disk_load_generation == _available_models_cache_generation
+        ):
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+            _available_models_cache_authority = _models_cache_authority()
             _sync_models_cache_provenance()
             return copy.deepcopy(disk_groups)
 
@@ -8577,9 +8971,21 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # serve the network-free minimal catalog and leave the flag alone.
             return copy.deepcopy(_minimal_static_models_catalog())
 
-        # Cold path: full rebuild — only one thread reaches here at a time
+        # Cold path: full rebuild.
+        # Claim ownership atomically instead of unconditionally setting the
+        # flag (#7007 round 5 finding 3): a caller whose wait_for(...) above
+        # timed out because the owner is genuinely still building (no
+        # invalidation happened) must NOT start a second competing rebuild —
+        # nothing previously stopped that, so two workers could race the
+        # same generation with no way to tell them apart. If someone else
+        # already owns the current build, serve the best fallback instead;
+        # the live owner will publish when it finishes.
         with _cache_build_cv:
-            _cache_build_in_progress = True
+            _build_owner = _try_claim_build_owner()
+        if _build_owner is None:
+            if stale_disk_groups is not None:
+                return copy.deepcopy(stale_disk_groups)
+            return copy.deepcopy(_static_models_catalog_without_live_probes())
 
         # Capture the active per-request profile (#3957). The live provider
         # probe inside the rebuild resolves credentials from os.environ /
@@ -8618,24 +9024,53 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 with _sync_scope:
                     result = _invoke_models_rebuild(_build_available_models_uncached)
             except BaseException:
-                # Always reset the flag so waiting threads don't block for 60s
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                # Always reset the flag so waiting threads don't block for
+                # 60s — but only if we're still the owner (#7007 round 5
+                # finding 2): a stale/retired owner's exception handler must
+                # not clear a newer owner's in-progress flag out from under it.
+                _release_build_owner_if_current(_build_owner)
                 raise
             with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            try:
-                _save_models_cache_to_disk(result)
-            finally:
-                with _cache_build_cv:
+                if not _is_current_build_owner(_build_owner):
+                    # Catalog was invalidated (or a newer owner took over)
+                    # while we built — discard stale result, don't touch
+                    # shared state, and don't write it to disk below either.
+                    # A local invalidation already retired the owner. An
+                    # external process can instead advance only the durable
+                    # authority, leaving this process's local flag live; in
+                    # that case release this exact stale owner so a B-era
+                    # caller can rebuild instead of remaining stuck behind it.
+                    _release_build_owner_if_current(_build_owner)
+                    pass
+                else:
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _available_models_cache_authority = _build_owner[2]
+                    _sync_models_cache_provenance()
+            if not _is_current_build_owner(_build_owner):
+                # Fall through to fresh-build fallback on next call; return
+                # stale to this caller would re-pollute caches. The flag
+                # itself was already retired by whatever invalidated/took
+                # over — this stale build owns nothing to release.
+                return copy.deepcopy(result)
+            _save_models_cache_to_disk(
+                result, generation=_build_owner[0], authority=_build_owner[2]
+            )
+            with _cache_build_cv:
+                if _is_current_build_owner(_build_owner):
                     _cache_build_in_progress = False
+                    _active_build_owner = None
                     _cache_build_cv.notify_all()
+                else:
+                    # An invalidation (or a newer owner) landed WHILE the
+                    # write above was in flight (#7007 round 5 finding 1):
+                    # the file we just wrote is now the stale data that
+                    # invalidation meant to discard. Delete it rather than
+                    # let it resurrect on the next cold start/disk hit.
+                    _delete_models_cache_on_disk()
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -8671,7 +9106,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
+            global _available_models_cache_authority
+            global _active_build_owner
+            # Every check below only ever mutates shared state when
+            # `_build_owner` still matches the live owner tuple. A mismatch
+            # means an invalidation landed (or, in principle, a different
+            # owner took over) at some point during this build; whichever
+            # event retired us already cleared the flag and notified. A
+            # stale worker touching state after that would let a third
+            # caller start a redundant rebuild believing none was in
+            # progress, or resurrect data an invalidation meant to discard.
+            # So on any owner mismatch this function only ever returns,
+            # never touches the flag, cache, or disk.
             with _cache_build_cv:
+                if not _is_current_build_owner(_build_owner):
+                    # Cross-process invalidation changes the durable authority
+                    # but cannot clear our process-local ownership flag. Retire
+                    # this stale owner; a local invalidation has already made
+                    # this a harmless no-op by clearing `_active_build_owner`.
+                    _release_build_owner_if_current(_build_owner)
+                    return
                 published_at = time.monotonic()
                 _available_models_cache = result
                 _available_models_cache_ts = published_at
@@ -8679,20 +9133,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _available_models_cache_source_fingerprint = (
                     _models_cache_source_fingerprint()
                 )
+                _available_models_cache_authority = _build_owner[2]
                 _sync_models_cache_provenance()
-            try:
-                _save_models_cache_to_disk(result)
-            except Exception:
-                logger.debug("models cache disk save failed", exc_info=True)
-            finally:
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
-
-        def _clear_build_in_progress():
-            global _cache_build_in_progress
+            # Write OUTSIDE the lock (slow I/O, and several existing tests
+            # monkeypatch this exact function to observe/suppress the
+            # write) — then re-check ownership AFTER it returns (#7007
+            # round 5 finding 1): the old check here only gated the
+            # in-progress flag, not the write/rename itself, so a stale
+            # worker's write could still land on disk after an invalidation
+            # deleted the file it was replacing. If ownership was lost
+            # while the write was in flight, delete what we just wrote
+            # instead of letting it resurrect stale data.
+            _save_models_cache_to_disk(
+                result, generation=_build_owner[0], authority=_build_owner[2]
+            )
             with _cache_build_cv:
+                if not _is_current_build_owner(_build_owner):
+                    _delete_models_cache_on_disk()
+                    _release_build_owner_if_current(_build_owner)
+                    return
                 _cache_build_in_progress = False
+                _active_build_owner = None
                 _cache_build_cv.notify_all()
 
         def _claim_publish() -> bool:
@@ -8731,7 +9192,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if "result" in box:
                             _publish_models_result(box["result"])
                         else:
-                            _clear_build_in_progress()
+                            # #7007 round 5 finding 2: only retire OUR OWN
+                            # owner tuple. A late failed build must not be
+                            # able to clear a newer owner's in-progress flag
+                            # just because it happens to run after one took
+                            # over the same (invalidated) generation.
+                            _release_build_owner_if_current(_build_owner)
 
         _worker = threading.Thread(
             target=_rebuild_worker,
@@ -8744,7 +9210,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # Build finished within budget — foreground publishes
             # synchronously, exactly like the legacy path.
             if "error" in box:
-                _clear_build_in_progress()
+                # Same owner-scoped release as the worker's own error path
+                # above (#7007 round 5 finding 2) — this foreground could be
+                # observing a LATE error after an invalidation and a new
+                # owner have already taken over.
+                _release_build_owner_if_current(_build_owner)
                 raise box["error"]
             if _claim_publish():
                 _publish_models_result(box["result"])
@@ -8856,6 +9326,7 @@ def warm_models_catalog_provenance_if_cold() -> None:
         _available_models_cache_ts = time.monotonic()
         try:
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+            _available_models_cache_authority = _models_cache_authority()
         except Exception:
             _available_models_cache_source_fingerprint = None
         _sync_models_cache_provenance()
@@ -8895,6 +9366,7 @@ def get_available_models_for_session_visit() -> dict:
             _slow_threshold_ms = 0.0
 
     global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint
+    global _available_models_cache_authority
     cache_path = _get_models_cache_path()
     cache_age = _models_cache_file_age_seconds(cache_path, time.time())
     _mark(f"disk_age_check:{cache_age}")
@@ -8909,6 +9381,12 @@ def get_available_models_for_session_visit() -> dict:
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
         _mark("memory_cache_miss_loading_disk")
+        # Snapshot the generation BEFORE the read (#7007), mirroring
+        # get_available_models(): whatever this read returns describes the
+        # catalog as of AT MOST this generation. Capturing before (not after)
+        # the read is the conservative side -- an invalidation that lands
+        # *during* the read also fails the comparison below.
+        disk_load_generation = _available_models_cache_generation
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
             with _available_models_cache_lock:
@@ -8917,13 +9395,29 @@ def get_available_models_for_session_visit() -> dict:
                     _mark("disk_then_memory_cache_hit")
                     _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                     return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            _mark("disk_cache_returned")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(disk_cached)
+                # Re-check the generation captured before the pre-lock read
+                # (#7007): the read-time stamp check in _is_loadable_disk_cache
+                # proves the file was current when opened, but the read happens
+                # OUTSIDE this lock, so an invalidation can land between it and
+                # this publish. The source-fingerprint guard in
+                # _get_fresh_memory_models_cache cannot catch that either --
+                # this publish stamps the *current* fingerprint onto the
+                # superseded payload, so it reads as valid. Without this check
+                # that snapshot is served for the full _AVAILABLE_MODELS_CACHE_TTL
+                # (24h) -- the exact "catalog missing a just-authenticated
+                # provider" symptom invalidation exists to prevent. On a
+                # mismatch, drop it and fall through to a real rebuild.
+                if disk_load_generation == _available_models_cache_generation:
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _available_models_cache_authority = _models_cache_authority()
+                    _sync_models_cache_provenance()
+                    _mark("disk_cache_returned")
+                    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                    return copy.deepcopy(disk_cached)
+                _mark("disk_cache_superseded")
+                disk_cached = None
 
     _mark("cache_age_stale_or_missing")
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()

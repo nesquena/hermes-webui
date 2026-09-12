@@ -215,6 +215,8 @@ def test_load_skips_version_check_when_runtime_unknown(isolated_cache, monkeypat
     cache = {
         "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
         "_source_fingerprint": config._models_cache_source_fingerprint(),
+        "_authority": config._models_cache_authority(),
+        "_generation": config._available_models_cache_generation,
         # no _webui_version
         **_shape_cache(),
     }
@@ -246,13 +248,18 @@ def test_is_loadable_disk_cache_checks_versions(with_runtime_version):
     with_runtime_version("v0.50.293")
 
     # Missing _webui_version
-    bad1 = {"_schema_version": config._MODELS_CACHE_SCHEMA_VERSION, **_shape_cache()}
+    bad1 = {
+        "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
+        "_generation": config._available_models_cache_generation,
+        **_shape_cache(),
+    }
     assert config._is_loadable_disk_cache(bad1) is False
 
     # Wrong _webui_version
     bad2 = {
         "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
         "_webui_version": "v0.50.281",
+        "_generation": config._available_models_cache_generation,
         **_shape_cache(),
     }
     assert config._is_loadable_disk_cache(bad2) is False
@@ -261,6 +268,7 @@ def test_is_loadable_disk_cache_checks_versions(with_runtime_version):
     bad3 = {
         "_schema_version": 0,
         "_webui_version": "v0.50.293",
+        "_generation": config._available_models_cache_generation,
         **_shape_cache(),
     }
     assert config._is_loadable_disk_cache(bad3) is False
@@ -270,9 +278,40 @@ def test_is_loadable_disk_cache_checks_versions(with_runtime_version):
         "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
         "_webui_version": "v0.50.293",
         "_source_fingerprint": config._models_cache_source_fingerprint(),
+        "_authority": config._models_cache_authority(),
+        "_generation": config._available_models_cache_generation,
         **_shape_cache(),
     }
     assert config._is_loadable_disk_cache(good) is True
+
+
+def test_is_loadable_disk_cache_rejects_stale_generation(with_runtime_version):
+    """#7007 round 6: a disk cache stamped with an older generation than the
+    live one must be rejected, even with otherwise-perfect version/schema/
+    fingerprint stamps — this is what makes _load_models_cache_from_disk()
+    (deliberately called before acquiring any lock, see its docstring) safe
+    against a stale build's write landing in the exact window before that
+    build's own delete-on-invalidation cleanup runs."""
+    from api import config
+    with_runtime_version("v0.50.293")
+
+    stale = {
+        "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
+        "_webui_version": "v0.50.293",
+        "_source_fingerprint": config._models_cache_source_fingerprint(),
+        # Written by THIS run: the generation counter is only comparable
+        # within the process that produced it, so a file claiming an older
+        # generation is only provably stale when it carries this run's id.
+        # `_save_models_cache_to_disk` always stamps both.
+        "_run_id": config._PROCESS_RUN_ID,
+        "_authority": config._models_cache_authority(),
+        "_generation": config._available_models_cache_generation - 1,
+        **_shape_cache(),
+    }
+    assert config._is_loadable_disk_cache(stale) is False
+
+    fresh = dict(stale, _generation=config._available_models_cache_generation)
+    assert config._is_loadable_disk_cache(fresh) is True
 
 
 def test_is_loadable_disk_cache_rejects_non_dict():
