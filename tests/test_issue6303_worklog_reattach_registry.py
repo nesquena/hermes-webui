@@ -203,6 +203,7 @@ async function api(url) { return __apiResponse; }
 // under test (registry ownership, reattach, journal-snapshot projection) are
 // real; these are presentation/side-effect hooks outside the tested invariant.
 function _bindStreamHiddenTracker() {}
+function _dispatchExtensionTurnLifecycle() {}
 function ensureLiveWorklogShell() {}
 function showLiveRunStatus() {}
 // REAL transport teardown — the fresh-reconnect regression test must exercise
@@ -351,6 +352,7 @@ _SESSIONS_HELPERS = [
     "_selectLiveRecoveryInflight",
     "_inflightHasVisibleLiveState",
     "_ensureInflightLiveAssistantMessage",
+    "_mergePendingSessionMessage",
     "_projectInflightMessagesForActivityBursts",
     "_messageComparableText",
     "_compactTranscriptText",
@@ -458,7 +460,9 @@ S.messages = [];
 // Phase 1 — install the OPEN source through the PRODUCTION listener path:
 // a real attachLiveStream() call creates the EventSource and _wireSSE() binds
 // the real reasoning/tool handlers that close over the anchor registry.
+  (async () => {
 attachLiveStream(SID, STREAM_ID, [], {});
+await new Promise((resolve) => setTimeout(resolve, 0)); // master defers EventSource creation to a microtask
 const handlerRegistryRef = window._liveAnchorRegistries.get(STREAM_ID);
 const source = __esCreated[0];
 __results.registryCreatedThroughProduction = !!handlerRegistryRef;
@@ -467,6 +471,7 @@ __results.esCreatedAfterInstall = __esCreated.length;
 // Phase 2 — reattach: the OPEN same-stream transport must be reused (early
 // return) and the registry it owns must NOT be deleted.
 attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+await new Promise((resolve) => setTimeout(resolve, 0)); // master defers EventSource creation to a microtask
 __results.esCreatedAfterReattach = __esCreated.length;
 __results.registryKeptThroughReattach = window._liveAnchorRegistries.get(STREAM_ID) === handlerRegistryRef;
 
@@ -487,6 +492,10 @@ __results.sceneRowSourceType = scene && scene.activity_rows[0] ? scene.activity_
 __results.renderCalls = __renderCalls.length;
 
 process.stdout.write(JSON.stringify(__results) + '\\n', () => { process.exit(0); });
+  })().catch(err => {
+    console.error(err && err.stack ? err.stack : String(err));
+    process.exit(2);
+  });
 """)
 
 
@@ -591,6 +600,7 @@ INFLIGHT[SID] = {
   activityBurstAnchors: [], currentActivityBurstId: 0, currentLiveSegmentSeq: 0,
 };
 attachLiveStream(SID, STREAM_ID, [], {});
+await new Promise((resolve) => setTimeout(resolve, 0)); // master defers EventSource creation to a microtask
 const handlerRegistryRef = window._liveAnchorRegistries.get(STREAM_ID);
 const source = __esCreated[0];
 delete INFLIGHT[SID];   // drop the local tail: server snapshot must win
@@ -715,7 +725,9 @@ def test_fresh_connection_replaces_stale_registry_when_no_open_transport():
     window._liveAnchorRegistries.set(STREAM_ID, staleRegistry);
 
     // NO existing OPEN transport for the stream.
+  (async () => {
     attachLiveStream(SID, STREAM_ID, [], { reconnecting: true });
+    await new Promise((resolve) => setTimeout(resolve, 0)); // master defers EventSource creation to a microtask
 
     // The stale object must be gone from the map (delete-order fix) and a
     // brand-new registry created by the fresh closure via the real API.
@@ -729,6 +741,10 @@ def test_fresh_connection_replaces_stale_registry_when_no_open_transport():
       : false;
 
     process.stdout.write(JSON.stringify(__results) + '\\n', () => { process.exit(0); });
+  })().catch(err => {
+    console.error(err && err.stack ? err.stack : String(err));
+    process.exit(2);
+  });
     """)
 
     result = _run_harness(setup)
@@ -778,6 +794,7 @@ S.toolCalls = [];
   // Phase 1 — install the OLD same-stream transport through the production
   // listener path (real attachLiveStream -> _wireSSE -> LIVE_STREAMS entry).
   attachLiveStream(SID, STREAM_ID, [], {});
+  await new Promise((resolve) => setTimeout(resolve, 0)); // master defers EventSource creation to a microtask
   const oldSource = __esCreated[0];
   const oldRegistry = window._liveAnchorRegistries.get(STREAM_ID);
   __results.oldTransportInstalled = !!oldRegistry && LIVE_STREAMS[SID].source === oldSource;
@@ -982,6 +999,7 @@ _handleBgTaskCompleteEvent = function(){ __bgTaskCalls.push('bg_task_complete');
 (async () => {
   // Phase 1 — generation A installs through the production listener path.
   attachLiveStream(SID, STREAM_ID, [], {});
+  await new Promise((resolve) => setTimeout(resolve, 0)); // master defers EventSource creation to a microtask
   const sourceA = __esCreated[0];
 
   // Phase 2 — the SAME (session_id, stream_id) pair gets a new transport: the
@@ -1145,6 +1163,7 @@ S.toolCalls = [];
 
 (async () => {
   attachLiveStream(SID, STREAM_ID, [], {});
+  await new Promise((resolve) => setTimeout(resolve, 0)); // master defers EventSource creation to a microtask
   const sourceA = __esCreated[0];
   sourceA.close();
   __apiResponse = { active: true };
