@@ -9426,7 +9426,11 @@ async function loadSettingsPanel(){
       const _clampCliCap=(v)=>{const n=parseInt(v,10);if(!Number.isFinite(n)||n<1)return 20;return n>500?500:n;};
       cliCapField.value=_clampCliCap(settings.cli_visible_session_cap==null?20:settings.cli_visible_session_cap);
       window._cliVisibleSessionCap=parseInt(cliCapField.value,10);
-      cliCapField.disabled=_cliCapParent?!_cliCapParent.checked:true;
+      // Initial disabled state must read the SETTINGS value (source of truth), not the
+      // parent checkbox's DOM state — at this point the parent has not yet been hydrated
+      // from settings (that happens further below), and assigning .checked won't fire
+      // 'change'. show_cli_sessions defaults to true when absent (matches the toggle).
+      cliCapField.disabled=(settings.show_cli_sessions===false);
       // Normalize (clamp blank/oob to [1,500] or default 20) on commit so the saved
       // value matches the help text and the box never displays a value the server rejected.
       cliCapField.addEventListener('change',()=>{cliCapField.value=_clampCliCap(cliCapField.value);window._cliVisibleSessionCap=parseInt(cliCapField.value,10);_schedulePreferencesAutosave();},{once:false});
