@@ -63,6 +63,22 @@ def _to_openrouter_namespace(model_id: str) -> str:
     return model_id
 
 
+# ── OpenRouter setup: drop ids OpenRouter does not serve (#7520) ────────────
+# ``_FALLBACK_MODELS`` doubles as the curated OpenRouter list, but one Z.AI
+# entry has no counterpart there: OpenRouter serves the GLM-4.5 generation as
+# ``z-ai/glm-4.5`` / ``z-ai/glm-4.5-air`` / ``z-ai/glm-4.5v`` and never as
+# ``glm-4.5-flash`` (audited against the live catalog on 2026-09-10: 437 ids,
+# 0 hits).  The wizard used to hand the id out anyway, so the first message
+# failed provider-side.  Filter it at this projection boundary only — the
+# direct ``zai`` setup keeps every provider-native id.
+#
+# Kept in the *pre-translation* namespace on purpose: the set is matched
+# against ``_FALLBACK_MODELS`` entries, which are authored for the direct
+# endpoint, so the filter stays correct — and one line long — regardless of
+# how ``_to_openrouter_namespace`` above evolves.
+_OPENROUTER_UNSERVED_IDS = frozenset({"zai/glm-4.5-flash"})
+
+
 _SUPPORTED_PROVIDER_SETUPS = {
     # ── Easy start ──────────────────────────────────────────────────────
     "openrouter": {
@@ -73,6 +89,7 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": [
             {"id": _to_openrouter_namespace(model["id"]), "label": model["label"]}
             for model in _FALLBACK_MODELS
+            if model["id"] not in _OPENROUTER_UNSERVED_IDS
         ],
         "category": "easy_start",
         "quick": True,
