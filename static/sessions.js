@@ -2029,16 +2029,16 @@ async function loadSession(sid){
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).
   if(typeof syncTopbar==='function') syncTopbar();
-  // Acknowledge the visit as soon as the session metadata is accepted for the
-  // in-flight load: clears the viewed count + any stale completion-unread marker
+  // Do not acknowledge unread state on metadata arrival. The transcript fetch can
+  // still fail or be superseded by a newer navigation; only the final successful
+  // load block below is allowed to mark this selected session read.
   // `let` (not const): re-read below, after the awaited _ensureMessagesLoaded,
   // so a server_turn_started that attaches a live stream MID-RELOAD is honored
   // by the attach/idle decision instead of being clobbered by the stale snapshot.
   let activeStreamId=S.session.active_stream_id||null;
   // If the server says the session is idle, reset browser-side streaming flags
-  // NOW — BEFORE _acknowledgeSessionVisit() below (whose sidebar repaint would
-  // otherwise inherit the PREVIOUS session's busy/stream state) and before the
-  // async _ensureMessagesLoaded gap. Without this, S.busy can remain true from a
+  // NOW — before any sidebar repaint and before the async
+  // _ensureMessagesLoaded gap. Without this, S.busy can remain true from a
   // still-running stream in the PREVIOUS session while S.session.session_id has
   // already advanced to the new one. _isSessionLocallyStreaming() checks
   // (isActive && S.busy), so the new session would appear locally-streaming
@@ -2054,14 +2054,6 @@ async function loadSession(sid){
       if(typeof clearInflightState==='function') clearInflightState(sid);
     }
   }
-
-  // and syncs the polling snapshot so a deferred /api/sessions poll landing
-  // during the async message-load gap below cannot re-flag a stale unread dot.
-  _acknowledgeSessionVisit(
-    S.session.session_id,
-    Number(data.session.message_count || 0),
-    Number(data.session.last_message_at || data.session.updated_at || 0)
-  );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   if(typeof startSessionStream==='function') startSessionStream(S.session.session_id);
@@ -2386,15 +2378,12 @@ async function loadSession(sid){
   // flight and re-mark the open session unread; re-syncing here clears that
   // sticky dot once the transcript is settled (#4946).
   //
-  // Gate the final ack on _isSessionActivelyViewedForList(sid): a completion
-  // that lands while _ensureMessagesLoaded() is in flight AND the tab then goes
-  // hidden is correctly marked unread — an UNCONDITIONAL ack here would wrongly
-  // clear that hidden-tab-completion marker. Only clear when the session is
-  // still actively viewed. (#5917 gate finding)
-  if (
-    S.session && S.session.session_id === sid &&
-    (typeof _isSessionActivelyViewedForList !== 'function' || _isSessionActivelyViewedForList(sid))
-  ) {
+  // A successfully loaded selected transcript is read, even if the window lost
+  // focus while _ensureMessagesLoaded() was in flight. Failure and stale-load
+  // exits occur above, so reaching this point proves that `sid` finished loading
+  // and is still the selected session. Completions that arrive later while the
+  // window is hidden still use the normal focus-gated background marker paths.
+  if (S.session && S.session.session_id === sid) {
     _acknowledgeSessionVisit(
       sid,
       Number(S.session.message_count || 0),
@@ -3180,8 +3169,10 @@ async function _ensureMessagesLoaded(sid, opts) {
     if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
   }
   if (!_ownsLoad()) return;
-  // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
+  // api() may redirect on 401 and return undefined. That is not a loaded
+  // transcript: reject it so loadSession's existing failure path clears the
+  // loading marker without acknowledging unread state.
+  if (!data || !data.session) throw new Error('Conversation messages response was unavailable');
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
