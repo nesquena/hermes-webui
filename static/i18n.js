@@ -334,6 +334,8 @@ const LOCALES = {
     settings_label_busy_placeholder_hint: 'Show busy placeholder hint',
     settings_label_new_chat_on_workspace_switch: 'Start a new chat when switching workspace',
     settings_desc_new_chat_on_workspace_switch: 'When on, selecting a different workspace starts a fresh conversation bound to that workspace and leaves your current chat on its original workspace, avoiding stale cross-workspace context. When off (default), switching workspace changes the current workspace in place.',
+    settings_label_profile_switch_resume: 'Resume last session when switching profile',
+    settings_desc_profile_switch_resume: 'When on, switching profiles auto-resumes the target profile\u2019s most recent conversation instead of starting a blank chat. When off (default), every profile switch starts fresh so sessions never get cross-tagged.',
     workspace_switched_new_chat: 'Started a new chat in {0}',
     settings_desc_busy_placeholder_hint: 'Shows the composer placeholder with the current busy action while the session is running and the draft is empty.',
     composer_placeholder_busy_queue: 'Enter = queue | /interrupt | /background | /steer',
