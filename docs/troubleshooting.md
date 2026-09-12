@@ -211,6 +211,44 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## "OpenCode Go model picker shows a model that errors when you send" (or is missing newly released models)
+
+**Symptom.** One of two directions:
+
+1. A model selected from the OpenCode Go group fails on the first message (`model not found`, `Model is unavailable`, or a region error), even though the picker offered it.
+2. A newly released OpenCode Go model does not appear in the picker at all, and must be typed into the Custom Model ID box.
+
+**Why.** The Go picker follows the **live** Go-tier catalog (`https://opencode.ai/zen/go/v1/models`) whenever the installed Hermes Agent is v0.20.5 or newer. That endpoint advertises a superset of what a given tier, key, or region can actually serve — an id can be listed and still fail on send. Conversely, an id the endpoint serves but the WebUI's static fallback list predates is missing when the live path is unavailable (Agent older than v0.20.5, probe failure, or offline); the static list mirrors Hermes core's curated Go catalog and can lag new releases by design.
+
+**Diagnostic.** Check which path is feeding your picker:
+
+```bash
+hermes --version          # live path requires >= 0.20.5
+curl -sS https://opencode.ai/zen/go/v1/models \
+  -H "Authorization: Bearer $OPENCODE_GO_API_KEY" | head -50
+```
+
+Interpret the two together:
+
+- **Failing model absent from the `curl` output** → it was delisted upstream (for example `ox-alpha-free`, removed from the relay on 2026-09-09). A picker can still offer it from a **stale catalog merge**: Hermes core merges its own curated Go list into the live result, and every Agent release *through v0.21.1 (tag `v2026.9.7`)* still carries the delisted id in that list — verified at runtime against v0.21.0, where the live path serves 37 ids including `ox-alpha-free`. The removal is committed on core `main` (2026-09-09 sync) but **no released Agent version includes it yet** — and `main` reports the same `0.21.1` version string as the stale tag, so a version number alone cannot tell you whether the fix is in. Until a release notes the 2026-09-09 catalog sync, the **verified workaround is the config allowlist** (below); selecting the dead entry is harmless to other models (it errors on send, nothing else).
+- **Failing model present in the `curl` output** → the relay lists it but your tier/region cannot serve it; the picker is behaving correctly. Pin the models you actually use with an explicit allowlist in `config.yaml`, which takes precedence over both the live catalog and the fallback:
+
+  ```yaml
+  providers:
+    opencode-go:
+      models:
+        - kimi-k3
+        - glm-5.3
+  ```
+
+  A lighter per-provider exclude capability is tracked in #7507.
+- **Missing new model, Agent ≥ v0.20.5** → the live catalog is the source; refresh or check the endpoint with the `curl` above (cold rebuilds are also bounded by a 4-second foreground budget — the first picker open after a restart can serve the last-known list while the live rebuild finishes in the background, so re-open the picker once before concluding it's stale).
+- **Missing new model, Agent older than v0.20.5** → the static fallback is serving by design; upgrade the Agent to ≥ v0.20.5 so the picker reads the live catalog.
+
+**When to file a bug.** File a WebUI bug if a model fails on send *and* appears in the `curl` output for your key (a routing problem), or if a model is missing with Agent ≥ v0.20.5 and the live catalog reachable (fallback used when it should not be).
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
