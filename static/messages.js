@@ -1658,7 +1658,20 @@ async function send(){
   const uploadedNames=uploaded.map(u=>u.name||u);
   const uploadedPaths=uploaded.map(u=>u&&u.path?u.path:(u&&u.name?u.name:(u&&u.filename?u.filename:u)));
   let msgText=text;
-  if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
+  if(uploaded.length&&!msgText){
+    const lines=uploaded.map(u=>{
+      const label=(u&&u.name)||(u&&u.filename)||String(u);
+      const meta=[];
+      if(u&&u.id)meta.push(`attachment_id: ${u.id}`);
+      if(u&&u.mime)meta.push(`mime: ${u.mime}`);
+      if(u&&typeof u.size==='number')meta.push(`size: ${u.size} bytes`);
+      if(u&&u.sha256)meta.push(`sha256: ${u.sha256}`);
+      const metaStr=meta.length?` (${meta.join(', ')})`:'';
+      const pathStr=(u&&u.path)?`\n  path: ${u.path}`:'';
+      return `- ${label}${metaStr}${pathStr}`;
+    });
+    msgText=`I've uploaded ${uploaded.length} file(s):\n${lines.join('\n')}`;
+  }
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
   if(_forcedSkillDirectivePending){
     const _pending=_forcedSkillDirectivePending;
