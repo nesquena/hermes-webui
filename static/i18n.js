@@ -20557,6 +20557,8 @@ const LOCALES = {
     settings_desc_new_chat_on_workspace_switch: 'When on, selecting a different workspace starts a fresh conversation bound to that workspace and leaves your current chat on its original workspace, avoiding stale cross-workspace context. When off (default), switching workspace changes the current workspace in place.',
     workspace_switched_new_chat: 'Started a new chat in {0}',
     settings_label_fade_text_effect: 'Efekt vyblednutí textu',
+    settings_label_cli_session_cap: 'Limit relací mimo WebUI',
+    settings_desc_cli_session_cap: 'Maximální počet relací mimo WebUI (CLI, Telegram, Discord, cron atd.) ponechaných v postranním panelu. Aktivní pouze při povolení relací mimo WebUI. Výchozí je 20; maximum je 500 (vyšší hodnoty jsou omezeny kvůli výkonu postranního panelu).',
     settings_label_language: 'Jazyk',
     settings_label_max_tokens: 'Maximální výstupní tokeny',
     settings_label_model: 'Výchozí model',

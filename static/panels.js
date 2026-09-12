@@ -8769,7 +8769,7 @@ function _preferencesPayloadFromUi(){
   const pinnedLimitField=$('settingsPinnedSessionsLimit');
   if(pinnedLimitField) payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10);
   const cliCapField=$('settingsCliVisibleSessionCap');
-  if(cliCapField) payload.cli_visible_session_cap=parseInt(cliCapField.value,10);
+  if(cliCapField){const _n=parseInt(cliCapField.value,10);payload.cli_visible_session_cap=(!Number.isFinite(_n)||_n<1)?20:(_n>500?500:_n);}
   const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
   if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
   const defaultMessageModeSel=$('settingsDefaultMessageMode');
@@ -9422,10 +9422,15 @@ async function loadSettingsPanel(){
     }
     const cliCapField=$('settingsCliVisibleSessionCap');
     if(cliCapField){
-      cliCapField.value=parseInt(settings.cli_visible_session_cap||20,10)||20;
-      window._cliVisibleSessionCap=parseInt(cliCapField.value,10)||20;
-      cliCapField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      const _clampCliCap=(v)=>{const n=parseInt(v,10);if(!Number.isFinite(n)||n<1)return 20;return n>500?500:n;};
+      cliCapField.value=_clampCliCap(settings.cli_visible_session_cap==null?20:settings.cli_visible_session_cap);
+      window._cliVisibleSessionCap=parseInt(cliCapField.value,10);
+      cliCapField.disabled=showCliCb?!showCliCb.checked:true;
+      // Normalize (clamp blank/oob to [1,500] or default 20) on commit so the saved
+      // value matches the help text and the box never displays a value the server rejected.
+      cliCapField.addEventListener('change',()=>{cliCapField.value=_clampCliCap(cliCapField.value);window._cliVisibleSessionCap=parseInt(cliCapField.value,10);_schedulePreferencesAutosave();},{once:false});
       cliCapField.addEventListener('input',()=>{window._cliVisibleSessionCap=parseInt(cliCapField.value,10)||20;_schedulePreferencesAutosave();},{once:false});
+      if(showCliCb){showCliCb.addEventListener('change',function(){cliCapField.disabled=!showCliCb.checked;},{once:false});}
     }
     const fadeTextCb=$('settingsFadeTextEffect');
     if(fadeTextCb){
@@ -12776,7 +12781,7 @@ async function saveSettings(andClose){
   const showKanbanSessions=!!($('settingsShowKanbanSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
-  const cliVisibleSessionCap=parseInt(($('settingsCliVisibleSessionCap')||{}).value,10)||20;
+  const cliVisibleSessionCap=(()=>{const _n=parseInt(($('settingsCliVisibleSessionCap')||{}).value,10);return(!Number.isFinite(_n)||_n<1)?20:(_n>500?500:_n);})();
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';

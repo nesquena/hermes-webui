@@ -148,15 +148,15 @@ def test_cli_session_cap_setting_is_exposed_and_wired():
     assert 'id="settingsCliVisibleSessionCap"' in INDEX_HTML
     assert 'min="1"' in INDEX_HTML
     assert 'max="500"' in INDEX_HTML
-    # panels.js: read + persist
-    assert "payload.cli_visible_session_cap=parseInt(cliCapField.value,10)" in PANELS_JS
+    # panels.js: read + persist (value is clamped to [1,500] before persisting)
+    assert "payload.cli_visible_session_cap=" in PANELS_JS
     assert "settings.cli_visible_session_cap" in PANELS_JS
     assert "body.cli_visible_session_cap=cliVisibleSessionCap" in PANELS_JS
     # boot.js: window mirror
     assert "window._cliVisibleSessionCap=parseInt(s.cli_visible_session_cap||20,10)||20" in BOOT_JS
-    # i18n: new keys present in all 14 locale blocks (English fallback fine)
-    assert I18N_JS.count("settings_label_cli_session_cap:") == 14
-    assert I18N_JS.count("settings_desc_cli_session_cap:") == 14
+    # i18n: new keys present in all 15 locale blocks (English fallback fine)
+    assert I18N_JS.count("settings_label_cli_session_cap:") == 15
+    assert I18N_JS.count("settings_desc_cli_session_cap:") == 15
 
 
 # ── live settings-API persistence + range validation ─────────────────────────
@@ -182,3 +182,37 @@ def test_settings_api_persists_cli_session_cap_and_rejects_out_of_range():
         assert d[SETTING] == 150
     finally:
         post("/api/settings", {SETTING: DEFAULT})
+
+
+def test_model_cache_key_includes_resolved_cap(monkeypatch):
+    """Codex#2 regression: the state.db fetch cache identity must include the resolved cap.
+
+    Before this fix, ``get_cli_sessions()`` keyed its cache without the resolved
+    non-WebUI cap, so changing ``cli_visible_session_cap`` served a stale row set
+    (fetched at the OLD cap) for up to the cache TTL. The cache key must move when
+    the resolved cap moves, so a bumped cap forces a fresh fetch.
+    """
+    seen = {"cap": 20}
+    monkeypatch.setattr(models, "_cli_visible_session_limit", lambda: seen["cap"])
+
+    _, _, _, key_20 = models._resolve_cli_sessions_context(
+        source_filter=None, include_claude_code=False,
+    )
+    seen["cap"] = 100
+    _, _, _, key_100 = models._resolve_cli_sessions_context(
+        source_filter=None, include_claude_code=False,
+    )
+    assert key_20 != key_100, "cache key must change when the resolved cap changes"
+    # And both keys must actually carry the resolved cap value.
+    assert 20 in key_20 and 100 in key_100
+
+
+def test_cap_change_is_in_session_cache_invalidation_list():
+    """Codex#2 regression: a cap-only /api/settings write must clear the session-list cache.
+
+    The explicit invalidation branch in api/routes.py listed only the visibility
+    TOGGLES; a cap change alone left the session-list cache serving the old window
+    for up to the TTL (5s idle / 45s streaming). The cap key must be in that list.
+    """
+    # The invalidation branch keys off the presence of these settings in the body.
+    assert '"cli_visible_session_cap",' in ROUTES_PY

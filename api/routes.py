@@ -16826,6 +16826,7 @@ def handle_post(handler, parsed) -> bool:
                 "show_webhook_sessions",
                 "show_kanban_sessions",
                 "show_previous_messaging_sessions",
+                "cli_visible_session_cap",
             )
         ):
             try:

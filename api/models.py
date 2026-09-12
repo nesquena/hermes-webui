@@ -7537,6 +7537,7 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
+        _cli_visible_session_limit(),
     )
     return hermes_home, db_path, cli_profile, cache_key
 
@@ -8082,6 +8083,7 @@ def get_cli_sessions(
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
+            _cli_visible_session_limit(),
         )
     else:
         resolve_kwargs = {}
