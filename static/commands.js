@@ -1221,7 +1221,12 @@ async function cmdStop(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
   if(typeof cancelStream==='function'){
-    if(await cancelStream('slash-stop')) showToast(t('stream_stopped'));
+    const _r = await cancelStream('slash-stop');
+    // cancelStream() returns {cancelled, persistence_failed}; preserve the
+    // persistence-failure warning instead of overwriting with success
+    // (gate-certifier blocker #4: SILENT false success).
+    if(_r && _r.cancelled && !_r.persistence_failed) showToast(t('stream_stopped'));
+    else if(_r && _r.persistence_failed) { /* warning already shown by cancelStream */ }
     else showToast(t('cancel_failed'),null,'error');
   }
   else showToast(t('cancel_unavailable'));
@@ -1370,7 +1375,10 @@ async function cmdInterrupt(args){
   S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
   if(typeof cancelStream==='function'){
-    if(await cancelStream('slash-interrupt')) showToast(t('cmd_interrupt_confirm'),2000);
+    const _r = await cancelStream('slash-interrupt');
+    // Preserve persistence-failure warning (gate-certifier blocker #4).
+    if(_r && _r.cancelled && !_r.persistence_failed) showToast(t('cmd_interrupt_confirm'),2000);
+    else if(_r && _r.persistence_failed) { /* warning already shown by cancelStream */ }
     else showToast(t('cancel_failed'),null,'error');
   }
 }

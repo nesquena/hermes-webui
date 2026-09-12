@@ -82,7 +82,7 @@ class TestCancelledTurnFinalizer:
         assert session.pending_user_message is None
         assert session.pending_attachments == []
         assert session.pending_started_at is None
-        assert session.saved == 1
+        assert session.saved >= 1  # PR #6405: settlement path saves twice (cancel marker + active_stream_id clear)
         assert session.messages[-1]['content'] == _cancelled_turn_content('Task cancelled.')
         assert '**Task cancelled:** Task cancelled.' in session.messages[-1]['content']
         assert 'No provider failure occurred' in session.messages[-1]['content']

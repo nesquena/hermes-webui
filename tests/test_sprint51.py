@@ -44,7 +44,7 @@ class TestCancelStreamEagerRelease:
 
         result = cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
         assert stream_id not in STREAMS, \
             "cancel_stream() should eagerly pop from STREAMS to release the session lock"
 
@@ -155,12 +155,12 @@ class TestCancelStreamEagerRelease:
 
         # First cancel
         result1 = cancel_stream(stream_id)
-        assert result1 is True
+        assert result1["cancelled"] is True
         assert stream_id not in STREAMS
 
         # Second cancel (stream already popped)
         result2 = cancel_stream(stream_id)
-        assert result2 is False
+        assert result2["cancelled"] is False
 
     def test_cancel_handle_get_session_failure(self):
         """Cancel should not raise even if get_session fails."""
@@ -177,5 +177,5 @@ class TestCancelStreamEagerRelease:
             # Should not raise
             result = cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
         assert stream_id not in STREAMS

@@ -34,6 +34,46 @@ def _extract_function(src: str, name: str) -> str:
 
 CANCEL_SESSION_STREAM_SRC = _extract_function(BOOT_JS, "cancelSessionStream")
 COMPOSER_PRIMARY_ACTION_SRC = _extract_function(UI_JS, "handleComposerPrimaryAction")
+
+
+def _extract_stop_action_callback(src: str) -> str:
+    """Extract the sidebar Stop action's async callback as a named function.
+
+    The sidebar Stop menu-item callback is defined inline in sessions.js as::
+
+        menu.appendChild(_buildSessionAction(
+          t('session_action_stop'), t('session_action_stop_desc'), ICONS.stop,
+          async()=>{ closeSessionActionMenu(); const result = await cancelSessionStream(...); ... }
+        ));
+
+    ``_extract_function`` can't address an anonymous arrow, so we locate the
+    ``async()`` arrow body directly from the source, then rewrite it into a
+    named function ``_sidebarStopAction(session)`` the Node harness can call.
+    Toast/i18n lookups are stubbed by the harness (``t`` / ``showToast``),
+    matching what ``test_stop_callers_gate_success_toasts_on_cancel_result``
+    lints statically.
+    """
+    marker = "ICONS.stop,"
+    idx = src.find(marker)
+    assert idx > 0, "sessions.js: ICONS.stop marker not found — sidebar Stop action moved?"
+    arrow_start = src.find("async(", idx)
+    assert arrow_start > 0, "sessions.js: async() callback after ICONS.stop not found"
+    brace = src.find("{", arrow_start)
+    assert brace > 0, "sessions.js: callback body brace not found"
+    depth = 1
+    pos = brace + 1
+    while pos < len(src) and depth > 0:
+        ch = src[pos]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        pos += 1
+    body = src[brace + 1:pos - 1]
+    return "async function _sidebarStopAction(session) {" + body + "}"
+
+
+SIDEBAR_STOP_ACTION_SRC = _extract_stop_action_callback(SESSIONS_JS)
 _TOAST_DEFAULT_NAME = "TOAST_" + "DEFAULT_MS"
 _TOAST_ERROR_DEFAULT_NAME = "TOAST_ERROR_" + "DEFAULT_MS"
 SHOW_TOAST_SRC = _extract_function(UI_JS, "show" + "Toast").replace(
@@ -42,13 +82,18 @@ SHOW_TOAST_SRC = _extract_function(UI_JS, "show" + "Toast").replace(
 
 
 def test_source_gates_sidebar_settle_on_http_success():
-    assert "return false" in CANCEL_SESSION_STREAM_SRC
-    assert "return true" in CANCEL_SESSION_STREAM_SRC
+    compact = "".join(CANCEL_SESSION_STREAM_SRC.split())
+    assert "return{cancelled:false,persistence_failed:false}" in compact, (
+        "cancelSessionStream() must return a structured result on HTTP failure"
+    )
+    assert "return{cancelled:true,persistence_failed:" in compact, (
+        "cancelSessionStream() must return a structured result on HTTP success"
+    )
     assert "r.ok" in CANCEL_SESSION_STREAM_SRC, (
         "cancelSessionStream() must check the /api/chat/cancel HTTP status before "
         "closing local UI state"
     )
-    assert "if(!respOk)returnfalse;" in "".join(CANCEL_SESSION_STREAM_SRC.split()), (
+    assert "if(!respOk)return{cancelled:false,persistence_failed:false};" in compact, (
         "cancelSessionStream() must bail out on failed stop responses"
     )
 
@@ -56,27 +101,102 @@ def test_source_gates_sidebar_settle_on_http_success():
 def test_stop_callers_gate_success_toasts_on_cancel_result():
     compact_commands = "".join(COMMANDS_JS.split())
     compact_messages = "".join(MESSAGES_JS.split())
-    compact_sessions = "".join(SESSIONS_JS.split())
+    compact_stop_cb = "".join(SIDEBAR_STOP_ACTION_SRC.split())
+    compact_ui = "".join(UI_JS.split())
+
+    # cancelStream() now returns a structured {cancelled, persistence_failed}
+    # result (gate-certifier blocker #2: stale boolean test assertions).  The
+    # four production callers (slash-stop, slash-interrupt, busy-interrupt,
+    # composer-stop) and the sidebar Stop callback all capture the result into
+    # a local `_r`/`result`, then branch on `_r.cancelled` and
+    # `_r.persistence_failed` so the persistence-failure warning is preserved
+    # instead of being overwritten by a generic success/failure toast.  These
+    # source-level assertions prove the structured contract is wired at every
+    # call site; the Node-runtime tests below prove the runtime behavior.
+    #
+    # We assert the structured pieces (capture + branch conditions) rather than
+    # one contiguous block because the production source carries inline
+    # comments between the await and the if — a contiguous assertion would
+    # break on any comment edit.  The pieces below are stable and prove the
+    # boolean `if(await cancelStream(...))` form is gone.
+
+    # slash-stop caller (static/commands.js): structured result, preserve
+    # persistence warning.
+    assert "const_r=awaitcancelStream('slash-stop');" in compact_commands, (
+        "slash-stop caller must capture the structured result from cancelStream"
+    )
     assert (
-        "if(awaitcancelStream('slash-stop'))showToast(t('stream_stopped'));"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_commands
+        "if(_r&&_r.cancelled&&!_r.persistence_failed)showToast(t('stream_stopped'));"
+        in compact_commands
+    ), "slash-stop caller must gate stream_stopped on cancelled&&!persistence_failed"
     assert (
-        "if(awaitcancelStream('slash-interrupt'))showToast(t('cmd_interrupt_confirm'),2000);"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_commands
+        "elseif(_r&&_r.persistence_failed){/*warningalreadyshownbycancelStream*/}"
+        in compact_commands
+    ), "slash-stop caller must preserve the persistence-failure warning (no toast)"
+    assert "elseshowToast(t('cancel_failed'),null,'error');" in compact_commands, (
+        "slash-stop caller must render cancel_failed on plain failure"
+    )
+
+    # slash-interrupt caller (static/commands.js): structured result, preserve
+    # persistence warning.
+    assert "const_r=awaitcancelStream('slash-interrupt');" in compact_commands, (
+        "slash-interrupt caller must capture the structured result from cancelStream"
+    )
     assert (
-        "if(awaitcancelStream('busy-interrupt'))showToast(t('busy_interrupt_confirm'),2000);"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_messages
+        "if(_r&&_r.cancelled&&!_r.persistence_failed)showToast(t('cmd_interrupt_confirm'),2000);"
+        in compact_commands
+    ), "slash-interrupt caller must gate cmd_interrupt_confirm on cancelled&&!persistence_failed"
     assert (
-        "if(awaitcancelSessionStream(session))showToast(t('stream_stopped'));"
-        "elseshowToast(t('cancel_failed'),null,'error');"
-    ) in compact_sessions
+        "elseif(_r&&_r.persistence_failed){/*warningalreadyshownbycancelStream*/}"
+        in compact_commands
+    ), "slash-interrupt caller must preserve the persistence-failure warning (no toast)"
+
+    # busy-interrupt caller (static/messages.js): structured result, preserve
+    # persistence warning.
+    assert "const_r=awaitcancelStream('busy-interrupt');" in compact_messages, (
+        "busy-interrupt caller must capture the structured result from cancelStream"
+    )
     assert (
-        "if(typeofcancelStream==='function'&&!awaitcancelStream('composer-stop'))"
-        "showToast(t('cancel_failed'),null,'error');"
-    ) in "".join(UI_JS.split())
+        "if(_r&&_r.cancelled&&!_r.persistence_failed)showToast(t('busy_interrupt_confirm'),2000);"
+        in compact_messages
+    ), "busy-interrupt caller must gate busy_interrupt_confirm on cancelled&&!persistence_failed"
+    assert (
+        "elseif(_r&&_r.persistence_failed){/*warningalreadyshownbycancelStream*/}"
+        in compact_messages
+    ), "busy-interrupt caller must preserve the persistence-failure warning (no toast)"
+
+    # Sidebar Stop caller (extracted from static/sessions.js): structured
+    # tri-state result from cancelSessionStream().  When persistence_failed is
+    # true, suppress both generic success and failure toasts so the warning
+    # remains the final visible result.  Verify on the extracted Stop callback
+    # (same source the Node-runtime test drives) so the source lint and the
+    # runtime assertion prove the same contract.
+    assert "constresult=awaitcancelSessionStream(session);" in compact_stop_cb, (
+        "extracted sidebar Stop callback must capture the structured result from cancelSessionStream"
+    )
+    assert "if(result&&result.persistence_failed)return;" in compact_stop_cb, (
+        "extracted sidebar Stop callback must suppress toasts when persistence_failed is true"
+    )
+    assert "if(result&&result.cancelled)showToast(t('stream_stopped'));" in compact_stop_cb, (
+        "extracted sidebar Stop callback must show stream_stopped only when cancelled is true"
+    )
+
+    # composer-stop caller (static/ui.js): structured result.  When the cancel
+    # did not succeed (cancelled is false — covers both HTTP failure and
+    # persistence failure where cancelSessionStream/cancelStream already showed
+    # the warning), show cancel_failed.  Keep a failure case for
+    # {cancelled:false, persistence_failed:false} (HTTP failure): the
+    # `!(_r && _r.cancelled)` branch fires and cancel_failed is rendered.
+    assert "const_r=awaitcancelStream('composer-stop');" in compact_ui, (
+        "composer-stop caller must capture the structured result from cancelStream"
+    )
+    assert (
+        "if(!(_r&&_r.cancelled))showToast(t('cancel_failed'),null,'error');"
+        in compact_ui
+    ), (
+        "composer-stop caller must render cancel_failed when cancelled is false "
+        "(covers {cancelled:false,persistence_failed:false} HTTP failure)"
+    )
 
 
 _NODE_SCRIPT = r'''
@@ -205,9 +325,29 @@ globalThis.S = {};
 globalThis.getComposerPrimaryAction = () => 'stop';
 __SHOW_TOAST_SRC__
 globalThis.send = () => { M.sends += 1; };
+// cancelStream() returns a structured {cancelled, persistence_failed} result
+// (gate-certifier blocker #2: stale boolean cancel test fixture).  The
+// composer-stop caller branches on `_r.cancelled`, so the fixture must return
+// the structured object — a bare boolean `true` has no `.cancelled` property
+// and would wrongly render cancel_failed on the success path.
 globalThis.cancelStream = async () => M.cancelResult;
 __COMPOSER_PRIMARY_ACTION_SRC__
-for (const [message, result] of [[__ENGLISH__, false], [__JAPANESE__, false], ['unused', true]]) {
+// Three structured cases: HTTP failure, HTTP success, persistence failure.
+//   - {cancelled:false, persistence_failed:false}: cancel_failed rendered
+//     (covers the required failure case for {cancelled:false}).
+//   - {cancelled:true,  persistence_failed:false}: no toast (success — the
+//     terminal SSE event settles the UI; cancel_failed must NOT render).
+//   - {cancelled:true,  persistence_failed:true}:  no toast (cancelStream
+//     already showed the incomplete-persistence warning; the composer-stop
+//     caller's `!(_r && _r.cancelled)` branch is false so cancel_failed is
+//     suppressed, preserving the warning as the final visible result).
+const _cases = [
+  [__ENGLISH__,   {cancelled: false, persistence_failed: false}],
+  [__JAPANESE__,  {cancelled: false, persistence_failed: false}],
+  ['unused',      {cancelled: true,  persistence_failed: false}],
+  ['unused',      {cancelled: true,  persistence_failed: true}],
+];
+for (const [message, result] of _cases) {
   M.cancelResult = result;
   globalThis.t = () => message;
   const before = M.renders.length;
@@ -227,12 +367,138 @@ console.log(JSON.stringify(M));
         f"node subprocess failed:\n--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
     )
     result = json.loads(completed.stdout.splitlines()[-1])
+    # Only the two HTTP-failure cases render cancel_failed (localized).  The
+    # success case ({cancelled:true,persistence_failed:false}) and the
+    # persistence-failure case ({cancelled:true,persistence_failed:true}) both
+    # suppress cancel_failed — proving the composer-stop caller preserves the
+    # persistence warning and does not render a false success/failure toast.
     assert result["renders"] == [
         {"message": english_message, "className": "toast show error", "duration": 20000, "copy": True},
         {"message": japanese_message, "className": "toast show error", "duration": 20000, "copy": True},
     ]
     assert result["results"] == [
-        {"result": False, "rendered": 1, "sends": 0},
-        {"result": False, "rendered": 1, "sends": 0},
-        {"result": True, "rendered": 0, "sends": 0},
+        {"result": {"cancelled": False, "persistence_failed": False}, "rendered": 1, "sends": 0},
+        {"result": {"cancelled": False, "persistence_failed": False}, "rendered": 1, "sends": 0},
+        {"result": {"cancelled": True, "persistence_failed": False}, "rendered": 0, "sends": 0},
+        {"result": {"cancelled": True, "persistence_failed": True}, "rendered": 0, "sends": 0},
     ]
+
+
+_PERSISTENCE_FAILED_NODE_SCRIPT = r'''
+const M = {
+  closeCalls: [],
+  busyCalls: [],
+  composerCalls: [],
+  statusCalls: [],
+  renderCalls: 0,
+  clearCalls: [],
+  approvalStops: 0,
+  approvalHides: 0,
+  clarifyStops: 0,
+  clarifyHides: 0,
+  fetchCalls: [],
+  toastMessages: [],
+};
+
+globalThis.INFLIGHT = { 'sid-pf': { streamId: 'stream-pf' } };
+globalThis.S = { activeStreamId: 'stream-pf', session: { session_id: 'sid-pf', active_stream_id: 'stream-pf' } };
+globalThis.closeLiveStream = (...a) => M.closeCalls.push(a);
+globalThis.clearInflightState = (sid) => M.clearCalls.push(['clearInflightState', sid]);
+globalThis.clearInflight = () => M.clearCalls.push(['clearInflight']);
+globalThis.setBusy = (v) => M.busyCalls.push(v);
+globalThis.setComposerStatus = (v) => M.composerCalls.push(v);
+globalThis.setStatus = (v) => M.statusCalls.push(v);
+globalThis.stopApprovalPolling = () => M.approvalStops += 1;
+globalThis.hideApprovalCard = () => M.approvalHides += 1;
+globalThis.stopClarifyPolling = () => M.clarifyStops += 1;
+globalThis.hideClarifyCard = () => M.clarifyHides += 1;
+globalThis.renderSessionList = () => M.renderCalls += 1;
+globalThis._approvalSessionId = 'sid-pf';
+globalThis._clarifySessionId = 'sid-pf';
+globalThis.document = { baseURI: 'http://localhost:8787/' };
+globalThis.location = { href: 'http://localhost:8787/' };
+globalThis.showToast = (msg, ms) => M.toastMessages.push(msg);
+globalThis.closeSessionActionMenu = () => {};
+globalThis.t = (key) => key;
+globalThis.fetch = (url, opts) => {
+  M.fetchCalls.push({ url: String(url), opts });
+  return Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({ ok: true, cancelled: false, persistence_failed: true, stream_id: 'stream-pf' }),
+  });
+};
+
+__CANCEL_SESSION_STREAM_SRC__
+
+__SIDEBAR_STOP_ACTION_SRC__
+
+const session = { session_id: 'sid-pf', active_stream_id: 'stream-pf' };
+// Drive the REAL sidebar Stop callback (extracted from sessions.js) instead
+// of calling cancelSessionStream directly — this proves the callback itself
+// suppresses stream_stopped / cancel_failed when persistence_failed is true,
+// not just that the runtime returned the structured status.
+await _sidebarStopAction(session);
+console.log(JSON.stringify({
+  sessionActiveStreamId: session.active_stream_id,
+  activeStreamId: globalThis.S.activeStreamId,
+  closeCalls: M.closeCalls,
+  busyCalls: M.busyCalls,
+  composerCalls: M.composerCalls,
+  renderCalls: M.renderCalls,
+  clearCalls: M.clearCalls,
+  approvalStops: M.approvalStops,
+  approvalHides: M.approvalHides,
+  clarifyStops: M.clarifyStops,
+  clarifyHides: M.clarifyHides,
+  fetchCalls: M.fetchCalls.length,
+  toastMessages: M.toastMessages,
+}));
+'''
+
+
+def test_persistence_failed_clears_owned_stream_and_preserves_warning():
+    """HTTP 200 {cancelled:false,persistence_failed:true} must:
+    1. Clear owned stream state (closeLiveStream, active_stream_id=null, INFLIGHT delete)
+    2. Show the incomplete-persistence warning as the final visible toast
+    3. NOT render stream_stopped or cancel_failed
+
+    Drives the REAL sessions.js sidebar Stop action callback (extracted from
+    the production source) so the toast-suppression contract is enforced by
+    the same code that runs in browser, not by a test-side re-implementation
+    of the gating logic (gate-certifier blocker #2 follow-up: execute through
+    the real Stop callback).
+    """
+    script = (
+        _PERSISTENCE_FAILED_NODE_SCRIPT
+        .replace("__CANCEL_SESSION_STREAM_SRC__", CANCEL_SESSION_STREAM_SRC)
+        .replace("__SIDEBAR_STOP_ACTION_SRC__", SIDEBAR_STOP_ACTION_SRC)
+    )
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=str(REPO),
+        capture_output=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert completed.returncode == 0, (
+        f"node subprocess failed:\n--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+    )
+    result = json.loads(completed.stdout.splitlines()[-1])
+
+    # Owned stream state MUST be cleared (not stuck rendering "streaming")
+    assert result["sessionActiveStreamId"] is None
+    assert result["activeStreamId"] is None
+    assert len(result["closeCalls"]) == 1
+    assert result["renderCalls"] == 1
+    assert len(result["clearCalls"]) >= 2  # clearInflightState + clearInflight
+
+    # The ONLY toast shown was the incomplete-persistence warning from
+    # cancelSessionStream itself — the Stop callback's suppress-toast contract
+    # means stream_stopped / cancel_failed were NOT rendered.
+    assert len(result["toastMessages"]) == 1
+    # The toast uses the localized i18n key cancel_persistence_warning
+    # (the test's t() mock returns the key name, not translated text)
+    assert "cancel_persistence_warning" in result["toastMessages"][0].lower()
+    # Neither stream_stopped nor cancel_failed was rendered
+    assert "stopped" not in " ".join(result["toastMessages"]).lower()
+    assert "failed" not in " ".join(result["toastMessages"]).lower()

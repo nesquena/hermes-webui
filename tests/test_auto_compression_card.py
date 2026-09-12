@@ -456,14 +456,10 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     assert "or 'compressing' in _lower" not in block
     assert "or 'preflight compression' in _lower" not in block
 
-    # warning events with type:fallback for rate-limit/fallback lifecycle notices
+    # warning events with type:fallback for confirmed fallback lifecycle notices
     assert "put('warning'" in block
     assert "'type': 'fallback'" in block
-    assert "'rate limited'" in src
-    assert "'switching to fallback'" in src
-    assert "'falling back'" in src
-    assert "'fallback activated'" in src
-    assert "'trying fallback'" in src
+    assert "'switched to fallback'" in src
 
     # Verify callback is wired to agent
     assert "'status_callback' in _agent_params" in src
@@ -555,23 +551,129 @@ def test_agent_status_callback_wiring():
 
 
 def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
+    # Confirmed post-switch notices from the Agent (the ONLY path that persists)
     assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "🔄 Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Switched to fallback model: GLM-5.2-300K via custom:vllm-cwb101 → DeepSeek-V4-Flash-262K via custom:vllm-cwb101",
+    )
+    # Transient pre-switch notices must NOT match (they fire before the model
+    # changes, carry OLD model info, and may never complete the switch)
+    assert not _is_fallback_lifecycle_message(
         "lifecycle",
         "Rate limited — switching to fallback provider...",
     )
-    assert _is_fallback_lifecycle_message(
+    assert not _is_fallback_lifecycle_message(
         "lifecycle",
         "Non-retryable error (HTTP 500) — trying fallback...",
     )
     assert not _is_fallback_lifecycle_message(
         "tool",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+    # Provider fallback activation (chat_completion_helpers) surfaces through
+    # _emit_warning → status_callback("warn", ...), not ("lifecycle", ...).
+    # The matcher must accept the warn kind for fallback-phrased texts or the
+    # successful-fallback notice is silently dropped by the WebUI bridge.
+    # Current agent CONFIRMED post-switch notice (dead-provider probe, verbatim):
+    # kind='warn' via _emit_warning, names the NEW model. #6405's matcher was
+    # written against the legacy "Switched to fallback model:" lifecycle shape;
+    # the agent's provider-transition rework (Aug 2026) changed the emission.
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "⚠️ Model fallback: dead-model-test via custom:vllm-dead-test unavailable "
+        "(provider overloaded); using gpt-5.6-sol via copilot.",
+    )
+    # Legacy agent shape retained for older agents.
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "Model fallback: a via b unavailable (x); using c via d.",
+    )
+    # Confirmed-only contract: transient pre-switch chatter ("switching to",
+    # "trying fallback") must NOT become a persistent notice — the PR gates
+    # those through _is_transient_fallback_warning instead.
+    assert not _is_fallback_lifecycle_message(
+        "warn",
+        "Fallback activated: GLM-5.3-Flash-512K → gpt-5.6-sol (copilot)",
+    )
+    assert not _is_fallback_lifecycle_message(
+        "warn",
         "Rate limited — switching to fallback provider...",
+    )
+    # chat_completion_helpers emits "⚠️ Model fallback: <old> via <prov>
+    # unavailable (<reason>); using <new> via <prov>." on live fallbacks —
+    # captured verbatim from a dead-provider probe of the real agent.
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "⚠️ Model fallback: dead-model-test via custom:vllm-dead-test unavailable "
+        "(provider overloaded); using gpt-5.6-sol via copilot.",
+    )
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "⚠️ Model fallback: a via b unavailable (x); using c via d.",
+    )
+    # warn kind is still phrase-gated: unrelated degraded-path warnings
+    # (auxiliary failures, compression blocks) must not surface as fallbacks.
+    assert not _is_fallback_lifecycle_message(
+        "warn",
+        "Auxiliary approval failed after 2 attempts",
     )
     assert not _is_fallback_lifecycle_message(
         "lifecycle",
         "Compressing context",
     )
 
+
+
+def test_transient_fallback_warning_classifies_broad_lifecycle_messages():
+    """The broad classifier must match transient pre-switch fallback/rate-limit
+    messages for live SSE warnings, while the confirmed classifier rejects them.
+
+    The PR narrows _is_fallback_lifecycle_message to confirmed post-switch
+    notices only, but existing transient warnings must still produce a live
+    SSE warning.  A separate _is_transient_fallback_warning classifier covers
+    the broad set without persisting a _fallbackNotice.
+    """
+    from api.streaming import _is_transient_fallback_warning, _is_fallback_lifecycle_message
+
+    # Transient messages must match the broad classifier
+    assert _is_transient_fallback_warning(
+        "lifecycle",
+        "Rate limited — switching to fallback provider...",
+    )
+    assert _is_transient_fallback_warning(
+        "lifecycle",
+        "Non-retryable error (HTTP 500) — trying fallback...",
+    )
+    assert _is_transient_fallback_warning(
+        "lifecycle",
+        "Fallback activated",
+    )
+
+    # Confirmed post-switch must NOT match the transient classifier
+    assert not _is_transient_fallback_warning(
+        "lifecycle",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+
+    # Confirmed post-switch must still match the confirmed classifier
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+
+    # Non-lifecycle kinds must not match either classifier
+    assert not _is_transient_fallback_warning(
+        "tool",
+        "Rate limited — switching to fallback provider...",
+    )
 
 def test_auto_compression_completion_transition_is_preserved_after_running_listener():
     src = _read("static/messages.js")

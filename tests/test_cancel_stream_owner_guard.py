@@ -200,6 +200,23 @@ globalThis.fetch = (url, opts) => {
 globalThis.document = { baseURI: 'http://localhost:8787/' };
 globalThis.location = { href: 'http://localhost:8787/' };
 
+// i18n stub: cancelStream() calls t() for toast messages
+// (t('stream_no_longer_active'), t('cancel_persistence_warning')).  The real
+// t() is provided by static/i18n.js at runtime; in the node-VM test harness we
+// provide a lightweight stub that returns the English translations for the
+// keys cancelStream() actually uses, falling back to the key for anything else.
+// This matches the established pattern in other node-VM tests (e.g.
+// test_update_banner_fixes.py uses a values-map stub, test_issue5231 uses an
+// identity stub).  We use a values map here because the toast assertions check
+// for human-readable substrings like "no longer active" (with spaces), which
+// are present in the English translation but not in the underscore-delimited
+// i18n key.
+const _tStrings = {
+  stream_no_longer_active: 'Stream is no longer active.',
+  cancel_persistence_warning: 'Cancellation incomplete — response may not be fully saved.',
+};
+globalThis.t = (key) => _tStrings[key] || key;
+
 // The function under test, extracted from boot.js verbatim.
 __CANCEL_STREAM_SRC__
 
