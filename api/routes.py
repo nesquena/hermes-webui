@@ -20245,7 +20245,11 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+# Shared with api/media_snapshots.py so the capture and allowlist backends
+# cannot drift (#7359). Excludes whitespace plus the markdown delimiters
+# ` ) ] so an inline-code-wrapped `MEDIA:/abs/path.zip` token never captures
+# the closing backtick into the path.
+from api.media_snapshots import MEDIA_TOKEN_RE as _MEDIA_TOKEN_RE
 
 
 def _message_content_text(content) -> str:

@@ -53,6 +53,13 @@ def _run_renderers(markdown: str) -> dict:
         global.document={baseURI:'http://example.test/'};
         '''
     )
+    # #7359: renderMd() captures MEDIA refs with the shared MEDIA_REF_CLASS
+    # constant (ui.js top-level). Extract the real constant alongside the
+    # functions so the eval'd body resolves it — keeps the single source of
+    # truth instead of re-deriving the char class here.
+    _mrc = re.search(r"const\s+MEDIA_REF_CLASS\s*=\s*[^;]+;", UI_JS)
+    assert _mrc, "MEDIA_REF_CLASS const not found in ui.js"
+    js += "\n" + _mrc.group(0)
     js += "\n" + _extract_function(UI_JS, "_matchBacktickFenceLine")
     js += "\n" + _extract_function(UI_JS, "_isBacktickFenceClose")
     js += "\n" + _extract_function(UI_JS, "_renderUserFencedBlocks")

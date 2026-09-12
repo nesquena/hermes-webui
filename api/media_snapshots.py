@@ -66,6 +66,14 @@ logger = logging.getLogger("hermes.webui")
 # sneak past the gate; ``fullmatch`` is used at call sites.
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 
+# MEDIA:<ref> token shape — single source of truth shared with api/routes.py
+# (allowlist) so the two backends cannot drift (#7359). The capture class
+# excludes whitespace plus the markdown delimiters ` ) ] so a token wrapped in
+# inline-code backticks or link parens/brackets never captures the closing
+# delimiter into the path (a trailing backtick used to reach
+# /api/media?path=...%60 and 404).
+MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]`]+)")
+
 # Default caps.  Overridable via env var for operators with unusual disks.
 DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024          # 50 MB per snapshot
 DEFAULT_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024   # 2 GB total store
@@ -438,13 +446,11 @@ def annotate_media_snapshots(
 
     Returns the number of new snapshots captured (0 on a repeat settle).
     """
-    import re as _re
-
     if resolve_ref is None:
         resolve_ref = resolve_media_ref
     if allowed_predicate is None:
         allowed_predicate = media_capture_allowed
-    media_re = _re.compile(r"MEDIA:([^\s\)\]]+)")
+    media_re = MEDIA_TOKEN_RE
     captured = 0
     for msg in messages or []:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":

@@ -251,6 +251,27 @@ def test_annotate_stamps_assistant_messages_with_snapshots(snap_dir, tmp_path):
     assert len(stamped[str(target)]) == 64
 
 
+def test_annotate_strips_trailing_backtick_from_inline_code_media_ref(snap_dir, tmp_path):
+    """#7359: `` `MEDIA:/abs/path.zip` `` (inline-code backticks) must snapshot
+    /abs/path.zip, not /abs/path.zip` — the closing backtick used to make the
+    ref unresolvable, so the snapshot was skipped and the browser got a 404.
+    """
+    from api.media_snapshots import annotate_media_snapshots
+
+    target = tmp_path / "report.html"
+    target.write_text("<html>v1</html>")
+
+    messages = [
+        {"role": "assistant", "content": f"see `MEDIA:{target}` below"},
+    ]
+    captured = annotate_media_snapshots(messages)
+    assert captured == 1
+
+    stamped = messages[0]["_media_snapshots"]
+    assert str(target) in stamped
+    assert not any("`" in key for key in stamped)
+
+
 def test_annotate_is_idempotent_across_settles(snap_dir, tmp_path):
     from api.media_snapshots import annotate_media_snapshots
 

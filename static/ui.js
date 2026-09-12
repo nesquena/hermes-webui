@@ -7576,6 +7576,14 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, ...visibleTexts){
   return clean;
 }
 
+// MEDIA:<ref> token shape — single source of truth for every MEDIA capture
+// site in ui.js AND messages.js so they cannot drift (#7359). The capture
+// class excludes whitespace plus the markdown delimiters ` ) ] so a token
+// wrapped in inline-code backticks or link parens/brackets never captures
+// the closing delimiter into the path (a trailing backtick used to reach
+// /api/media?path=...%60 and 404).
+const MEDIA_REF_CLASS = '[^\\s\\)\\]`]';
+
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
@@ -7648,7 +7656,7 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
+  s=s.replace(new RegExp('MEDIA:(' + MEDIA_REF_CLASS + '+)', 'g'),(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
@@ -9062,7 +9070,7 @@ function _stripForTTS(text){
   // Strip links, keep text
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
-  text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  text=text.replace(new RegExp('MEDIA:'+MEDIA_REF_CLASS+'+','g'),'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown

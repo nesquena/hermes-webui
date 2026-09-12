@@ -670,6 +670,26 @@ class TestMediaEndpointUnit(unittest.TestCase):
                     )
                 )
 
+    def test_session_media_token_allows_backtick_wrapped_html_path(self):
+        # #7359: `MEDIA:<path>` (inline-code backticks) must resolve the
+        # allowlist against the bare path, not path` — the trailing backtick
+        # used to be captured, so the browser requested path%60 and downloaded
+        # the JSON 404 body instead of the file.
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            html = pathlib.Path(tmpd) / "report.html"
+            html.write_text("<h1>Report</h1>", encoding="utf-8")
+            session = SimpleNamespace(
+                messages=[{"role": "assistant", "content": f"see `MEDIA:{html}` below"}]
+            )
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_path(
+                        "s-media", html, {"text/html"}
+                    )
+                )
+
     def test_session_media_token_rejects_user_authored_html_path(self):
         from api import routes
 

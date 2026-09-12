@@ -93,6 +93,7 @@ def _run_real_smd_media_cases() -> dict:
         "globalThis.requestAnimationFrame = cb => cb();\n"
         "const _MEDIA_TAIL_MAX = 4096;\n"
         "const _SMD_MEDIA_PREFIX = 'MEDIA:';\n"
+        "const MEDIA_REF_CLASS = '[^\\\\s\\\\)\\\\]`]';\n"
         "const _SMD_MEDIA_TAIL = new WeakMap();\n"
         "const __SMD_PARSER_FALLBACK = {};\n"
         "const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|message:|\\/|#|\\?|\\.|api|session\\/)/i;\n"
@@ -197,9 +198,24 @@ def _run_real_smd_media_cases() -> dict:
         "const refSplit=renderModes(['MEDIA:C:/tmp/li', 've.png ']);\n"
         "const finalExtensionless=renderModes(['MEDIA:https://fal.media/generated']);\n"
         "const pdf=renderModes(['MEDIA:C:/tmp/report.pdf ']);\n"
+        "const backtickRaw=(()=>{\n"
+        "  const root=document.createElement('div');\n"
+        "  const baseRenderer=_safeSmdRenderer(root);\n"
+        "  const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);\n"
+        "  const parser=smd.parser(renderer);\n"
+        "  _smdBindParserIdentity(renderer, parser, root);\n"
+        "  const parent=document.createElement('p');\n"
+        "  root.appendChild(parent);\n"
+        "  const data={nodes:[parent], index:0};\n"
+        "  const writeText=(p,d,t)=>{ p.appendChild(document.createTextNode(String(t||''))); };\n"
+        "  _smdMediaAwareAddText((d,t)=>{}, parent, data, 'MEDIA:C:/tmp/live.png`', _SMD_MEDIA_TAIL, parser, writeText);\n"
+        "  _smdMediaTailFlush(parser);\n"
+        "  _smdMediaTailClear(parser);\n"
+        "  return { html: root.outerHTML, text: root.textContent };\n"
+        "})();\n"
         "const falsePrefix=renderModes(['M', 'aybe plain prose ']);\n"
         "const crossParent=renderModes(['- ME', '\\n- ow']);\n"
-        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, falsePrefix, crossParent}));\n"
+        "console.log(JSON.stringify({prefixSplits, refSplit, finalExtensionless, pdf, backtickRaw, falsePrefix, crossParent}));\n"
     )
     completed = subprocess.run(
         [NODE, "--input-type=module", "-e", script],
@@ -410,7 +426,7 @@ class TestSmdMediaInStream(unittest.TestCase):
         # boundary check must therefore treat a complete http(s) ref as complete
         # even when it has no filename extension.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        self.assertIn("new RegExp('^MEDIA:('", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_extensionless_https_tail_waits_until_stream_end(self):
@@ -520,6 +536,19 @@ class TestSmdMediaInStream(unittest.TestCase):
         self.assertIn("postProcessRenderedMessages(root)", scheduler)
         self.assertIn("_applyMediaPlaybackPreferences(root)", scheduler)
 
+    def test_media_token_capture_class_excludes_backtick_everywhere(self):
+        # #7359: an inline-code-wrapped `MEDIA:/abs/path.zip` token must never
+        # capture the closing backtick into the path. Every MEDIA capture site
+        # (ui.js stash + preview flatten, messages.js streaming sites) must use
+        # the shared MEDIA_REF_CLASS (which excludes ` ) ]), and the old
+        # backtick-swallowing literals must be gone.
+        self.assertIn("const MEDIA_REF_CLASS", UI_JS)
+        self.assertIn("MEDIA_REF_CLASS", MESSAGES_JS)
+        self.assertNotIn(r"MEDIA:([^\s\)\]]+)", UI_JS)
+        self.assertNotIn(r"MEDIA:([^\s\)\]]+)", MESSAGES_JS)
+        self.assertNotIn(r"MEDIA:[^\s]+", UI_JS)
+        self.assertNotIn(r"MEDIA:[^\s\)\]]*$", MESSAGES_JS)
+
 
 @unittest.skipIf(NODE is None, "node not on PATH")
 class TestSmdMediaRealParserBehaviour(unittest.TestCase):
@@ -559,6 +588,19 @@ class TestSmdMediaRealParserBehaviour(unittest.TestCase):
                 self.assertIn('data-path="C:/tmp/report.pdf"', result["html"])
                 self.assertGreaterEqual(result["postProcessCalls"], 1)
                 self.assertGreaterEqual(result["playbackCalls"], 1)
+
+    def test_real_smd_parser_backtick_wrapped_token_strips_backtick(self):
+        # #7359: when a raw inline-code backtick reaches the streaming
+        # interceptor (`MEDIA:C:/tmp/live.png`), the captured ref must never
+        # include the closing backtick — it used to produce
+        # /api/media?path=...%60 → 404 download. The interceptor must emit a
+        # media node with the clean ref and leave the backtick as plain text.
+        result = self.cases["backtickRaw"]
+        self.assertIn('class="media-node"', result["html"])
+        self.assertIn('data-ref="C:/tmp/live.png"', result["html"])
+        self.assertNotIn('data-ref="C:/tmp/live.png`"', result["html"])
+        self.assertNotIn("MEDIA:", result["text"])
+        self.assertIn("`", result["text"])
 
     def test_real_smd_parser_false_prefix_plain_prose_keeps_fade(self):
         result = self.cases["falsePrefix"]["fade"]
