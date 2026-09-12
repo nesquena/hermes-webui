@@ -166,3 +166,22 @@ def test_cancel_session_stream_closes_local_eventsource_on_failure_path():
 
     assert "closeLiveStream(sid,streamId" in helper or "closeLiveStream(sid, streamId" in helper
     assert "catch(e){/* cancel request failed - cleanup below still runs */}" not in helper
+
+
+def test_sessions_resume_handler_cleans_up_in_finally_and_returns_before_agent_lookup():
+    """#6224 regression (historical test id kept): the invariant is now proven
+    *behaviourally* by the node runtime harness in
+    tests/test_6224_sessions_command_runtime.py, which executes the real
+    /sessions & /resume branch from static/messages.js instead of slicing its
+    source text. Source shape cannot show that a opener or renderSessionList()
+    rejection runs the composer/dropdown cleanup and still rejects send().
+    """
+    import importlib
+
+    harness = importlib.import_module("tests.test_6224_sessions_command_runtime")
+    if harness.NODE is None:
+        pytest.skip("node not on PATH")
+    harness.test_sessions_and_resume_short_circuit_before_agent_lookup("sessions")
+    harness.test_sessions_and_resume_short_circuit_before_agent_lookup("resume")
+    harness.test_sessions_runs_cleanup_and_still_rejects_when_opener_throws()
+    harness.test_sessions_runs_cleanup_and_still_rejects_when_render_session_list_rejects()
