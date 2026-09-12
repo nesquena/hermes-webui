@@ -136,12 +136,35 @@ HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
   python tests/browser_historical_transcript_hydration.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs the current
-proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`) and
-stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add session switching, reconnect/replay,
-cancellation, compression, and recovery.
+The dedicated `Conversation lifecycle (informational)` workflow keeps the existing
+proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`)
+non-blocking while the public matrix expands. The Chromium
+`reconnect-scene-redraw` row does **not** allow failures: it exercises the real
+`loadSession` reconnect path and fails the workflow on a regression. Required
+merge checks remain a maintainer-controlled repository setting.
+The maintainer's private QA harness remains broader; later public slices will
+add cancellation, compression, and recovery coverage.
+
+### Active-session reconnect redraw gate
+
+`tests/browser_reconnect_scene_redraw.py` is an opt-in deterministic browser
+gate for reconnecting to a running session with a large Anchor activity scene.
+It uses an isolated temporary server/home and fixture SSE events—no agent,
+provider credentials, or production state. By default it checks Chromium and
+WebKit, desktop and 390px viewports, and all three activity display modes:
+
+```bash
+pip install playwright
+python -m playwright install chromium webkit
+python tests/browser_reconnect_scene_redraw.py
+```
+
+`TOOL_COUNT`, `BROWSERS`, and `MODES` narrow the matrix. `MEASURE_BASELINE=1`
+records an unoptimized baseline without enforcing the redraw ceiling;
+`METRICS_FILE` saves JSON metrics and `SCREENSHOT_DIR` saves generated-fixture
+screenshots. This gate tests page reconstruction, journal-cursor resume, and
+subsequent fixture SSE updates. It does not test a real provider/network or PWA
+service-worker cache behavior.
 
 ### Streaming reader intent
 
