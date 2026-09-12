@@ -77,7 +77,10 @@ The first screen reports the runtime state WebUI can see:
 
 - Hermes Agent importability: whether WebUI can import and run `AIAgent`.
 - Provider status: whether `config.yaml` and credential state are enough for a
-  chat request.
+  chat request. Provider readiness resolves the configured provider key through
+  its alias, mixed-case, and underscore forms before checking credentials, so an
+  entry written under an alias (for example `providers: {z-ai: ...}` while the
+  selected provider is `zai`) is still detected as configured.
 - Password status: whether WebUI password protection is enabled.
 - Config paths: the active `config.yaml` and `.env` locations for this profile.
 

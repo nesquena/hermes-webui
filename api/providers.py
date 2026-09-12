@@ -39,6 +39,7 @@ from api.config import (
     _configured_model_ids,
     _custom_provider_slug_from_name,
     _get_label_for_model,
+    _get_provider_cfg_for_id,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
     _read_live_provider_model_ids,
@@ -1153,7 +1154,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
             values.append(model_cfg.get("api_key"))
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
+        provider_cfg = _get_provider_cfg_for_id(provider_id, providers_cfg)
         if isinstance(provider_cfg, dict):
             values.append(provider_cfg.get("api_key"))
     custom_providers = cfg.get("custom_providers", [])
@@ -1321,7 +1322,7 @@ def _provider_has_key(provider_id: str) -> bool:
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
+        provider_cfg = _get_provider_cfg_for_id(provider_id, providers_cfg)
         if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
             if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
                 return True
@@ -1367,7 +1368,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
+        provider_cfg = _get_provider_cfg_for_id(provider_id, providers_cfg)
         if isinstance(provider_cfg, dict):
             provider_key = str(provider_cfg.get("api_key") or "").strip()
             if _provider_value_counts_as_api_key(provider_id, provider_key):
@@ -2776,15 +2777,18 @@ def get_providers() -> dict[str, Any]:
                     pid,
                     exc_info=True,
                 )
-        # Also include models from config.yaml providers section
+        # Also include models from config.yaml providers section. Route the
+        # mapping through _configured_model_ids so metadata sentinels Hermes
+        # persists inside a discovered catalog
+        # (__discovered_model_catalog__ / __explicit_model_allowlist__) never
+        # surface as visible model rows (#7404 review).
         if isinstance(providers_cfg, dict):
             provider_cfg = providers_cfg.get(pid, {})
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                cfg_models = provider_cfg["models"]
-                if isinstance(cfg_models, dict):
-                    models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
-                elif isinstance(cfg_models, list):
-                    models = models + [{"id": k, "label": k} for k in cfg_models]
+                models = models + [
+                    {"id": model_id, "label": model_id}
+                    for model_id in _configured_model_ids(provider_cfg["models"])
+                ]
                 # Recompute models_total when config.yaml contributes additional
                 # entries on top of the live/static catalog. For non-Nous
                 # providers models_total still equals len(models); for Nous
@@ -3023,7 +3027,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             # 1. Clean providers.<id>.api_key
             providers_cfg = cfg.get("providers") or {}
             if isinstance(providers_cfg, dict):
-                provider_cfg = providers_cfg.get(provider_id, {})
+                provider_cfg = _get_provider_cfg_for_id(provider_id, providers_cfg)
                 if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                     del provider_cfg["api_key"]
                     changed = True

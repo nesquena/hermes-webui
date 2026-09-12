@@ -702,6 +702,79 @@ Default toolset list (hardcoded fallback):
 The web UI always runs with the full CLI toolset. There is no per-session toolset
 restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 
+### Provider identity resolution
+
+`config.yaml` stores `providers:` entries under the raw key the user wrote, so
+those keys legitimately vary: `z-ai`, `CLIPpoxy` and `opencode_go` all occur.
+Most call sites instead hold an already-canonicalized id, with aliases resolved
+by `_resolve_provider_alias()` (`z-ai` -> `zai`, `google` -> `gemini`, `github`
+-> `copilot`). A plain `providers.get(canonical)` therefore misses an aliased,
+mixed-case or underscore-named entry and silently skips that provider's
+configuration — its pins, `api_key`, reasoning efforts and readiness.
+
+`_resolve_raw_provider_key(provider_id, providers_cfg=None)` in `api/config.py`
+maps any id form back to the raw key. An exact raw-key hit wins first; otherwise
+it matches on any of the key, its lowercased form, `_canonicalise_provider_id(key)`
+and `_resolve_provider_alias(key)`. It matches on any candidate form rather than
+one shared normal form because `_canonicalise_provider_id` deliberately preserves
+`x-ai` instead of folding it to `xai`. Unknown ids pass through unchanged; the
+helper does not guess. `_get_provider_cfg_for_id()` is the convenience wrapper
+that returns the resolved config dict.
+
+### Discovered model catalogs vs. pinned allowlists
+
+A `providers.<id>.models` mapping has two meanings, and the code must not
+conflate them: a user pin / allowlist that restricts which models the picker
+offers, or per-model metadata Hermes itself persisted after a successful live
+`/v1/models` probe.
+
+A mapping is metadata, not a pin, when the entry carries `models_discovered: true`
+or the legacy in-mapping sentinel `__discovered_model_catalog__: true`; detect
+it with `_models_config_is_discovered()`. In that case the live catalog stays
+authoritative and the persisted IDs are only a probe-failure fallback. An
+unflagged mapping stays a strict allowlist — the historic behavior, which must
+not regress.
+
+`__discovered_model_catalog__` and `__explicit_model_allowlist__` are
+compatibility metadata keys, never model IDs. `_configured_model_ids()` filters
+both centrally so they cannot leak into any model list. The exception is
+`providers.copilot.models`, which is a per-model settings map (reasoning effort,
+limits) and never a picker pin.
+
+One shared resolver applies this policy for both `providers{}` and matching
+`custom_providers[]` entries: `_live_models_policy_for_provider()` in
+`api/config.py`. A pin stored in either location restricts; a discovery marker
+in either location is metadata. That resolver is the authority used by the live
+route, `/api/models/live`. The main catalog path — `get_available_models()` and
+its network-free static fallback,
+`_static_models_catalog_without_live_probes()` — does not call the resolver; it
+mirrors the same policy with its own `_models_config_is_discovered()` checks.
+That duplication is deliberate (those paths carry their own admission gating and
+produce a different catalog shape), but it means the resolver and the mirrored
+checks must be kept in sync whenever the discovered-versus-pinned policy
+changes. The same provider-config resolution and sentinel filtering back the
+Settings provider list in `api/providers.py`, the provider credential helpers,
+the reasoning-effort config lookup, and the onboarding readiness check in
+`api/onboarding.py`.
+
+### Live-model response caching
+
+`/api/models/live` caches responses for 60 seconds (`_LIVE_MODELS_CACHE_TTL`),
+keyed by `(profile, provider, policy fingerprint)` — see `_live_models_cache_key()`
+and `_live_models_policy_fingerprint()` in `api/routes.py`. The fingerprint
+covers only the inputs the discovered-vs-pinned decision reads: the matched
+source, the discovery marker, the Copilot settings-map flag, and the sanitized
+configured model IDs. It never includes credential values such as `api_key` or
+`key_env`. This is what stops a discovered catalog being replayed after the same
+profile and provider are switched to a pin.
+
+The browser keeps no response cache of its own. `static/ui.js` always fetches
+`/api/models/live` and relies on the policy-keyed server cache above, because a
+profile-and-provider-only browser copy would go stale on a same-profile policy
+change. It captures the active profile at fetch start and re-checks it before
+applying a response, so a mid-flight profile switch cannot file one profile's
+catalog under another profile's view.
+
 ---
 
 ## 9. Known Bugs and Technical Debt Summary

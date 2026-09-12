@@ -42,6 +42,35 @@ def _read_static(name: str) -> str:
     return (REPO / "static" / name).read_text(encoding="utf-8")
 
 
+def _strip_line_comments(src: str) -> str:
+    """Drop ``// ...`` line comments, respecting string literals.
+
+    Source-presence assertions must not be satisfiable by a COMMENT that merely
+    mentions the symbol — otherwise deleting the real call still passes. Applied
+    to the extracted function bodies before asserting (#7404 review).
+    """
+    out = []
+    for line in src.splitlines():
+        quote = None
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if quote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'`":
+                quote = ch
+            elif ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
+                line = line[:i]
+                break
+            i += 1
+        out.append(line)
+    return "\n".join(out)
+
+
 def _extract_function_body(src: str, signature: str) -> str:
     """Return the source of a top-level ``async function NAME(...)`` /
     ``function NAME(...)`` declaration via brace-balance — robust to nested
@@ -154,41 +183,87 @@ class TestProviderRemoveInvalidatesDropdowns:
         )
 
     def test_dropdown_flush_calls_populate_model_dropdown(self):
-        src = _read_static("panels.js")
-        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
-        assert "populateModelDropdown" in body, (
-            "_refreshModelDropdownsAfterProviderChange must call "
-            "populateModelDropdown() so the composer model picker, Settings → "
-            "Default Model dropdown, _dynamicModelLabels, and "
-            "_configuredModelBadges all rebuild from a fresh /api/models "
-            "response (covers the dropdown + badge surfaces from #1539)."
+        """#1539's guarantee — a provider change must rebuild every dropdown
+        surface from a fresh /api/models response — is now provided by the
+        shared policy chokepoint.
+
+        ``_liveModelPolicyChanged()`` (``static/ui.js``) owns the rebuild: it
+        calls ``_ensureModelDropdownReady()`` (or ``populateModelDropdown()``)
+        so the composer picker, Settings → Default Model dropdown,
+        ``_dynamicModelLabels`` and ``_configuredModelBadges`` all rebuild. The
+        panels.js helper delegates to it. Assert BOTH halves so removing either
+        the delegation or the mechanics fails here (#1539, #7404 review).
+        """
+        body = _strip_line_comments(
+            _extract_function_body(
+                _read_static("panels.js"),
+                "function _refreshModelDropdownsAfterProviderChange(",
+            )
+        )
+        assert "_liveModelPolicyChanged()" in body, (
+            "_refreshModelDropdownsAfterProviderChange must delegate to "
+            "_liveModelPolicyChanged() so the dropdown/badge surfaces from "
+            "#1539 still rebuild from a fresh /api/models response."
+        )
+        chokepoint = _strip_line_comments(
+            _extract_function_body(
+                _read_static("ui.js"), "function _liveModelPolicyChanged("
+            )
+        )
+        assert "populateModelDropdown" in chokepoint, (
+            "_liveModelPolicyChanged() must call populateModelDropdown() (directly "
+            "or via _ensureModelDropdownReady) so the composer model picker, "
+            "Settings → Default Model dropdown, _dynamicModelLabels, and "
+            "_configuredModelBadges all rebuild (#1539)."
         )
 
     def test_dropdown_flush_reuses_shared_model_ready_promise(self):
-        src = _read_static("panels.js")
-        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
-        ensure_pos = body.index("typeof window._ensureModelDropdownReady")
-        reset_pos = body.index("window._modelDropdownReady=null", ensure_pos)
-        call_pos = body.index("window._ensureModelDropdownReady()", reset_pos)
+        """The rebuild must reset and reuse the shared ``_modelDropdownReady``
+        promise rather than firing a second, unshared fetch. The mechanics moved
+        into ``_liveModelPolicyChanged()``; the ordering assertion is unchanged
+        there (#1539, #7404 review)."""
+        chokepoint = _strip_line_comments(
+            _extract_function_body(
+                _read_static("ui.js"), "function _liveModelPolicyChanged("
+            )
+        )
+        ensure_pos = chokepoint.index("typeof window._ensureModelDropdownReady")
+        reset_pos = chokepoint.index("window._modelDropdownReady=null", ensure_pos)
+        call_pos = chokepoint.index("window._ensureModelDropdownReady()", reset_pos)
 
         assert ensure_pos < reset_pos < call_pos
 
     def test_dropdown_flush_is_resilient_to_missing_modules(self):
         """If commands.js or ui.js failed to load, the providers panel must
-        still update — the dropdown flush is best-effort (#1539)."""
-        src = _read_static("panels.js")
-        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
-        # Outer try/catch wraps the whole helper so a runtime error inside
-        # populateModelDropdown / cache flush cannot surface as an unhandled
-        # rejection that breaks the surrounding save/remove flow.
+        still update — the dropdown flush is best-effort (#1539).
+
+        Both halves are asserted: the panels.js helper keeps its own try/catch
+        and typeof guard, and the delegated chokepoint in ui.js is itself
+        resilient (try/catch + typeof guards) so a missing module cannot surface
+        as an unhandled rejection in the save/remove flow (#7404 review)."""
+        body = _strip_line_comments(
+            _extract_function_body(
+                _read_static("panels.js"),
+                "function _refreshModelDropdownsAfterProviderChange(",
+            )
+        )
         assert re.search(r"\btry\s*\{", body), (
             "_refreshModelDropdownsAfterProviderChange must wrap its work in "
             "try/catch — if commands.js or ui.js failed to load, a missing "
             "function should not break the providers panel update (#1539)."
         )
-        # And the populateModelDropdown call must be guarded by typeof — the
-        # dropdown rebuild is best-effort.
-        assert "typeof populateModelDropdown" in body, (
+        chokepoint = _strip_line_comments(
+            _extract_function_body(
+                _read_static("ui.js"), "function _liveModelPolicyChanged("
+            )
+        )
+        assert re.search(r"\btry\s*\{", chokepoint), (
+            "_liveModelPolicyChanged must be best-effort: saveSettings() treats a "
+            "throw from it as a failed model save and aborts (#7404 review)."
+        )
+        # The populateModelDropdown call must be guarded by typeof — the dropdown
+        # rebuild is best-effort.
+        assert "typeof populateModelDropdown" in chokepoint, (
             "populateModelDropdown lookup must use typeof so it gracefully "
             "skips when ui.js hasn't loaded yet."
         )

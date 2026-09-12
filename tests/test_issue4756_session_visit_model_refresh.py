@@ -667,7 +667,26 @@ def test_populate_model_dropdown_accepts_session_visit_freshness_and_guards_stal
     assert "const requestSeq=++_modelDropdownRequestSeq" in body
     assert body.count("requestSeq!==_modelDropdownRequestSeq") >= 3
     assert "_fetchLiveModels(data.active_provider, sel, requestSeq)" in body
-    assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 4
+    # `_fetchLiveModels` must re-check the request sequence at every async
+    # boundary before touching the DOM. The count was calibrated at 4 when a
+    # redundant duplicate guard sat after the client-side cache assignment; the
+    # browser response cache was removed (#7406), taking its guard with it, so 3
+    # covers the remaining boundaries (entry, post-fetch, post-json).
+    assert live_tail.count("requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq") >= 3
+    # The removed cache also lost its "this cached payload is still current"
+    # protection, so the owner token captured before the await must be
+    # re-verified before the response is applied (#7406). The token subsumes the
+    # earlier profile-only re-check by capturing the active profile alongside the
+    # model-policy generation and the target select identity (#7404 review).
+    assert "_liveModelOwnerToken(provider, sel)" in live_tail, (
+        "_fetchLiveModels must capture an owner token (active profile + policy "
+        "generation + select identity) before awaiting so a mid-flight profile "
+        "switch or policy change cannot apply the response (#7406)"
+    )
+    assert live_tail.count("_isLiveModelOwnerCurrent(ownerToken)") >= 2, (
+        "_fetchLiveModels must re-verify the captured owner token before "
+        "mutating the DOM and before syncing the chip (#7406, #7404 review)"
+    )
 
 
 def test_load_session_schedules_session_visit_model_refresh_before_message_load():

@@ -18,6 +18,7 @@ from api.config import (
     _FALLBACK_MODELS,
     _HERMES_FOUND,
     invalidate_models_cache,
+    _get_provider_cfg_for_id,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _get_config_path,
@@ -609,7 +610,11 @@ def _provider_api_key_present(
     # ``... or {}`` degrades that null to an empty mapping (salvage of #3967).
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider, {})
+        # ``provider`` is a canonical setup id (``zai``), but config.yaml stores
+        # the entry under the RAW user key (``z-ai``, ``CLIPpoxy``). Resolve it
+        # back so an aliased provider is not reported as unconfigured (same
+        # class as the /api/models/live alias gap).
+        provider_cfg = _get_provider_cfg_for_id(provider, providers_cfg)
         if (
             isinstance(provider_cfg, dict)
             and str(provider_cfg.get("api_key") or "").strip()

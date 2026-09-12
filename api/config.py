@@ -1379,9 +1379,21 @@ def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
 
 
 def _configured_model_ids(raw_models: object) -> list[str]:
-    """Return ordered model IDs from supported config allowlist shapes."""
+    """Return ordered model IDs from supported config allowlist shapes.
+
+    Sentinel keys that Hermes persists inside a user-facing ``models`` mapping
+    (``__discovered_model_catalog__``, ``__explicit_model_allowlist__``) are
+    config metadata, never model IDs. Filter them out centrally here (mirroring
+    upstream Hermes Agent's ``_declared_model_ids``) so no downstream model
+    list, static group, provenance path, or fallback path can surface them.
+    """
+    sentinel_keys = {"__discovered_model_catalog__", "__explicit_model_allowlist__"}
     if isinstance(raw_models, dict):
-        candidates = (key for key in raw_models if isinstance(key, str))
+        candidates = (
+            key
+            for key in raw_models
+            if isinstance(key, str) and key not in sentinel_keys
+        )
     elif isinstance(raw_models, list):
         candidates = raw_models
     else:
@@ -1416,6 +1428,29 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
         {"id": model_id, "label": labels.get(model_id, model_id)}
         for model_id in _configured_model_ids(raw_models)
     ]
+
+
+def _models_config_is_discovered(provider_cfg: object) -> bool:
+    """True when a provider's ``models`` mapping is an auto-discovered catalog.
+
+    Mirrors upstream Hermes Agent's ``_entry_models_discovered``: the current
+    shape is an entry-level ``models_discovered: true`` sibling of ``models``,
+    and older Hermes versions wrote an in-mapping
+    ``__discovered_model_catalog__: true`` sentinel instead (accepted on read
+    for backward compatibility). A catalog Hermes itself persisted after a
+    successful ``/v1/models`` probe is never a user pin, so ``models`` must
+    not be treated as a restricting picker allowlist — the live catalog is
+    authoritative.
+    """
+    if not isinstance(provider_cfg, dict):
+        return False
+    if provider_cfg.get("models_discovered") is True:
+        return True
+    models = provider_cfg.get("models")
+    return (
+        isinstance(models, dict)
+        and models.get("__discovered_model_catalog__") is True
+    )
 
 
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
@@ -2639,6 +2674,168 @@ def _get_providers_cfg() -> dict:
 def _get_provider_cfg(provider_id) -> dict:
     provider_cfg = _get_providers_cfg().get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
+
+
+def _resolve_raw_provider_key(provider_id, providers_cfg=None):
+    """Map a provider id back to its RAW key in ``config.yaml`` ``providers:``.
+
+    Most call sites hold an already-canonicalised provider id (aliases resolved
+    by ``_resolve_provider_alias``), but ``config.yaml`` stores the entry under
+    whatever key the user wrote — e.g. ``z-ai``, ``CLIPpoxy`` or
+    ``opencode_go``.  A plain ``providers.get(canonical)`` therefore misses an
+    aliased / mixed-case / underscore-named entry, silently skipping the
+    per-provider config (pins, api_key, reasoning efforts).
+
+    Matching accepts any of the candidate forms the main catalog path builds
+    inline: the exact key, its lowercased form, ``_canonicalise_provider_id``
+    and ``_resolve_provider_alias``.  The comparison is an intersection on ANY
+    form (rather than a single shared normal form) because
+    ``_canonicalise_provider_id`` deliberately preserves ``x-ai`` instead of
+    folding it to ``xai``.
+
+    An exact raw-key hit wins first so behaviour for existing non-aliased
+    configs is unchanged.  The request is returned unchanged when no key
+    matches.  Cheap, side-effect free, no config writes.
+    """
+    if provider_id is None:
+        return provider_id
+    if providers_cfg is None:
+        providers_cfg = _get_providers_cfg()
+    if not isinstance(providers_cfg, dict) or not providers_cfg:
+        return provider_id
+    if provider_id in providers_cfg:
+        return provider_id
+
+    def _match_forms(value):
+        text = str(value)
+        forms = {text, text.strip().lower()}
+        try:
+            forms.add(_canonicalise_provider_id(text))
+        except Exception:
+            pass
+        try:
+            forms.add(_resolve_provider_alias(text.strip().lower()))
+        except Exception:
+            pass
+        forms.discard("")
+        return forms
+
+    requested_forms = _match_forms(provider_id)
+    for key in providers_cfg:
+        if requested_forms & _match_forms(key):
+            return key
+    return provider_id
+
+
+def _get_provider_cfg_for_id(provider_id, providers_cfg=None) -> dict:
+    """Return the ``providers.<raw key>`` config dict for *provider_id*.
+
+    Like ``_get_provider_cfg`` but first resolves alias / mixed-case /
+    underscore ids back to the raw key the user actually wrote, so an aliased
+    provider's config is not silently missed.
+    """
+    if providers_cfg is None:
+        providers_cfg = _get_providers_cfg()
+    if not isinstance(providers_cfg, dict):
+        return {}
+    provider_cfg = providers_cfg.get(_resolve_raw_provider_key(provider_id, providers_cfg), {})
+    return provider_cfg if isinstance(provider_cfg, dict) else {}
+
+
+def _matching_custom_provider_entries(provider_id, config_obj=None) -> list[dict]:
+    """Return ``custom_providers[]`` entries matching a requested provider id.
+
+    Mirrors the collection ``_handle_live_models`` performs: a ``custom:<slug>``
+    id matches the entry whose name normalizes to that slug, and the bare
+    ``custom`` id matches unnamed entries.  Kept here so the live-model policy
+    resolver and the live route agree on which entry a request maps to.
+    """
+    raw = str(provider_id or "").strip().lower()
+    if not raw:
+        return []
+    entries = _custom_provider_entries(config_obj)
+    if not entries:
+        return []
+    if raw.startswith("custom:"):
+        return [
+            entry
+            for entry in entries
+            if _custom_provider_slug_from_name(entry.get("name", "")) == raw
+        ]
+    if raw == "custom":
+        return [
+            entry
+            for entry in entries
+            if not _custom_provider_slug_from_name(entry.get("name", ""))
+        ]
+    return []
+
+
+def _live_models_policy_for_provider(provider_id, config_obj=None) -> dict:
+    """Resolve the discovered-vs-pinned live-model policy for *provider_id*.
+
+    One shared resolver for both ``providers{}`` and matching
+    ``custom_providers[]`` entries, so a genuine pin stored in either location
+    restricts the live catalog and a Hermes-persisted discovery catalog stays
+    per-model metadata (live authoritative).  ``provider_id`` may be canonical
+    or raw; the ``providers{}`` lookup resolves alias / mixed-case / underscore
+    ids via ``_resolve_raw_provider_key``.
+
+    Returns a dict:
+
+    - ``source``: ``"providers"``, ``"custom"`` or ``None``.
+    - ``entry``: the matched config mapping (or ``{}``).
+    - ``models``: sanitized configured model IDs (``_configured_model_ids``);
+      for a custom entry the singular ``model`` is prepended.
+    - ``discovered``: ``_models_config_is_discovered(entry)``.
+    - ``settings_map``: True for Copilot, whose ``models`` mapping is per-model
+      settings rather than a picker allowlist.
+    - ``has_models``: True when the matched entry carries a ``models`` key.
+    """
+    result = {
+        "source": None,
+        "entry": {},
+        "models": [],
+        "discovered": False,
+        "settings_map": False,
+        "has_models": False,
+    }
+    if config_obj is None:
+        config_obj = cfg
+    if not isinstance(config_obj, dict):
+        return result
+    requested = str(provider_id or "").strip()
+    providers_cfg = config_obj.get("providers") or {}
+    if isinstance(providers_cfg, dict):
+        provider_cfg = _get_provider_cfg_for_id(requested, providers_cfg)
+        if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+            result.update(
+                source="providers",
+                entry=provider_cfg,
+                models=_configured_model_ids(provider_cfg.get("models")),
+                discovered=_models_config_is_discovered(provider_cfg),
+                settings_map=(
+                    requested.lower() == "copilot"
+                    or _resolve_raw_provider_key(requested, providers_cfg) == "copilot"
+                ),
+                has_models=True,
+            )
+            return result
+    for entry in _matching_custom_provider_entries(requested, config_obj):
+        models = _configured_model_ids(entry.get("models"))
+        singular = str(entry.get("model") or "").strip()
+        if singular and singular not in models:
+            models = [singular] + models
+        result.update(
+            source="custom",
+            entry=entry,
+            models=models,
+            discovered=_models_config_is_discovered(entry),
+            settings_map=False,
+            has_models="models" in entry,
+        )
+        return result
+    return result
 
 
 class AmbiguousCustomProviderError(ValueError):
@@ -4208,7 +4405,7 @@ def _resolve_model_reasoning_efforts_impl(
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = _get_provider_cfg_for_id(provider, cfg.get("providers") or {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -5741,7 +5938,18 @@ def _static_models_catalog_without_live_probes() -> dict:
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
             provider_cfg = _get_provider_cfg(raw_key)
             raw_models = []
-            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+            # A provider whose ``models`` was persisted by live discovery
+            # (``models_discovered: true`` or the legacy in-mapping sentinel) is
+            # a per-model metadata catalog, not a user pin — never treat it as
+            # the complete static picker allowlist. Start from the broader
+            # static/plugin fallback catalog and let persisted model IDs be
+            # merged in below as fallback metadata (mirrors the live-rebuild
+            # chokepoint in _build_available_models_uncached, #7404).
+            if (
+                isinstance(provider_cfg, dict)
+                and "models" in provider_cfg
+                and not _models_config_is_discovered(provider_cfg)
+            ):
                 raw_models = _configured_model_options(provider_cfg["models"])
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
@@ -7540,7 +7748,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 providers_cfg = cfg.get("providers", {})
                 if isinstance(providers_cfg, dict):
                     for provider_key in filter(None, [active_provider, "custom"]):
-                        provider_cfg = providers_cfg.get(provider_key, {})
+                        # ``active_provider`` is already alias-resolved, but
+                        # config.yaml stores the entry under the RAW key the user
+                        # wrote (``z-ai``, ``CLIPpoxy``, ``opencode_go``). Resolve
+                        # it back so an aliased provider's api_key is not missed
+                        # (same class as the /api/models/live alias gap).
+                        provider_cfg = _get_provider_cfg_for_id(provider_key, providers_cfg)
                         if isinstance(provider_cfg, dict):
                             api_key = (provider_cfg.get("api_key") or "").strip()
                             if api_key:
@@ -7627,6 +7840,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_has_configured_models = (
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
+                        # A mapping Hermes persisted after a live /v1/models
+                        # probe is per-model metadata, not a user pin. Exclude
+                        # it so the provider still probes (and the live catalog
+                        # stays authoritative) instead of treating the
+                        # discovered catalog as a restricting allowlist (#7404).
+                        and not _models_config_is_discovered(_cp)
                     )
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
@@ -8143,9 +8362,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # whichever model had local settings. Only Copilot skips the
                     # config-models allowlist branch and asks Hermes CLI for the
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
+                    # A provider whose ``models`` was persisted by live discovery
+                    # (``models_discovered: true``) is the same class of case:
+                    # the mapping is per-model metadata, not a user pin, so the
+                    # live /v1/models catalog stays authoritative (#7404).
                     _uses_models_as_settings_map = pid == "copilot"
                     if (
                         not _uses_models_as_settings_map
+                        and not _models_config_is_discovered(provider_cfg)
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
                     ):
@@ -8168,6 +8392,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+                        # A discovered catalog is per-model metadata, not a
+                        # user pin: when the live probe returns nothing the
+                        # broader static catalog is the base, and the persisted
+                        # (sanitized) model IDs are MERGED in as fallback
+                        # metadata so a probe failure does not silently drop a
+                        # discovered-only model from the picker (#7404).
+                        if _models_config_is_discovered(provider_cfg):
+                            for model_id in _configured_model_ids(
+                                provider_cfg.get("models")
+                            ):
+                                if not any(
+                                    m.get("id") == model_id for m in raw_models
+                                ):
+                                    raw_models.append(
+                                        {
+                                            "id": model_id,
+                                            "label": _get_label_for_model(
+                                                model_id, groups
+                                            ),
+                                        }
+                                    )
 
                     detected_models = auto_detected_models_by_provider.get(pid, [])
                     if detected_models and not raw_models:

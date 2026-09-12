@@ -3561,6 +3561,151 @@ function _persistSessionModelCorrection(model, provider, opts){
 let _modelDropdownRequestSeq=0;
 let _modelCatalogFallbackRetried=false;
 
+// #7404 review: live-model applicability has TWO independent authorities.
+//
+//  * `_liveModelPolicyGeneration` is GLOBAL and advances ONLY on a genuine
+//    provider/model policy change (a default-model save or a provider
+//    add/remove/refresh). A policy change invalidates every in-flight response
+//    captured before it, across all selects.
+//  * Each <select> owns a per-target latest-request sequence
+//    (`sel.__liveModelOwnerSeq`). Rebuilding one select (composer or Settings)
+//    advances only ITS sequence, so it supersedes its own older requests and
+//    never the other select's. `_fetchLiveModels()` claims a fresh sequence at
+//    request start, so "the newest request for a target wins" is intrinsic to
+//    the request rather than dependent on every caller.
+//
+// A response is applied only while its immutable owner token still matches the
+// live profile, the live policy generation, and its target's latest sequence.
+// Both halves are read from live state at check time (the sequence off the
+// element itself, never a WeakMap), so a stale request can neither mutate the
+// list nor re-sync the chip.
+let _liveModelPolicyGeneration=0;
+function _liveModelAdvancePolicyGeneration(){
+  _liveModelPolicyGeneration++;
+}
+let _liveModelOwnerSeq=0;
+function _liveModelAdvanceSelectIdentity(sel){
+  if(!sel) return;
+  _liveModelOwnerSeq++;
+  sel.__liveModelOwnerSeq=_liveModelOwnerSeq;
+}
+function _liveModelTargetIdentity(sel){
+  if(sel&&sel.id) return String(sel.id);
+  const fallback=(typeof $==='function')?$('modelSelect'):null;
+  return (fallback&&fallback.id)?String(fallback.id):'';
+}
+function _liveModelOwnerToken(provider, sel){
+  return {
+    profile:(typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'default',
+    provider:String(provider||''),
+    generation:_liveModelPolicyGeneration,
+    targetId:_liveModelTargetIdentity(sel),
+    selectIdentity:(sel&&typeof sel.__liveModelOwnerSeq==='number')?sel.__liveModelOwnerSeq:null,
+    sel:sel||null,
+  };
+}
+function _isLiveModelOwnerCurrent(token){
+  if(!token) return false;
+  const profile=(typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'default';
+  if(profile!==token.profile) return false;
+  if(_liveModelPolicyGeneration!==token.generation) return false;
+  if(token.sel){
+    const selectIdentity=(typeof token.sel.__liveModelOwnerSeq==='number')?token.sel.__liveModelOwnerSeq:null;
+    if(selectIdentity!==token.selectIdentity) return false;
+  }
+  return true;
+}
+function _liveModelPolicyChanged(){
+  // Best-effort by contract: this is a dropdown refresh, so nothing here may
+  // throw into the caller. saveSettings() wraps its call in a catch that treats
+  // a throw as "failed to update default model" and ABORTS the save, so an
+  // unexpected error while resolving either target must not escape.
+  //
+  // There are exactly TWO live-model targets in this codebase: the composer
+  // (`modelSelect`) and Settings -> Default Model (`settingsModel`). A genuine
+  // policy change invalidates in-flight responses for BOTH, so the replacement
+  // must cover both as well; starting one only for the composer leaves the
+  // Settings picker without its live-only models (#7404 review).
+  let composerSel=null;
+  let settingsSel=null;
+  try{
+    composerSel=(typeof $==='function')?$('modelSelect'):null;
+    settingsSel=(typeof $==='function')?$('settingsModel'):null;
+  }catch(_e){
+    composerSel=null;
+    settingsSel=null;
+  }
+  // Resolve the provider BEFORE advancing so both placeholders below are
+  // retained under the replacement's own authority.
+  const provider=window._activeProvider||null;
+  // The global policy generation is real policy authority: advance it ONCE.
+  _liveModelAdvancePolicyGeneration();
+  // Gap-free transition for the COMPOSER: advancing the generation changes the
+  // composer's pending key, but the replacement rebuild only re-registers that
+  // key after an asynchronous /api/models round-trip. Retain a placeholder
+  // SYNCHRONOUSLY -- before any promise is created -- so `has()` on the current
+  // composer key is never false across the transition. syncTopbar() defers a
+  // model correction while that key is pending, so without this the in-flight
+  // live fetch window would persist a static fallback (#7404 review).
+  const composerRetainedKey=_liveModelFetchKey(provider, undefined, composerSel);
+  _liveModelFetchRetain(composerRetainedKey);
+  let composerReleased=false;
+  const releaseComposer=()=>{
+    if(composerReleased) return;
+    composerReleased=true;
+    _liveModelFetchEnd(composerRetainedKey);
+  };
+  // The SETTINGS select is an independent publisher with its own per-target
+  // identity, so it gets its own placeholder under the SAME key function and a
+  // replacement through the SHARED rebuild. Retained synchronously here for the
+  // same gap-free reason as the composer; release() is idempotent so overlap
+  // decrements the refcount once.
+  let settingsRetainedKey=null;
+  let settingsReleased=true;
+  const releaseSettings=()=>{
+    if(settingsReleased) return;
+    settingsReleased=true;
+    _liveModelFetchEnd(settingsRetainedKey);
+  };
+  if(settingsSel){
+    settingsRetainedKey=_liveModelFetchKey(provider, undefined, settingsSel);
+    _liveModelFetchRetain(settingsRetainedKey);
+    settingsReleased=false;
+  }
+  // A policy change invalidates any in-flight response. Start a replacement
+  // request for the composer so its live catalog is not dropped. Fire-and-
+  // forget: callers must not await the rebuild. The placeholder is released on
+  // EVERY exit: the settled promise, the no-rebuild-available path, and the
+  // catch.
+  try{
+    if(typeof window._ensureModelDropdownReady==='function'){
+      window._modelDropdownReady=null;
+      Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{}).finally(releaseComposer);
+    }else if(typeof populateModelDropdown==='function'){
+      Promise.resolve(populateModelDropdown()).catch(()=>{}).finally(releaseComposer);
+    }else{
+      releaseComposer();
+    }
+  }catch(_e){
+    releaseComposer();
+  }
+  // Symmetric replacement for the SETTINGS target. Route through the shared
+  // `_rebuildSettingsModelSelect()` so both call sites have ONE implementation.
+  // That helper clears the select first, so this REPLACES the live catalog; a
+  // bare `_fetchLiveModels()` re-append would accumulate entries on every
+  // policy save. Guarded so a missing panels.js helper cannot throw into
+  // saveSettings().
+  try{
+    if(typeof window._rebuildSettingsModelSelect==='function'){
+      Promise.resolve(window._rebuildSettingsModelSelect()).catch(()=>{}).finally(releaseSettings);
+    }else{
+      releaseSettings();
+    }
+  }catch(_e){
+    releaseSettings();
+  }
+}
+
 function _applySessionModelFallback(sel){
   if(!sel) return null;
   const configuredDefault=String(window._defaultModel||'').trim();
@@ -3656,6 +3801,11 @@ async function populateModelDropdown(opts={}){
       return; // no server groups and no configured fallback
     }
     const previousSelection=_captureModelDropdownSelection(sel);
+    // Authoritative rebuild of THIS select (the composer). Advance only its
+    // per-target latest-request sequence, never the global policy generation:
+    // the Settings select is an independent publisher, so a composer rebuild
+    // must not invalidate its in-flight live request (#7404 review).
+    _liveModelAdvanceSelectIdentity(sel);
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -3719,12 +3869,46 @@ async function populateModelDropdown(opts={}){
   }
 }
 
-// Cache so we don't re-fetch on every page load
-const _liveModelCache={};
-// Tracks providers for which a live-model fetch is in flight.
-// Used by syncTopbar() to defer model corrections until the fetch completes,
-// preventing premature fallback to the first static model (#1169).
-const _liveModelFetchPending=new Set();
+// No client-side response cache for live models. The server-side
+// /api/models/live cache is keyed by (profile, provider, policy fingerprint),
+// so a browser copy keyed only by profile+provider would replay a broad
+// discovered catalog after the same profile switched to a strict model pin and
+// never reach the policy-aware server cache (#7404 review). Always fetch.
+//
+// Tracks profile+provider+policy-generation+target-select tuples with a
+// live-model fetch in flight. Carrying the target identity keeps the composer
+// and Settings pending states independent: syncTopbar() observes only the
+// composer key, so a Settings-only fetch cannot make the composer look pending
+// (nor hide a composer fetch behind a Settings one). Keyed by the same
+// authority as the request so an older generation's completion decrements its
+// own counter, never a newer generation's. Calling this without an explicit
+// select resolves to the composer select, so `has()` there still means "at
+// least one in-flight request for the current composer authority".
+const _liveModelFetchPending=new Map();
+function _liveModelFetchKey(provider, generation, sel){
+  const profile=(typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'default';
+  const policyGeneration=(typeof generation==='number')?generation:_liveModelPolicyGeneration;
+  return profile+'\u0000'+String(provider||'')+'\u0000'+String(policyGeneration)+'\u0000'+_liveModelTargetIdentity(sel);
+}
+function _liveModelFetchBegin(provider, ownerToken){
+  const key=_liveModelFetchKey(provider, ownerToken?ownerToken.generation:undefined, ownerToken?ownerToken.sel:undefined);
+  _liveModelFetchPending.set(key,(_liveModelFetchPending.get(key)||0)+1);
+  return key;
+}
+function _liveModelFetchEnd(key){
+  const remaining=(_liveModelFetchPending.get(key)||0)-1;
+  if(remaining>0)_liveModelFetchPending.set(key,remaining);
+  else _liveModelFetchPending.delete(key);
+}
+// Retain an EXPLICIT key without owning a request. Used by
+// _liveModelPolicyChanged() to hold a placeholder across the async
+// advance-then-rebuild window so the composer never observes `has()===false`
+// between generations (#7404 review). The refcount overlaps the replacement
+// fetch's own begin/end; _liveModelFetchEnd() releases it.
+function _liveModelFetchRetain(key){
+  if(!key) return;
+  _liveModelFetchPending.set(key,(_liveModelFetchPending.get(key)||0)+1);
+}
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -3828,14 +4012,19 @@ function _addLiveModelsToSelect(provider, models, sel){
 async function _fetchLiveModels(provider, sel, requestSeq=null){
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-  // Already fetched — apply cached models to this select element (#872)
-  if(_liveModelCache[provider]){
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
-    if(added>0 && typeof syncModelChip==='function') syncModelChip();
-    return;
-  }
-  _liveModelFetchPending.add(provider);
+  // Claim a FRESH per-target latest-request token at fetch start. This makes
+  // "the newest request for this select wins" intrinsic to the request instead
+  // of relying on every caller to advance identity first -- the recurring
+  // source of cross-target stale-rejection bugs. An older overlapping request
+  // for the same select becomes stale and cannot re-append its catalog after
+  // the newer one.
+  _liveModelAdvanceSelectIdentity(sel);
+  // Capture an immutable latest-owner token at fetch start: active profile,
+  // provider, model-policy generation, target identity, and this request's own
+  // per-target sequence. See _isLiveModelOwnerCurrent() for the staleness
+  // contract.
+  const ownerToken=_liveModelOwnerToken(provider, sel);
+  const fetchKey=_liveModelFetchBegin(provider, ownerToken);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
@@ -3845,17 +4034,21 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(!data.models||!data.models.length) return;
-    _liveModelCache[provider]=data.models;
-    if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    // Require the captured owner token to remain current before any UI
+    // mutation. A profile switch, a newer policy save/refresh, or a rebuilt
+    // target select all invalidate it -- the last one is what stops an older
+    // broad response from being appended after a newer strict result.
+    if(!_isLiveModelOwnerCurrent(ownerToken)) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
+      if(!_isLiveModelOwnerCurrent(ownerToken)) return;
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    _liveModelFetchEnd(fetchKey);
   }
 }
 
@@ -11182,8 +11375,10 @@ function syncTopbar(){
         const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
         // Also defer if a live model fetch is still in flight — the model may be
         // in the list once the fetch completes. Persisting now would corrupt the
-        // session with the wrong model before live models arrive (#1169).
-        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        // session with the wrong model before live models arrive (#1169). The
+        // entry is reference-counted, so it persists until the LAST in-flight
+        // request for this key completes (overlapping fetches share one key).
+        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(_liveModelFetchKey(window._activeProvider, undefined, $('modelSelect')));
         if(liveStillPending||missingModelIsRoutable){
           // Live fetch in flight — don't touch sel.value or S.session.model yet.
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).

@@ -120,3 +120,7 @@ jobs:
       - name: Run browser smoke
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py
+
+      - name: Run live-model policy regression
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_live_model_policy.py

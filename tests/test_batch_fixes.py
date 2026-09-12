@@ -247,9 +247,26 @@ class TestSystemTheme:
         src = read("static/panels.js")
         # PR #2799 (v0.51.119): skin precedence now prefers localStorage over settings.skin
         # so the inline-gate-resolved DOM skin survives the picker hydration.
-        skin_idx = src.index("const skinVal=(localStorage.getItem('hermes-skin')||settings.skin||'default').toLowerCase();")
-        # models is now declared as let models=null before the try block
-        models_idx = src.index("models=await api('/api/models');")
+        #
+        # #7404 review: the Settings-select rebuild -- and therefore the
+        # /api/models await -- moved into the shared _rebuildSettingsModelSelect()
+        # helper, which is defined earlier in the file. A file-global index()
+        # would therefore compare this function's skin hydration against the
+        # helper's own definition. Scope the search to loadSettingsPanel and
+        # compare against whichever construct performs the await, so the
+        # guarantee is unchanged: theme/skin must be hydrated before the models
+        # fetch is awaited, otherwise a slow model fetch can clobber an
+        # in-progress skin selection.
+        start = src.index("async function loadSettingsPanel(){")
+        end = src.index("\nasync function ", start + 10)
+        body = src[start:end]
+        skin_idx = body.index(
+            "const skinVal=(localStorage.getItem('hermes-skin')||settings.skin||'default').toLowerCase();"
+        )
+        if "models=await api('/api/models');" in body:
+            models_idx = body.index("models=await api('/api/models');")
+        else:
+            models_idx = body.index("await _rebuildSettingsModelSelect();")
         assert skin_idx < models_idx, (
             "loadSettingsPanel must hydrate theme/skin before awaiting /api/models, "
             "otherwise a slow model fetch can clobber an in-progress skin selection"

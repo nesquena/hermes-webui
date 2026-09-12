@@ -193,10 +193,31 @@ class TestLiveModelFetching:
             "ui.js must define _fetchLiveModels() function (#375)"
         )
 
-    def test_frontend_live_models_cache_exists(self):
-        """ui.js must cache live model responses to avoid redundant API calls (#375)."""
-        assert "_liveModelCache" in UI_JS, (
-            "ui.js must use _liveModelCache to avoid re-fetching on every dropdown open (#375)"
+    def test_frontend_has_no_client_live_models_cache(self):
+        """#375 required avoiding redundant live-model fetches. That intent is now
+        served by the SERVER: /api/models/live caches for 60s keyed by
+        (profile, provider, policy fingerprint).
+
+        The client-side response cache was deliberately removed. Keyed only by
+        profile+provider it replayed a broad discovered catalog after the same
+        profile switched to a strict model pin, short-circuiting before the
+        policy-aware server cache could answer (#7406 review). This pins the
+        frontend half of that contract; the server half is asserted below.
+        """
+        assert "_liveModelCache" not in UI_JS, (
+            "ui.js must not keep a client-side live-model response cache — it goes "
+            "stale on a same-profile policy change and bypasses the server cache (#7406)"
+        )
+        assert "_fetchLiveModels" in UI_JS, (
+            "ui.js must still fetch live models on every dropdown population — the "
+            "policy-keyed server cache is the only cache (#375, #7406)"
+        )
+
+    def test_server_live_models_cache_preserves_375_intent(self):
+        """The #375 no-redundant-fetch guarantee now lives in the server cache."""
+        assert "_LIVE_MODELS_CACHE_TTL" in ROUTES_PY, (
+            "the server-side live-model cache must exist — it is what preserves the "
+            "#375 intent now that the browser keeps no response cache (#7406)"
         )
 
     def test_frontend_calls_live_models_after_static_load(self):

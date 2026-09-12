@@ -124,6 +124,15 @@ const window = {_defaultModel: null, _activeProvider: null, _configuredModelBadg
 let _dynamicModelLabels = {};
 let _liveModelFetchPending = new Set();
 let _liveModelCache = {};
+// Mirror the production latest-owner helpers populateModelDropdown() now calls
+// (#7404 review). _fetchLiveModels is stubbed above, so only the generation and
+// select-identity advances are needed here.
+let _liveModelPolicyGeneration = 0;
+function _liveModelAdvancePolicyGeneration() { _liveModelPolicyGeneration++; }
+function _liveModelAdvanceSelectIdentity(sel) {
+  if (!sel) return;
+  sel.__liveModelOwnerSeq = (typeof sel.__liveModelOwnerSeq === 'number' ? sel.__liveModelOwnerSeq : 0) + 1;
+}
 
 for (const name of [
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',

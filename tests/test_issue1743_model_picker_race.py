@@ -26,7 +26,10 @@ def test_model_picker_opens_before_async_model_catalog_finishes():
 
 def test_populate_model_dropdown_rerenders_if_picker_is_already_open():
     """If the async catalog finishes while open, refresh the visible custom rows."""
-    body = _body_between(UI_JS, "async function populateModelDropdown", "// Cache so we don't re-fetch")
+    # End anchor is the next top-level declaration, not a prose comment: the
+    # old "// Cache so we don't re-fetch" marker vanished when the browser
+    # live-model response cache was removed (#7406).
+    body = _body_between(UI_JS, "async function populateModelDropdown", "const _liveModelFetchPending")
 
     assert "composerModelDropdown" in body
     assert "classList.contains('open')" in body or 'classList.contains("open")' in body

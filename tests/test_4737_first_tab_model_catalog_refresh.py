@@ -147,6 +147,15 @@ function buildHarness(currentScenario) {
   globalThis._configuredModelBadges = {};
   globalThis._modelDropdownRequestSeq = 0;
   globalThis._modelCatalogFallbackRetried = false;
+  // Mirror the production latest-owner helpers populateModelDropdown() now calls
+  // (#7404 review). _fetchLiveModels is stubbed below, so only the generation
+  // and select-identity advances are needed here.
+  globalThis._liveModelPolicyGeneration = 0;
+  globalThis._liveModelAdvancePolicyGeneration = () => { globalThis._liveModelPolicyGeneration++; };
+  globalThis._liveModelAdvanceSelectIdentity = (sel) => {
+    if (!sel) return;
+    sel.__liveModelOwnerSeq = (typeof sel.__liveModelOwnerSeq === 'number' ? sel.__liveModelOwnerSeq : 0) + 1;
+  };
   globalThis.$ = (id) => {
     if (id === 'modelSelect') return select;
     if (id === 'composerModelDropdown') return dropdown;
