@@ -163,7 +163,60 @@ def test_cron_polling_suppresses_toasts_but_keeps_unread_badges():
 
     assert "c.toast_notifications !== false" in body
     assert "showToast(t('cron_completion_status'" in body
-    assert "if(c.job_id) _cronNewJobIds.add(String(c.job_id));" in body
+    # Toast off no longer implies badge off: the badge opt-out is its own
+    # per-job flag. The poll only skips the unread set when the job explicitly
+    # opts out of badge notifications.
+    assert "c.job_id && c.badge_notifications !== false" in body
+
+
+def test_cron_create_persists_badge_notifications(monkeypatch):
+    """create with badge_notifications: False must persist the opt-out (not
+    just toast), and the returned projection must reflect it."""
+    import api.routes as routes
+
+    created = {"id": "job-badge", "name": "Badge-off", "prompt": "ping"}
+    calls = []
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    cron_jobs.create_job = lambda **kwargs: calls.append(("create", kwargs)) or dict(created)
+    cron_jobs.update_job = lambda job_id, updates: calls.append(("update", job_id, updates)) or {**created, **updates}
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
+
+    handler = _JSONHandler()
+    routes._handle_cron_create(
+        handler,
+        {
+            "prompt": "ping",
+            "schedule": "every 1h",
+            "toast_notifications": False,
+            "badge_notifications": False,
+        },
+    )
+
+    assert handler.status == 200
+    assert calls[0][0] == "create"
+    assert ("update", "job-badge", {"toast_notifications": False, "badge_notifications": False}) in calls
+    assert _payload(handler)["job"]["badge_notifications"] is False
+
+
+def test_cron_form_has_badge_toggle_and_i18n_keys():
+    render_body = _function_body("_renderCronForm")
+    save_body = _function_body("saveCronForm")
+    edit_body = _function_body("openCronEdit")
+    detail_body = _function_body("_renderCronDetail")
+
+    assert "cronFormBadgeNotifications" in render_body
+    assert "cron_badge_notifications_label" in render_body
+    assert "badge_notifications" in edit_body
+    assert "badge_notifications" in detail_body
+    assert "const badgeNotifications" in save_body
+    assert "badge_notifications: badgeNotifications" in save_body
+    assert "cron_badge_notifications_label" in I18N_JS
+    assert "cron_badge_notifications_hint" in I18N_JS
+    assert "cron_badge_notifications_enabled" in I18N_JS
+    assert "cron_badge_notifications_disabled" in I18N_JS
 
 
 def test_cron_toast_i18n_keys_exist():
