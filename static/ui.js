@@ -3927,6 +3927,15 @@ function _normalizeConfiguredModelKey(modelId){
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
+  // A row synthesized from an ungrouped top-level OPTION (temporary/custom
+  // entries added by _ensureModelOptionInDropdown) is stored with providerId:''
+  // even when the option carries provider identity, so that row's provider
+  // authority has to fall back to its badge provider (same fallback already
+  // used by _modelProviderForSelectedBadge below). Without it the routed
+  // spellings cannot see the row as belonging to that provider (#7290).
+  const _entryProvider=(entry)=>String(
+    (entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)||''
+  ).toLowerCase();
   const matchingEntries=(entries||[]).filter(existing=>
     _normalizeConfiguredModelKey(existing.value)===normalized
   );
@@ -3940,12 +3949,29 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // different providers.
   const rawId=String(modelId||'');
   const prefix=provider?`@${provider}:`:'';
-  if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
-  const routedId=rawId.slice(prefix.length);
-  return (entries||[]).some(entry=>
-    String(entry.providerId||'').toLowerCase()===provider
-    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
-  );
+  if(prefix&&rawId.toLowerCase().startsWith(prefix)){
+    const routedId=rawId.slice(prefix.length);
+    return (entries||[]).some(entry=>
+      _entryProvider(entry)===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    );
+  }
+  // Plain `provider/model` badge keys (produced by the backend alongside
+  // `@provider:model`) must dedupe the same way when an existing picker row
+  // belongs to that provider. For single-slash model ids the primary
+  // normalization already strips the prefix; this branch matters for
+  // slash-bearing model ids where the prefixed key keeps vendor hierarchy
+  // (e.g. commandcode/deepseek/deepseek-v4-flash vs deepseek/deepseek-v4-flash)
+  // and would otherwise leak as a duplicate selectable entry (#7290).
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const routedId=rawId.slice(slashPrefix.length);
+    return (entries||[]).some(entry=>
+      _entryProvider(entry)===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    );
+  }
+  return false;
 }
 
 function _getConfiguredModelBadge(modelId,badgeMap,providerId){
