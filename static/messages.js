@@ -72,6 +72,10 @@ if(typeof window!=='undefined'){
 function _isBackgroundedForBrowserNotification(){
   return !!(typeof document!=='undefined'&&document.hidden)||_desktopBackgroundedForNotifications;
 }
+function _isBrowserNotificationReady(){
+  return typeof window!=='undefined'&&!!window._notificationsEnabled&&
+    'Notification' in window&&Notification.permission==='granted';
+}
 
 function _isSessionCurrentPane(sid) {
   if(!sid || !S.session || S.session.session_id!==sid) return false;
@@ -9161,14 +9165,41 @@ function playAttentionSound(key){
 }
 
 function _notificationOptions(body,options={}){
+  const hasSid=!!(options&&Object.prototype.hasOwnProperty.call(options,'sid'))&&options.sid!==undefined;
   const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
-  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  const effectiveSid=hasSid?options.sid:sid;
+  const url=effectiveSid?`${location.origin}${_sessionUrlForSid(sid)}`:
+    (hasSid&&typeof _appRootPath==='function'?`${location.origin}${_appRootPath()}`:location.href);
+  const defaults={body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  const tag=options&&Object.prototype.hasOwnProperty.call(options,'tag')?options.tag:
+    (hasSid&&!effectiveSid?'hermes-webui':defaults.tag);
+  const renotify=options&&Object.prototype.hasOwnProperty.call(options,'renotify')?!!options.renotify:true;
+  return {...defaults,tag,renotify};
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
   const opts=_notificationOptions(body,options);
-  const direct=()=>new Notification(title||botName,opts);
+  const delivered=()=>({delivered:true,alreadyDisplayed:false});
+  const failed=()=>({delivered:false,alreadyDisplayed:false});
+  const direct=()=>{
+    try{new Notification(title||botName,opts);return Promise.resolve(delivered());}
+    catch(_err){return Promise.resolve(failed());}
+  };
+  const showWithFallback=reg=>{
+    if(!reg||!reg.active||!reg.showNotification) return direct();
+    return Promise.resolve().then(()=>reg.showNotification(title||botName,opts))
+      .then(()=>delivered(),()=>direct().then(result=>result.delivered?result:failed()));
+  };
+  const inspectAndShow=reg=>{
+    if(options&&options.dedupe&&opts.tag&&reg&&typeof reg.getNotifications==='function'){
+      return Promise.resolve().then(()=>reg.getNotifications({tag:opts.tag})).then(records=>{
+        if(Array.isArray(records)&&records.length>0)
+          return {delivered:false,alreadyDisplayed:true};
+        return showWithFallback(reg);
+      },()=>showWithFallback(reg));
+    }
+    return showWithFallback(reg);
+  };
   // Prefer the service worker (the only path that works in a standalone PWA,
   // notably iOS). Use getRegistration() + a short timeout race rather than
   // navigator.serviceWorker.ready, because `.ready` NEVER settles when no
@@ -9180,11 +9211,10 @@ function _showPwaNotification(title,body,options={}){
       navigator.serviceWorker.getRegistration().catch(()=>null),
       new Promise(res=>setTimeout(()=>res(null),2000))
     ]);
-    return reg$.then(reg=>(reg&&reg.active&&reg.showNotification)
-      ? reg.showNotification(title||botName,opts)
-      : direct());
+    return reg$.then(inspectAndShow);
   }
-  return Promise.resolve(direct());
+  // Direct notifications do not expose browser-owned displayed records.
+  return inspectAndShow(null);
 }
 function requestNotificationPermission(){
   if(!('Notification' in window)){
@@ -9217,16 +9247,20 @@ function sendBrowserNotification(title,body,options={}){
   // notifications-enabled SETTING is still honored (unlike `force`, which is the
   // explicit "Send test" override); only the visibility gate is bypassed.
   const forceHidden=!!(options&&options.forceHidden);
-  if(!force&&!window._notificationsEnabled) return;
-  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return;
-  if(!('Notification' in window)) return;
+  const skip=()=>Promise.resolve({delivered:false,alreadyDisplayed:false});
+  if(!force&&!window._notificationsEnabled) return skip();
+  if(!force&&!forceHidden&&!_isBackgroundedForBrowserNotification()) return skip();
+  if(!('Notification' in window)) return skip();
   if(Notification.permission==='granted'){
-    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
+    return _showPwaNotification(title,body,options);
   }else if(Notification.permission==='denied'){
     // Explicit "Send test" (force) deserves feedback instead of a silent no-op.
     if(force&&typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    return skip();
   }else{
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});});
+    return requestNotificationPermission().then(p=>p==='granted'
+      ? _showPwaNotification(title,body,options)
+      : skip()).catch(()=>skip());
   }
 }
 
