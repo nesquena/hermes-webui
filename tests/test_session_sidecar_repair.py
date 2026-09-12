@@ -423,6 +423,213 @@ class TestDraftRecovery:
         assert s.active_stream_id is None
 
 
+class TestOrphanedToolTailRepair:
+    """Stale-stream cleanup must leave the transcript at a valid assistant boundary."""
+
+    def test_stale_stream_with_tool_tail_gets_terminal_assistant_marker(self, hermes_home):
+        """A process exit after tool output must not leave the session ending on role=tool."""
+        import api.routes as routes
+
+        s = _make_session(
+            session_id="orphan_tool_tail",
+            messages=[
+                {"role": "user", "content": "fix the bug", "timestamp": 100},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                    "timestamp": 101,
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "file contents",
+                    "timestamp": 102,
+                },
+            ],
+            context_messages=[
+                {"role": "user", "content": "fix the bug", "timestamp": 100},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                    "timestamp": 101,
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "file contents",
+                    "timestamp": 102,
+                },
+            ],
+        )
+        s.active_stream_id = "dead_stream"
+        s.pending_user_message = None
+        s.pending_started_at = time.time() - 120
+        s.save()
+
+        assert routes._clear_stale_stream_state(s) is True
+
+        assert s.active_stream_id is None
+        assert s.pending_user_message is None
+        assert s.messages[-1]["role"] == "assistant"
+        assert s.messages[-1].get("_error") is True
+        assert s.messages[-1].get("type") == "interrupted"
+        assert "transcript ended on tool output" in s.messages[-1]["content"]
+        assert s.context_messages[-1]["role"] == "assistant"
+        assert s.context_messages[-1].get("type") == "interrupted"
+
+    def test_stale_stream_with_tool_call_request_tail_gets_terminal_marker(self, hermes_home):
+        """A stream lost after requesting a tool but before tool output is also incomplete."""
+        import api.routes as routes
+
+        s = _make_session(
+            session_id="orphan_tool_call_request",
+            messages=[
+                {"role": "user", "content": "check the file", "timestamp": 100},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "finish_reason": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                    "timestamp": 101,
+                },
+            ],
+        )
+        s.active_stream_id = "dead_stream"
+        s.pending_user_message = None
+        s.pending_started_at = time.time() - 120
+        s.save()
+
+        assert routes._clear_stale_stream_state(s) is True
+
+        assert s.active_stream_id is None
+        assert s.messages[-1]["role"] == "assistant"
+        assert s.messages[-1].get("type") == "interrupted"
+        assert "transcript ended on a tool-call request" in s.messages[-1]["content"]
+
+    def test_context_only_tool_tail_gets_terminal_assistant_marker(self, hermes_home):
+        """Provider-facing context is sealed even when display messages already are."""
+        import api.routes as routes
+
+        display_messages = [
+            {"role": "user", "content": "hi", "timestamp": 100},
+            {"role": "assistant", "content": "hello", "timestamp": 101},
+        ]
+        s = _make_session(
+            session_id="context_only_orphan_tool_tail",
+            messages=list(display_messages),
+            context_messages=[
+                {"role": "user", "content": "fix the bug", "timestamp": 100},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                    "timestamp": 101,
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "file contents",
+                    "timestamp": 102,
+                },
+            ],
+        )
+        s.active_stream_id = "dead_stream"
+        s.pending_user_message = None
+        s.pending_started_at = time.time() - 120
+        s.save()
+
+        assert routes._clear_stale_stream_state(s) is True
+
+        assert s.messages == display_messages
+        assert s.context_messages[-1]["role"] == "assistant"
+        assert s.context_messages[-1].get("type") == "interrupted"
+        assert "transcript ended on tool output" in s.context_messages[-1]["content"]
+
+    def test_tool_tail_marker_is_idempotent(self, hermes_home):
+        """Repeated repair scans should not append duplicate interrupted markers."""
+        import api.routes as routes
+
+        s = _make_session(
+            session_id="orphan_tool_tail_idempotent",
+            messages=[
+                {"role": "user", "content": "fix the bug", "timestamp": 100},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                    "timestamp": 101,
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "file contents",
+                    "timestamp": 102,
+                },
+            ],
+        )
+
+        assert routes._append_orphaned_tool_tail_interruption_marker(s, "dead_stream") is True
+        assert routes._append_orphaned_tool_tail_interruption_marker(s, "dead_stream") is False
+        markers = [m for m in s.messages if m.get("_orphaned_tool_tail_repair")]
+        assert len(markers) == 1
+
+    def test_stale_stream_with_completed_assistant_tail_only_clears_flags(self, hermes_home):
+        """Completed assistant tails should not get a synthetic interruption marker."""
+        import api.routes as routes
+
+        s = _make_session(
+            session_id="complete_tail",
+            messages=[
+                {"role": "user", "content": "hi", "timestamp": 100},
+                {"role": "assistant", "content": "hello", "timestamp": 101},
+            ],
+        )
+        s.active_stream_id = "dead_stream"
+        s.pending_user_message = None
+        s.pending_started_at = time.time() - 120
+        s.save()
+
+        assert routes._clear_stale_stream_state(s) is True
+
+        assert s.active_stream_id is None
+        assert s.messages == [
+            {"role": "user", "content": "hi", "timestamp": 100},
+            {"role": "assistant", "content": "hello", "timestamp": 101},
+        ]
+
+
 class TestStreamIdRecheck:
     """Under-lock re-check in _apply_core_sync_or_error_marker bails out when
     active_stream_id has rotated or the stream has come back alive."""

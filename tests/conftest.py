@@ -439,6 +439,21 @@ def pytest_report_collectionfinish(config, items):
 # imports trigger botocore initialisation.
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 
+# ── Supervised-restart drain markers stay out of the real state home ───────
+# api.config.enter_restart_drain() writes a PID-keyed marker under
+# HERMES_WEBUI_RESTART_DRAIN_DIR (default: <state home>/webui/restart-drain).
+# A test that exercises a real _schedule_restart() success path (the drain
+# producer) holds that marker for the restart window from a daemon thread. If
+# the default path resolves to the production ~/.hermes tree, any later test
+# starting an agent run is refused (RunAdmissionDrainingError) and the marker
+# outlives the pytest process on abort. Anchor the marker dir inside the
+# isolated test state root so a leaked marker can neither poison a later test
+# through production state nor survive the session.
+os.environ.setdefault(
+    'HERMES_WEBUI_RESTART_DRAIN_DIR',
+    str(TEST_STATE_DIR / 'webui' / 'restart-drain'),
+)
+
 # ── Permanent os.execv guard for the pytest session ────────────────────────
 # Several tests in tests/test_update_banner_fixes.py exercise
 # api.updates._schedule_restart(), which spawns a DAEMON thread that sleeps

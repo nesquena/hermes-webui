@@ -36,6 +36,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
+    RunAdmissionDrainingError,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     peek_stream,
@@ -6268,6 +6269,73 @@ def _session_context_messages(session):
     return session.messages or []
 
 
+def _dedupe_state_backed_reasoning_rows(messages):
+    """Collapse replayed copies of one durable reasoning-only state.db row.
+
+    This is intentionally narrower than ``_message_identity``.  Equal reasoning
+    text is not a global turn identity: two legitimate turns may think the same
+    thing, and WebUI's display projection can expose content-distinct rows with
+    the same ``_row_id``.  Collapse only rows with durable state provenance:
+
+    * positive integer ``_row_id`` and ``_db_persisted``;
+    * reasoning-only assistant shape, excluding live ``_partial`` rows;
+    * exact timestamp and complete, non-empty ``reasoning_content`` match.
+
+    ``reasoning`` is incremental display state and may differ across replayed
+    copies of the same settled row.  Keep the longest snapshot at the original
+    position so repair improves, rather than discards, visible trace detail.
+    """
+    rows = list(messages or [])
+    if len(rows) < 2:
+        return rows
+    out = []
+    kept_by_key = {}
+    for message in rows:
+        if not isinstance(message, dict):
+            out.append(message)
+            continue
+        row_id = message.get('_row_id')
+        settled_reasoning = message.get('reasoning_content')
+        timestamp = message.get('timestamp', message.get('_ts'))
+        eligible = (
+            isinstance(row_id, int)
+            and not isinstance(row_id, bool)
+            and row_id > 0
+            and message.get('_db_persisted') is True
+            and not message.get('_partial')
+            and _is_reasoning_only_assistant_message(message)
+            and isinstance(settled_reasoning, str)
+            and bool(settled_reasoning)
+            and timestamp not in (None, '')
+        )
+        if not eligible:
+            out.append(message)
+            continue
+        key = (row_id, timestamp, settled_reasoning)
+        existing_idx = kept_by_key.get(key)
+        if existing_idx is None:
+            kept_by_key[key] = len(out)
+            out.append(message)
+            continue
+        existing = out[existing_idx]
+        existing_reasoning = str(existing.get('reasoning') or '')
+        incoming_reasoning = str(message.get('reasoning') or '')
+        if len(incoming_reasoning) > len(existing_reasoning):
+            replacement = dict(existing)
+            replacement['reasoning'] = message.get('reasoning')
+            for field in ('codex_reasoning_items', 'codex_message_items'):
+                incoming = message.get(field)
+                existing_value = replacement.get(field)
+                if incoming and (
+                    not existing_value
+                    or len(json.dumps(incoming, sort_keys=True, default=str))
+                    > len(json.dumps(existing_value, sort_keys=True, default=str))
+                ):
+                    replacement[field] = copy.deepcopy(incoming)
+            out[existing_idx] = replacement
+    return out
+
+
 def _message_identity(msg):
     if not isinstance(msg, dict):
         return None
@@ -7092,6 +7160,11 @@ def _merge_display_messages_after_agent_result(
     # three inputs consistently so prefix/delta detection below stays aligned.
     # (#5334; same internal-control-message class as #3320/#3821/#4373/#4875)
     previous_display = _drop_synthetic_control_messages(previous_display)
+    # A recovered state.db reasoning row can be replayed into the display more
+    # than once while its incremental `reasoning` snapshot changes. Scrub only
+    # duplicates proven to share the same durable row provenance; do not broaden
+    # global message identity (equal reasoning can be legitimate across turns).
+    previous_display = _dedupe_state_backed_reasoning_rows(previous_display)
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -9009,16 +9082,30 @@ def _run_agent_streaming(
                 exc_info=True,
             )
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        ephemeral=bool(ephemeral),
-    )
+    try:
+        register_active_run(
+            stream_id,
+            session_id=session_id,
+            started_at=time.time(),
+            phase="starting",
+            workspace=str(workspace),
+            model=model,
+            provider=model_provider,
+            ephemeral=bool(ephemeral),
+        )
+    except RunAdmissionDrainingError:
+        q.put_nowait((
+            "apperror",
+            {
+                "type": "restart_draining",
+                "retryable": True,
+                "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                "session_id": session_id,
+            },
+        ))
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:

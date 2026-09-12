@@ -3013,6 +3013,76 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
+def _orphaned_tool_tail_kind(messages) -> str | None:
+    """Return the incomplete tool-tail kind that needs a terminal assistant marker."""
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role == "tool":
+            return "tool output"
+        if role == "assistant":
+            if message.get("_error") or message.get("type") == "interrupted":
+                return None
+            if (
+                message.get("tool_calls")
+                or message.get("_partial_tool_calls")
+                or message.get("finish_reason") == "tool_calls"
+            ):
+                return "a tool-call request"
+            return None
+        if role == "user":
+            return None
+    return None
+
+
+def _append_orphaned_tool_tail_interruption_marker(session, stream_id: str | None) -> bool:
+    """Seal stale transcripts whose tails end mid tool-call turn.
+
+    Server/process exits can occur after a tool result is persisted but before
+    the assistant writes the final post-tool response. Clearing active_stream_id
+    alone makes the next user turn append after ``role=tool``; providers require
+    that a tool result be followed by an assistant message. Append terminal
+    assistant markers so display and provider-facing context both stop at valid
+    boundaries, even if only one transcript copy is orphaned.
+    """
+
+    def _marker(kind: str) -> dict:
+        detail = f"the transcript ended on {kind}"
+        return {
+            "role": "assistant",
+            "content": (
+                "**Response interrupted.**\n\n"
+                "The live response stream stopped before this turn finished. "
+                f"Evidence: {detail}, so the assistant did not write a final "
+                "post-tool response before the WebUI process lost the stream. "
+                "Start a new turn to continue."
+            ),
+            "timestamp": int(time.time()),
+            "_error": True,
+            "type": "interrupted",
+            "interruption_cause": "lost_worker_bookkeeping" if stream_id else "unknown",
+            "_orphaned_tool_tail_repair": True,
+        }
+
+    repaired = False
+    messages = getattr(session, "messages", None)
+    kind = _orphaned_tool_tail_kind(messages)
+    if isinstance(messages, list) and kind:
+        messages.append(_marker(kind))
+        repaired = True
+
+    context_messages = getattr(session, "context_messages", None)
+    context_kind = _orphaned_tool_tail_kind(context_messages)
+    if isinstance(context_messages, list) and context_kind:
+        context_messages.append(_marker(context_kind))
+        repaired = True
+
+    return repaired
+
+
 def _clear_stale_stream_state(session) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
@@ -3178,6 +3248,7 @@ def _clear_stale_stream_state(session) -> bool:
                 return True
             if getattr(session, "active_stream_id", None) != stream_id:
                 return False
+        _append_orphaned_tool_tail_interruption_marker(session, stream_id)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):
@@ -12442,6 +12513,7 @@ def _handle_health(handler, parsed):
         "last_run_finished_at": run_check.get("last_run_finished_at"),
         "server_started_at": SERVER_START_TIME,
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+        "restart_drain_supported": True,
         "accept_loop": _accept_loop_health(handler),
     }
     if "oldest_run_age_seconds" in run_check:
@@ -24027,6 +24099,16 @@ def _handle_chat_start(handler, body, diag=None):
                 handler,
                 {"status": "suppressed", "reason": "silent_control_message"},
                 status=200,
+            )
+        if api_config.restart_drain_active():
+            return j(
+                handler,
+                {
+                    "status": "restart_draining",
+                    "retryable": True,
+                    "error": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                },
+                status=503,
             )
         if body.get("regenerate") is True:
             from api.runtime_adapter import runtime_adapter_runner_enabled

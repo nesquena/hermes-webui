@@ -57,6 +57,7 @@ def _collect_via_node(messages):
             "_normalizeArtifactPath",
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
+            "_harvestArtifactCandidatesFromMessages",
             "collectSessionArtifacts",
         )
     )
@@ -93,8 +94,11 @@ def test_malformed_tool_calls_entries_do_not_throw():
 
 
 def test_guard_present_in_source():
-    """Pin the explicit guard so it can't be silently removed."""
-    fn = _extract_fn("collectSessionArtifacts")
+    """Pin the explicit guard so it can't be silently removed. The message-row
+    harvest (OpenAI/Anthropic tool metadata) lives in the shared
+    _harvestArtifactCandidatesFromMessages chokepoint that both the resident
+    scan and the dropped-head registry use."""
+    fn = _extract_fn("_harvestArtifactCandidatesFromMessages")
     assert "if(!tc || typeof tc !== 'object') continue;" in fn, (
         "OpenAI tool_calls loop must guard malformed entries before "
         "dereferencing tc.function (#3329 Codex regression-gate finding)"

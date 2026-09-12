@@ -23,6 +23,7 @@ from api.config import (
     STREAM_LIVE_TOOL_CALLS,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
+    RunAdmissionDrainingError,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
@@ -932,16 +933,32 @@ def _run_gateway_chat_streaming(
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="gateway-starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        backend="gateway",
-    )
+    try:
+        register_active_run(
+            stream_id,
+            session_id=session_id,
+            started_at=time.time(),
+            phase="gateway-starting",
+            workspace=str(workspace),
+            model=model,
+            provider=model_provider,
+            backend="gateway",
+        )
+    except RunAdmissionDrainingError:
+        q.put_nowait((
+            "apperror",
+            {
+                "type": "restart_draining",
+                "retryable": True,
+                "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                "session_id": session_id,
+            },
+        ))
+        _finish_gateway_run_starting(stream_id)
+        _clear_gateway_run_starting(stream_id)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:

@@ -3067,6 +3067,47 @@ function _currentLoadedRenderableMessageCount(){
   return count;
 }
 
+function _captureLoadedMessageWindow(sid){
+  if(!S.session||S.session.session_id!==sid||!_messagesTruncated||
+    !Number.isInteger(_oldestIdx)||_oldestIdx<=0||!S.messages||!S.messages.length) return null;
+  return {
+    session_id:sid,
+    offset:_oldestIdx,
+    message_count:S.session.message_count,
+    revision:S.session.regeneration_revision,
+    first:_loadedMessageBoundarySignature(S.messages[0]),
+  };
+}
+function _loadedMessageBoundarySignature(message){
+  if(!message||!message.role) return null;
+  return JSON.stringify([message.role,message.content,message.tool_call_id,message.tool_calls]);
+}
+function _preserveLoadedMessageWindow(session, loaded){
+  // Full transport snapshots need not implicitly load older history. Preserve
+  // the existing server-indexed boundary, never drop a row the reader loaded.
+  // A changed boundary/revision or shortened history takes the canonical path.
+  if(!loaded||!session||session.session_id!==loaded.session_id||
+    session.regeneration_revision!==loaded.revision||!Array.isArray(session.messages)) return session;
+  const offset=session._messages_offset===undefined?0:session._messages_offset;
+  if(!Number.isInteger(offset)||offset<0||offset>=loaded.offset) return session;
+  const start=loaded.offset-offset;
+  if(start>=session.messages.length||
+    session.messages.length+offset<loaded.message_count||!loaded.first||
+    _loadedMessageBoundarySignature(session.messages[start])!==loaded.first) return session;
+  // Rows about to be sliced out of the resident transcript still carry
+  // mutation evidence (write/patch tool calls, diff fences). Harvest them into
+  // a per-session registry BEFORE dropping them, so the workspace Artifacts
+  // projection (which scans only resident state) keeps surfacing files changed
+  // before the loaded boundary. Once the reader loads full history, the head
+  // rows become resident again and the registry entry is cleared.
+  if(typeof _noteHeadArtifactsForSession==='function'){
+    try{ _noteHeadArtifactsForSession(session.session_id, session.messages.slice(0,start)); }
+    catch(_){ /* harvest is best-effort; never block the settlement slice */ }
+  }
+  return {...session,messages:session.messages.slice(start),
+    _messages_offset:loaded.offset,_messages_truncated:true};
+}
+
 function _captureSameSessionForceReloadHint(sid){
   const loadedRenderableCount=_currentLoadedRenderableMessageCount();
   const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
@@ -3081,6 +3122,7 @@ function _captureSameSessionForceReloadHint(sid){
     loaded_message_count:loadedMessageCount,
     message_count:knownMessageCount,
     truncated:!!_messagesTruncated,
+    loaded_window:_captureLoadedMessageWindow(sid),
   };
 }
 
@@ -3156,6 +3198,9 @@ async function _ensureMessagesLoaded(sid, opts) {
     return;
   }
   // Fetch session messages with a tail window for fast initial load.
+  const loadedWindow=_sameSessionForceReloadHint&&_sameSessionForceReloadHint.session_id===sid
+    ? _sameSessionForceReloadHint.loaded_window : null;
+  const windowAtRequest={messages:S.messages,offset:_oldestIdx,truncated:_messagesTruncated};
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
   // A reload window above the server's msg_limit ceiling would be clamped by
   // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
@@ -3182,9 +3227,33 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  // Loading older history while this request was in flight supersedes the
+  // captured window. Do not slice the response using an obsolete boundary.
+  const unchangedWindow=S.messages===windowAtRequest.messages&&
+    _messagesTruncated===windowAtRequest.truncated&&_oldestIdx===windowAtRequest.offset;
+  if(!unchangedWindow&&S.session&&S.session.session_id===sid&&
+    Number.isInteger(_oldestIdx)&&_oldestIdx>=0&&
+    Number.isInteger(data.session._messages_offset)&&data.session._messages_offset>_oldestIdx){
+    // The reader expanded history while this bounded request was pending.
+    // Fetch canonical full history once instead of dropping their loaded head
+    // or merging possibly revised rows from the stale client snapshot.
+    data=await api(
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
+      {timeoutMs:120000}
+    );
+    if(!_ownsLoad()||!data||!data.session) return;
+    data.session=_preserveLoadedMessageWindow(data.session,_captureLoadedMessageWindow(sid));
+  }else{
+    data.session=_preserveLoadedMessageWindow(data.session,unchangedWindow?loadedWindow:null);
+  }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
+  // Full history is resident again — the harvested head registry is redundant
+  // (its rows now live in S.messages and would double-count otherwise).
+  if(!_messagesTruncated && typeof _clearHeadArtifactsForSession==='function'){
+    _clearHeadArtifactsForSession(sid);
+  }
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"

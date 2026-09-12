@@ -517,6 +517,82 @@ async function refreshOpenPreviewIfMutated(){
   await openFile(_previewCurrentPath, { bustCache: true });
 }
 
+// Extract artifact candidates from raw transcript rows: text-mined diff/patch
+// fences plus structured tool_calls (OpenAI) / tool_use blocks (Anthropic).
+// Shared by the resident-message scan in collectSessionArtifacts and the
+// dropped-head harvest so both surfaces agree on what counts as an artifact.
+function _harvestArtifactCandidatesFromMessages(messages){
+  const out = [];
+  const seen = new Set();
+  const add = (a, fallbackKind) => {
+    if(!a || !a.path || seen.has(a.path)) return;
+    seen.add(a.path);
+    out.push({path: a.path, kind: a.kind || fallbackKind || 'tool'});
+  };
+  for(const msg of (Array.isArray(messages) ? messages : [])){
+    if(!msg) continue;
+    const text = msg.content || msg.text || msg.message || '';
+    if(typeof text === 'string'){
+      for(const a of _artifactCandidatesFromText(text)) add(a, 'diff');
+    }
+    if(Array.isArray(msg.tool_calls)){
+      for(const tc of msg.tool_calls){
+        if(!tc || typeof tc !== 'object') continue;
+        const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
+        const name = fn.name || tc.name || '';
+        let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
+        if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
+        const fakeTc = {name, args, result: tc.result || tc.output || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) add(a, name || 'tool');
+      }
+    }
+    if(Array.isArray(msg.content)){
+      for(const block of msg.content){
+        if(!block || block.type !== 'tool_use') continue;
+        let inp = block.input || {};
+        if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
+        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) add(a, block.name || 'tool');
+      }
+    }
+  }
+  return out;
+}
+
+// Per-session registry of artifacts harvested from transcript rows dropped by
+// a loaded-window slice. Keyed by session id so a session switch restores the
+// right list; capped so a long-lived tab cannot grow it without bound.
+const _HEAD_ARTIFACTS_MAX_PATHS = 200;
+const _HEAD_ARTIFACTS_MAX_SESSIONS = 12;
+const _sessionHeadArtifacts = new Map();
+
+function _noteHeadArtifactsForSession(sid, messages){
+  if(!sid) return;
+  const existing = _sessionHeadArtifacts.get(sid) || [];
+  const seen = new Set(existing.map(a => a.path));
+  const merged = existing.slice();
+  for(const a of _harvestArtifactCandidatesFromMessages(messages)){
+    if(seen.has(a.path)) continue;
+    seen.add(a.path);
+    merged.push({path: a.path, kind: a.kind || 'tool'});
+    if(merged.length >= _HEAD_ARTIFACTS_MAX_PATHS) break;
+  }
+  if(merged.length === existing.length) return;
+  if(!_sessionHeadArtifacts.has(sid) && _sessionHeadArtifacts.size >= _HEAD_ARTIFACTS_MAX_SESSIONS){
+    const oldest = _sessionHeadArtifacts.keys().next().value;
+    _sessionHeadArtifacts.delete(oldest);
+  }
+  _sessionHeadArtifacts.set(sid, merged);
+}
+
+function _headArtifactsForSession(sid){
+  return _sessionHeadArtifacts.get(sid) || [];
+}
+
+function _clearHeadArtifactsForSession(sid){
+  if(sid) _sessionHeadArtifacts.delete(sid);
+}
+
 function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
@@ -532,38 +608,22 @@ function collectSessionArtifacts(){
   }
   // Source 2 & 3: message-level data — both text-mined diffs and structured
   // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
-  for(const msg of (S.messages || [])){
-    if(!msg) continue;
-    const text = msg.content || msg.text || msg.message || '';
-    // Text-mined diff/patch fences (existing path).
-    if(typeof text === 'string'){
-      for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
-    }
-    // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
-    if(Array.isArray(msg.tool_calls)){
-      for(const tc of msg.tool_calls){
-        if(!tc || typeof tc !== 'object') continue;
-        const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
-        const name = fn.name || tc.name || '';
-        let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
-        if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
-        const fakeTc = {name, args, result: tc.result || tc.output || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
-      }
-    }
-    // Structured content array with tool_use blocks (Anthropic format).
-    if(Array.isArray(msg.content)){
-      for(const block of msg.content){
-        if(!block || block.type !== 'tool_use') continue;
-        let inp = block.input || {};
-        if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
-        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
-        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
-      }
-    }
+  for(const a of _harvestArtifactCandidatesFromMessages(S.messages || [])){
+    push(a.path, a.kind || 'tool');
+  }
+  // Source 4: artifacts harvested from history OUTSIDE the resident loaded
+  // window. Terminal settlements slice full snapshots down to the reader's
+  // loaded boundary (_preserveLoadedMessageWindow); the dropped head rows are
+  // harvested there into a per-session registry so mutation tool calls before
+  // the boundary keep surfacing here even though they are no longer resident
+  // in S.messages. Cleared once full history is loaded (head becomes resident).
+  const sid = S.session && S.session.session_id;
+  if(sid && typeof _headArtifactsForSession === 'function'){
+    for(const a of _headArtifactsForSession(sid)) push(a.path, a.kind || 'tool');
   }
   return items.slice(0, 50);
 }
+
 
 function renderSessionArtifacts(){
   const root = $('workspaceArtifacts');

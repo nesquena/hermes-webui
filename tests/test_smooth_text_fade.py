@@ -91,8 +91,6 @@ let _streamFadeDomText='';
 let _streamFadeSilentPrefixChars=0;
 const _STREAM_FADE_MS=620;
 const _STREAM_FADE_MAX_MS=900;
-const _STREAM_FADE_DONE_MAX_MS=1000;
-const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
 const performance={performance_stub};
 {helpers}
 """
@@ -513,25 +511,16 @@ def test_transparent_anchor_prose_receives_revealed_fade_text():
     )
 
 
-def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
-    drain_block = function_block(MESSAGES_JS, "_drainStreamFadeBeforeDone")
-    assert "const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400" in MESSAGES_JS
-    assert_contains_all(
-        drain_block,
-        [
-            "const drainStartedAt=performance.now();",
-            "const target=_streamFadeCurrentDisplayText();",
-            "const caughtUp=_renderStreamingFadeMarkdown(target);",
-            "const anchorProcessText=_streamFadeDomText||target;",
-            "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);",
-            "performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS",
-            "if(_smdParser) _smdEndParser();",
-            "onDone();",
-        ],
-    )
-    assert drain_block.index("_renderStreamingFadeMarkdown(target)") < drain_block.index(
-        "_upsertAnchorProcessProse(anchorProcessText)"
-    )
+def test_completion_does_not_depend_on_cosmetic_playout():
+    # The old bounded-drain contract still delayed canonical Markdown. Real
+    # synchronous completion and buffered-tail coverage lives in the browser gate.
+    done = slice_between(MESSAGES_JS, "source.addEventListener('done'", "source.addEventListener('stream_end'")
+    terminal_call = done[done.rfind("      };"): ]
+    assert "_finishDone();" in terminal_call
+    assert "if(" not in terminal_call
+    assert "setTimeout(" not in terminal_call
+    assert "_drainStreamFadeBeforeDone" not in MESSAGES_JS
+    assert "_STREAM_FADE_DONE_" not in MESSAGES_JS
 
 
 def test_live_streaming_assistant_content_opts_out_of_global_theme_transitions():
