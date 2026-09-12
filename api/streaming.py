@@ -1805,13 +1805,36 @@ def _active_turn_has_checkpoint(messages, identity):
 
 
 def _mark_active_turn_checkpoint(message, identity):
+    """Adopt an existing row as this turn's user turn, provenance included.
+
+    The row being marked here is the one the Agent returned for the current
+    turn, so in ``deferred`` session-save mode (the default) it is the ONLY
+    copy that reaches the transcript — ``_materialize_active_turn_user`` never
+    runs for it. Stamping just ``_active_turn_token`` therefore silently
+    dropped the turn's ``_source`` (and the ``_wakeup_meta`` / fork-child
+    provenance that rides with it): a ``process_wakeup`` delivery persisted as
+    an unmarked user turn, and the frontend — which gates the collapsed
+    process-wakeup card on ``_source`` — rendered it as a raw user bubble.
+    Route through the same stamp choke point the materialize branch uses so
+    both ways of settling the boundary produce the same provenance. ``webui``
+    turns are unchanged: ``stamp_message_source`` leaves the default source
+    unwritten.
+    """
     if (
         isinstance(message, dict)
         and message.get('role') == 'user'
         and isinstance(identity, dict)
         and identity.get('token')
     ):
-        message['_active_turn_token'] = identity['token']
+        stamp_message_source(
+            message,
+            identity.get('source') or 'webui',
+            active_turn_token=identity['token'],
+        )
+        if str(identity.get('source') or '').strip().lower() == 'fork':
+            child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
     return message
 
 
