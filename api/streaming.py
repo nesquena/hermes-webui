@@ -4667,7 +4667,7 @@ def generate_title_raw_via_aux(
                         if raw:
                             return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
                         last_status = empty_status or 'llm_empty_aux'
-                        if mode == 'schema' and last_status == 'llm_empty_aux':
+                        if mode == 'schema' and last_status in {'llm_empty_aux', 'llm_empty_reasoning_aux'}:
                             schema_unavailable = True
                             continue
                         break
@@ -4708,6 +4708,8 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
     prev_reasoning = getattr(agent, 'reasoning_config', None)
     try:
         agent.reasoning_config = disabled_reasoning
+        attempted = 0
+        schema_unavailable = False
         for idx, prompt in enumerate(prompts):
             api_messages = [
                 {"role": "system", "content": prompt},
@@ -4720,6 +4722,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                     raw = ""
                     empty_status = ''
                     if getattr(agent, 'api_mode', '') == 'codex_responses':
+                        attempted += 1
                         codex_kwargs = agent._build_api_kwargs(api_messages)
                         codex_kwargs.pop('tools', None)
                         if 'max_output_tokens' in codex_kwargs:
@@ -4730,6 +4733,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         if not raw:
                             empty_status = 'llm_empty'
                     elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
+                        attempted += 1
                         from agent.anthropic_adapter import build_anthropic_kwargs
                         ant_kwargs = build_anthropic_kwargs(
                             model=agent.model,
@@ -4749,10 +4753,10 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         if not raw:
                             empty_status = 'llm_empty'
                     else:
-                        api_kwargs = agent._build_api_kwargs(api_messages)
-                        api_kwargs.pop('tools', None)
-                        api_kwargs['temperature'] = 0.1
-                        api_kwargs['timeout'] = 15.0
+                        base_api_kwargs = agent._build_api_kwargs(api_messages)
+                        base_api_kwargs.pop('tools', None)
+                        base_api_kwargs['temperature'] = 0.1
+                        base_api_kwargs['timeout'] = 15.0
                         # Reasoning suppression for title gen is already handled
                         # route-correctly by `_build_api_kwargs()` from the
                         # `agent.reasoning_config = {"enabled": False}` set above —
@@ -4764,23 +4768,36 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                         # re-adds a 400-rejected param on top of the profile output
                         # (#4161). MiniMax still needs reasoning_split, which the
                         # profile path does not add.
-                        _tg_extra = dict(api_kwargs.get('extra_body') or {})
-                        _tg_extra['response_format'] = _TITLE_RESPONSE_FORMAT
-                        if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                            _tg_extra['reasoning_split'] = True
-                        if _tg_extra:
-                            api_kwargs['extra_body'] = _tg_extra
-                        if 'max_completion_tokens' in api_kwargs:
-                            api_kwargs['max_completion_tokens'] = max_tokens
-                        else:
-                            api_kwargs['max_tokens'] = max_tokens
-                        resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
-                            **api_kwargs,
-                        )
-                        raw, empty_status = _extract_title_response(resp)
+                        modes = ('compatibility',) if schema_unavailable else ('schema', 'compatibility')
+                        for mode in modes:
+                            api_kwargs = dict(base_api_kwargs)
+                            _tg_extra = dict(base_api_kwargs.get('extra_body') or {})
+                            if mode == 'schema':
+                                _tg_extra['response_format'] = _TITLE_RESPONSE_FORMAT
+                            if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
+                                _tg_extra['reasoning_split'] = True
+                            if _tg_extra:
+                                api_kwargs['extra_body'] = _tg_extra
+                            if 'max_completion_tokens' in api_kwargs:
+                                api_kwargs['max_completion_tokens'] = max_tokens
+                            else:
+                                api_kwargs['max_tokens'] = max_tokens
+                            try:
+                                attempted += 1
+                                resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
+                                    **api_kwargs,
+                                )
+                            except Exception as e:
+                                if mode == 'schema':
+                                    schema_unavailable = True
+                                    logger.debug("Agent title schema attempt %s failed: %s", idx + 1, e)
+                                    continue
+                                raise
+                            raw, empty_status = _extract_title_response(resp)
+                            break
                     raw = str(raw or '').strip()
                     if raw:
-                        return raw, ('llm' if idx == 0 and budget_idx == 0 else 'llm_retry')
+                        return raw, ('llm' if attempted == 1 else 'llm_retry')
                     last_status = empty_status or 'llm_empty'
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(

@@ -200,6 +200,36 @@ def test_aux_schema_rejection_falls_back_to_existing_request_shape():
     assert calls[1]["extra_body"] == {"reasoning": {"enabled": False}}
 
 
+def test_aux_schema_reasoning_only_retries_with_reasoning_disabled_shape():
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        if "response_format" in (kwargs.get("extra_body") or {}):
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "", "reasoning": "hidden reasoning"},
+                        "finish_reason": "length",
+                    }
+                ]
+            }
+        return _response("Compatibility Reasoning Fallback")
+
+    with auxiliary_client_modules():
+        with patch_tg_config({"provider": "custom", "model": "reasoning-gateway"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=fake_call_llm, create=True):
+                result, status = streaming.generate_title_raw_via_aux(
+                    "Use a reasoning title route.",
+                    "The schema request returns reasoning only.",
+                )
+
+    assert result == "Compatibility Reasoning Fallback"
+    assert status == "llm_aux_retry"
+    assert len(calls) == 2
+    assert calls[1]["extra_body"] == {"reasoning": {"enabled": False}}
+
+
 def test_extract_title_response_rejects_json_without_string_title():
     assert streaming._extract_title_response(_response('{"options": ["one", "two"]}')) == (
         "",
@@ -235,4 +265,38 @@ def test_agent_openai_title_request_uses_strict_json_schema():
     assert result == "Fix login button on mobile"
     assert status == "llm"
     assert captured["extra_body"]["response_format"] == EXPECTED_RESPONSE_FORMAT
+    assert agent.reasoning_config is None
+
+
+def test_agent_schema_rejection_falls_back_to_existing_request_shape():
+    calls = []
+
+    def fake_create(**kwargs):
+        calls.append(kwargs)
+        if "response_format" in (kwargs.get("extra_body") or {}):
+            raise ValueError("response_format unsupported")
+        return _response("Compatibility Agent Title")
+
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=fake_create))
+    )
+    agent = MagicMock()
+    agent.api_mode = "openai"
+    agent.provider = "minimax"
+    agent.model = "minimax-m2"
+    agent.base_url = "https://api.minimaxi.com/v1"
+    agent.reasoning_config = None
+    agent._build_api_kwargs.return_value = {}
+    agent._ensure_primary_openai_client.return_value = client
+
+    result, status = streaming.generate_title_raw_via_agent(
+        agent,
+        "Why is the title route failing?",
+        "The endpoint rejects response_format.",
+    )
+
+    assert result == "Compatibility Agent Title"
+    assert status == "llm_retry"
+    assert len(calls) == 2
+    assert calls[1]["extra_body"] == {"reasoning_split": True}
     assert agent.reasoning_config is None
