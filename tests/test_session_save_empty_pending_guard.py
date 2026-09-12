@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 import api.config as config
 import api.models as models
 from api.models import Session
@@ -33,7 +35,8 @@ def test_empty_active_pending_save_cannot_overwrite_existing_messages(tmp_path, 
         pending_user_message="prompt",
         pending_started_at=123.0,
     )
-    stale.save()
+    with pytest.raises(models.StaleSessionGenerationError):
+        stale.save()
 
     persisted = json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
     assert [m["content"] for m in persisted["messages"]] == ["prompt", "answer"]

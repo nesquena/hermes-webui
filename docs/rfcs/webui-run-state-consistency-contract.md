@@ -152,6 +152,39 @@ and 5; it does not mark every run-state boundary implemented.
    still owns a live channel. Staleness is measured from the cancellation
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
+10. **Sidecar writes are generation-fenced.** A writer may replace a session JSON
+   sidecar only while the exact durable revision it observed is still current.
+   Text publication must use canonical LF bytes so the stored digest matches the
+   file on native Windows. First creation must use an atomic create-only primitive:
+   hard-link on POSIX, create-only rename on Windows, or fail closed when neither
+   is available. SID rotation must start from an absent revision for the new ID.
+   A raw metadata patch may advance only aliases that owned the exact pre-write
+   revision; stale aliases are invalidated and reloaded instead, and callers must
+   adopt the returned revision owner before model resolution or turn start.
+   Recovery must recheck durable deletes under the SID authority, validate the
+   embedded SID, and invalidate stale in-memory aliases. A shrinking write must
+   not proceed unless its recoverable history is durable: row count or message
+   coverage alone does not prove dominance. Dominance covers the complete
+   canonical recovery snapshot, including ordered context/tool sequences and
+   all unknown metadata; only derived generation/count and superseded activity
+   time are excluded. The comparison accepts legacy snapshots that omit newer
+   bookkeeping fields, has a fixed work budget, and treats any overflow or
+   unverifiable field as incomparable. Malformed, non-object, foreign-SID, and
+   incomparable primary backups are archived byte-for-byte and
+   content-addressedly before the valid live snapshot is promoted. Archive
+   publication streams into a complete
+   temporary file, verifies the expected digest, and atomically renames it, so
+   archive preservation does not depend on hard-link support; the stricter
+   create-only primitive remains mandatory for live sidecars. Backup retirement
+   requires matching receipts for both the backup and the committed live
+   generation. Any deletion path must decide and act while holding the same SID
+   authority, revalidate its payload and exact revision at the deletion point,
+   publish a durable tombstone before unlinking, and remove the primary sidecar,
+   backup, backup archives, and session-owned replay-v10 recovery artifacts
+   before reporting success. Hidden ephemeral deletion follows this rule after
+   both cancellation and normal completion, with the agent lock acquired before
+   the SID authority. Its response-level cleanup may remain best-effort, but a
+   protocol failure must be logged and must not fall back to a raw unlink.
 
 ## Review Checklist
 
@@ -175,6 +208,14 @@ context reconstruction, or session metadata:
 - If it introduces or changes a reclamation window, what proves an in-flight
   cancellation is not evicted early, and that a wedged one is eventually freed?
 - Can automatic compression or recovery text become visible active-turn content?
+- Can a stale save, repair, recovery, or metadata patch replace a newer sidecar?
+  Does recovery revalidate delete tombstones and state-db ownership while holding
+  the same SID authority used for publication?
+- If the write shrinks history, is backup publication fail-closed and monotone by
+  complete canonical snapshot coverage rather than message rows or count? Does
+  the bounded comparison include every durable top-level field, archive
+  unverifiable/incomparable generations before promotion, and does cleanup prove
+  both backup and live receipts still match before unlinking?
 - What test or manual evidence proves the invariant?
 
 ## Existing Issue Map

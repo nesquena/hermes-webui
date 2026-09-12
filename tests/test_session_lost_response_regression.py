@@ -974,9 +974,70 @@ def test_sync_persists_recovered_state_db_tail_when_stream_dead(monkeypatch):
     assert s.pending_user_message is None
     assert [m["content"] for m in s.messages] == [m["content"] for m in state_messages]
 
+    s.title = "save after recovered tail"
+    s.save(skip_index=True)
+
     reloaded = Session.load(sid)
     assert reloaded.active_stream_id is None
     assert reloaded.messages[-1]["content"] == "recovered tail"
+    assert reloaded.title == "save after recovered tail"
+
+
+def test_sync_returns_fresh_owner_when_alias_did_not_own_pre_save_revision(
+    monkeypatch,
+):
+    sid = "state_sync_stale_alias_sid"
+    stream_id = "stream_dead_stale_alias"
+    durable = Session(
+        session_id=sid,
+        title="Durable owner",
+        messages=[
+            {"role": "user", "content": "old question", "timestamp": 100.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 101.0},
+        ],
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=0,
+    )
+    durable.save()
+    stale_alias = Session(
+        session_id=sid,
+        title="Stale alias",
+        messages=list(durable.messages),
+        active_stream_id=stream_id,
+        pending_user_message="new request",
+        pending_started_at=0,
+    )
+    state_messages = [
+        *durable.messages,
+        {"role": "user", "content": "new request", "timestamp": 102.0},
+        {"role": "assistant", "content": "recovered tail", "timestamp": 103.0},
+    ]
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages),
+            "last_message_at": 103.0,
+        },
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    recovered_owner = models._sync_sidecar_from_state_db_if_newer(stale_alias)
+
+    assert isinstance(recovered_owner, Session)
+    assert recovered_owner is not stale_alias
+    recovered_owner.title = "Fresh owner remains saveable"
+    recovered_owner.save(skip_index=True)
+    reloaded = Session.load(sid)
+    assert reloaded.title == "Fresh owner remains saveable"
+    assert reloaded.messages[-1]["content"] == "recovered tail"
+    with pytest.raises(models.StaleSessionGenerationError):
+        stale_alias.save(skip_index=True)
 
 
 def test_sync_skips_during_registration_window_recent_pending(monkeypatch):
