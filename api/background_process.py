@@ -1086,12 +1086,55 @@ def _start_async_delegation_wakeup_turn(
                 session_id,
                 exc_info=True,
             )
+        finally:
+            # The wakeup turn has resolved (accepted, rejected, or raised): the
+            # per-origin admission slot is free for the next backlogged
+            # completion. Never release earlier — the slot must stay reserved
+            # for the whole claim→turn window so siblings defer without
+            # consuming the finite delivery budget (#6959).
+            _release_async_delegation_wakeup_admission(session_id)
 
     threading.Thread(
         target=_runner,
         name=f"hermes-webui-delegation-wakeup-{str(session_id)[:8]}",
         daemon=True,
     ).start()
+
+
+# ── Per-origin wakeup admission reservation (#6959) ────────────────────────
+# A durable claim has a finite delivery-attempt budget, and the pre-claim busy
+# check is NOT atomic with turn publication: several completed delegations for
+# one idle origin can all pass it, each obtain a durable claim, then race for a
+# single ``start_session_turn`` admission slot. The losers' transient 409s
+# release already-counted claims, and repeated rounds can drive completed rows
+# to the terminal ``dropped`` state. Reserve the per-origin admission slot
+# ATOMICALLY before claiming so at most one async-delegation wakeup per session
+# is in flight at a time; siblings that lose the reservation defer WITHOUT
+# claiming (no delivery attempt consumed). The reservation is in-process only:
+# the wakeup thread releases it on every exit path and it vanishes on restart,
+# so it can never strand a durable claim.
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK = threading.Lock()
+_ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT: set[str] = set()
+
+
+def _try_reserve_async_delegation_wakeup_admission(session_id: str) -> bool:
+    """Atomically reserve the single in-flight wakeup slot for *session_id*.
+
+    Returns False when another async-delegation wakeup for the same origin is
+    already in flight (claimed but not yet resolved), so the caller can defer
+    without touching the finite delivery budget.
+    """
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        if session_id in _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT:
+            return False
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.add(session_id)
+        return True
+
+
+def _release_async_delegation_wakeup_admission(session_id: str) -> None:
+    """Release the in-flight wakeup slot for *session_id* (idempotent)."""
+    with _ASYNC_DELEGATION_WAKEUP_ADMISSION_LOCK:
+        _ASYNC_DELEGATION_WAKEUP_ADMISSION_INFLIGHT.discard(session_id)
 
 
 def _process_async_delegation_event(
@@ -1114,56 +1157,87 @@ def _process_async_delegation_event(
         )
         return
 
-    try:
-        claim = claim_async_delegation_delivery(evt, "webui-background")
-    except Exception:
-        _requeue_async_delegation_event(process_registry, evt)
-        return
-    if claim is None:
-        completion_queue = getattr(process_registry, "completion_queue", None)
-        schedule_async_delegation_claim_retry(evt, completion_queue)
-        return
-
-    try:
-        wakeup_prompt_raw = format_wakeup_prompt(evt)
-        wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
-        if not wakeup_prompt:
-            raise RuntimeError("async delegation completion could not be formatted")
-    except Exception:
-        # A formatting failure is a permanent, non-retryable defect (a malformed
-        # event will never format correctly), so it must stay on the bounded
-        # one-shot path — never keep_legacy_retrying, or it would loop forever.
-        release_async_delegation_delivery(evt, claim)
-        _retry_unclaimed_async_delegation_event(process_registry, evt)
-        logger.warning(
-            "async delegation completion could not be formatted for session %s",
-            session_id,
-            exc_info=True,
-        )
-        return
-
-    try:
-        _start_async_delegation_wakeup_turn(
-            session_id,
-            wakeup_prompt,
-            delegation_id=delegation_id,
-            evt=evt,
-            claim=claim,
-            process_registry=process_registry,
-        )
-    except Exception:
-        # A post-format dispatch failure against a resolved target is transient
-        # (the target may accept on a later pass), so keep the legacy completion
-        # retrying rather than dropping it after one bounded attempt.
-        release_async_delegation_delivery(evt, claim)
+    # Atomic per-origin wakeup admission (#6959): the busy check above is a
+    # pre-check, not a reservation — several idle completions for one origin
+    # can all pass it together. Only one may own the in-flight wakeup slot; a
+    # sibling that loses this reservation must NOT claim, because a claim
+    # released by a transient 409 would count against the finite delivery
+    # budget. The admitted wakeup releases the slot when its turn resolves.
+    if not _try_reserve_async_delegation_wakeup_admission(session_id):
         _retry_unclaimed_async_delegation_event(
-            process_registry, evt, keep_legacy_retrying=True
+            process_registry,
+            evt,
+            keep_legacy_retrying=True,
         )
-        logger.warning(
-            "server-side async delegation dispatch failed for session %s",
-            session_id,
-            exc_info=True,
-        )
+        return
+
+    # Ownership-transfer guard (#6959 gate): the outer finally releases the
+    # per-origin reservation on EVERY exit below — claim exception, claim-None,
+    # formatting failure, dispatch failure, or any exception raised by the
+    # retry helpers themselves — UNLESS the wakeup thread successfully started,
+    # in which case the thread's own finally now owns the release. No raisable
+    # call can therefore strand the reservation (a stranded slot would defer
+    # every later completion for this origin forever, without delivery).
+    transfer_owned = False
+    try:
+        try:
+            claim = claim_async_delegation_delivery(evt, "webui-background")
+        except Exception:
+            _requeue_async_delegation_event(process_registry, evt)
+            return
+        if claim is None:
+            completion_queue = getattr(process_registry, "completion_queue", None)
+            schedule_async_delegation_claim_retry(evt, completion_queue)
+            return
+
+        try:
+            wakeup_prompt_raw = format_wakeup_prompt(evt)
+            wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
+            if not wakeup_prompt:
+                raise RuntimeError("async delegation completion could not be formatted")
+        except Exception:
+            # A formatting failure is a permanent, non-retryable defect (a malformed
+            # event will never format correctly), so it must stay on the bounded
+            # one-shot path — never keep_legacy_retrying, or it would loop forever.
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(process_registry, evt)
+            logger.warning(
+                "async delegation completion could not be formatted for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return
+
+        try:
+            _start_async_delegation_wakeup_turn(
+                session_id,
+                wakeup_prompt,
+                delegation_id=delegation_id,
+                evt=evt,
+                claim=claim,
+                process_registry=process_registry,
+            )
+        except Exception:
+            # A post-format dispatch failure against a resolved target is transient
+            # (the target may accept on a later pass), so keep the legacy completion
+            # retrying rather than dropping it after one bounded attempt.
+            release_async_delegation_delivery(evt, claim)
+            _retry_unclaimed_async_delegation_event(
+                process_registry, evt, keep_legacy_retrying=True
+            )
+            logger.warning(
+                "server-side async delegation dispatch failed for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        # The wakeup thread is running: its own finally owns the release from
+        # here on (set only after Thread.start() returns, so a mid-start
+        # failure still releases here).
+        transfer_owned = True
+    finally:
+        if not transfer_owned:
+            _release_async_delegation_wakeup_admission(session_id)
 
 
 def _resolve_completion_target(
@@ -1571,14 +1645,44 @@ def _session_has_active_turn(session_id: str) -> bool:
     ``_emit_to_session_streams``) to map a stream back to its owning session.
     ACTIVE_RUNS is registered at agent-worker start and removed in the worker's
     outer ``finally``, so it survives cancel/reconnect races better than
-    STREAMS. There is a brief window where ``_start_chat_stream_for_session``
-    has populated STREAMS but the worker thread has not yet called
-    ``register_active_run``; in that window this returns False and the
-    subsequent ``start_session_turn`` is rejected with a 409 by
-    ``_start_chat_stream_for_session``'s own active-stream guard — i.e. the
-    same lock /api/chat/start uses is the authoritative race backstop.
+    STREAMS. We ALSO count a same-session live STREAMS entry (via the
+    synchronously-populated STREAM_SESSION_OWNERS registry): the worker
+    publishes its stream BEFORE it registers in ACTIVE_RUNS, and that
+    pre-registration window must not look idle to a sibling completion
+    (#6959 gate — see the STREAMS check below). ``_start_chat_stream_for_session``'s
+    own active-stream guard remains the authoritative 409 backstop for any
+    residual race.
     """
-    return bool(_active_run_ids_for_session(session_id, attachable_only=False))
+    # ACTIVE_RUNS rows (including a bounded cancelling-run unwind window,
+    # per _active_run_ids_for_session).
+    if _active_run_ids_for_session(session_id, attachable_only=False):
+        return True
+
+    # Pre-ACTIVE_RUNS publication window (#6959 gate): the agent worker
+    # publishes its stream — register_stream_owner() first, then the live
+    # STREAMS channel — BEFORE it registers in ACTIVE_RUNS. In that window a
+    # same-session live STREAMS entry means a turn is already (or about to be)
+    # active, so it must count here: otherwise a sibling async-delegation
+    # completion would pass the busy pre-check, reserve the per-origin
+    # admission, claim, and then 409 against the already-published stream —
+    # burning the finite delivery-attempt budget on every retry round. The
+    # worker's teardown finally pops STREAMS (and unregisters the stream owner)
+    # before the turn-teardown idle-hook drain runs, so the just-ended turn
+    # does not keep the session busy.
+    from api import config as _cfg
+
+    try:
+        with _cfg.STREAMS_LOCK:
+            live_stream_ids = list((_cfg.STREAMS or {}).keys())
+        with _cfg.STREAM_SESSION_OWNERS_LOCK:
+            stream_owners = dict(_cfg.STREAM_SESSION_OWNERS or {})
+    except Exception:
+        logger.debug("STREAMS active-turn check failed", exc_info=True)
+        return False
+    for _stream_id in live_stream_ids:
+        if str(stream_owners.get(_stream_id) or "") == str(session_id or ""):
+            return True
+    return False
 
 
 def _start_server_side_wakeup_turn(
