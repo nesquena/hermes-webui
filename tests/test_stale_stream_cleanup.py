@@ -69,7 +69,7 @@ def test_stale_stream_cleanup_does_not_refresh_sidebar_timestamp():
 
 
 def test_session_load_clears_stale_stream_before_response():
-    load_pos = ROUTES_SRC.index("s = get_session(sid, metadata_only=(not load_messages))")
+    load_pos = ROUTES_SRC.index("s = get_session(sid, metadata_only=True)")
     cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", load_pos)
     response_pos = ROUTES_SRC.index('"active_stream_id": getattr(s, "active_stream_id", None)', cleanup_pos)
     assert load_pos < cleanup_pos < response_pos
