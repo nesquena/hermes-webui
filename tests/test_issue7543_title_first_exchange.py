@@ -1,26 +1,16 @@
-"""Regression coverage for local hotfix of nesquena/hermes-webui#7543.
+"""Regression coverage for nesquena/hermes-webui#7543.
 
 Bug: manual "Regenerate title" failed with missing_exchange for sessions
 whose transcript opens with consecutive user rows (no assistant text before
 the second user turn) — _first_exchange_snippets() aborted at the second
 user message, the aux call was skipped, and the deterministic local fallback
 was persisted (200 + identical wrong title on every retry).
-
-LOCAL UNCOMMITTED HOTFIX — intentionally not upstreamed. The working-tree
-changes are captured in /root/workspace/local-7543.patch; originals in
-/root/workspace/7543-localpatch-backup/.
 """
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-import api.profiles as profiles_api  # noqa: E402
-import api.streaming as streaming  # noqa: E402
+import api.profiles as profiles_api
+import api.streaming as streaming
 
 
 class _ProfileEnv:
