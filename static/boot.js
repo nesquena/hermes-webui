@@ -2,6 +2,8 @@
 // These run during script evaluation to handle server-stopped state
 // and cross-tab shutdown broadcasts as early as possible.
 (function(){
+  // Restore active run state from session storage across page reloads (#6025)
+  try{_restoreActiveRunState();}catch(e){}
   // Clear stale stop-server flag on successful page load (server is reachable)
   try{localStorage.removeItem('hermes-webui-server-stopped');}catch(_){}
   // Listen for shutdown broadcast from other tabs
