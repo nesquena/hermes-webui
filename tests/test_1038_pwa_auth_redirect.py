@@ -1,11 +1,11 @@
 """
 Tests for issue #1038 — iOS PWA auth-expiry redirect.
 
-When a 401 is returned by any API endpoint, the client-side JS should redirect
-to login rather than showing a raw error toast. On iOS PWA standalone mode a
-server-side 302→login can break out of the PWA shell into Safari, so the fix is
-client-side: workspace.js api() intercepts 401 before throwing and calls a
-relative login URL that also works under subpath mounts like /hermes/.
+When a 401 is returned by any API endpoint, the client-side JS should perform a
+top-level navigation rather than showing a raw error toast. Reloading the current
+deep link lets WebUI auth or an identity-aware reverse proxy run its own login /
+token-refresh flow without escaping the installed PWA or discarding the session
+route.
 
 These are static regression tests that verify the JS source contains the
 correct guard patterns.
@@ -27,13 +27,15 @@ def _ui_js() -> str:
 
 class TestPWAAuthRedirect:
     def test_workspace_js_has_401_redirect(self):
-        """api() in workspace.js must redirect to login on 401."""
+        """api() in workspace.js must delegate 401 recovery to the shared navigator."""
         src = _workspace_js()
         # Guard must appear inside the !res.ok block, before throwing
         assert "res.status===401" in src, \
             "workspace.js api() must check res.status===401"
-        assert "window.location.href='login" in src or 'window.location.href="login' in src, \
-            "workspace.js api() must redirect to login on 401"
+        assert "_redirectIfUnauth(res)" in src, \
+            "workspace.js api() must use the shared top-level auth recovery"
+        assert "window.location.reload()" in src, \
+            "workspace.js api() must retain a top-level reload fallback"
         assert "window.location.href='/login" not in src and 'window.location.href="/login' not in src, \
             "workspace.js api() must not escape subpath mounts by redirecting to root /login"
 

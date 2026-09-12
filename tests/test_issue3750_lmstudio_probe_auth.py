@@ -624,3 +624,64 @@ display:
     assert "target" not in hosts_hit, "credentialed redirect must not be followed"
     # The credential only ever touched the configured (redirector) endpoint.
     assert all(c["host"] == "redirector" for c in captured)
+
+
+def test_reasoning_status_prefers_selected_model_override(tmp_path, monkeypatch):
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        """
+model:
+  provider: lmstudio
+  default: other-model
+providers:
+  lmstudio:
+    models:
+      qwen/qwen3.8-27b:
+        reasoning_efforts: [low, medium, xhigh]
+agent:
+  reasoning_effort: low
+  reasoning_overrides:
+    qwen/qwen3.8-27b: xhigh
+""",
+    )
+
+    status = config.get_reasoning_status(
+        model_id="qwen/qwen3.8-27b",
+        provider_id="lmstudio",
+    )
+
+    assert status["reasoning_effort"] == "xhigh"
+    assert status["supported_efforts"] == ["low", "medium", "xhigh"]
+
+
+def test_model_aware_reasoning_write_does_not_mutate_global_default(tmp_path, monkeypatch):
+    _write_config(
+        tmp_path,
+        monkeypatch,
+        """
+model:
+  provider: openai-codex
+  default: gpt-5.6-sol
+providers:
+  lmstudio:
+    models:
+      qwen/qwen3.8-27b:
+        reasoning_efforts: [low, medium, xhigh]
+agent:
+  reasoning_effort: low
+  reasoning_overrides:
+    qwen/qwen3.8-27b: xhigh
+""",
+    )
+
+    status = config.set_reasoning_effort(
+        "medium",
+        model_id="qwen/qwen3.8-27b",
+        provider_id="lmstudio",
+    )
+    saved = config._load_yaml_config_file(config._get_config_path())
+
+    assert saved["agent"]["reasoning_effort"] == "low"
+    assert saved["agent"]["reasoning_overrides"]["qwen/qwen3.8-27b"] == "medium"
+    assert status["reasoning_effort"] == "medium"

@@ -21,7 +21,11 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def _get_state_db(profile: Optional[str] = None):
+class TitleChangedError(RuntimeError):
+    """The title snapshot no longer owns an explicit regeneration."""
+
+
+def _get_state_db(profile: Optional[str] = None, *, strict: bool = False):
     """Get a SessionDB instance for a profile's state.db.
 
     When ``profile`` is provided the function resolves *that* profile's
@@ -76,6 +80,8 @@ def _get_state_db(profile: Optional[str] = None):
                     "write rather than leaking to the default state.db (#2762).",
                     profile,
                 )
+                if strict:
+                    raise ValueError('Invalid title profile')
                 return None
             hermes_home = Path(_resolve_profile_home_for_name(profile)).expanduser().resolve()
         except Exception:
@@ -83,6 +89,8 @@ def _get_state_db(profile: Optional[str] = None):
                 "state_sync: could not resolve profile %r — skipping write rather "
                 "than leaking to the active profile (#2762).", profile,
             )
+            if strict:
+                raise
             return None
     else:
         # Implicit / TLS-fallback path — preserves pre-#2762 behavior
@@ -102,6 +110,8 @@ def _get_state_db(profile: Optional[str] = None):
         return SessionDB(db_path)
     except Exception:
         logger.debug("Failed to open state.db")
+        if strict:
+            raise
         return None
 
 
@@ -136,7 +146,7 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
                        estimated_cost=None, model=None, title: Optional[str] = None,
                        message_count: Optional[int] = None, profile: Optional[str] = None,
                        cache_read_tokens: int = 0, cache_write_tokens: int = 0,
-                       api_call_count: Optional[int] = None) -> None:
+                       api_call_count: Optional[int] = None, title_source: str = 'derived') -> None:
     """Update token usage and title for a WebUI session in state.db.
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).
@@ -174,7 +184,14 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
         # Update title if we have one, using the public API
         if title:
             try:
-                db.set_session_title(session_id, title)
+                if title_source == 'user':
+                    db.set_session_title(session_id, title)
+                elif hasattr(db, 'set_auto_title'):
+                    # Usage mirrors may contain a first-message placeholder.
+                    # Never consume the Agent's one-time derived -> llm upgrade.
+                    db.set_auto_title(session_id, title, source=title_source)
+                else:
+                    db.set_auto_title_if_empty(session_id, title)
             except Exception:
                 logger.debug("Failed to sync session title to state.db")
         # Update message count
@@ -197,55 +214,86 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
             logger.debug("Failed to close state.db")
 
 
-def sync_session_title(session_id: str, title: str, profile: Optional[str] = None) -> None:
-    """Sync an auto-generated title to state.db (not gated by sync_to_insights).
+def _read_title_state(db, session_id):
+    if hasattr(db, 'get_session_title_source'):
+        row = db._read_one("SELECT title, title_source FROM sessions WHERE id = ?", (session_id,))
+        return (row['title'], row['title_source']) if row else (None, None)
+    return db.get_session_title(session_id), None
 
-    Background title generation writes the title to the WebUI sidecar JSON but
-    not to hermes-agent's state.db, so ``hermes sessions list`` shows blank
-    titles for WebUI sessions.  This function bridges that gap and is called
-    from the background title update/refresh paths after a title is persisted.
 
-    Uses ``set_auto_title`` (LLM provenance) so it will only populate a row that
-    is NULL or holds a lower-authority auto-title, and never overwrites a manual
-    rename made via CLI/Gateway/TUI (``set_auto_title`` returns ``False``,
-    untouched, when a higher-authority title holds the row).  This means title
-    refreshes (where state.db already holds the initial auto-title) are
-    effectively no-ops at the state.db layer -- acceptable because the primary
-    goal is ensuring ``hermes sessions list`` is not blank.
+def get_session_title_state(session_id: str, profile: Optional[str] = None):
+    """Read the canonical (title, provenance), or None when Agent DB is absent.
 
-    On a title collision (two sessions with the same auto-title), the title is
-    de-duplicated via ``get_next_title_in_lineage`` (e.g. "My Session" ->
-    "My Session #2") and retried, so the second session is never left blank.
+    A nonempty title with unknown provenance is protected like a user title.
+    Unlike optional insights sync, an unreadable existing DB must fail closed.
     """
-    if not title:
-        return
-    db = _get_state_db(profile=profile)
-    if not db:
-        return
+    db = _get_state_db(profile=profile, strict=True)
+    if db is None:
+        return None
     try:
-        # Ensure the session row exists (idempotent) so the UPDATE has a target.
-        db.ensure_session(session_id=session_id, source='webui')
-        # hermes-agent's SessionDB.set_auto_title_if_empty was renamed to
-        # set_auto_title(session_id, title, *, source) in the state-module
-        # split (agent commit 53db597201, released v2026.9.7). set_auto_title
-        # preserves the same "only populate NULL / never clobber a manual
-        # rename" semantics (returns False, untouched, when a higher-authority
-        # title holds the row) and requires an explicit auto source.
-        _llm_source = getattr(db, "TITLE_SOURCE_LLM", "llm")
-        try:
-            db.set_auto_title(session_id, title, source=_llm_source)
-        except ValueError:
-            # state.db enforces uniqueness on sessions.title, so a byte-identical
-            # auto-title generated for two sessions raises ValueError here. Derive
-            # a de-duplicated variant (e.g. "My Session" -> "My Session #2") and
-            # retry instead of leaving the second row blank (#6964).
-            alt = db.get_next_title_in_lineage(title)
-            if alt and alt != title:
-                db.set_auto_title(session_id, alt, source=_llm_source)
-    except Exception:
-        logger.debug("Failed to sync session title to state.db for %s", session_id)
+        return _read_title_state(db, session_id)
     finally:
-        try:
-            db.close()
-        except Exception:
-            logger.debug("Failed to close state.db")
+        db.close()
+
+
+def sync_session_title(session_id: str, title: str, profile: Optional[str] = None,
+                       *, expected=None, replace: bool = False, explicit: bool = False):
+    """Resolve a generated title BEFORE publishing it to the WebUI sidecar.
+
+    Return the persisted (title, source), including collision suffixes or a
+    racing user rename. With no Agent DB, retain standalone WebUI behavior.
+    Refresh/explicit regeneration compare against the pre-generation snapshot;
+    automatic refresh never replaces user/unknown provenance. Errors propagate
+    so callers cannot advertise a title that the canonical DB rejected.
+    """
+    db = _get_state_db(profile=profile, strict=True)
+    if db is None:
+        return title, 'llm'
+    try:
+        db.ensure_session(session_id=session_id, source='webui')
+        modern = hasattr(db, 'get_session_title_source') and hasattr(db, 'set_auto_title')
+        candidate = db.sanitize_title(title) if hasattr(db, 'sanitize_title') else title
+        for attempt in range(3):
+            try:
+                if modern and replace and expected is not None:
+                    # Agent's set_auto_title only upgrades provenance; equal-rank
+                    # refresh is deliberately a separate, snapshot-fenced write.
+                    # BEGIN IMMEDIATE (owned by _execute_write) serializes the
+                    # collision check and CAS with Agent/CLI title writers.
+                    def update(conn, candidate=candidate):
+                        row = conn.execute(
+                            "SELECT title, title_source, hidden FROM sessions WHERE id = ?", (session_id,)
+                        ).fetchone()
+                        if row is None or (row['title'], row['title_source']) != expected:
+                            if explicit:
+                                raise TitleChangedError('Session title changed while generating; retry explicitly')
+                            return
+                        if row['title'] and not explicit and row['title_source'] not in ('derived', 'llm'):
+                            return
+                        if row['hidden'] and row['title'] == getattr(db, 'CANONICAL_BOT_CHAT_TITLE', 'Bot Chat'):
+                            return
+                        if conn.execute("SELECT 1 FROM sessions WHERE title = ? AND id != ?",
+                                        (candidate, session_id)).fetchone():
+                            raise ValueError('Title collision')
+                        conn.execute(
+                            "UPDATE sessions SET title = ?, title_source = ? WHERE id = ? AND title IS ? AND title_source IS ?",
+                            (candidate, 'llm', session_id, *expected),
+                        )
+                    db._execute_write(update)
+                elif modern:
+                    db.set_auto_title(session_id, candidate, source='llm')
+                else:
+                    # Old Agents can fill a blank title but cannot safely refresh
+                    # one without provenance/CAS. Read back their winning value.
+                    db.set_auto_title_if_empty(session_id, candidate)
+                break
+            except ValueError:
+                if attempt == 2:
+                    raise
+                candidate = db.get_next_title_in_lineage(candidate)
+        persisted = _read_title_state(db, session_id)
+        if not persisted[0]:
+            raise RuntimeError('Agent DB did not persist a session title')
+        return persisted
+    finally:
+        db.close()

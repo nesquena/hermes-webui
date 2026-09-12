@@ -3807,12 +3807,21 @@ def _looks_invalid_generated_title(text: str) -> bool:
         return True
     return bool(
         re.search(r'<think>|<\|channel\|>thought|<\|turn\|>thinking', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*(?:the|ther)\s+user(?:\s|\b)', s, flags=re.IGNORECASE)
+        or re.search(r"^\s*the\s+user(?:'s|s)?\b", s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
-        or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
+        or re.search(r"\b(?:they|user)\s+want(?:s)?\s+me\s+to\b", s, flags=re.IGNORECASE)
+        or re.search(r"^\s*(?:i|we)\s+(?:should|need(?:\s+to)?|will|can|am|'m)\b", s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
+        or re.search(r'^\s*good\s+title\s+options?\s*:', s, flags=re.IGNORECASE)
+        or (
+            # Multi-option replies ("A", "B", or C) — a title is never a list of
+            # quoted alternatives, so treat that shape as a leak (yesterday's
+            # `Good title options: ...` failure came through this hole).
+            len(re.findall(r'"[^"]+"', s)) >= 2
+            or bool(re.search(r'\b(?:options?|alternatives?|candidates?)\s*:', s, flags=re.IGNORECASE))
+        )
     )
 
 
@@ -4748,8 +4757,25 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
         agent.reasoning_config = prev_reasoning
 
 
+def _generate_shared_session_title(user_text: str):
+    """Use Agent's title policy/config/validation; None means old Agent only."""
+    try:
+        from agent.title_generator import generate_title
+    except ImportError:
+        return None
+    try:
+        title = generate_title(user_text, timeout=_aux_title_timeout())
+        return title, ('shared_title' if title else 'shared_title_empty'), ''
+    except Exception:
+        logger.debug("Shared Agent title generation failed", exc_info=True)
+        return None, 'shared_title_error', ''
+
+
 def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
+    shared = _generate_shared_session_title(user_text)
+    if shared is not None:
+        return shared
     raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text)
     if not raw:
         return None, status, ''
@@ -4775,6 +4801,9 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
     targets receive the same ``x-opencode-session`` sticky key as the session's
     main turns (#7470). The context is reset in all exit paths.
     """
+    shared = _generate_shared_session_title(user_text)
+    if shared is not None:
+        return shared
     if use_agent_model and agent:
         provider = getattr(agent, 'provider', '')
         model = getattr(agent, 'model', '')
@@ -4920,6 +4949,26 @@ def _is_generic_fallback_title(title: str) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
+def _apply_generated_title(session, next_title, *, expected=None, replace=False, explicit=False):
+    """Caller holds the session lock; DB decides the exact sidebar title."""
+    from api.state_sync import sync_session_title
+
+    title, source = sync_session_title(
+        session.session_id, next_title, profile=getattr(session, 'profile', None) or 'default',
+        expected=expected, replace=replace, explicit=explicit,
+    )
+    session.title = title
+    if source in ('llm', 'derived'):
+        mark_session_title_generated(session)
+        if source == 'derived':
+            session.llm_title_generated = False
+    else:
+        # Unknown provenance on a nonempty legacy title is user authority.
+        session.manual_title = True
+        session.llm_title_generated = False
+    return title
+
+
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
     """Generate and publish a better title after `done`, then end the stream."""
     try:
@@ -4947,13 +4996,17 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
         from api import profiles as profiles_api
+        from api.state_sync import get_session_title_state
 
+        canonical = get_session_title_state(session_id, profile=getattr(s, 'profile', None) or 'default')
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
             if not _aux_title_generation_enabled():
                 _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
                 return
             aux_title_configured = _aux_title_configured()
-            if agent and not aux_title_configured:
+            if canonical and canonical[0] and canonical[1] != 'derived':
+                next_title, llm_status, raw_preview = canonical[0], 'canonical_title', ''
+            elif agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
@@ -4962,7 +5015,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             source = llm_status
-            if not next_title:
+            if not next_title and not llm_status.startswith('shared_title'):
                 fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
                 if fallback_title and not _is_generic_fallback_title(fallback_title):
                     logger.debug("Using local fallback for session title generation")
@@ -4995,9 +5048,8 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 if manual_title or not still_auto:
                     _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)
                     return
-                if next_title != effective_title:
-                    s.title = next_title
-                    mark_session_title_generated(s)
+                if next_title != effective_title or canonical:
+                    _apply_generated_title(s, next_title)
                     # Keep chronological ordering stable in the sidebar.
                     s.save(touch_updated_at=False)
                     effective_title = s.title
@@ -5009,14 +5061,11 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             else:
                 _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
             put_event('title', {'session_id': session_id, 'title': effective_title})
-            # Sync the generated title to state.db so `hermes sessions list` shows it.
-            try:
-                from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
-            except Exception:
-                logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
+    except Exception:
+        logger.warning('Title update failed for %s', session_id, exc_info=True)
+        _put_title_status(put_event, session_id, 'skipped', 'title_persistence_error')
     finally:
         put_event('stream_end', {'session_id': session_id})
 
@@ -5045,13 +5094,17 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         if not effective or effective in ('Untitled', 'New Chat'):
             return
         from api import profiles as profiles_api
+        from api.state_sync import get_session_title_state
 
+        canonical = get_session_title_state(session_id, profile=getattr(s, 'profile', None) or 'default')
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
             if not _aux_title_generation_enabled():
                 _put_title_status(put_event, session_id, 'refresh_skipped', 'title_generation_disabled', effective)
                 return
             aux_title_configured = _aux_title_configured()
-            if agent and not aux_title_configured:
+            if canonical and canonical[0] and canonical[1] not in ('derived', 'llm'):
+                next_title, llm_status, raw_preview = canonical[0], 'canonical_title', ''
+            elif agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
@@ -5065,7 +5118,7 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         # Skip if the new title is essentially the same (after normalization)
         normalized_current = re.sub(r'\s+', ' ', effective).strip().lower()
         normalized_new = re.sub(r'\s+', ' ', next_title).strip().lower()
-        if normalized_current == normalized_new:
+        if normalized_current == normalized_new and (canonical is None or canonical[0] == effective):
             _put_title_status(put_event, session_id, 'refresh_skipped', 'same_title', effective, raw_preview)
             return
         with _get_session_agent_lock(session_id):
@@ -5077,9 +5130,7 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
                 if session_has_manual_title(s) or str(s.title or '').strip() != current_title:
                     _put_title_status(put_event, session_id, 'skipped', 'manual_title', str(s.title or '').strip())
                     return
-                s.title = next_title
-                mark_session_title_generated(s)
-                effective_title = s.title
+            effective_title = _apply_generated_title(s, next_title, expected=canonical, replace=True)
             # Session.save() calls _write_session_index(), which acquires LOCK.
             # Keep the per-session agent lock for mutation serialization, but
             # release the global session LOCK before persisting to avoid a
@@ -5087,15 +5138,10 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             s.save(touch_updated_at=False)
         _put_title_status(put_event, session_id, 'refreshed', llm_status, effective_title, raw_preview)
         put_event('title', {'session_id': session_id, 'title': effective_title})
-        # Sync the refreshed title to state.db so `hermes sessions list` stays current.
-        try:
-            from api.state_sync import sync_session_title
-            sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
-        except Exception:
-            logger.debug("Failed to sync refreshed title to state.db for %s", session_id)
         logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)
     except Exception:
-        logger.debug("Background title refresh failed for session %s", session_id, exc_info=True)
+        logger.warning("Background title refresh failed for session %s", session_id, exc_info=True)
+        _put_title_status(put_event, session_id, 'refresh_skipped', 'title_persistence_error')
 
 
 
@@ -5125,7 +5171,7 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
         if not _aux_title_generation_enabled():
             return None, 'title_generation_disabled', ''
         next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, conversation_id=getattr(session, 'session_id', '') or '')
-    if next_title:
+    if next_title or llm_status.startswith('shared_title'):
         return next_title, llm_status, raw_preview
     fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
     if fallback_title and not _is_generic_fallback_title(fallback_title):
