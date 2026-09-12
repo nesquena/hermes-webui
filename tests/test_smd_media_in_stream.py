@@ -91,6 +91,8 @@ def _run_real_smd_media_cases() -> dict:
         "import * as smd from './static/vendor/smd.min.js';\n"
         "globalThis.window = { smd };\n"
         "globalThis.requestAnimationFrame = cb => cb();\n"
+        "const _currentAttachmentSource = {};\n"
+        "function _ownsActivePaneSource(source){ return source === _currentAttachmentSource; }\n"
         "const _MEDIA_TAIL_MAX = 4096;\n"
         "const _SMD_MEDIA_PREFIX = 'MEDIA:';\n"
         "const _SMD_MEDIA_TAIL = new WeakMap();\n"

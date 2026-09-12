@@ -24,6 +24,7 @@ def _run_reasoning_scene(
     stale_active_stream: bool = False,
     stale_live_turn: bool = False,
     show_thinking: bool = True,
+    settlement_identity: bool = False,
 ) -> dict:
     assert NODE, "node is required for the #5720 browser-chain regression"
     env = os.environ.copy()
@@ -46,6 +47,8 @@ def _run_reasoning_scene(
         env["ISSUE5720_STALE_LIVE_TURN"] = "1"
     if not show_thinking:
         env["ISSUE5720_SHOW_THINKING"] = "0"
+    if settlement_identity:
+        env["ISSUE5720_SETTLEMENT_IDENTITY"] = "1"
     result = subprocess.run(
         [NODE, "-e", _NODE_SCENE],
         cwd=ROOT,
@@ -197,6 +200,33 @@ def test_later_deferred_anchor_paint_remains_hidden_in_final_answer_only_mode():
     assert result["anchor_render_attempts"] == 2
     assert result["anchor_reasoning_events"] == 1
     assert result["anchor_reasoning_text"] == "Plan step"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_frontend_settlement_preserves_identical_reasoning_with_distinct_durable_ids():
+    result = _run_reasoning_scene(settlement_identity=True)
+
+    assert result["settlement_reasoning_texts"] == [
+        "same reasoning",
+        "same reasoning",
+        "legacy fallback",
+    ]
+    assert result["settlement_reasoning_event_ids"] == [
+        "reasoning-event-a",
+        "reasoning-event-b",
+        None,
+    ]
+    assert result["settlement_reasoning_row_ids"][:2] == [
+        "reasoning-event-a",
+        "reasoning-event-b",
+    ]
+    assert result["settlement_reasoning_count"] == 3
+    assert result["settlement_textual_rows"] == [
+        ["prose", "same reasoning"],
+        ["thinking", "same reasoning"],
+        ["thinking", "same reasoning"],
+        ["thinking", "legacy fallback"],
+    ]
 
 
 _NODE_SCENE = r"""
@@ -505,6 +535,7 @@ const S=global.S={
 };
 const INFLIGHT=global.INFLIGHT={};
 const LIVE_STREAMS=global.LIVE_STREAMS={};
+const _LIVE_STREAM_ATTACHMENT_GENERATIONS=global._LIVE_STREAM_ATTACHMENT_GENERATIONS={};
 const _STREAM_WAS_HIDDEN=global._STREAM_WAS_HIDDEN={};
 const _STREAM_NOTIFICATION_BACKGROUND=global._STREAM_NOTIFICATION_BACKGROUND={};
 const _desktopBackgroundedForNotifications=false;
@@ -532,10 +563,99 @@ const attachStart=messagesSrc.indexOf('function attachLiveStream(');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
 eval(extractFunc(messagesSrc,'_dispatchExtensionTurnLifecycle'));
-eval(messagesSrc.slice(attachStart,attachEnd));
+let attachSource=messagesSrc.slice(attachStart,attachEnd);
+attachSource=attachSource.replace(
+  'function attachLiveStream(activeSid, streamId, uploaded=[], options={}){',
+  'function attachLiveStream(activeSid, streamId, uploaded=[], options={}){\n'+
+  '  window.__issue5720CompleteSettledAnchorSceneForTurn = _completeSettledAnchorSceneForTurn;'
+);
+eval(attachSource);
 attachLiveStream('sid-1','stream-1');
 const source=FakeEventSource.instances[0];
 if(!source) throw new Error('attachLiveStream did not create EventSource');
+
+if(process.env.ISSUE5720_SETTLEMENT_IDENTITY==='1'){
+  const registry=window._liveAnchorRegistries&&window._liveAnchorRegistries.get('stream-1');
+  if(!registry) throw new Error('missing live anchor registry for settlement identity case');
+  applyProductionAnchorEvent('reasoning',{
+    event_id:'reasoning-event-a',
+    row_id:'reasoning-row-a',
+    local_id:'reasoning-local-a',
+    seq:1,
+    text:'same reasoning',
+  });
+  applyProductionAnchorEvent('reasoning',{
+    event_id:'reasoning-event-b',
+    row_id:'reasoning-row-b',
+    local_id:'reasoning-local-b',
+    seq:2,
+    text:'same reasoning',
+  });
+  const projected=window.HermesAssistantTurnAnchors.projectAssistantTurnAnchorActivityScene(
+    registry,
+    {mode:'compact_worklog'},
+  );
+  const legacyRow={
+    row_id:'settled:sid-1:stream-1:thinking:1:0',
+    order_index:projected.activity_rows.length,
+    kind:'reasoning',
+    role:'thinking',
+    source_event_type:'reasoning',
+    event_id:null,
+    local_id:null,
+    run_id:null,
+    stream_id:null,
+    seq:projected.activity_rows.length,
+    status:'completed',
+    identity:{event_id:null,row_id:null,local_id:null,run_id:null,stream_id:null,seq:projected.activity_rows.length},
+    group:{assistant_msg_idx:null},
+    text:'legacy fallback',
+    payload:{text:'legacy fallback'},
+  };
+  const legacyProse={
+    row_id:'settled:sid-1:stream-1:prose:1:0',
+    order_index:0,
+    kind:'process_prose',
+    role:'prose',
+    source_event_type:'token',
+    event_id:null,
+    local_id:null,
+    run_id:null,
+    stream_id:null,
+    seq:0,
+    status:'completed',
+    identity:{event_id:null,row_id:null,local_id:null,run_id:null,stream_id:null,seq:0},
+    group:{assistant_msg_idx:null},
+    text:'same reasoning',
+    payload:{text:'same reasoning'},
+  };
+  const legacyDuplicate={...legacyRow,row_id:'settled:sid-1:stream-1:thinking:1:1'};
+  const redelivered={...projected.activity_rows[0],text:'same reasoning'};
+  const projectedForSettlement={
+    ...projected,
+    activity_rows:[legacyProse,...projected.activity_rows,redelivered,legacyRow,legacyDuplicate],
+  };
+  const messagesForSettlement=[
+    {role:'user',content:'question'},
+    {role:'assistant',content:'Final answer'},
+  ];
+  const scene=window.__issue5720CompleteSettledAnchorSceneForTurn(
+    messagesForSettlement,
+    1,
+    projectedForSettlement,
+  );
+  const thinkingRows=(scene&&scene.activity_rows||[]).filter(row=>row&&row.role==='thinking');
+  const textualRows=(scene&&scene.activity_rows||[])
+    .filter(row=>row&&['prose','thinking'].includes(row.role));
+  process.stdout.write(JSON.stringify({
+    settlement_reasoning_texts:thinkingRows.map(row=>row.text),
+    settlement_reasoning_event_ids:thinkingRows.map(row=>row.event_id||null),
+    settlement_reasoning_row_ids:thinkingRows.map(row=>row.row_id||null),
+    settlement_reasoning_count:thinkingRows.length,
+    settlement_textual_rows:textualRows.map(row=>[row.role,row.text]),
+  }));
+  process.exit(0);
+}
 if(process.env.ISSUE5720_STALE_ACTIVE_STREAM==='1') S.activeStreamId='stream-new';
 
 function anchorReasoningRows(){

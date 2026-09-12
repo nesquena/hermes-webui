@@ -1485,7 +1485,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     error_body = _event_listener_body(src, "error")
     assert "_applyToAnchor('error'" not in error_body
     assert "_flushReasoningToAnchor();" in error_body
-    assert "_scheduleAnchorRegistryCleanup(120000);" in error_body
+    assert "_scheduleAnchorRegistryCleanup(120000,source);" in error_body
     assert "_handleStreamError(source)" in error_body
     assert "projectAssistantTurnAnchorActivityScene" in src
 
@@ -1502,7 +1502,7 @@ def test_slice6_live_shadow_feed_wires_anchor_scene_for_visible_order_handoff():
     assert "created_at:d.created_at||null" in done_body
     assert "_applyToAnchor('done',{...d" not in done_body
     assert "_flushReasoningToAnchor();" in done_body
-    assert "_scheduleAnchorRegistryCleanup();" in done_body
+    assert "_scheduleAnchorRegistryCleanup(600000,source);" in done_body
     assert "_attachProjectedAnchorSceneToLastAssistant(S.messages);" in done_body
     attach_body = _function_body(src, "_attachProjectedAnchorSceneToLastAssistant")
     assert "lastAsst._anchor_stream_id=streamId" in attach_body

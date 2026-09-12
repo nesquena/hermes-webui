@@ -420,7 +420,9 @@ def test_frontend_replay_cursor_uses_eventsource_last_event_id():
     assert "e.lastEventId" in block
     assert "lastIndexOf(':')" in block
     assert "_lastRunJournalSeq=seq" in block
-    assert "source.addEventListener(_runJournalEventName,_rememberRunJournalCursor)" in MESSAGES_SRC
+    assert "source.addEventListener(_runJournalEventName,e=>{" in MESSAGES_SRC
+    assert "if(_bailOutOfTerminalEventsFromStaleStream(source)) return;" in MESSAGES_SRC
+    assert "_rememberRunJournalCursor(e);" in MESSAGES_SRC
     assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC
     assert "after_seq=0" not in MESSAGES_SRC
 

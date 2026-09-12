@@ -467,14 +467,14 @@ def test_live_stream_terminal_paths_use_original_stream_owner_identity():
 
     start_dispatch = attach_body.index("_dispatchExtensionTurnLifecycle('turn:start',activeSid,streamId")
     dead_reconnect_return = attach_body.index("_scheduleAnchorRegistryCleanup(120000);")
-    event_source_attach = attach_body.index("_wireSSE(new EventSource", start_dispatch)
-    assert dead_reconnect_return < start_dispatch < event_source_attach
+    owned_source_attach = attach_body.index("_openOwnedSSE(replayParams)", start_dispatch)
+    assert dead_reconnect_return < start_dispatch < owned_source_attach
     assert "_dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId" in done
     assert "_dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId" in application_error
     assert "_dispatchExtensionTurnLifecycle('turn:cancel',activeSid,streamId" in cancel
     assert "_dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId" in connection_error
 
-    assert done.index("_setActivePaneIdleIfOwner()") < done.index(
+    assert done.index("_setActivePaneIdleIfOwner(source)") < done.index(
         "_dispatchExtensionTurnLifecycle('turn:complete'"
     )
     assert application_error.index("renderSessionList()") < application_error.index(
@@ -486,7 +486,7 @@ def test_live_stream_terminal_paths_use_original_stream_owner_identity():
     assert cancel.index("_setActivePaneIdleIfOwner()") < cancel.index(
         "_dispatchExtensionTurnLifecycle('turn:cancel'"
     )
-    assert connection_error.index("_setActivePaneIdleIfOwner()") < connection_error.index(
+    assert connection_error.index("_setActivePaneIdleIfOwner(source)") < connection_error.index(
         "_dispatchExtensionTurnLifecycle('turn:error'"
     )
 

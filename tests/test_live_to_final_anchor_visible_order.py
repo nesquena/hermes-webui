@@ -65,6 +65,20 @@ def _event_listener_body(src, event_name):
     raise AssertionError(f"{event_name} listener did not close")
 
 
+def test_reattach_starts_reasoning_in_a_fresh_tail_segment():
+    start = MESSAGES_JS.index("function attachLiveStream(")
+    end = MESSAGES_JS.index("\nfunction ", start + 1)
+    body = MESSAGES_JS[start:end]
+    assert "let liveReasoningText = reconnecting ? '' : reasoningText;" in body
+
+
+def test_settlement_preserves_projected_reasoning_identity_before_aggregate_fallback():
+    body = _function_body(MESSAGES_JS, "_completeSettledAnchorSceneForTurn")
+    assert "const preferProjectedThinking=" in body
+    assert "if(preferProjectedThinking&&row&&row.role==='thinking') continue;" in body
+    assert "_anchorSceneSettleLiveRunningRow(row,dropProjectedThinking)" in body
+
+
 def _run_node_script(script):
     assert NODE, "node is required for DOM-executed anchor render tests"
     result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
@@ -1110,13 +1124,14 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     settle_live = _function_body(MESSAGES_JS, "_anchorSceneSettleLiveRunningRow")
 
     assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
-    assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
+    assert "const dropProjectedThinking=hasSettledThinking&&!preferProjectedThinking;" in complete
+    assert "row=_anchorSceneSettleLiveRunningRow(row,dropProjectedThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
     assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
     assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
     assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
     assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
-    assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
+    assert "if(row.role==='thinking'&&dropLiveThinking&&hasLiveIdentity) return null;" in settle_live
     assert "const sealed={...row,status:'completed'};" in settle_live
     assert "sealed.payload={...row.payload,status:'completed'};" in settle_live
     assert "if(row.role==='tool') sealed.payload.done=true;" in settle_live

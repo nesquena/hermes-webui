@@ -90,6 +90,7 @@ def test_deferred_hidden_stream_error_reattaches_or_restores_before_inline_error
     recovery_block = MESSAGES_JS.split("function _reattachOrRestoreAfterDeferredStreamError(source){", 1)[1].split("function _deferStreamErrorIfPageHidden(source)", 1)[0]
     assert "api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`)" in recovery_block
     assert "if(st.active)" in recovery_block
-    assert "_wireSSE(new EventSource" in recovery_block
+    assert "_openOwnedSSE(_runJournalReplayParams())" in recovery_block
+    assert "if(!_ownsAttachmentSource(source)) return;" in recovery_block
     assert "if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;" in recovery_block
     assert recovery_block.find("if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;") < recovery_block.rfind("_handleStreamError(source)")

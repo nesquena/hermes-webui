@@ -104,7 +104,7 @@ def test_syncInflightAssistantMessage_calls_throttled_persist():
             depth -= 1
         i += 1
     fn_body = MESSAGES_JS[fn_body_start:i]
-    assert "_throttledPersist()" in fn_body, (
+    assert "_throttledPersist(source)" in fn_body, (
         "syncInflightAssistantMessage() must call _throttledPersist() so each "
         "live-text update is scheduled for persistence. Without this, a reconnect "
         "seeds from the last tool-event snapshot and loses all interim assistant text."

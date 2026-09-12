@@ -2032,6 +2032,211 @@ def test_anchor_scene_hydration_drops_stale_live_running_thinking_when_settled_t
     )
 
 
+def test_anchor_scene_hydration_preserves_matching_live_reasoning_segments():
+    from api import routes
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {
+            "role": "assistant",
+            "content": "process update",
+            "reasoning": "first segmentsecond segment",
+        },
+        {"role": "assistant", "content": "final answer"},
+    ]
+    records = {
+        "record": {
+            "message_index": 2,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[2]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "final answer",
+                "activity_rows": [
+                    {
+                        "row_id": "live-reasoning:stream-1:1",
+                        "local_id": "live-reasoning:stream-1:1",
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "running",
+                        "text": "first segment",
+                    },
+                    {
+                        "row_id": "live-reasoning:stream-1:2",
+                        "local_id": "live-reasoning:stream-1:2",
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "running",
+                        "text": "second segment",
+                    },
+                    {"row_id": "done", "role": "terminal", "kind": "terminal_status", "source_event_type": "done"},
+                ],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
+
+    rows = hydrated[2]["_anchor_activity_scene"]["activity_rows"]
+    thinking_rows = [row for row in rows if row.get("role") == "thinking"]
+    assert [row.get("text") for row in thinking_rows] == ["first segment", "second segment"]
+    assert [row.get("row_id") for row in thinking_rows] == [
+        "live-reasoning:stream-1:1",
+        "live-reasoning:stream-1:2",
+    ]
+    assert all(row.get("status") == "completed" for row in thinking_rows)
+
+
+def test_anchor_scene_preserves_identical_reasoning_with_distinct_durable_ids():
+    from api import routes
+
+    identityless_prefix = "legacy reasoning " + ("x" * 90)
+    identityless_extension = f"{identityless_prefix} with more detail"
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "Final answer"},
+    ]
+    records = {
+        "record": {
+            "message_index": 1,
+            "message_ref": routes._assistant_anchor_scene_message_ref(messages[1]),
+            "stream_id": "stream-1",
+            "scene": {
+                "version": "activity_scene_v1",
+                "mode": "compact_worklog",
+                "final_answer": "Final answer",
+                "activity_rows": [
+                    {
+                        "row_id": "reasoning-row-a",
+                        "event_id": "reasoning-event-a",
+                        "local_id": "reasoning-local-a",
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "completed",
+                        "text": "same reasoning",
+                        "identity": {
+                            "event_id": "reasoning-event-a",
+                            "row_id": "reasoning-row-a",
+                            "local_id": "reasoning-local-a",
+                        },
+                    },
+                    {
+                        "row_id": "hydrated:stream-1:prose:1:0",
+                        "event_id": None,
+                        "local_id": None,
+                        "role": "prose",
+                        "kind": "process_prose",
+                        "source_event_type": "token",
+                        "status": "completed",
+                        "text": "same reasoning",
+                        "identity": {"event_id": None, "row_id": None, "local_id": None},
+                    },
+                    {
+                        "row_id": "reasoning-row-b",
+                        "event_id": "reasoning-event-b",
+                        "local_id": "reasoning-local-b",
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "completed",
+                        "text": "same reasoning",
+                        "identity": {
+                            "event_id": "reasoning-event-b",
+                            "row_id": "reasoning-row-b",
+                            "local_id": "reasoning-local-b",
+                        },
+                    },
+                    {
+                        "row_id": "reasoning-row-a-redelivery",
+                        "event_id": "reasoning-event-a",
+                        "local_id": "reasoning-local-a-redelivery",
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "completed",
+                        "text": "same reasoning",
+                        "identity": {"event_id": "reasoning-event-a"},
+                    },
+                    {
+                        "row_id": "hydrated:stream-1:thinking:1:0",
+                        "event_id": None,
+                        "local_id": None,
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "completed",
+                        "text": identityless_prefix,
+                        "identity": {"event_id": None, "row_id": None, "local_id": None},
+                    },
+                    {
+                        "row_id": "hydrated:stream-1:thinking:1:1",
+                        "event_id": None,
+                        "local_id": None,
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "completed",
+                        "text": identityless_extension,
+                        "identity": {"event_id": None, "row_id": None, "local_id": None},
+                    },
+                    {
+                        "row_id": "hydrated:stream-1:thinking:1:2",
+                        "event_id": None,
+                        "local_id": None,
+                        "role": "thinking",
+                        "kind": "reasoning",
+                        "source_event_type": "reasoning",
+                        "status": "completed",
+                        "text": identityless_prefix,
+                        "identity": {"event_id": None, "row_id": None, "local_id": None},
+                    },
+                    {"row_id": "done", "role": "terminal", "kind": "terminal_status", "source_event_type": "done"},
+                ],
+            },
+        }
+    }
+
+    hydrated = routes._hydrate_anchor_activity_scenes(messages, records)
+    thinking_rows = [
+        row
+        for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+        if row.get("role") == "thinking"
+    ]
+    textual_rows = [
+        row
+        for row in hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+        if row.get("role") in ("prose", "thinking")
+    ]
+
+    assert [row.get("text") for row in thinking_rows] == [
+        "same reasoning",
+        "same reasoning",
+        identityless_prefix,
+        identityless_extension,
+    ]
+    assert [row.get("event_id") for row in thinking_rows] == [
+        "reasoning-event-a",
+        "reasoning-event-b",
+        None,
+        None,
+    ]
+    assert [row.get("row_id") for row in thinking_rows[:2]] == [
+        "reasoning-row-a",
+        "reasoning-row-b",
+    ]
+    assert [(row.get("role"), row.get("text")) for row in textual_rows] == [
+        ("thinking", "same reasoning"),
+        ("prose", "same reasoning"),
+        ("thinking", "same reasoning"),
+        ("thinking", identityless_prefix),
+        ("thinking", identityless_extension),
+    ]
+
+
 def test_anchor_scene_hydration_seals_unmatched_live_running_activity_rows():
     from api import routes
 
@@ -2118,7 +2323,7 @@ def test_anchor_scene_settlement_does_not_reclassify_transcript_owned_tool_row()
         "payload": {"tid": "call-1", "status": "running", "done": False},
     }
 
-    assert routes._anchor_scene_settle_live_running_row(row, has_settled_thinking=False) is row
+    assert routes._anchor_scene_settle_live_running_row(row, drop_live_thinking=False) is row
     assert row["tool"]["done"] is False
     assert row["payload"]["done"] is False
 
