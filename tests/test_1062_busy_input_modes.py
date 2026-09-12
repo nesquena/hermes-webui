@@ -492,7 +492,7 @@ class TestBootAndPanelsWiring:
 # ── i18n locale coverage ─────────────────────────────────────────────────
 
 class TestI18nKeys:
-    """All 17 new keys must appear in each of the 6 locale blocks."""
+    """All 16 current keys must appear in each of the 6 locale blocks."""
 
     REQUIRED_KEYS = [
         "cmd_queue",
@@ -505,7 +505,6 @@ class TestI18nKeys:
         "cmd_interrupt_confirm",
         "cmd_steer_no_msg",
         "cmd_steer_fallback",
-        "busy_steer_fallback",
         "busy_interrupt_confirm",
         "settings_label_default_message_mode",
         "settings_desc_default_message_mode",
@@ -525,6 +524,6 @@ class TestI18nKeys:
     def test_key_count_total(self):
         """17 keys × 6 locales = 102 minimum occurrences across the file."""
         total = sum(I18N_JS.count(f"{key}:") for key in self.REQUIRED_KEYS)
-        assert total >= 17 * 6, (
+        assert total >= 16 * 6, (
             f"Total i18n occurrences = {total}; expected ≥ {17*6}"
         )

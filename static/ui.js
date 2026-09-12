@@ -8462,6 +8462,7 @@ function setBusy(v){
     const sid=_queueDrainSid||(S.session&&S.session.session_id);
     _queueDrainSid=null;
     updateQueueBadge(sid);
+    if(typeof clearSteerPending==='function') clearSteerPending(sid);
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;
     const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
@@ -8760,6 +8761,24 @@ function _updateQueuePill(sid,count){
     if(pillOuter) pillOuter.classList.remove('show');
     pill.onclick=null;
   }
+}
+
+function updateSteerPendingBadge(sessionId){
+  // Display refresh only: never mutate pending count from rendering.
+  const sid=sessionId||_currentSteerSessionId();
+  if(!sid)return;
+  const count=getSteerPendingCount(sid);
+  if(_steerOwnerIsCurrent(sid)&&typeof setComposerStatus==='function'){
+    _updateSteerPendingIndicatorStatus(count);
+  }
+}
+
+function clearSteerPending(sessionId){
+  // Explicit state transition: the buffer was consumed or re-queued.
+  const sid=sessionId||_currentSteerSessionId();
+  if(!sid)return;
+  _setSteerPendingCount(sid,0);
+  updateSteerPendingBadge(sid);
 }
 
 function updateQueueBadge(sessionId){
@@ -16747,6 +16766,7 @@ function renderMessages(options){
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
+  if(typeof updateSteerPendingBadge==='function') updateSteerPendingBadge(sid);
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
     _hydrateIdLinkedHistoricalToolScenes(S.messages,{sessionId:sid,mode:activityMode});
