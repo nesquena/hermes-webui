@@ -150,7 +150,370 @@ def _discard_cached_summary(path: Path) -> None:
         _SUMMARY_CACHE.pop(str(path), None)
 
 
+_LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _splitline_terminator(element: str) -> str:
+    """Return the ``str.splitlines`` terminator of ``element`` ("" if none).
+
+    The journal writer always emits "\\n", but the historical reader parsed
+    ``read_text().splitlines()`` — which also breaks on \\r\\n, \\v, \\f, \\x1c,
+    \\x1d, \\x1e, \\x85, \\u2028 and \\u2029 — so incremental parsing must use
+    the exact same line semantics to keep responses identical.
+    """
+    if element and element[-1] in _LINE_BREAK_CHARS:
+        if element.endswith("\r\n"):
+            return "\r\n"
+        return element[-1]
+    return ""
+
+
+def _parse_journal_line(content: str, line_no: int, events: list, malformed: list) -> None:
+    """Parse one journal line with the historical ``_read_jsonl`` row rules."""
+    if not content.strip():
+        return
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        malformed.append({"line": line_no, "raw": content})
+        return
+    if isinstance(parsed, dict):
+        events.append(parsed)
+    else:
+        malformed.append({"line": line_no, "raw": content})
+
+
+# RC2: incremental read cache for the run journal.
+#
+# ``_read_jsonl`` is the single read chokepoint for ``find_run_summary``,
+# ``latest_run_summary``, ``read_run_events`` and ``_next_seq``. During a live
+# turn the journal grows on every streamed event (including per-token rows), so
+# every summary-cache invalidation forced a full re-read + re-parse of the whole
+# file — and ``_run_journal_live_snapshot`` pays that cost twice per request
+# (once via ``find_run_summary``, once via ``read_run_events``).
+#
+# The cache stores the parsed rows up to a byte watermark (end of the last
+# COMPLETE line). A later read may reuse them only when continuity is verified:
+#   - same file identity (st_dev, st_ino) — replace/rotate falls back;
+#   - the file did not shrink — truncate falls back;
+#   - same size requires unchanged mtime/ctime — same-size rewrite falls back
+#     (ctime cannot be forged back, mirroring _summary_cache_signature);
+#   - growth requires the ≤8KiB region before the watermark to be
+#     byte-identical (append-only overlap proof) AND the first new complete row
+#     to continue the seq watermark (seq == last_seq + 1, per-row envelope
+#     ``event_id == f"{run_id}:{seq}"`` — the same identity the replay reader
+#     enforces). The writer is append-only by construction (O_APPEND, no
+#     truncate/rewrite path) and reserves gapless seqs (_reserve_next_seq), so
+#     a passing check means the tail is purely new rows.
+# Any uncertainty (shrink, metadata change, overlap mismatch, malformed first
+# row, undecodable bytes, stat failure) falls back to the full read, which
+# returns exactly the historical result — the cache only chooses between a fast
+# path and the historical path, never between different contents.
+# A trailing partial line (writer mid-append) is reported for the current read
+# exactly like the historical reader reported it, but is NOT consumed: the
+# watermark stays before it, so the completed line is parsed once later — no
+# loss, no duplication.
+_JOURNAL_READ_TAIL_VERIFY_BYTES = 8192
+_JOURNAL_READ_CACHE_MAX_ENTRIES = 4
+_JOURNAL_READ_CACHE_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+_JOURNAL_READ_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+_JOURNAL_READ_CACHE_LOCK = threading.Lock()
+# Read-path counters (diagnostics/tests): full = full re-read+parse; tail =
+# incremental tail parse; fast = watermark hit with zero parse.
+_JOURNAL_READ_PATH_STATS = {"full": 0, "tail": 0, "fast": 0}
+
+
+def _journal_read_stats_bump(kind: str) -> None:
+    with _JOURNAL_READ_CACHE_LOCK:
+        _JOURNAL_READ_PATH_STATS[kind] = _JOURNAL_READ_PATH_STATS.get(kind, 0) + 1
+
+
+def _journal_read_cache_get(key: str) -> dict | None:
+    with _JOURNAL_READ_CACHE_LOCK:
+        entry = _JOURNAL_READ_CACHE.get(key)
+        if entry is None:
+            return None
+        _JOURNAL_READ_CACHE.move_to_end(key, last=True)
+        return entry
+
+
+def _journal_read_cache_store(key: str, entry: dict) -> None:
+    with _JOURNAL_READ_CACHE_LOCK:
+        _JOURNAL_READ_CACHE[key] = entry
+        _JOURNAL_READ_CACHE.move_to_end(key, last=True)
+
+        def cached_total() -> int:
+            return sum(int(item.get("cached_bytes") or 0) for item in _JOURNAL_READ_CACHE.values())
+
+        # Evict LRU-first; never evict the entry just stored while it is the
+        # only one left (one oversized journal is tolerated over losing the
+        # cache entirely).
+        while len(_JOURNAL_READ_CACHE) > 1 and (
+            len(_JOURNAL_READ_CACHE) > _JOURNAL_READ_CACHE_MAX_ENTRIES
+            or cached_total() > _JOURNAL_READ_CACHE_MAX_TOTAL_BYTES
+        ):
+            evicted = None
+            for candidate in list(_JOURNAL_READ_CACHE.keys()):
+                if candidate == key:
+                    continue
+                evicted = _JOURNAL_READ_CACHE.pop(candidate)
+                break
+            if evicted is None:
+                break
+
+
+def _journal_read_cache_discard(key: str) -> None:
+    with _JOURNAL_READ_CACHE_LOCK:
+        _JOURNAL_READ_CACHE.pop(key, None)
+
+
 def _read_jsonl(path: Path) -> tuple[list[dict], list[dict]]:
+    events: list[dict] = []
+    malformed: list[dict] = []
+    key = str(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        _journal_read_cache_discard(key)
+        return events, malformed
+    entry = _journal_read_cache_get(key)
+    if (
+        entry is not None
+        and entry.get("dev") == stat.st_dev
+        and entry.get("ino") == stat.st_ino
+    ):
+        result = _read_jsonl_incremental(path, entry)
+        if result is not None:
+            return result
+    _journal_read_stats_bump("full")
+    return _read_jsonl_full(path)
+
+
+def _read_jsonl_full(path: Path) -> tuple[list[dict], list[dict]]:
+    """Historical full read+parse; seeds the incremental read cache."""
+    events: list[dict] = []
+    malformed: list[dict] = []
+    key = str(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        _journal_read_cache_discard(key)
+        return events, malformed
+    elements = text.splitlines(keepends=True)
+    partial: str | None = None
+    if elements and _splitline_terminator(elements[-1]) == "":
+        partial = elements[-1]
+        elements = elements[:-1]
+    consumed_lines = 0
+    for element in elements:
+        consumed_lines += 1
+        terminator = _splitline_terminator(element)
+        content = element[: len(element) - len(terminator)]
+        _parse_journal_line(content, consumed_lines, events, malformed)
+    fragment_events: list[dict] = []
+    fragment_malformed: list[dict] = []
+    if partial is not None:
+        # A trailing line still being appended is reported for THIS read exactly
+        # like the historical reader did, but stays unconsumed: the watermark
+        # remains before it, so the completed line is parsed exactly once later.
+        # Parse it into separate lists so it never leaks into the read cache.
+        _parse_journal_line(partial, consumed_lines + 1, fragment_events, fragment_malformed)
+    consumed_blob = b""
+    try:
+        consumed_blob = "".join(elements).encode("utf-8")
+    except Exception:  # pragma: no cover - encode of decoded text cannot fail
+        consumed_blob = b""
+    last_seq = 0
+    run_id = None
+    for event in reversed(events):
+        seq = event.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            last_seq = int(seq)
+            raw_run_id = str(event.get("run_id") or "").strip()
+            run_id = raw_run_id or None
+            break
+    try:
+        stat = path.stat()
+        if stat.st_size >= len(consumed_blob) and consumed_blob:
+            _journal_read_cache_store(key, {
+                "dev": int(stat.st_dev),
+                "ino": int(stat.st_ino),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "ctime_ns": int(stat.st_ctime_ns),
+                "consumed_bytes": len(consumed_blob),
+                "consumed_lines": consumed_lines,
+                "events": events,
+                "malformed": malformed,
+                "last_seq": last_seq,
+                "run_id": run_id,
+                "verify_tail": consumed_blob[-_JOURNAL_READ_TAIL_VERIFY_BYTES:],
+                "cached_bytes": len(consumed_blob),
+            })
+        else:
+            _journal_read_cache_discard(key)
+    except OSError:
+        _journal_read_cache_discard(key)
+    # Hand out fresh top-level objects (historical semantics: every read parsed
+    # fresh rows) while the cache keeps its own copies. The unconsumed trailing
+    # fragment rows (if any) are transient and come last, in file order.
+    return (
+        [dict(event) for event in events] + [dict(event) for event in fragment_events],
+        [dict(row) for row in malformed] + [dict(row) for row in fragment_malformed],
+    )
+
+
+def _read_jsonl_incremental(path: Path, entry: dict) -> tuple[list[dict], list[dict]] | None:
+    """Extend a cached journal read incrementally, or None to fall back.
+
+    The caller already verified the cached (st_dev, st_ino) identity against a
+    fresh stat; this re-checks on the open fd (races between stat and open),
+    verifies the append-only overlap before the watermark, parses only the new
+    complete rows under the exact historical line semantics, and re-stores the
+    extended entry.
+    """
+    key = str(path)
+    consumed_bytes = int(entry["consumed_bytes"])
+    try:
+        fh = open(path, "rb")
+    except FileNotFoundError:
+        _journal_read_cache_discard(key)
+        return [], []
+    except OSError:
+        return None
+    try:
+        fd_stat = os.fstat(fh.fileno())
+        if int(fd_stat.st_dev) != int(entry["dev"]) or int(fd_stat.st_ino) != int(entry["ino"]):
+            return None
+        if int(fd_stat.st_size) == consumed_bytes:
+            if (
+                int(fd_stat.st_mtime_ns) == int(entry["mtime_ns"])
+                and int(fd_stat.st_ctime_ns) == int(entry["ctime_ns"])
+            ):
+                _journal_read_stats_bump("fast")
+                return (
+                    [dict(event) for event in entry["events"]],
+                    [dict(row) for row in entry["malformed"]],
+                )
+            return None
+        if int(fd_stat.st_size) < consumed_bytes:
+            return None
+        overlap = min(consumed_bytes, _JOURNAL_READ_TAIL_VERIFY_BYTES)
+        fh.seek(consumed_bytes - overlap)
+        head = fh.read(overlap)
+        if head != entry["verify_tail"]:
+            return None
+        tail_blob = fh.read()
+    except OSError:
+        return None
+    finally:
+        fh.close()
+    try:
+        text = tail_blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    tail_events: list[dict] = []
+    tail_malformed: list[dict] = []
+    fragment_events: list[dict] = []
+    fragment_malformed: list[dict] = []
+    new_consumed_bytes = consumed_bytes
+    new_consumed_lines = int(entry["consumed_lines"])
+    expected_seq = int(entry["last_seq"] or 0) + 1
+    continuity_verified = False
+    last_seq = int(entry["last_seq"] or 0)
+    run_id = entry.get("run_id")
+    for element in text.splitlines(keepends=True):
+        terminator = _splitline_terminator(element)
+        if terminator == "":
+            # Partial trailing line: report it for this read (historical
+            # parity) but leave it unconsumed for the next read.
+            content = element
+            if content.strip():
+                try:
+                    parsed = json.loads(content)
+                except json.JSONDecodeError:
+                    fragment_malformed.append({"line": new_consumed_lines + 1, "raw": content})
+                else:
+                    if isinstance(parsed, dict):
+                        fragment_events.append(parsed)
+                    else:
+                        fragment_malformed.append({"line": new_consumed_lines + 1, "raw": content})
+            break
+        raw_bytes = element.encode("utf-8")
+        content = element[: len(element) - len(terminator)]
+        line_no = new_consumed_lines + 1
+        if not content.strip():
+            new_consumed_lines = line_no
+            new_consumed_bytes += len(raw_bytes)
+            continue
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # A complete malformed row makes the tail unverifiable — fall back
+            # to the full read, which returns exactly the historical rows.
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        seq = parsed.get("seq")
+        if not continuity_verified:
+            if not isinstance(seq, int) or isinstance(seq, bool) or int(seq) != expected_seq:
+                return None
+            row_run_id = str(parsed.get("run_id") or "").strip() or None
+            if parsed.get("event_id") != f"{row_run_id}:{int(seq)}":
+                return None
+            if run_id is None:
+                run_id = row_run_id
+            continuity_verified = True
+        elif run_id is not None and str(parsed.get("run_id") or "").strip() and str(parsed.get("run_id")) != run_id:
+            # Rows of one journal file share one run_id; a mismatch is not an
+            # append of this run — fall back rather than guess.
+            return None
+        last_seq = int(seq) if isinstance(seq, int) and not isinstance(seq, bool) else last_seq
+        tail_events.append(parsed)
+        new_consumed_lines = line_no
+        new_consumed_bytes += len(raw_bytes)
+    if not tail_events and not fragment_events and not fragment_malformed:
+        # Nothing usable was read (e.g. only whitespace) — let the full read
+        # decide, keeping the result identical by construction.
+        return None
+    try:
+        post_stat = path.stat()
+    except OSError:
+        return None
+    if int(post_stat.st_size) < new_consumed_bytes:
+        return None
+    merged_events = entry["events"] + tail_events
+    merged_malformed = entry["malformed"] + tail_malformed
+    new_verify_tail = (entry["verify_tail"] + tail_blob[: new_consumed_bytes - consumed_bytes])[
+        -_JOURNAL_READ_TAIL_VERIFY_BYTES:
+    ]
+    _journal_read_cache_store(key, {
+        "dev": int(entry["dev"]),
+        "ino": int(entry["ino"]),
+        "mtime_ns": int(post_stat.st_mtime_ns),
+        "ctime_ns": int(post_stat.st_ctime_ns),
+        "consumed_bytes": new_consumed_bytes,
+        "consumed_lines": new_consumed_lines,
+        "events": merged_events,
+        "malformed": merged_malformed,
+        "last_seq": last_seq,
+        "run_id": run_id,
+        "verify_tail": new_verify_tail,
+        "cached_bytes": new_consumed_bytes,
+    })
+    _journal_read_stats_bump("tail")
+    return (
+        [dict(event) for event in merged_events] + [dict(event) for event in fragment_events],
+        [dict(row) for row in merged_malformed] + [dict(row) for row in fragment_malformed],
+    )
+
+
+def _read_jsonl_legacy(path: Path) -> tuple[list[dict], list[dict]]:
+    """The pre-RC2 full reader, kept verbatim as the parity oracle for tests.
+
+    Production reads go through ``_read_jsonl`` (incremental with full-read
+    fallback); these tests prove both paths return identical rows for the same
+    file state, including partial lines, malformed rows and exotic breaks.
+    """
     events: list[dict] = []
     malformed: list[dict] = []
     try:
@@ -754,6 +1117,12 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         with _SUMMARY_CACHE_LOCK:
             for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
                 del _SUMMARY_CACHE[cache_key]
+        with _JOURNAL_READ_CACHE_LOCK:
+            for cache_key in [
+                entry for entry in _JOURNAL_READ_CACHE
+                if str(Path(entry).parent) == dir_key
+            ]:
+                del _JOURNAL_READ_CACHE[cache_key]
     return removed
 
 
