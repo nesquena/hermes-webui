@@ -1061,6 +1061,26 @@ function _clearComposerAfterQueuedSelectionSend(){
   const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
   const draftText=composer?String(composer.value||''):'';
   const draftFiles=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  if(arguments.length>=3){
+    const submittedText=String(arguments[1]||'');
+    const submittedFiles=Array.isArray(arguments[2])?arguments[2]:[];
+    if(!S.session||S.session.session_id!==sid){
+      return typeof _clearComposerDraft==='function'
+        ? _clearComposerDraft(sid,submittedText,submittedFiles)
+        : undefined;
+    }
+    const textMatches=draftText===submittedText;
+    const delivered=new Set(submittedFiles);
+    const remaining=draftFiles.filter(file=>!delivered.has(file));
+    if(textMatches&&composer)composer.value='';
+    if(remaining.length!==draftFiles.length){S.pendingFiles=remaining;if(typeof renderTray==='function')renderTray();}
+    const save=typeof _saveComposerDraftNow==='function'
+      ? _saveComposerDraftNow(sid,textMatches?'':draftText,remaining,true)
+      : (textMatches&&typeof _clearComposerDraft==='function'?_clearComposerDraft(sid,submittedText,submittedFiles):undefined);
+    _clearPendingSelections();
+    if(textMatches&&typeof autoResize==='function')autoResize();
+    return save;
+  }
   if(composer)composer.value='';
   if(sid&&typeof _clearComposerDraft==='function') _clearComposerDraft(sid,draftText,draftFiles);
   _clearPendingSelections();
@@ -1407,6 +1427,8 @@ async function send(){
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
       if(!S.session){await newSession();await renderSessionList();}
+      const _interruptRawText=$('msg').value||'';
+      const _interruptRevision=typeof _interruptComposerRevision==='function'?_interruptComposerRevision():0;
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, or /yolo while the agent is running and have
@@ -1419,8 +1441,10 @@ async function send(){
         if(_pc&&['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
           if(_bc){
-            $('msg').value='';autoResize();
-            await _bc.fn(_pc.args);
+            const _isInterrupt=_pc.name==='interrupt';
+            if(!_isInterrupt){$('msg').value='';autoResize();}
+            if(_isInterrupt) await _bc.fn(_pc.args,_interruptRawText,_interruptRevision);
+            else await _bc.fn(_pc.args);
             return;
           }
         }
@@ -1439,18 +1463,7 @@ async function send(){
         // _trySteer clears staged files only after /api/chat/steer accepts, and
         // only when the visible session still matches the captured owner sid.
       } else if(defaultMessageMode==='interrupt'){
-        // Queue the message, then cancel so drain re-sends it.
-        const _modelState=_chatPayloadModelState();
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
-        updateQueueBadge(S.session.session_id);
-        _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
-        S.pendingFiles=[];renderTray();
-        if(S.activeStreamId&&typeof cancelStream==='function'){
-          if(await cancelStream('busy-interrupt')) showToast(t('busy_interrupt_confirm'),2000);
-          else showToast(t('cancel_failed'),null,'error');
-        } else {
-          showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
-        }
+        await _tryInterrupt(text);
       } else {
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.

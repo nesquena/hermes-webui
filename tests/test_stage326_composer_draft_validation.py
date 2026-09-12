@@ -9,12 +9,15 @@ debounced auto-save. The hardening:
 - files: must be list; clamped to 50 entries
 """
 import json
+import contextlib
+import io
 import os
 import sys
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -81,7 +84,7 @@ def test_draft_validation_appears_before_persist():
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     # Anchor on the unique POST-validation comment marker.
     marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("s.composer_draft = next_draft\n                # Draft persistence is not conversation activity")
+    persist_idx = src.find("s.composer_draft = next_draft")
     assert marker_idx != -1 and persist_idx != -1, (
         "could not locate validation marker or persist site"
     )
@@ -116,3 +119,142 @@ def test_draft_save_skips_unchanged_payload_before_persist():
     assert save_idx != -1, "draft route should still save changed drafts"
     assert unchanged_idx < save_idx, "unchanged guard must run before full session save"
     assert 'payload["unchanged"] = True' in src
+
+
+class _DraftRouteHandler:
+    command = "POST"
+
+    def __init__(self):
+        self.wfile = io.BytesIO()
+        self.headers = {}
+        self.status = None
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, *_args):
+        pass
+
+    def end_headers(self):
+        pass
+
+
+def _post_draft(monkeypatch, session, body):
+    from api import routes
+
+    handler = _DraftRouteHandler()
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *args, **kwargs: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: contextlib.nullcontext())
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/draft", query=""))
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    return payload
+
+
+def test_compare_and_clear_is_atomic_and_preserves_newer_draft(monkeypatch):
+    """Interrupt settlement clears only the exact draft it submitted."""
+    from types import SimpleNamespace as _Namespace
+
+    matching = _Namespace(
+        composer_draft={"text": "captured \n", "files": [{"name": "a.pdf"}]},
+        save=lambda **_kwargs: None,
+    )
+    body = {
+        "session_id": "sid-draft",
+        "text": "captured \n",
+        "files": [{"name": "a.pdf"}],
+        "compare_and_clear": True,
+    }
+    payload = _post_draft(monkeypatch, matching, body)
+    assert payload["compare_cleared"] is True
+    assert matching.composer_draft == {"text": "", "files": []}
+
+    newer = _Namespace(
+        composer_draft={"text": "newer owner draft", "files": []},
+        save=lambda **_kwargs: None,
+    )
+    payload = _post_draft(monkeypatch, newer, body)
+    assert payload["compare_cleared"] is False
+    assert newer.composer_draft == {"text": "newer owner draft", "files": []}
+
+
+def test_expected_stream_guard_rejects_stale_draft_write(monkeypatch):
+    saves = []
+    session = SimpleNamespace(
+        active_stream_id="successor",
+        composer_draft={"text": "successor draft", "files": []},
+        save=lambda **_kwargs: saves.append(True),
+    )
+    payload = _post_draft(monkeypatch, session, {
+        "session_id": "sid-draft",
+        "text": "old stream draft",
+        "files": [],
+        "expected_stream_id": "old",
+    })
+
+    assert payload == {"error": "Session stream changed"}
+    assert saves == []
+    assert session.composer_draft == {"text": "successor draft", "files": []}
+
+
+def test_expected_stream_guard_allows_current_draft_write(monkeypatch):
+    saves = []
+    session = SimpleNamespace(
+        active_stream_id="old",
+        composer_draft={"text": "old", "files": []},
+        save=lambda **_kwargs: saves.append(True),
+    )
+    payload = _post_draft(monkeypatch, session, {
+        "session_id": "sid-draft",
+        "text": "current stream draft",
+        "files": [],
+        "expected_stream_id": "old",
+    })
+
+    assert payload["ok"] is True
+    assert saves == [True]
+    assert session.composer_draft == {"text": "current stream draft", "files": []}
+
+
+def test_compare_clear_allows_idle_after_expected_stream_cancel(monkeypatch):
+    saves = []
+    session = SimpleNamespace(
+        active_stream_id=None,
+        composer_draft={"text": "old", "files": [{"name": "old.pdf"}]},
+        save=lambda **_kwargs: saves.append(True),
+    )
+    payload = _post_draft(monkeypatch, session, {
+        "session_id": "sid-draft",
+        "text": "old",
+        "files": [{"name": "old.pdf"}],
+        "compare_and_clear": True,
+        "expected_stream_id": "old",
+    })
+
+    assert payload["compare_cleared"] is True
+    assert saves == [True]
+    assert session.composer_draft == {"text": "", "files": []}
+
+
+def test_compare_clear_rejects_successor_even_when_payload_matches(monkeypatch):
+    saves = []
+    session = SimpleNamespace(
+        active_stream_id="successor",
+        composer_draft={"text": "old", "files": [{"name": "old.pdf"}]},
+        save=lambda **_kwargs: saves.append(True),
+    )
+    payload = _post_draft(monkeypatch, session, {
+        "session_id": "sid-draft",
+        "text": "old",
+        "files": [{"name": "old.pdf"}],
+        "compare_and_clear": True,
+        "expected_stream_id": "old",
+    })
+
+    assert payload == {"error": "Session stream changed"}
+    assert saves == []
+    assert session.composer_draft == {"text": "old", "files": [{"name": "old.pdf"}]}
