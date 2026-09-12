@@ -2953,6 +2953,15 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
     invalidate_account_usage_status_cache(provider_id)
     invalidate_providers_cache()
 
+    # A prior removal may have suppressed the env:<VAR> pool source (see
+    # remove_provider_key). A plain key save only touches .env, so without
+    # this the pool entry is never re-materialized and the runtime keeps
+    # failing auth after a UI re-add. Lift the suppression and force an
+    # immediate load_pool() — mirroring `hermes auth add` (upstream #96058).
+    # Best-effort: the .env write above has already succeeded.
+    if api_key:
+        _lift_suppressed_pool_source(provider_id, env_var)
+
     return {
         "ok": True,
         "provider": provider_id,
@@ -2964,10 +2973,12 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
 def remove_provider_key(provider_id: str) -> dict[str, Any]:
     """Remove the API key for a provider.
 
-    Removes the key from ``~/.hermes/.env`` (via ``set_provider_key``)
-    and also cleans up ``config.yaml`` if the key is stored there
+    Removes the key from ``~/.hermes/.env`` (via ``set_provider_key``),
+    cleans up ``config.yaml`` if the key is stored there
     (``providers.<id>.api_key`` or top-level ``model.api_key`` when this
-    provider is the active one).
+    provider is the active one), and purges the env-seeded
+    ``credential_pool`` entry from ``auth.json`` (see
+    ``_purge_env_seeded_credential_pool``).
 
     Returns a status dict with the operation result.
     """
@@ -2978,8 +2989,100 @@ def remove_provider_key(provider_id: str) -> dict[str, Any]:
     # Clean those up so _provider_has_key() returns False after removal.
     if result.get("ok"):
         _clean_provider_key_from_config(provider_id)
+        # auth.json credential_pool entries seeded from env:<VAR> are only
+        # removable through an explicit purge (load_pool() is additive-only
+        # for env sources, upstream #9331) — otherwise the provider card
+        # survives the delete across restarts and the runtime can't auth.
+        # Runtime parity: prune the entry and record suppressed_sources
+        # exactly like `hermes auth remove` / remove_provider_env_credential.
+        _purge_env_seeded_credential_pool(provider_id)
 
     return result
+
+
+def _purge_env_seeded_credential_pool(provider_id: str) -> None:
+    """Purge the env-seeded ``credential_pool`` entry for *provider_id*.
+
+    Deleting a provider key previously only removed it from ``.env`` and
+    ``config.yaml``; the ``auth.json`` ``credential_pool`` row (source
+    ``env:<VAR>``) survived and kept the provider card alive across server
+    restarts (#7412). Because the pool loader is deliberately additive-only
+    for ``env:*`` sources (#9331), the stale row can only be removed by an
+    explicit deletion path.
+
+    Mirrors the runtime's own removal surface
+    (``hermes_cli.credential_lifecycle.purge_env_credential_references``):
+    prune env-seeded pool entries AND record ``suppressed_sources`` so a
+    lingering shell export cannot re-seed the entry on the next
+    ``load_pool()``. Only ``env:<VAR>`` rows are touched — OAuth /
+    device-code / manual / borrowed credentials are preserved. Best-effort:
+    a failure here must not change the (already successful) .env/config.yaml
+    removal result.
+    """
+    env_var = _provider_env_var_for(provider_id)
+    if not env_var:
+        return
+    try:
+        from hermes_cli.credential_lifecycle import purge_env_credential_references
+
+        purge_env_credential_references(env_var)
+    except ImportError:
+        # Runtime not installed / stubbed in tests — nothing to purge.
+        logger.debug(
+            "hermes_cli runtime unavailable; skipped credential_pool purge "
+            "for provider %s (env var %s)",
+            provider_id,
+            env_var,
+        )
+    except Exception:
+        logger.exception(
+            "credential_pool purge failed for provider %s (env var %s)",
+            provider_id,
+            env_var,
+        )
+
+
+def _lift_suppressed_pool_source(provider_id: str, env_var: str) -> None:
+    """Lift a prior ``env:<VAR>`` suppression and materialize the pool entry.
+
+    Symmetric side of ``_purge_env_seeded_credential_pool`` (#7412): a key
+    re-added through the UI must behave like ``hermes auth add`` — clear the
+    ``suppressed_sources`` marker written by a previous removal and force an
+    immediate ``load_pool()`` so the env-seeded ``credential_pool`` entry is
+    materialized to auth.json right now (upstream #96058 class). Best-effort:
+    the .env write above has already succeeded.
+    """
+    try:
+        from hermes_cli.auth import unsuppress_credential_source
+
+        unsuppress_credential_source(provider_id, f"env:{env_var}")
+    except ImportError:
+        logger.debug(
+            "hermes_cli runtime unavailable; skipped unsuppress for provider %s",
+            provider_id,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to lift suppressed env source for provider %s",
+            provider_id,
+            exc_info=True,
+        )
+    try:
+        from agent.credential_pool import load_pool
+
+        load_pool(provider_id)
+    except ImportError:
+        logger.debug(
+            "hermes_cli runtime unavailable; skipped pool materialization "
+            "for provider %s",
+            provider_id,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to materialize credential_pool entry for provider %s",
+            provider_id,
+            exc_info=True,
+        )
 
 
 def _clean_provider_key_from_config(provider_id: str) -> None:
