@@ -394,6 +394,65 @@ process.stdout.write(JSON.stringify({{ count: sent.length, bodies: sent.map(s =>
     assert result["consumed"] is True, "the enabled notify must be recorded (consumed) for the owner"
 
 
+def test_displaced_pending_prompt_key_is_retired_on_replacement():
+    """Greptile round-2 regression: when a NEW approval/clarify replaces the
+    session pending entry, the DISPLACED prompt notification-dedupe key must
+    retire. Without retirement (and with TTL-based expiry gone) the stale key
+    persists forever, so the same externally supplied ID re-surfacing later is
+    wrongly suppressed as already-notified. A re-render of the SAME owner must
+    keep its key (still deduped)."""
+    remember_ap = _extract_fn(MESSAGES_JS, "_rememberApprovalPending")
+    remember_cl = _extract_fn(MESSAGES_JS, "_rememberClarifyPending")
+    clear_ap = _extract_fn(MESSAGES_JS, "_clearApprovalPendingForSession")
+    keyfn = _extract_fn(MESSAGES_JS, "_promptNotifyKey")
+    retire = _extract_fn(MESSAGES_JS, "_retirePromptNotifyKey")
+    active = _extract_fn(MESSAGES_JS, "_promptActiveSessionId")
+    script = f"""
+const _promptNotifySeen = new Map();
+const S = {{ session: {{ session_id: "sid-1" }} }};
+{keyfn}
+{retire}
+{active}
+{remember_ap}
+{remember_cl}
+{clear_ap}
+const _approvalPendingBySession = new Map();
+const _clarifyPendingBySession = new Map();
+// Displaced approval owner: id-1, then a NEW different approval for sid-1.
+_rememberApprovalPending({{ approval_id: "id-1", description: "first" }}, 1);
+const key1 = _promptNotifyKey("approval", "sid-1", {{ approval_id: "id-1" }});
+_promptNotifySeen.set(key1, Date.now());
+_rememberApprovalPending({{ approval_id: "id-2", description: "replacement" }}, 1);
+const displacedRetired = !_promptNotifySeen.has(key1);
+// Same-owner re-render must NOT retire its own key (seed it as already
+// notified, as a prior poll tick would have).
+const key2 = _promptNotifyKey("approval", "sid-1", {{ approval_id: "id-2" }});
+_promptNotifySeen.set(key2, Date.now());
+_rememberApprovalPending({{ approval_id: "id-2", description: "re-render same owner" }}, 1);
+const sameOwnerKept = _promptNotifySeen.has(key2);
+// Clear path retires the CURRENT entry.
+_clearApprovalPendingForSession("sid-1");
+const clearedRetired = !_promptNotifySeen.has(_promptNotifyKey("approval", "sid-1", {{ approval_id: "id-2" }}));
+// Clarify mirror: displacement retires, same-owner re-render keeps.
+_rememberClarifyPending({{ clarify_id: "c-1" }});
+const ckey1 = _promptNotifyKey("clarify", "sid-1", {{ clarify_id: "c-1" }});
+_promptNotifySeen.set(ckey1, Date.now());
+_rememberClarifyPending({{ clarify_id: "c-2" }});
+const clarifyDisplacedRetired = !_promptNotifySeen.has(ckey1);
+const ckey2 = _promptNotifyKey("clarify", "sid-1", {{ clarify_id: "c-2" }});
+_promptNotifySeen.set(ckey2, Date.now());
+_rememberClarifyPending({{ clarify_id: "c-2" }});
+const clarifySameOwnerKept = _promptNotifySeen.has(ckey2);
+process.stdout.write(JSON.stringify({{ displacedRetired, sameOwnerKept, clearedRetired, clarifyDisplacedRetired, clarifySameOwnerKept }}));
+"""
+    result = _run_node(script)
+    assert result["displacedRetired"] is True, f"displaced approval key must retire on replacement (got {result})"
+    assert result["sameOwnerKept"] is True, f"same-owner re-render must keep its dedupe key (got {result})"
+    assert result["clearedRetired"] is True, f"clear path must retire the current entry key (got {result})"
+    assert result["clarifyDisplacedRetired"] is True, f"displaced clarify key must retire on replacement (got {result})"
+    assert result["clarifySameOwnerKept"] is True, f"clarify same-owner re-render must keep its key (got {result})"
+
+
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
     """Background completion preview must not slice the live-stream accumulator."""
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
