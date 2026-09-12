@@ -37,13 +37,20 @@ def _production_signature_calls() -> list[tuple[int, str]]:
     """Return `(offset, source)` for every production signature call site.
 
     Paren-balanced so the whole multi-line keyword-argument list is captured,
-    and every call site is returned so a retry path cannot silently drop a
-    field that the initial send still passes.
+    and every live call site is returned so a retry path cannot silently drop a
+    field that the initial send still passes. Commented-out occurrences are
+    skipped -- a disabled retry call must read as missing, not as present.
     """
     marker = "_agent_sig = _compute_agent_cache_signature("
     calls: list[tuple[int, str]] = []
     pos = STREAMING_PY.find(marker)
     while pos != -1:
+        line_start = STREAMING_PY.rfind("\n", 0, pos) + 1
+        if STREAMING_PY[line_start:pos].strip():
+            # Commented-out (or otherwise non-statement) occurrence: it no
+            # longer runs, so it must not count as a live call site.
+            pos = STREAMING_PY.find(marker, pos + 1)
+            continue
         depth = 0
         for idx in range(pos + len(marker) - 1, len(STREAMING_PY)):
             char = STREAMING_PY[idx]
@@ -58,6 +65,99 @@ def _production_signature_calls() -> list[tuple[int, str]]:
             raise AssertionError("unterminated _compute_agent_cache_signature( call")
         pos = STREAMING_PY.find(marker, pos + 1)
     return calls
+
+
+# Lifecycle anchors for the streaming send path. Pinning one signature call to
+# each region keeps the oracle honest: a retry call that silently disappears
+# fails the region check instead of hiding behind the calls that remain.
+INITIAL_SEND_MARKER = "# ── Agent cache: reuse across messages in the same session ──"
+RETURNED_ERROR_SELF_HEAL_MARKER = (
+    "logger.info('[webui] self-heal: retrying stream after credential refresh')"
+)
+RAISED_EXCEPTION_SELF_HEAL_MARKER = (
+    "logger.info('[webui] self-heal (except path): "
+    "retrying stream after credential refresh')"
+)
+
+# Each region ends at the cache write that stores the signature it just
+# computed. Bounding the region at the write -- rather than at the next
+# lifecycle anchor or at EOF -- is what proves the signature is recomputed
+# *before* it is cached: a call moved below its own write lands outside the
+# region and fails, instead of passing while the write consumes a stale
+# `_agent_sig`.
+INITIAL_SEND_CACHE_WRITE_MARKER = (
+    "SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)"
+)
+RETURNED_ERROR_SELF_HEAL_CACHE_WRITE_MARKER = (
+    "_SAC[session_id] = (agent, _agent_sig)"
+)
+RAISED_EXCEPTION_SELF_HEAL_CACHE_WRITE_MARKER = (
+    "_SAC2[session_id] = (_heal_agent, _agent_sig)"
+)
+
+
+def _marker_offset(marker: str) -> int:
+    """Return the single offset of a lifecycle marker in streaming.py."""
+    offset = STREAMING_PY.index(marker)
+    assert STREAMING_PY.find(marker, offset + 1) == -1, (
+        "lifecycle marker is no longer unique in streaming.py:\n" + marker
+    )
+    return offset
+
+
+def _signature_calls_by_region(
+    calls: list[tuple[int, str]],
+) -> dict[str, tuple[int, str]]:
+    """Map each lifecycle region to the single signature call inside it.
+
+    The regions are the initial send, the returned-error self-heal retry and
+    the raised-exception self-heal retry; each runs from its lifecycle anchor
+    to the cache write that consumes `_agent_sig`. Requiring exactly one call
+    inside those bounds means neither a dropped retry call (masked by its
+    surviving siblings) nor a call recomputed after its own cache write (which
+    would leave the write storing a stale signature) can read as correct.
+    """
+    initial = _marker_offset(INITIAL_SEND_MARKER)
+    initial_cache_write = _marker_offset(INITIAL_SEND_CACHE_WRITE_MARKER)
+    returned_error = _marker_offset(RETURNED_ERROR_SELF_HEAL_MARKER)
+    returned_error_cache_write = _marker_offset(
+        RETURNED_ERROR_SELF_HEAL_CACHE_WRITE_MARKER
+    )
+    raised_exception = _marker_offset(RAISED_EXCEPTION_SELF_HEAL_MARKER)
+    raised_exception_cache_write = _marker_offset(
+        RAISED_EXCEPTION_SELF_HEAL_CACHE_WRITE_MARKER
+    )
+    assert (
+        initial
+        < initial_cache_write
+        < returned_error
+        < returned_error_cache_write
+        < raised_exception
+        < raised_exception_cache_write
+    ), (
+        "streaming.py lifecycle regions are out of order; these anchors no "
+        "longer describe the send path"
+    )
+
+    bounds = {
+        "initial send": (initial, initial_cache_write),
+        "returned-error self-heal": (returned_error, returned_error_cache_write),
+        "raised-exception self-heal": (
+            raised_exception,
+            raised_exception_cache_write,
+        ),
+    }
+    by_region: dict[str, tuple[int, str]] = {}
+    for region, (start, end) in bounds.items():
+        found = [(offset, call) for offset, call in calls if start < offset < end]
+        assert len(found) == 1, (
+            "expected exactly one _compute_agent_cache_signature() call in the "
+            f"{region} region of streaming.py -- between its lifecycle anchor "
+            f"and the cache write that stores `_agent_sig` -- found "
+            f"{len(found)}"
+        )
+        by_region[region] = found[0]
+    return by_region
 
 
 def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path, monkeypatch):
@@ -273,12 +373,15 @@ def test_cache_signature_includes_profile_home():
     )
 
     calls = _production_signature_calls()
-    assert calls, "streaming.py no longer calls _compute_agent_cache_signature()"
-    for _offset, call in calls:
+    assert len(calls) == 3, (
+        "expected exactly three _compute_agent_cache_signature() call sites "
+        "(initial send plus both self-heal retries), found "
+        f"{len(calls)}"
+    )
+    for region, (_offset, call) in _signature_calls_by_region(calls).items():
         assert "profile_home=_profile_home" in call, (
-            "every signature call site (initial send and both self-heal "
-            "retries) must pass the resolved profile home, or a retry re-caches "
-            "the agent under a signature that ignores the active profile:\n" + call
+            f"the {region} signature call site must pass the resolved profile home, "
+            "or a retry re-caches the agent under a signature that ignores the active profile:\n" + call
         )
 
 
@@ -286,11 +389,16 @@ def test_profile_home_resolved_before_cache_signature():
     profile_home_assignment = STREAMING_PY.index("_profile_home = str(_profile_home_path)")
 
     calls = _production_signature_calls()
-    assert calls, "streaming.py no longer calls _compute_agent_cache_signature()"
-    for offset, call in calls:
+    assert len(calls) == 3, (
+        "expected exactly three _compute_agent_cache_signature() call sites "
+        "(initial send plus both self-heal retries), found "
+        f"{len(calls)}"
+    )
+    for region, (offset, call) in _signature_calls_by_region(calls).items():
         assert profile_home_assignment < offset, (
             "`_profile_home` must be resolved before the cache signature is "
-            "computed, otherwise the signature hashes a stale/unbound home."
+            f"computed, otherwise the {region} signature hashes a stale/unbound "
+            "home."
         )
         assert "profile_home=_profile_home" in call, call
         assert "max_iterations_cfg=_max_iterations_cfg" in call, call
