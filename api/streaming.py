@@ -4540,6 +4540,65 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         return '', f'llm_empty{suffix}'
 
 
+# Strict-output schema for auxiliary title generation (#7413).  Byte-for-byte
+# the CLI's response_format (agent/title_generator.py): requesting a JSON
+# object of shape ``{"title": "..."}`` works on routes that accept-but-ignore a
+# reasoning-disable (e.g. opencode-go/mimo-v2.5-pro) — those used to answer
+# with long reasoning markdown instead of a short title.
+_TITLE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "session_title",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _title_unwrap_schema_content(content: str) -> str:
+    """Unwrap a schema-mode title response to plain text.
+
+    Port of the CLI's ``agent/title_generator._extract_title_text`` for the
+    aux route.  Strict ``json_schema`` responses arrive as
+    ``{"title": "..."}``, sometimes wrapped in a markdown fence by
+    non-compliant gateways; providers that ignore ``response_format`` return
+    prose, which is passed through unchanged for the shared sanitizer.
+
+    Returns '' when the content IS JSON but carries no usable string
+    ``title`` (a different object shape, an array, ...) — the caller then
+    falls back to the reasoning-disable mode instead of storing a JSON blob
+    as the session title.
+    """
+    if not content:
+        return ''
+    raw = content.strip()
+    # Fenced JSON from gateways that wrap structured output in markdown.
+    fenced = re.match(r'^```(?:json)?\s*(.*?)\s*```$', raw, re.DOTALL)
+    if fenced:
+        raw = fenced.group(1).strip()
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and isinstance(parsed.get('title'), str):
+            return parsed['title'].strip()
+        # Valid JSON that is not a {"title": ...} object — not prose, unusable.
+        return ''
+    except (ValueError, TypeError):
+        pass
+    # Loose scan: a compliant object embedded in surrounding chatter.
+    match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    if match:
+        try:
+            return json.loads('"%s"' % match.group(1)).strip()
+        except ValueError:
+            return match.group(1).strip()
+    return raw  # prose: leave to the shared sanitizer
+
+
 def generate_title_raw_via_aux(
     user_text: str,
     assistant_text: str,
@@ -4573,15 +4632,39 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
+    # Schema-first title generation (#7413): request a strict ``{"title": ...}``
+    # JSON object via ``response_format`` (mirroring the CLI), because routes
+    # that accept-but-ignore a reasoning-disable (e.g. opencode-go/mimo-v2.5-pro)
+    # answer with long reasoning markdown instead of a short title — structured
+    # output works on those routes.  The reasoning-disable mode is kept as the
+    # fallback for routes that reject ``response_format`` (HTTP 400) or answer
+    # with a fully empty response.
+    schema_extra = {"response_format": _TITLE_RESPONSE_FORMAT}
     reasoning_extra = {}
     if not _route_rejects_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
+    # The two modes stay INDEPENDENT (#7417 re-gate): the schema attempt sends
+    # ONLY ``response_format`` — exactly the request shape of the Agent title
+    # generator this path mirrors (agent/title_generator.py). A route that
+    # accepts structured output but rejects the nonstandard ``reasoning``
+    # extension (strict OpenAI-compatible gateways) must not fail the schema
+    # attempt because the extension rode along; schema support would then be
+    # gated behind the old provider whitelist again, and the reasoning fallback
+    # would fail too on such routes. The reasoning-disable shape is reserved
+    # for the compatibility fallback below, still gated by
+    # ``_route_rejects_reasoning_extra()`` (#2083 concern is covered there:
+    # the fallback only runs when the route rejected/ignored the schema).
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
         last_status = 'llm_error_aux'
+        attempted = 0
+        # Schema mode starts alive; once a route proves it can't honor
+        # ``response_format`` (exception or empty answer), switch that route to
+        # the reasoning-disable mode for all remaining attempts.
+        schema_dead = False
         for idx, prompt in enumerate(prompts):
             messages = [
                 {"role": "system", "content": prompt},
@@ -4590,22 +4673,63 @@ def generate_title_raw_via_aux(
             budgets = [base_max_tokens]
             try:
                 for budget_idx, max_tokens in enumerate(budgets):
-                    resp = call_llm(
-                        task='title_generation',
-                        provider=provider or None,
-                        model=model or None,
-                        base_url=base_url or None,
-                        api_key=api_key or None,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.2,
-                        timeout=_timeout,
-                        extra_body=reasoning_extra or None,
-                    )
-                    raw, empty_status = _extract_title_response(resp, aux=True)
-                    if raw:
-                        return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
-                    last_status = empty_status or 'llm_empty_aux'
+                    # Try the JSON-schema mode first; fall back to the
+                    # reasoning-disable mode for this same slot when the route
+                    # rejected ``response_format`` or returned an empty answer.
+                    modes = ('schema', 'reasoning') if not schema_dead else ('reasoning',)
+                    for mode in modes:
+                        try:
+                            attempted += 1
+                            resp = call_llm(
+                                task='title_generation',
+                                provider=provider or None,
+                                model=model or None,
+                                base_url=base_url or None,
+                                api_key=api_key or None,
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=0.2,
+                                timeout=_timeout,
+                                extra_body=(
+                                    schema_extra
+                                    if mode == 'schema'
+                                    else (reasoning_extra or None)
+                                ),
+                            )
+                        except Exception as e:
+                            last_status = 'llm_error_aux'
+                            logger.debug(
+                                "Aux title generation attempt %s (%s mode) failed: %s",
+                                idx + 1, mode, e,
+                            )
+                            if mode == 'schema':
+                                schema_dead = True
+                                continue  # try the reasoning-disable mode instead
+                            raise
+                        raw, empty_status = _extract_title_response(resp, aux=True)
+                        if raw:
+                            if mode == 'schema':
+                                # json_schema responses arrive as
+                                # ``{"title": ...}`` (possibly markdown-fenced);
+                                # unwrap before the shared sanitizer runs.
+                                # Returns '' when the JSON object has no usable
+                                # title, so the reasoning-disable mode gets a
+                                # chance instead of storing a JSON blob.
+                                raw = _title_unwrap_schema_content(raw)
+                            if raw:
+                                return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
+                        last_status = empty_status or 'llm_empty_aux'
+                        if mode == 'schema' and last_status == 'llm_empty_aux':
+                            # Route answered with no content at all: it likely
+                            # ignored ``response_format``.  Fall back to the
+                            # reasoning-disable mode for this same slot.
+                            schema_dead = True
+                            continue
+                        # llm_empty_reasoning / llm_length keep today's semantics:
+                        # reasoning-only output short-circuits (#2083) and length
+                        # truncation retries with a doubled budget — in whichever
+                        # mode is active.
+                        break
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))
             except Exception as e:
