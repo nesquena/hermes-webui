@@ -1,3 +1,4 @@
+import io
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,379 @@ def test_read_body_rejects_negative_content_length_without_unbounded_read():
     with pytest.raises(ValueError, match="Content-Length"):
         read_body(handler)
     assert handler.close_connection is True
+
+
+def test_read_body_decodes_chunked_transfer_encoding():
+    from api.helpers import read_body
+
+    body = b'{"a": 1}'
+    chunked = b"8\r\n" + body + b"\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_rejects_malformed_chunk_size():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"zz\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed chunk size"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_oversized_chunked_body():
+    from api.helpers import MAX_BODY_BYTES, read_body
+
+    size = MAX_BODY_BYTES + 1
+    chunked = b"%x\r\n" % size + b"x" * size + b"\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Request body too large"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_incomplete_chunk_body():
+    from api.helpers import read_body
+
+    # Declares 8 bytes but the stream ends after 5
+    chunked = b"8\r\n{\"a\":"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Incomplete chunk body"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_missing_terminating_chunk():
+    from api.helpers import read_body
+
+    # One complete chunk, but no terminating 0-chunk before EOF
+    chunked = b"8\r\n{\"a\": 1}\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="missing terminating chunk"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_oversized_chunked_trailers():
+    from api.helpers import MAX_CHUNKED_TRAILER_BYTES, read_body
+
+    chunked = b"0\r\n" + b"x" * (MAX_CHUNKED_TRAILER_BYTES + 100) + b"\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="trailers too large"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_empty_chunked_stream():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b""),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="missing terminating chunk"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_eof_in_trailer_section():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"0\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="EOF in trailer section"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_negative_chunk_size():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"-1\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed chunk size"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_invalid_chunk_data_delimiter():
+    from api.helpers import read_body
+
+    # 8 bytes of data followed by "xx" instead of CRLF
+    chunked = b"8\r\n{\"a\": 1}xx"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Invalid chunk data delimiter"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_accepts_multiple_chunks():
+    from api.helpers import read_body
+
+    # {"a": 1} split as 4 + 4 bytes
+    chunked = b"4\r\n{\"a\"\r\n4\r\n: 1}\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_accepts_chunk_extensions():
+    from api.helpers import read_body
+
+    chunked = b"8;foo=bar\r\n{\"a\": 1}\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_accepts_mixed_case_chunked_token():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "Chunked"}),
+        rfile=io.BytesIO(b"8\r\n{\"a\": 1}\r\n0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_rejects_non_chunked_transfer_encoding():
+    from api.helpers import read_body
+
+    for header_value in ("gzip, chunked", "xchunked", "identity"):
+        handler = SimpleNamespace(
+            headers=_Headers({"Transfer-Encoding": header_value}),
+            rfile=io.BytesIO(b""),
+            close_connection=False,
+        )
+
+        with pytest.raises(ValueError, match="Unsupported Transfer-Encoding"):
+            read_body(handler)
+        assert handler.close_connection is True
+
+
+def test_read_body_rejects_empty_transfer_encoding_header():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": " "}),
+        rfile=io.BytesIO(b""),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Invalid Transfer-Encoding"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_bare_lf_size_line():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"8\n{\"a\": 1}\r\n0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed chunk size line"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_whitespace_padded_chunk_size():
+    from api.helpers import read_body
+
+    for padded in (b" 8\r\n{\"a\": 1}\r\n0\r\n\r\n", b"8 \r\n{\"a\": 1}\r\n0\r\n\r\n", b"\t8\r\n{\"a\": 1}\r\n0\r\n\r\n"):
+        handler = SimpleNamespace(
+            headers=_Headers({"Transfer-Encoding": "chunked"}),
+            rfile=io.BytesIO(padded),
+            close_connection=False,
+        )
+
+        with pytest.raises(ValueError, match="Malformed chunk size"):
+            read_body(handler)
+        assert handler.close_connection is True
+
+
+def test_read_body_rejects_bare_lf_trailer_terminator():
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(b"0\r\n\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Malformed trailer line"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_accepts_trailer_fields():
+    from api.helpers import read_body
+
+    chunked = b"8\r\n{\"a\": 1}\r\n0\r\nFoo: bar\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def _real_http_headers(pairs):
+    """Build a genuine http.client.HTTPMessage (what http.server hands the
+    handler) so get_all() repeated-header semantics are exercised for real."""
+    import http.client
+
+    msg = http.client.HTTPMessage()
+    for key, value in pairs:
+        msg[key] = value
+    return msg
+
+
+def test_read_body_rejects_content_length_and_transfer_encoding_together():
+    """CL.TE / TE.CL smuggling guard: a request carrying BOTH Content-Length
+    and Transfer-Encoding must be refused with the connection closed, so
+    trailing bytes cannot be replayed as a smuggled second request."""
+    from api.helpers import read_body
+
+    body = b'{"a": 1}'
+    chunked = b"8\r\n" + body + b"\r\n0\r\n\r\n"
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", "chunked"), ("Content-Length", "8")]),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Ambiguous framing"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_duplicate_transfer_encoding_hiding_a_coding():
+    """A repeated Transfer-Encoding header must not let a non-chunked coding
+    slip past a .get()-only check. get_all() sees every line, so
+    'Transfer-Encoding: chunked' + 'Transfer-Encoding: gzip' is rejected."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "gzip")]),
+        rfile=io.BytesIO(b"0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Unsupported Transfer-Encoding"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_rejects_duplicate_te_chunked_then_chunked():
+    """Two Transfer-Encoding: chunked lines still collapse to >1 coding and are
+    rejected — multiple codings are never accepted even if all are 'chunked'."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "chunked")]),
+        rfile=io.BytesIO(b"0\r\n\r\n"),
+        close_connection=False,
+    )
+
+    with pytest.raises(ValueError, match="Unsupported Transfer-Encoding codings"):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_empty_transfer_encoding_header_is_not_treated_as_absent():
+    """An exactly-empty Transfer-Encoding header is still a present TE header;
+    it must take the TE path (and be rejected as having no valid coding) rather
+    than silently falling through to Content-Length parsing."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Transfer-Encoding", ""), ("Content-Length", "2")]),
+        rfile=io.BytesIO(b"{}"),
+        close_connection=False,
+    )
+
+    # Present-but-empty TE with a Content-Length is ambiguous framing → rejected.
+    with pytest.raises(ValueError):
+        read_body(handler)
+    assert handler.close_connection is True
+
+
+def test_read_body_plain_content_length_still_works_with_real_headers():
+    """Non-chunked Content-Length requests remain unchanged with real headers."""
+    from api.helpers import read_body
+
+    handler = SimpleNamespace(
+        headers=_real_http_headers([("Content-Length", "8")]),
+        rfile=io.BytesIO(b'{"a": 1}'),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
 
 
 def test_session_save_rejects_unsafe_session_id(tmp_path, monkeypatch):
