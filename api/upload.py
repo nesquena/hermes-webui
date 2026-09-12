@@ -122,6 +122,43 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
+def build_chat_attachment_message(message: str, attachments: list, workspace: str) -> str:
+    """Format fresh chat input before checkpointing or dispatching it.
+
+    Clients supply upload metadata, not model-facing text. Retained turns already
+    contain this text and must not pass through fresh-input formatting again.
+    Use the same permitted roots as native image embedding; file bytes remain
+    the responsibility of the consuming tool or native image builder.
+    """
+    if not attachments:
+        return message
+    roots = (Path(workspace).expanduser().resolve(), _attachment_root())
+    references = []
+    for index, attachment in enumerate(attachments, start=1):
+        raw_path = attachment.get('path') if isinstance(attachment, dict) else None
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError(f'Attachment {index} requires a usable path')
+        try:
+            path = Path(raw_path).expanduser()
+            if not path.is_absolute():
+                path = roots[0] / path
+            path = path.resolve(strict=True)
+            if not any(path.is_relative_to(root) for root in roots):
+                raise ValueError('outside permitted attachment locations')
+            if not (path.is_file() or path.is_dir()):
+                raise ValueError('not a file or directory')
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ValueError(f'Attachment {index} is unavailable or outside permitted locations') from exc
+        # Keep embedding and model-facing text on the same resolved path.
+        attachment['path'] = str(path)
+        references.append(str(path))
+    joined = ', '.join(references)
+    if not message:
+        names = ', '.join(Path(reference).name for reference in references)
+        message = f'Uploaded: {names}'
+    return f'{message}\n\n[Attached files: {joined}]'
+
+
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
     dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)

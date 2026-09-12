@@ -6530,7 +6530,7 @@ def all_sessions(
 
 
 def _strip_attached_files_marker(text: str) -> str:
-    return re.sub(r"\n\n\[Attached files: [^\]]+\]$", "", str(text or "")).strip()
+    return re.sub(r"\n\n\[Attached files: [^\r\n]+\]$", "", str(text or "")).strip()
 
 
 def title_from(messages, fallback: str='Untitled'):

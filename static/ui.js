@@ -8222,7 +8222,7 @@ function renderMd(raw){
 }
 
 function _stripAttachedFilesMarkerForDisplay(text){
-  return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+  return String(text||'').replace(/\n\n\[Attached files: [^\r\n]+\]$/,'').trim();
 }
 
 function setStatus(t){
