@@ -11213,6 +11213,7 @@ function _buildProviderQuotaCard(status){
   }else{
     body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_unavailable'))}</div>`;
   }
+  const publicStatus=status.public_status;
   card.innerHTML=`
     <div class="provider-quota-header">
       <div>
@@ -11227,6 +11228,34 @@ function _buildProviderQuotaCard(status){
     </div>
     <div class="provider-quota-body">${body}</div>
   `;
+  if(publicStatus&&typeof publicStatus==='object'&&['operational','degraded','outage','maintenance'].includes(publicStatus.status)&&typeof publicStatus.checkedAt==='string'){
+    const detail=document.createElement('aside');
+    detail.className=`provider-public-status provider-public-status-${publicStatus.status}`;
+    const heading=document.createElement('strong');
+    const label=t(`provider_public_status_${publicStatus.status}`)||publicStatus.status;
+    heading.textContent=`${t('provider_public_status_label')}: ${label}`;
+    detail.appendChild(heading);
+    if(typeof publicStatus.description==='string'&&publicStatus.description.trim()){
+      const description=document.createElement('span');
+      description.textContent=publicStatus.description;
+      detail.appendChild(description);
+    }
+    const observed=new Date(publicStatus.checkedAt);
+    const when=Number.isNaN(observed.getTime())?'':observed.toLocaleString();
+    const meta=document.createElement('small');
+    meta.textContent=t('provider_public_status_observed',when);
+    if(typeof publicStatus.url==='string'&&/^https?:\/\//i.test(publicStatus.url)){
+      const separator=document.createTextNode(' · ');
+      const source=document.createElement('a');
+      source.href=publicStatus.url;
+      source.target='_blank';
+      source.rel='noopener noreferrer';
+      source.textContent=t('provider_public_status_source');
+      meta.append(separator,source);
+    }
+    detail.appendChild(meta);
+    card.querySelector('.provider-quota-body').appendChild(detail);
+  }
   const refreshBtn=card.querySelector('[data-provider-quota-refresh]');
   if(refreshBtn) refreshBtn.addEventListener('click',()=>_refreshProviderQuota(card,refreshBtn));
   const poolDetails=card.querySelector('.provider-quota-pool');
