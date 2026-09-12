@@ -10,6 +10,8 @@ def test_chat_start_appends_submitted_turn_journal_before_worker_thread_start():
     assert save_idx < append_idx < thread_idx
     assert '"event": "submitted"' in src[append_idx:thread_idx]
     assert '"role": "user"' in src[append_idx:thread_idx]
+    assert '"source"' in src[append_idx:thread_idx]
+    assert 'pending_user_source' in src[append_idx:thread_idx]
 
 
 def test_chat_start_writes_turn_journal_after_session_lock_and_handles_failure():

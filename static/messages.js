@@ -2229,7 +2229,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let liveReasoningText = reasoningText;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
-  let _pendingGoalContinuation=null;
   let assistantRow=null;
   let assistantBody=null;
   // On reconnect with recorded burst anchors, the rendered DOM has multiple
@@ -6075,14 +6074,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const continuation_prompt=String(d.continuation_prompt||d.text||'').trim();
         if(!continuation_prompt||sid!==activeSid)return;
         _applyToAnchor('goal_continue',d,e);
-        const _modelState=_chatPayloadModelState();
-        _pendingGoalContinuation={
-          sid,
-          text:continuation_prompt,
-          model:_modelState.model,
-          model_provider:_modelState.model_provider,
-          profile:S.activeProfile||'default',
-        };
+        // The durable server scheduler owns dispatch.  This event is status-only,
+        // matching the bg_task_complete server-started live-view notification.
         const toast=t('goal_continuing_toast');
         const cmsg=_resolveGoalMessage(d);
         showToast((toast&&cmsg&&cmsg!==toast)?cmsg.split('\n')[0]:toast,2200);
@@ -6387,18 +6380,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
-        }
-        if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
-          const _goalNext=_pendingGoalContinuation;
-          _pendingGoalContinuation=null;
-          queueSessionMessage(_goalNext.sid,{
-            text:_goalNext.text,
-            files:[],
-            model:_goalNext.model,
-            model_provider:_goalNext.model_provider,
-            profile:_goalNext.profile,
-          });
-          if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
         }
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
@@ -7964,7 +7945,7 @@ const _SESSION_STREAM_HIDDEN_POLL_MAX_FALSE = 20; // ~2 min at the 6s cadence
 // signal, a poll that fires while another session is in the current pane
 // would attach nothing AND stop polling, leaving the turn invisible until
 // the next user interaction.
-function _attachServerInitiatedStream(sid, streamId, recovered) {
+function _attachServerInitiatedStream(sid, streamId, recovered, source) {
   let handedOff = false;
   try {
     streamId = String(streamId || '');
@@ -7985,6 +7966,7 @@ function _attachServerInitiatedStream(sid, streamId, recovered) {
     if (S.session && S.session.session_id === sid) {
       S.session.active_stream_id = streamId;
       if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
+      if (source && !S.session.pending_user_source) S.session.pending_user_source = String(source);
     }
     if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
     else if (typeof appendThinking === 'function') appendThinking();
@@ -8070,7 +8052,7 @@ function _startHiddenActiveStreamPoll(sid) {
               _sessionStreamHiddenPollFalseStreamId = streamKey;
               _sessionStreamHiddenPollFalseCount = 0;
             }
-            const attached = _attachServerInitiatedStream(sid, streamId, true);
+            const attached = _attachServerInitiatedStream(sid, streamId, true, d.pending_user_source);
             if (attached) {
               _stopHiddenActiveStreamPoll();
             } else {
@@ -8302,6 +8284,7 @@ function startSessionStream(sid) {
           S.session.active_stream_id = streamId;
           if (typeof d.pending_started_at === 'number') S.session.pending_started_at = d.pending_started_at;
           else if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;
+          if (d.source && !S.session.pending_user_source) S.session.pending_user_source = String(d.source);
         }
         if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();
         else if (typeof appendThinking === 'function') appendThinking();

@@ -588,10 +588,11 @@ def test_autonomous_wakeup_acks_after_successful_turn_acceptance(monkeypatch):
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     from api import routes
 
+    started = []
     monkeypatch.setattr(
         routes,
         "start_session_turn",
-        lambda *_args, **_kwargs: {"_status": 200, "stream_id": "stream-1"},
+        lambda *args, **kwargs: started.append((args, kwargs)) or {"_status": 200, "stream_id": "stream-1"},
     )
     monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
     evt = _async_delegation_event()
@@ -611,6 +612,22 @@ def test_autonomous_wakeup_acks_after_successful_turn_acceptance(monkeypatch):
     assert delivery["release"] == []
     assert registry.completion_queue.qsize() == 0
     assert cfg.BG_TASK_COMPLETE_EVENTS_SEEN == {}
+    assert started[0][1]["source"] == "async_delegation"
+
+
+def test_async_delegation_source_stamps_internal_event_identity():
+    msg = {
+        "role": "user",
+        "content": "[ASYNC DELEGATION BATCH COMPLETE — deleg_test123]\nresult",
+    }
+
+    peu.stamp_message_source(msg, "async_delegation")
+
+    assert msg["_source"] == "async_delegation"
+    assert msg["_display_kind"] == "internal_event"
+    assert msg["_user_originated"] is False
+    assert msg["_event_id"] == "async_delegation:deleg_test123:terminal"
+    assert msg["_workflow_id"] == "delegation:deleg_test123"
 
 
 def test_background_and_next_turn_consumers_share_one_atomic_claim(monkeypatch):
