@@ -181,18 +181,17 @@ class TestProjectDotPlacement:
             "ellipsis truncation. Dot must live in titleRow instead."
         )
 
-    def test_dot_placed_between_title_and_timestamp(self):
-        """The dot is appended AFTER title.appendChild and BEFORE ts append
-        — that ordering puts the dot between the title and the timestamp
-        in the flex row."""
+    def test_dot_placed_between_title_group_and_timestamp(self):
+        """The dot is appended after the constrained title/tag group and before
+        the timestamp, keeping all three as ordered flex-row siblings."""
         body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
-        title_pos = body.find("titleRow.appendChild(title);")
+        title_group_pos = body.find("titleRow.appendChild(titleGroup);")
         dot_pos = body.find("titleRow.appendChild(dot);")
         ts_pos = body.find("titleRow.appendChild(ts);")
-        assert title_pos >= 0 and dot_pos >= 0 and ts_pos >= 0
-        assert title_pos < dot_pos < ts_pos, (
-            f"Order must be title → dot → ts in the title row "
-            f"(positions: {title_pos}, {dot_pos}, {ts_pos})"
+        assert title_group_pos >= 0 and dot_pos >= 0 and ts_pos >= 0
+        assert title_group_pos < dot_pos < ts_pos, (
+            f"Order must be title group → dot → ts in the title row "
+            f"(positions: {title_group_pos}, {dot_pos}, {ts_pos})"
         )
 
     def test_session_time_uses_flex_flow_not_absolute(self):
