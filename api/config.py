@@ -51,6 +51,19 @@ HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
 
+def _natural_model_id_key(_m) -> list:
+    """Natural, case-insensitive sort key for model ids.
+
+    Splits digit runs so versioned ids order like the frontend
+    ``localeCompare(..., {numeric:true})`` comparator: ``model-2`` sorts
+    before ``model-10``, while plain lexical Python sorting would emit
+    ``model-10`` first.  Tuple (kind, value) pairs keep text/digit runs
+    comparable at every position.
+    """
+    _s = str((_m or {}).get("id") or "").lower()
+    return [(0, int(t)) if t.isdigit() else (1, t) for t in re.split(r"(\d+)", _s)]
+
+
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read a positive int from the environment, falling back on bad input.
 
@@ -5909,6 +5922,21 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         groups.sort(key=_group_sort_key)
 
+        # Alphabetize model entries within each provider group (natural,
+        # case-insensitive numeric order, mirroring the frontend
+        # localeCompare(numeric:true) comparator). Previously models kept
+        # insertion order from config/live /v1/models probes, so a group
+        # like newapi showed jd-* / sn-* / sub-* intermixed in scramble
+        # (user request 2026-09-05). Natural order keeps model-2 before
+        # model-10 at both the API and the UI boundary.
+        for _group in groups:
+            _group_models = _group.get("models")
+            if isinstance(_group_models, list) and len(_group_models) > 1:
+                try:
+                    _group_models.sort(key=_natural_model_id_key)
+                except Exception:
+                    pass
+
         model_aliases: dict[str, str] = {}
         try:
             raw_aliases = cfg.get("model", {}).get("aliases", {})
@@ -8411,6 +8439,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 return (2, pid)
             return (3, pid)
         groups.sort(key=_group_sort_key)
+
+        # Alphabetize model entries within each provider group (natural,
+        # case-insensitive numeric order). Mirrors the static catalog path
+        # (and the frontend localeCompare(numeric:true) comparator) so live
+        # /v1/models probe results are also sorted by model id, with
+        # model-2 before model-10 at every boundary (user request 2026-09-05).
+        for _group in groups:
+            _group_models = _group.get("models")
+            if isinstance(_group_models, list) and len(_group_models) > 1:
+                try:
+                    _group_models.sort(key=_natural_model_id_key)
+                except Exception:
+                    pass
 
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases: dict[str, str] = {}

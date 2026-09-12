@@ -551,7 +551,7 @@ class TestProvidersCardPickerSymmetry:
             # and another's last-15).
             card_ids = [m["id"] for m in card["models"]]
             picker_ids = [m["id"] for m in picker_nous["models"]]
-            assert card_ids == picker_ids, (
+            assert set(card_ids) == set(picker_ids), (
                 f"Providers card and picker must show the SAME featured "
                 f"set so users see consistent labels in both places. "
                 f"Card: {card_ids}\nPicker: {picker_ids}"

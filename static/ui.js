@@ -2983,6 +2983,63 @@ window.addEventListener('visibilitychange',()=>{
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
+
+// Keep every model-picker data boundary on the same deterministic order. The
+// value field is used for picker entries/options; id is the fallback for API
+// model objects and overflow records. Numeric comparison keeps model versions
+// in human order (e.g. 5.10 after 5.9) while remaining case-insensitive.
+function _modelPickerSortValue(entry){
+  let value=String(entry&&entry.value!=null?entry.value:(entry&&entry.id!=null?entry.id:entry)||'');
+  const provider=String(
+    (entry&&entry.providerId)||
+    (entry&&entry.provider_id)||
+    (entry&&entry.parentElement&&entry.parentElement.dataset&&entry.parentElement.dataset.provider)||
+    ''
+  ).trim();
+  // Strip only the known provider prefix. Splitting at every colon would eat
+  // a valid model suffix such as `model-a:free`.
+  if(value.startsWith('@')){
+    const prefix=provider?`@${provider}:`:'';
+    if(prefix&&value.toLowerCase().startsWith(prefix.toLowerCase())) value=value.slice(prefix.length);
+    else{
+      const colon=value.indexOf(':');
+      if(colon>=0) value=value.slice(colon+1);
+    }
+  }
+  return value;
+}
+function _compareModelPickerEntries(a,b){
+  const av=_modelPickerSortValue(a);
+  const bv=_modelPickerSortValue(b);
+  const rawA=String(a&&a.value!=null?a.value:(a&&a.id!=null?a.id:a)||'');
+  const rawB=String(b&&b.value!=null?b.value:(b&&b.id!=null?b.id:b)||'');
+  return av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'})
+    || rawA.localeCompare(rawB,undefined,{numeric:true,sensitivity:'base'});
+}
+function _sortModelPickerEntries(items){
+  return Array.from(items||[]).sort(_compareModelPickerEntries);
+}
+function _sortModelPickerOptions(group){
+  if(!group||!group.children) return;
+  const options=Array.from(group.children).filter(option=>option&&option.tagName==='OPTION');
+  const ordered=_sortModelPickerEntries(options);
+  if(typeof group.replaceChildren==='function'){
+    group.replaceChildren(...ordered);
+    return;
+  }
+  // Lightweight DOMs used by the picker regression driver expose children as
+  // an Array. Reorder that array directly so the fallback does not duplicate
+  // options by calling their simplified appendChild implementation.
+  if(Array.isArray(group.children)){
+    group.children.splice(0,group.children.length,...ordered);
+    for(const option of ordered){
+      option.parentElement=group;
+      if('parentNode' in option) option.parentNode=group;
+    }
+    return;
+  }
+  for(const option of ordered) group.appendChild(option);
+}
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
@@ -3604,6 +3661,15 @@ async function populateModelDropdown(opts={}){
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
     window._modelEndpointErrors={};
+    const _sortModelEntries=(items)=>{
+      const values=Array.from(items||[]);
+      if(typeof _sortModelPickerEntries==='function') return _sortModelPickerEntries(values);
+      return values.sort((a,b)=>{
+        const av=String(a&&a.id!=null?a.id:a||'').replace(/^@(?:[^:]+:)+/,'');
+        const bv=String(b&&b.id!=null?b.id:b||'').replace(/^@(?:[^:]+:)+/,'');
+        return av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'})||av.localeCompare(bv);
+      });
+    };
     // Keep g.extra_models label hydration in this function for /model and tail selections.
 
     const _synthGroupsFromConfigured=()=>{
@@ -3637,7 +3703,7 @@ async function populateModelDropdown(opts={}){
         const display=(String(providerId).startsWith('custom:')
           ? String(providerId).slice('custom:'.length)
           : String(providerId))||'Configured';
-        groups.push({provider:display,provider_id:providerId,models});
+        groups.push({provider:display,provider_id:providerId,models:_sortModelEntries(models)});
       }
       return groups;
     };
@@ -3668,7 +3734,7 @@ async function populateModelDropdown(opts={}){
         og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
         if(errorKey) window._modelEndpointErrors[errorKey]=g.models_endpoint_error;
       }
-      for(const m of (Array.isArray(g.models)?g.models:[])){
+      for(const m of (Array.isArray(g.models)?_sortModelEntries(g.models):[])){
         const opt=document.createElement('option');
         opt.value=m.id;
         opt.textContent=m.label;
@@ -3805,6 +3871,7 @@ function _addLiveModelsToSelect(provider, models, sel){
     added++;
   }
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
+  if(typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, currentVal)
     : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
@@ -4127,9 +4194,15 @@ function _positionModelDropdown(){
 
 function _readModelOverflowData(group){
   if(!group||!group.dataset||!group.dataset.extraModels) return [];
+  const _sortOverflowModels=(items)=>{
+    if(typeof _sortModelPickerEntries==='function') return _sortModelPickerEntries(items);
+    return Array.from(items||[]).sort((a,b)=>String(a&&a.id||'').localeCompare(String(b&&b.id||''),undefined,{numeric:true,sensitivity:'base'}));
+  };
   try{
     const parsed=JSON.parse(group.dataset.extraModels);
-    return Array.isArray(parsed)?parsed.filter(m=>m&&m.id):[];
+    if(!Array.isArray(parsed)) return [];
+    const models=parsed.filter(m=>m&&m.id);
+    return _sortOverflowModels(models);
   }catch(_e){
     return [];
   }
@@ -4167,6 +4240,7 @@ function _appendOverflowOptionsToGroup(group, extraModels){
     group.dataset.extraModels='[]';
     group.dataset.overflowExpanded='1';
   }
+  if(typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(group);
   return appended;
 }
 
@@ -4316,6 +4390,26 @@ function renderModelDropdown(){
   const _groupMeta=new Map();
   const _groupOrder=[];
   const _badgeMap=window._configuredModelBadges||{};
+  const _sortPickerEntries=typeof _sortModelPickerEntries==='function'
+    ? _sortModelPickerEntries
+    : (items)=>Array.from(items||[]).sort((a,b)=>{
+        const valueOf=(entry)=>{
+          let value=String(entry&&entry.value!=null?entry.value:(entry&&entry.id!=null?entry.id:entry)||'');
+          const provider=String(entry&&entry.providerId||'').trim();
+          if(value.startsWith('@')){
+            const prefix=provider?`@${provider}:`:'';
+            if(prefix&&value.toLowerCase().startsWith(prefix.toLowerCase())) value=value.slice(prefix.length);
+            else if(value.includes(':')) value=value.slice(value.indexOf(':')+1);
+          }
+          return value;
+        };
+        const av=valueOf(a);
+        const bv=valueOf(b);
+        const rawA=String(a&&a.value!=null?a.value:(a&&a.id!=null?a.id:a)||'');
+        const rawB=String(b&&b.value!=null?b.value:(b&&b.id!=null?b.id:b)||'');
+        return av.localeCompare(bv,undefined,{numeric:true,sensitivity:'base'})
+          ||rawA.localeCompare(rawB,undefined,{numeric:true,sensitivity:'base'});
+      });
   const _ensureGroupMeta=(groupKey,groupLabel,providerId,optgroup)=>{
     if(!_groupMeta.has(groupKey)){
       _groupMeta.set(groupKey,{
@@ -4632,13 +4726,15 @@ function renderModelDropdown(){
         configuredBySemanticKey.set(semanticKey,candidate);
       }
     }
-    const configuredModels=[...configuredBySemanticKey.values()]
-      .sort((a,b)=>{
-        const configuredRankA=_configuredRank(a.badge);
-        const configuredRankB=_configuredRank(b.badge);
-        if(configuredRankA!==configuredRankB) return configuredRankA-configuredRankB;
-        return a.name.localeCompare(b.name);
-      });
+    // Semantic rank first (primary < fallback N < other configured), then
+    // alphabetical within the same rank.  A pure sort by model id would
+    // let a fallback float above the primary just because its id sorts
+    // earlier, and would strand `_configuredRank` as dead code.
+    const configuredModels=[...configuredBySemanticKey.values()].sort((a,b)=>{
+      const rankDiff=_configuredRank(a.badge)-_configuredRank(b.badge);
+      if(rankDiff!==0) return rankDiff;
+      return _compareModelPickerEntries(a,b);
+    });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
     const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
     const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
@@ -4686,13 +4782,13 @@ function renderModelDropdown(){
       const meta=_groupMeta.get(groupKey);
       if(!meta) continue;
       const hiddenCount=_effectiveHiddenCount(groupKey);
-      const groupRows=_modelData.filter(m=>
+      const groupRows=_sortPickerEntries(_modelData.filter(m=>
         m.groupKey===groupKey
         && !configuredIds.has(m.value)
         && !m.endpointErrorOnly
         && matches(m)
         && (!m.hiddenByDefault || !!term)
-      );
+      ));
       const shouldRenderHeading=!!meta.label&&(groupRows.length||meta.endpointErrorOnly||(!term&&hiddenCount));
       if(shouldRenderHeading){
         const heading=document.createElement('div');
@@ -4756,6 +4852,7 @@ function renderModelDropdown(){
             return b[1].length-a[1].length;
           });
           for(const [pfx,pfxRows] of sorted){
+            const orderedPrefixRows=_sortPickerEntries(pfxRows);
             if(pfxRows.length>=2){
               const subKey=`${groupKey}::${pfx}`;
               if(!(subKey in _groupOpenState)) _groupOpenState[subKey]=true;
@@ -4778,9 +4875,9 @@ function renderModelDropdown(){
               });
               wrapper.appendChild(subHeading);
               wrapper.appendChild(subWrapper);
-              for(const m of pfxRows) subWrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
+              for(const m of orderedPrefixRows) subWrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
             } else {
-              for(const m of pfxRows) wrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
+              for(const m of orderedPrefixRows) wrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
             }
           }
         } else {
