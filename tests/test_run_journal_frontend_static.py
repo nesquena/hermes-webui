@@ -605,13 +605,33 @@ def test_get_pending_session_message_keeps_deferred_repeat_prompt_by_behavior():
     assert result["isContextCompactionMessage"] is True
 
 
+def _function_extent(src: str, decl: str) -> str:
+    """Return the exact body of ``decl`` by brace matching.
+
+    Previously each block below was a fixed byte window (450/900/600). That is
+    brittle in both directions: a few added characters push the very lines under
+    test out of the window (a false pass is impossible, but a false FAILURE is),
+    while a shrinking function silently starts asserting against whatever code
+    follows it. Matching the real extent is exact -- it can neither truncate the
+    function nor leak into its neighbours.
+    """
+    start = src.index(decl)
+    cursor = src.index("{", start) + 1
+    depth = 1
+    while depth and cursor < len(src):
+        if src[cursor] == "{":
+            depth += 1
+        elif src[cursor] == "}":
+            depth -= 1
+        cursor += 1
+    assert depth == 0, "unbalanced braces scanning %s" % decl
+    return src[start:cursor]
+
+
 def test_live_tool_matching_uses_the_same_aliases_as_live_card_dedup():
-    live_tid_pos = MESSAGES_SRC.index("function _liveToolTid")
-    live_tid_block = MESSAGES_SRC[live_tid_pos : live_tid_pos + 450]
-    find_pos = MESSAGES_SRC.index("function _findPendingLiveToolCallIndex")
-    find_block = MESSAGES_SRC[find_pos : find_pos + 900]
-    upsert_pos = MESSAGES_SRC.index("function upsertLiveToolCall")
-    upsert_block = MESSAGES_SRC[upsert_pos : upsert_pos + 600]
+    live_tid_block = _function_extent(MESSAGES_SRC, "function _liveToolTid")
+    find_block = _function_extent(MESSAGES_SRC, "function _findPendingLiveToolCallIndex")
+    upsert_block = _function_extent(MESSAGES_SRC, "function upsertLiveToolCall")
 
     for key in ("tid", "id", "tool_call_id", "tool_use_id", "call_id"):
         assert key in live_tid_block

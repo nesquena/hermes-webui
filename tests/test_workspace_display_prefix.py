@@ -48,4 +48,9 @@ def test_user_render_uses_stripped_display_content_without_preempting_context_ca
     assert ("_renderUserFencedBlocks(displayContent)" in render_prefix or
             "_getCachedRender(displayContent, isUser)" in render_prefix)
     assert "const newRawText=String(displayContent).trim();" in render_prefix
-    assert "row.dataset.rawText=newRawText;" in render_prefix
+    # #7040: dataset.rawText is no longer a raw literal assignment -- it's
+    # bounded through _setBoundedRawText() so the full canonical payload
+    # never gets serialized into the DOM/HTML cache (only the bounded
+    # display projection does). The full text still lives in
+    # row._canonicalRawText, a non-serialized JS property.
+    assert "_setBoundedRawText(row, newRawText, 'user')" in render_prefix

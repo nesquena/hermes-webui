@@ -9,9 +9,10 @@ rebuilds a tool card from a persisted ``activity_scene_v1`` row through
 ``_anchorSceneToolCallFromRow`` and then ``buildToolCard``; this pins that the
 reconstructed card:
 
-  * produces a "Show more" expand button for output over the 800-char cap, with
-    the FULL output carried in ``data-full=`` (so the inline ``_toggleToolDiff``
-    expand handler can reveal it), and
+  * produces a "Show more" expand button for output over the 800-char cap,
+    with the FULL output recoverable by identity (durable
+    ``data-tool-disclosure-key`` -> ``_toolCallByDisclosureKey`` / the row's
+    ``_tcData`` expando) rather than embedded in the DOM as ``data-full=``, and
   * renders a ``diff-block`` for patch/edit snippets.
 
 #4622 was reported as a regression after the v0.51.547-.560 wave (which actually
@@ -144,9 +145,17 @@ class TestRestoredToolCardKeepsFullOutputAndExpand:
         assert "tool-card-more" in out["html"], (
             "a terminal output over the display cap must render a Show-more expand button"
         )
-        # The inline _toggleToolDiff handler reveals data-full; it must be
-        # present (it carries the full output, not the truncated preview).
-        assert "data-full=" in out["html"]
+        # The full output must never be serialized into the DOM as data-full
+        # (that re-embeds the complete payload, defeating the bounded
+        # display/cache contract this repo's later review explicitly
+        # required removing -- see test_tool_card_does_not_embed_full_snippet_in_dom
+        # in test_transcript_display_projection.py). Show-more instead
+        # recovers the canonical output by identity: the row must carry the
+        # durable disclosure key _toggleToolDiff resolves through
+        # _toolCallByDisclosureKey / the row's _tcData expando (see
+        # test_restore_recovers_full_snippet_via_disclosure_key in the same
+        # file for the recovery path itself).
+        assert "data-full=" not in out["html"]
 
     def test_restored_scene_terminal_card_stays_expandable(self, driver_path):
         """The reload/settled path reconstructs the card from a persisted scene

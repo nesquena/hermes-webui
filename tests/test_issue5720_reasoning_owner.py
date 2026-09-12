@@ -462,6 +462,12 @@ global._decorateTransparentEventRow=(row,opts)=>{
 global._rehydrateTransparentLiveRow=()=>{};
 global._sanitizeThinkingDisplayText=value=>String(value||'').trim();
 global._firstValidTimestampSeconds=()=>null;
+// #7040: _renderThinkingInto now bounds reasoning text through the large-
+// transcript display projection (same projection applied to assistant
+// prose/tool output). That projection has its own dedicated coverage
+// (test_transcript_display_projection.py) -- stub identity here so this
+// test keeps exercising reasoning-OWNERSHIP logic in isolation.
+global._projectTranscriptTextForDisplay=text=>String(text||'');
 
 eval(anchorsSrc);
 for(const name of [

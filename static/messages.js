@@ -2154,6 +2154,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
     if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
   }
+  // #7040 round 11/12: reconnect-replay idempotence is owned by DURABLE event
+  // identity (_startEventId/_completeEventId, persisted with the tool call and
+  // resolved in upsertLiveToolCall BEFORE any queue search) -- not by per-attach
+  // state. Round 10 kept per-attach claim WeakSets here; round 11 replaced that
+  // approach precisely because they are cleared on reattach, so a replayed event
+  // after a reload met an empty set and could consume a later pending occurrence.
+  // Nothing about tool-call identity needs clearing on attach now: a replayed
+  // event re-binds to the record already owning its event id, a genuinely new
+  // start always mints a fresh occurrence (it is never matched by signature),
+  // and a new completion only ever takes an UNFINISHED occurrence.
   const _priorInflightStreamId=String(INFLIGHT[activeSid].streamId||'');
   if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
     INFLIGHT[activeSid].lastRunJournalSeq=0;
@@ -3989,7 +3999,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _anchorProseIncrementalNode(key, text, options){
     if(!window.smd || !key || typeof _safeSmdRenderer!=='function') return null;
     const finalize=!!(options&&options.finalize);
-    const value=String(text||'');
+    const _rawValue=String(text||'');
+    // perf(#7040 round 10): project through an incremental opaque-run cache
+    // scoped to THIS anchor owner (key), mirroring the main live path. Round 9
+    // fixed _scheduleRender's fade/no-fade/reduced-motion/renderMd sinks but
+    // not the Anchor sink it also calls, so every repaint still re-scanned the
+    // full accumulated text -- O(n) per update, O(n^2) per stream.
+    // The cache is stored on the SAME per-key entry as the smd parser state, so
+    // it inherits that entry's exact lifecycle: created with it, dropped on the
+    // rewind/self-heal path, on LRU eviction, on error, and on cache clear. It
+    // therefore cannot outlive or desync from the parser it feeds. Finalization
+    // needs no special reset: project() full-rescans whenever streaming is
+    // false, and a rewind is caught by its own isAppendOnly() guard.
+    let _entry=_anchorProseSmdCache.get(key);
+    let _projCache=_entry&&_entry._projCache;
+    if(!_projCache){
+      if(typeof _createIncrementalOpaqueRunCache==='function') _projCache=_createIncrementalOpaqueRunCache();
+      else if(typeof window!=='undefined'&&typeof window._createIncrementalOpaqueRunCache==='function') _projCache=window._createIncrementalOpaqueRunCache();
+      if(_projCache&&_entry) _entry._projCache=_projCache;
+    }
+    const _projOpts={surface:'assistant', streaming:!finalize, liveCache:_projCache||undefined};
+    const value=typeof _projectTranscriptTextForDisplay==='function'?_projectTranscriptTextForDisplay(_rawValue,_projOpts):(typeof window!=='undefined'&&typeof window._projectTranscriptTextForDisplay==='function'?window._projectTranscriptTextForDisplay(_rawValue,_projOpts):_rawValue);
     const fade=typeof _shouldUseLiveProseFade==='function'&&_shouldUseLiveProseFade();
     let st;
     let _rewindPrevRendered='';
@@ -4031,6 +4061,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const baseRenderer=fade?_streamFadeRenderer(body):_safeSmdRenderer(body);
         const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
         st={node,parser:window.smd.parser(renderer),writtenText:'',fade};
+        // Same lifecycle as the parser state (see _projCache rationale above).
+        if(_projCache) st._projCache=_projCache;
         _smdBindParserIdentity(renderer,st.parser,body);
         _anchorProseSmdCache.set(key,st);
         // Bound memory across turns: keys embed the stream id, so stale entries
@@ -4058,7 +4090,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(finalize){
         _finalizeAnchorProseIncrementalNode(st);
       }
-      st.node.dataset.rawText=value;
+      try{ st.node._canonicalRawText=_rawValue; }catch(_){}
+      // Bounded display value for the serialized DOM/cache surface. Use the
+      // shared projector (not a blunt .slice) so this matches every other
+      // data-raw-text writer: a raw cut can land mid-opaque-run and omits the
+      // "abbreviated" notice. Canonical stays on the _canonicalRawText expando
+      // set immediately above. (The old catch branch re-ran the identical
+      // expression, so it could never actually recover from a throw.)
+      // The value computed above is ALREADY the projected/bounded display text
+      // for this repaint (same surface), so re-projecting it here was a second
+      // full-text pass per update on top of the one above -- the other half of
+      // the O(n^2) the round-10 review flagged. Reuse it directly. While
+      // streaming it is the
+      // withheld-open-run form, which is exactly what is on screen; on finalize
+      // it is projected with streaming:false and so is byte-identical to what
+      // the old second pass produced. Canonical stays on _canonicalRawText.
+      try{ st.node.dataset.rawText=String(value||''); }catch(_){}
       return st.node;
     }catch(_){
       if(st){
@@ -4474,6 +4521,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamingKatexTimer=null;
       if(assistantBody&&typeof renderKatexBlocks==='function') renderKatexBlocks(assistantBody,{streaming:true});
     },150);
+  }
+  // perf(#7040 round 9): one incremental opaque-run cache per attached
+  // stream (this closure runs once per attachLiveStream call), so repeated
+  // _projectLiveDisplayText calls across the life of ONE stream reuse prior
+  // scan progress instead of re-scanning the whole accumulated text every
+  // chunk. See _createIncrementalOpaqueRunCache in ui.js for the full
+  // correctness rationale (append-only reuse, fallback on any rewrite/desync
+  // or safe-image span).
+  let _liveOpaqueRunCache=null;
+  function _projectLiveDisplayText(raw){
+    // Always the actively-streaming path (not yet settled), so always pass
+    // streaming:true -- withholds a still-open trailing opaque run instead
+    // of emitting it raw now and retracting it into a bounded notice later
+    // once it crosses the threshold.
+    try{
+      if(!_liveOpaqueRunCache && typeof _createIncrementalOpaqueRunCache==='function') _liveOpaqueRunCache=_createIncrementalOpaqueRunCache();
+      if(!_liveOpaqueRunCache && typeof window!=='undefined' && typeof window._createIncrementalOpaqueRunCache==='function') _liveOpaqueRunCache=window._createIncrementalOpaqueRunCache();
+      const _projOpts={surface:'assistant', streaming:true, liveCache:_liveOpaqueRunCache||undefined};
+      if(typeof _projectTranscriptTextForDisplay==='function') return _projectTranscriptTextForDisplay(raw,_projOpts);
+      if(typeof window!=='undefined' && typeof window._projectTranscriptTextForDisplay==='function') return window._projectTranscriptTextForDisplay(raw,_projOpts);
+    }catch(_){}
+    return String(raw||'');
   }
   // Helper: feed new displayText delta to the smd parser.
   // Only feeds chars beyond what has already been written (_smdWrittenLen).
@@ -5206,8 +5275,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_streamFadeVisibleText.length>targetText.length) _streamFadeVisibleText=targetText;
     return {text:_streamFadeVisibleText,caughtUp:_streamFadeVisibleText===targetText,changed:true};
   }
-  function _renderStreamingFadeMarkdown(displayText){
+  function _renderStreamingFadeMarkdown(_rawDisplayText){
     if(!assistantBody) return true;
+    const displayText=_projectLiveDisplayText(_rawDisplayText);
+    try{
+      assistantBody._canonicalRawText=_rawDisplayText;
+      if(assistantRow) assistantRow._canonicalRawText=_rawDisplayText;
+      if(typeof window!=='undefined'){
+        window._lastLiveAssistantText=_rawDisplayText;
+        try{
+          if(!window._lastLiveAssistantTextBySession) window._lastLiveAssistantTextBySession=new Map();
+          if(typeof activeSid==='string'&&activeSid) window._lastLiveAssistantTextBySession.set(activeSid, _rawDisplayText);
+        }catch(_){}
+      }
+    }catch(_){}
     const next=_streamFadeNextText(displayText);
     if(!next.changed) return next.caughtUp;
     assistantBody.classList.add('stream-fade-active');
@@ -5291,20 +5372,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // so any future call-site cannot leak rendering into the wrong session.
     if(!_isActiveSession()) return;
     if(_renderPending) _cancelAnimationFramePendingStreamRender();
-    const displayText=segmentStart===0
+    const _rawDisplayText=segmentStart===0
       ? _parseStreamState().displayText
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
+    const displayText=_projectLiveDisplayText(_rawDisplayText);
+    try{
+      if(assistantBody) assistantBody._canonicalRawText=_rawDisplayText;
+      if(assistantRow) assistantRow._canonicalRawText=_rawDisplayText;
+      if(typeof window!=='undefined'){
+        window._lastLiveAssistantText=_rawDisplayText;
+        try{
+          if(!window._lastLiveAssistantTextBySession) window._lastLiveAssistantTextBySession=new Map();
+          if(typeof activeSid==='string'&&activeSid) window._lastLiveAssistantTextBySession.set(activeSid, _rawDisplayText);
+        }catch(_){}
+      }
+      if(assistantBody) try{ assistantBody.dataset.rawText=displayText; }catch(_){}
+      if(assistantRow) try{ assistantRow.dataset.rawText=displayText; }catch(_){}
+    }catch(_){}
     if(_smdParser){
       _smdWrite(displayText);
     } else if(window.smd){
-      // Parser was nulled out (e.g. by a prior segment end) but smd is
-      // available — recreate it on the existing element. Uses the non-fade
-      // renderer to match standard rendering, avoiding O(n²) innerHTML
-      // churn on long responses (#4704). Clear any content the renderMd()
-      // fallback already wrote first: _smdNewParser resets _smdWrittenText to
-      // '' but does NOT clear the element, so a following _smdWrite(displayText)
-      // would append the full accumulated segment ON TOP of the existing
-      // fallback render and duplicate the live text.
       assistantBody.innerHTML='';
       _smdNewParser(assistantBody, false);
       if(_smdParser) _smdWrite(displayText);
@@ -5313,7 +5400,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     } else {
       assistantBody.innerHTML=esc(displayText);
     }
-    if(!skipAnchorProcessProse) _upsertAnchorProcessProse(displayText,{sealed:force});
+    // Keep anchor storage canonical so the settled transcript retains the full
+    // value; only the live DOM is bounded.
+    if(!skipAnchorProcessProse) _upsertAnchorProcessProse(_rawDisplayText,{sealed:force});
     if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
   }
   function _resetAssistantSegment(){
@@ -5394,10 +5483,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return `${name}|${Number.isFinite(bid)?bid:0}|${Number.isFinite(seq)?seq:0}|${_stableStringify(args)}`;
   }
 
-  function _liveToolTid(d, activityBurstId, activitySegmentSeq){
+  function _liveToolTid(d, activityBurstId, activitySegmentSeq, occurrence){
     const explicit=String(d&&(d.tid||d.id||d.tool_call_id||d.tool_use_id||d.call_id)||'').trim();
     if(explicit) return explicit;
-    return `live-${activeSid}-${_hashString(_toolCallSignature(d,activityBurstId,activitySegmentSeq))}`;
+    // The signature alone is NOT unique: two ID-less calls with the same name
+    // and equal args in one burst/segment produce an identical signature and
+    // therefore an identical tid, aliasing two distinct occurrences onto one
+    // disclosure identity. The occurrence coordinate is minted once at
+    // ingestion and disambiguates them permanently.
+    const occPart=(occurrence===undefined||occurrence===null||occurrence==='')?'':`-o${occurrence}`;
+    return `live-${activeSid}-${_hashString(_toolCallSignature(d,activityBurstId,activitySegmentSeq))}${occPart}`;
   }
 
   function _coerceLiveToolCallSignature(tc, activityBurstId, activitySegmentSeq){
@@ -5407,8 +5502,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return tc&&tc._liveToolCallSignature||'';
   }
 
+  // #7040 round 10: `skip` excludes records already claimed by an event of this
+  // phase (see upsertLiveToolCall); `oldestFirst` gives deterministic queue
+  // pairing so completion #1 claims start #1. Kept above the declaration:
+  // test_run_journal_frontend_static reads a fixed-size window from the start
+  // of this function and the tid-alias list must stay inside it.
   function _findPendingLiveToolCallIndex(toolCalls, opts){
     if(!Array.isArray(toolCalls)) return -1;
+    const skip=opts&&opts.skip;
+    const _n=toolCalls.length;
+    const _f=!!(opts&&opts.oldestFirst);
     const wantedTid=opts&&opts.tid||'';
     const wantedName=String(opts&&opts.name||'');
     const wantedSig=opts&&opts.signature||'';
@@ -5419,7 +5522,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return !candidate||!candidate.name||!wantedName ? false : String(candidate.name)===wantedName;
     };
     if(wantedTid){
-      for(let i=toolCalls.length-1;i>=0;i--){
+      for(let _k=0,i=0;_k<_n&&((i=_f?_k:_n-1-_k)>=0);_k++){
         const candidate=toolCalls[i];
         if(!candidate||typeof candidate!=='object') continue;
         if(!allowDone&&candidate.done===true) continue;
@@ -5428,10 +5531,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     if(wantedSig){
-      for(let i=toolCalls.length-1;i>=0;i--){
+      for(let _k=0,i=0;_k<_n&&((i=_f?_k:_n-1-_k)>=0);_k++){
         const candidate=toolCalls[i];
         if(!candidate||typeof candidate!=='object') continue;
         if(!allowDone&&candidate.done===true) continue;
+        if(skip&&skip.has(candidate)) continue;
         const canonicalSig=_coerceLiveToolCallSignature(
           candidate,
           Number.isFinite(wantedBurst)?wantedBurst:activityBurstFallbackFromCandidate(candidate),
@@ -5440,10 +5544,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(canonicalSig&&canonicalSig===wantedSig) return i;
       }
     }
-    for(let i=toolCalls.length-1;i>=0;i--){
+    for(let _k=0,i=0;_k<_n&&((i=_f?_k:_n-1-_k)>=0);_k++){
       const candidate=toolCalls[i];
       if(!candidate||typeof candidate!=='object') continue;
       if(!allowDone&&candidate.done===true) continue;
+      if(skip&&skip.has(candidate)) continue;
       if(!matchName(candidate)) continue;
       const candidateSeq=Number(candidate.activitySegmentSeq);
       const candidateBid=Number(candidate.activityBurstId);
@@ -5480,7 +5585,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
   }
 
-  function upsertLiveToolCall(d, phase){
+  // #7040 round 10: one SSE event == one claim on one record.
+  //
+  // The producer used to look a record up by signature/name BEFORE the
+  // occurrence was minted, so a second equal ID-less start -- or a second
+  // completion-only event -- silently reused the first record and never got
+  // its own occurrence/tid. Simply never merging would break idempotence under
+  // the reconnect replay path (replay=1&after_seq=...), which can re-deliver
+  // events this stream already rendered.
+  //
+  // Claim sets separate the two cases without guessing: a record may be claimed
+  // at most once per phase per stream. A REPLAYED event finds its original
+  // record unclaimed (the sets live in this attachLiveStream closure and start
+  // empty on reattach) and re-binds to it; a genuinely NEW invocation finds the
+  // earlier record already claimed, skips it, and mints a fresh occurrence.
+  function upsertLiveToolCall(d, phase, rawEventId){
     if(!d||d.name==='clarify') return null;
     const name=String(d&&d.name||'').trim();
     if(!name) return null;
@@ -5495,30 +5614,57 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     const explicitTid=String(d&&d.tid||d&&d.id||d&&d.tool_call_id||d&&d.tool_use_id||d&&d.call_id||'').trim();
     const isComplete=phase==='complete';
+    const incomingEventId=String(rawEventId||(d&&d.event_id)||(d&&d.lastEventId)||(d&&d.last_event_id)||'').trim();
     let signature=_toolCallSignature(d,current.burstId,current.segmentSeq);
     let index=-1;
 
-    if(explicitTid){
+    // Durable event identity is the FIRST authority, before any queue search.
+    // A replayed event must re-bind to the exact record it already produced;
+    // if the unfinished search ran first, replaying call 0's completion would
+    // consume the still-pending equal call 1, and the later real completion
+    // for call 1 would then mint a spurious completion-only occurrence.
+    if(incomingEventId){
+      const _ownerField=isComplete?'_completeEventId':'_startEventId';
+      for(let _o=0;_o<inflight.toolCalls.length;_o++){
+        const _c=inflight.toolCalls[_o];
+        if(!_c||typeof _c!=='object') continue;
+        if(String(_c[_ownerField]||'')!==incomingEventId) continue;
+        if(explicitTid&&String(_c.tid||'')!==explicitTid) continue;
+        if(!explicitTid&&name&&_c.name&&String(_c.name)!==name) continue;
+        index=_o; break;
+      }
+    }
+
+    if(index<0&&explicitTid){
       index=_findPendingLiveToolCallIndex(inflight.toolCalls,{
         tid:explicitTid,
         allowDone:isComplete,
       });
     }
     if(index<0){
-      index=_findPendingLiveToolCallIndex(inflight.toolCalls,{
-        signature,
-        name,
-        activityBurstId:current.burstId,
-        activitySegmentSeq:current.segmentSeq,
-        allowDone:isComplete,
-      });
-    }
-    if(index<0 && isComplete && !explicitTid){
-      index=_findPendingLiveToolCallIndex(inflight.toolCalls,{
-        name,
-        activityBurstId:current.burstId,
-        allowDone:true,
-      });
+      if(!isComplete){
+        // A new start is always a new occurrence. Replay was already resolved
+        // above by durable event identity; never reuse by signature.
+      } else {
+        // No record owns this event id: this is a genuinely new completion, so
+        // take the OLDEST UNFINISHED matching occurrence (never a done record).
+        index=_findPendingLiveToolCallIndex(inflight.toolCalls,{
+          signature,
+          name,
+          activityBurstId:current.burstId,
+          activitySegmentSeq:current.segmentSeq,
+          allowDone:false,
+          oldestFirst:true,
+        });
+        if(index<0 && !explicitTid){
+          index=_findPendingLiveToolCallIndex(inflight.toolCalls,{
+            name,
+            activityBurstId:current.burstId,
+            allowDone:false,
+            oldestFirst:true,
+          });
+        }
+      }
     }
 
     let tc=null;
@@ -5527,13 +5673,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     if(!tc){
+      // TRUE ingestion for the live channel: this is the one place a live tool
+      // call first enters the client model. Mint the immutable occurrence
+      // coordinate here, once, and carry it — never recompute it from the
+      // current array order at render or recovery time.
+      const occurrence=inflight.toolCalls.length;
       tc={
         name,
         preview:String(d.preview||''),
         args:d.args||{},
         snippet:'',
         done:isComplete,
-        tid:explicitTid||_liveToolTid(d,current.burstId,current.segmentSeq),
+        _occurrence:occurrence,
+        _disclosureOrdinal:occurrence,
+        tid:explicitTid||_liveToolTid(d,current.burstId,current.segmentSeq,occurrence),
         activityBurstId:current.burstId,
         activitySegmentSeq:_coerceLiveToolCallSeq(current.segmentSeq),
       };
@@ -5588,13 +5741,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof d.is_error==='boolean') tc.is_error=d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
       if(tc.started_at===undefined||tc.started_at===null) tc.started_at=Date.now()/1000;
-      if(!tc.tid) tc.tid=explicitTid||_liveToolTid(d,tc.activityBurstId,tc.activitySegmentSeq);
+      if(!tc.tid) tc.tid=explicitTid||_liveToolTid(d,tc.activityBurstId,tc.activitySegmentSeq,tc._occurrence);
+      if(incomingEventId) tc._completeEventId=incomingEventId;
     } else {
       tc.done=false;
       tc.started_at=tc.started_at||Date.now()/1000;
+      if(incomingEventId) tc._startEventId=incomingEventId;
     }
 
     S.toolCalls=inflight.toolCalls;
+    // Persist the record mutation and the replay cursor as ONE coherent
+    // transition. _rememberRunJournalCursor() advances the cursor through the
+    // THROTTLED path, so a reload in that window used to restore this
+    // synchronously-saved completed record alongside a stale cursor — which is
+    // exactly what makes the server replay an already-applied event. Advancing
+    // the cursor from this same event before the synchronous save closes that
+    // window.
+    if(incomingEventId){
+      const _tail=incomingEventId.includes(':')
+        ? incomingEventId.slice(incomingEventId.lastIndexOf(':')+1)
+        : incomingEventId;
+      const _seq=Number.parseInt(_tail,10);
+      if(Number.isFinite(_seq)&&_seq>Number(inflight.lastRunJournalSeq||0)){
+        inflight.lastRunJournalSeq=_seq;
+        inflight.lastRunJournalEventId=incomingEventId;
+        if(typeof _lastRunJournalSeq==='number'&&_seq>_lastRunJournalSeq){
+          _lastRunJournalSeq=_seq;
+          _lastRunJournalEventId=incomingEventId;
+        }
+      }
+    }
     persistInflightState();
     return tc;
   }
@@ -5645,18 +5821,43 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const parsed=_cachedParsed&&_cachedParsedText===assistantText&&_cachedParsedReasoning===liveReasoningText ? _cachedParsed : _parseStreamState();
       _cachedParsed=null;
       _renderLiveThinking(parsed);
-      const displayText = segmentStart===0
+      const _rawDisplayText = segmentStart===0
         ? parsed.displayText                          // first segment: uses think-tag stripping
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      // #7040 round 9: EVERY live prose write must go through the one
+      // owner-scoped incremental projection state -- the fade path, the
+      // default/no-fade (and reduced-motion) smd path, the renderMd fallback,
+      // and Anchor prose. Writing raw text in any single one of them lets a
+      // growing opaque payload enter the live DOM in full and then retract to
+      // the settled abbreviation, which is the exact prefix-instability this
+      // PR exists to remove. _renderStreamingFadeMarkdown projects internally
+      // (it needs the raw text to record canonical state), so it still takes
+      // the raw value; every other sink takes the projected value.
+      const displayText = _projectLiveDisplayText(_rawDisplayText);
       let anchorProcessText=displayText;
       if(assistantBody){
         if(_shouldUseLiveProseFade()){
-          const caughtUp=_renderStreamingFadeMarkdown(displayText);
+          const caughtUp=_renderStreamingFadeMarkdown(_rawDisplayText);
           anchorProcessText=_streamFadeDomText||'';
           if(!caughtUp&&!_streamFinalized){
             setTimeout(()=>_scheduleRender(), 33);
           }
         } else {
+          // The fade and forced-flush paths both record canonical text so
+          // Copy/TTS/export can recover the unprojected value via
+          // _canonicalTextForRow. The no-fade/reduced-motion path did not, so
+          // a mid-stream Copy in that mode fell through to bounded DOM text.
+          try{
+            assistantBody._canonicalRawText=_rawDisplayText;
+            if(assistantRow) assistantRow._canonicalRawText=_rawDisplayText;
+            if(typeof window!=='undefined'){
+              window._lastLiveAssistantText=_rawDisplayText;
+              try{
+                if(!window._lastLiveAssistantTextBySession) window._lastLiveAssistantTextBySession=new Map();
+                if(typeof activeSid==='string'&&activeSid) window._lastLiveAssistantTextBySession.set(activeSid, _rawDisplayText);
+              }catch(_){}
+            }
+          }catch(_){}
           assistantBody.classList.remove('stream-fade-active');
           _resetStreamFadeState();
           if(!_smdParser&&window.smd){
@@ -5671,10 +5872,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // Fallback: smd not loaded yet, reconnect session, or smd unavailable — use renderMd
             // for every live segment. Without this, the first segment inserts raw
             // parsed.displayText and users see unformatted markdown until done.
-            const fallbackText = segmentStart===0
-              ? parsed.displayText
-              : _stripXmlToolCalls(assistantText.slice(segmentStart));
-            assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
+            // Uses the SAME projected value as the smd path (it used to
+            // re-derive the raw text here and write it unprojected).
+            assistantBody.innerHTML = renderMd ? renderMd(displayText) : esc(displayText);
           }
         }
         if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
@@ -5844,6 +6044,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const text=d.text||'';
       reasoningText += text;
       liveReasoningText += text;
+      try{
+        if(typeof window!=='undefined'){
+          window._lastLiveReasoningText=String(liveReasoningText||'');
+          try{
+            if(!window._lastLiveReasoningTextBySession) window._lastLiveReasoningTextBySession=new Map();
+            if(typeof activeSid==='string'&&activeSid) window._lastLiveReasoningTextBySession.set(activeSid, String(liveReasoningText||''));
+          }catch(_){}
+        }
+      }catch(_){}
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
@@ -5866,7 +6075,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);
-      const tc=upsertLiveToolCall(d,'start');
+      const tc=upsertLiveToolCall(d,'start', e&&e.lastEventId);
       if(!tc) return;
       const pendingDisplayTextBeforeTool=segmentStart===0
         ? (_parseStreamState().displayText||'')
@@ -5902,7 +6111,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);
-      const tc=upsertLiveToolCall(d,'complete');
+      const tc=upsertLiveToolCall(d,'complete', e&&e.lastEventId);
       if(!tc) return;
       tc.is_error=!!d.is_error;
       const pendingDisplayTextBeforeComplete=segmentStart===0
@@ -6156,6 +6365,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         },_doneEvent);
         _scheduleAnchorRegistryCleanup();
         _clearAnchorProseIncrementalNode();
+        try{
+          if(typeof window!=='undefined'){
+            if(window._lastLiveAssistantTextBySession) window._lastLiveAssistantTextBySession.delete(activeSid);
+            if(window._lastLiveReasoningTextBySession) window._lastLiveReasoningTextBySession.delete(activeSid);
+          }
+        }catch(_){}
         const isActiveSession=_isSessionCurrentPane(activeSid);
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
         const completedSession=d.session||{session_id:activeSid};

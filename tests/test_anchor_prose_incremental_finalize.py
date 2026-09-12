@@ -216,6 +216,11 @@ function createHarness(options={}){
   global.enhanceMarkdownTables = ()=>{ calls.enhance += 1; };
   global.renderMd = (text)=>String(text || '');
   global.esc = (value)=>String(value || '');
+  // #7040: anchor scene nodes now bound their canonical text through
+  // _setBoundedRawText() instead of a direct dataset.rawText= assignment.
+  // Covered on its own in test_workspace_display_prefix.py -- stub it here
+  // since this test exercises the incremental-finalize/parser-fallback path.
+  global._setBoundedRawText = (node, text)=>{ if (node) node.dataset.rawText = String(text || ''); };
 
   vm.runInThisContext(anchorSrc, {filename:'assistant_turn_anchors.js'});
   if(!window.HermesAssistantTurnAnchors){

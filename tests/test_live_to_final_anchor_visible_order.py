@@ -303,7 +303,10 @@ def test_process_prose_is_an_anchor_scene_row_not_a_dom_mirror():
     schedule = _function_body(MESSAGES_JS, "_scheduleRender")
     flush = _function_body(MESSAGES_JS, "_flushPendingSegmentRender")
 
-    assert "_upsertAnchorProcessProse(displayText,{sealed:force})" in flush
+    # #7040: the anchor registry stores canonical _rawDisplayText; bounding is
+    # applied downstream at render time (_anchorProseIncrementalNode() via
+    # _projectTranscriptTextForDisplay()), not before the registry write.
+    assert "_upsertAnchorProcessProse(_rawDisplayText,{sealed:force})" in flush
     assert "function _upsertAnchorProcessProse" in MESSAGES_JS
     assert "source_event_type:sourceEventType" in _function_body(MESSAGES_JS, "_applyToAnchor")
     assert "let anchorProcessText=displayText" in schedule

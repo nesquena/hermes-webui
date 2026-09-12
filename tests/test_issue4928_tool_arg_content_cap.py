@@ -148,6 +148,11 @@ function grab(name){
 }
 global.esc = (s) => String(s);   // identity so we can scan the raw value
 global._decodeToolLabelEntities = (s) => s;
+// #7040: tool-detail rendering now bounds oversized opaque payloads through
+// the large-transcript display projection (separate concern from the #4928
+// secret-redaction this test checks) -- stub identity so redaction behavior
+// is what's actually under test.
+global._projectTranscriptTextForDisplay = (value) => String(value || '');
 eval(grab('_redactToolTargetLabel'));
 eval(grab('_transparentToolDetailHtml'));
 let buf = '';

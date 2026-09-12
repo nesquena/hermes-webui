@@ -406,13 +406,24 @@ class TestScheduleRenderSmdPath:
     def test_fallback_formats_first_segment_with_render_md(self):
         fn = self.get_fn()
         assert fn, "_scheduleRender not found"
-        assert "const fallbackText" in fn, (
-            "_scheduleRender fallback should choose the visible segment text once"
+        # The segment text is now chosen ONCE as _rawDisplayText and projected
+        # into `displayText` (#7040 round 9: every live prose sink must receive
+        # the projected value, so the renderMd fallback no longer re-derives its
+        # own raw `fallbackText`). The guarantee this test exists for is
+        # unchanged and still asserted below: the fallback must FORMAT the
+        # segment with renderMd rather than insert raw parsed.displayText.
+        assert "const _rawDisplayText = segmentStart===0" in fn, (
+            "_scheduleRender should choose the visible segment text once"
         )
-        assert "renderMd(fallbackText)" in fn, (
+        assert "renderMd(displayText)" in fn, (
             "When smd is unavailable, the first live segment must still be "
             "formatted with renderMd instead of inserting raw parsed.displayText"
         )
+        # Negative guarantees preserved (and tightened): no raw insertion, and
+        # the fallback must not bypass the projector.
+        assert "renderMd(parsed.displayText)" not in fn
+        assert "renderMd(_rawDisplayText)" not in fn
+        assert "esc(_rawDisplayText)" not in fn
 
     def test_smd_new_parser_called_lazily(self):
         fn = self.get_fn()

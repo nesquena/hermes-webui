@@ -1750,7 +1750,17 @@ window.renderTranscript=function(container, messages, opts){
     const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
     if(!rows.length){ _startListening(); return; }
     const last=rows[rows.length-1];
-    const rawText=last.dataset.rawText||'';
+    // #7040 round 9: dataset.rawText is the BOUNDED display value (it is
+    // serialized into the session HTML cache, so it must stay bounded).
+    // Voice mode is a canonical-data consumer like Copy/export, so it must
+    // recover the full text by identity via _canonicalTextForRow -- the same
+    // helper ui.js's own _speakResponse already uses for auto-read TTS.
+    // Falls back to the bounded attribute only if ui.js has not loaded yet.
+    const rawText=(typeof _canonicalTextForRow==='function'
+      ? _canonicalTextForRow(last)
+      : (typeof window!=='undefined'&&typeof window._canonicalTextForRow==='function'
+        ? window._canonicalTextForRow(last)
+        : (last.dataset.rawText||'')))||'';
     if(!rawText.trim()){ _startListening(); return; }
 
     // Strip for TTS (reuse existing helper if available)

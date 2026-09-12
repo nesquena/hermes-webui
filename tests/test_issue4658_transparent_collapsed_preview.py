@@ -40,6 +40,7 @@ _FN_NAMES = [
     '_toolDisplayName', '_toolActionKind', '_toolKindIcon', '_toolPathBasename',
     '_decodeToolLabelEntities', '_redactToolTargetLabel', '_shortToolLabel', '_toolI18n',
     '_toolTargetLabel', '_toolReadRangeLabel', '_toolVisibleTargetLabel', '_toolCommandTitle', '_toolQueryTitle',
+    '_toolFullCommandLabel',
     '_toolActionLabelText', '_toolArgPreviewValue', '_toolArgPreviewKeyIsHidden',
     '_formatToolArgPreview', '_toolResultOneLiner', '_toolCardPreviewText', '_toolCardAllowsDetail',
     '_toolDetailLeadLabel', '_toolDetailLeadText', '_toolShortName', '_transparentEventPreview',
@@ -47,6 +48,24 @@ _FN_NAMES = [
     '_isMemorySave', '_isSkillUpdate', '_tcAction',
     'buildToolCard', '_decorateTransparentEventRow',
 ]
+
+
+# Characters that, immediately before a `/`, mean it's the START of a
+# division expression (a/b) rather than a regex literal (/pattern/flags).
+# Division only ever follows something that can hold a VALUE: an identifier
+# char, a digit, or a closing `)`/`]`. Everything else -- `(`, `,`, `=`,
+# operators, `return`, start-of-file, etc. -- means the next `/` opens a
+# regex literal instead. This matters here because this repo's redaction
+# helpers are regex-heavy and those regexes routinely contain a LITERAL
+# quote character (e.g. `'[^']*'` inside a `/.../ ` pattern) -- without
+# regex-awareness this scanner mistakes that quote for the start of a real
+# string, and the resulting depth-counting can run for tens of thousands of
+# characters past the function's real end before the fake "string" happens
+# to close again on some later coincidental quote, silently extracting the
+# wrong (much larger) span. Whether that coincidence still lines up back to
+# the correct final `}` depends on unrelated quote counts anywhere in
+# between -- fragile in a way an edit anywhere else in the file can flip.
+_DIVISION_PRECEDING = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$)]")
 
 
 def _function_source(src: str, name: str) -> str:
@@ -61,6 +80,9 @@ def _function_source(src: str, name: str) -> str:
     escaped = False
     in_line_comment = False
     in_block_comment = False
+    in_regex = False
+    in_char_class = False
+    last_significant = "{"
     while i < len(src) and depth:
         ch = src[i]
         nxt = src[i + 1] if i + 1 < len(src) else ""
@@ -74,6 +96,22 @@ def _function_source(src: str, name: str) -> str:
                 in_block_comment = False
                 i += 2
                 continue
+            i += 1
+            continue
+        if in_regex:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == "[":
+                in_char_class = True
+            elif ch == "]":
+                in_char_class = False
+            elif ch == "/" and not in_char_class:
+                in_regex = False
+                # consume trailing flag letters (g, i, m, s, u, y, d, v)
+                while i + 1 < len(src) and src[i + 1].isalpha():
+                    i += 1
             i += 1
             continue
         if in_string:
@@ -93,6 +131,12 @@ def _function_source(src: str, name: str) -> str:
             in_block_comment = True
             i += 2
             continue
+        if ch == "/" and last_significant not in _DIVISION_PRECEDING:
+            in_regex = True
+            in_char_class = False
+            escaped = False
+            i += 1
+            continue
         if ch in "'\"`":
             in_string = ch
             i += 1
@@ -101,6 +145,8 @@ def _function_source(src: str, name: str) -> str:
             depth += 1
         elif ch == "}":
             depth -= 1
+        if not ch.isspace():
+            last_significant = ch
         i += 1
     assert depth == 0, f"{name}() body did not close"
     return src[match.start():i]

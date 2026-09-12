@@ -6,6 +6,32 @@
 // against old servers (Phase 1 may not yet be deployed everywhere).
 // See api/todo_state.py for the wire contract.
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
+// ── Tool-call disclosure identity: the settled-channel ingestion seam ────────
+// Mint the ID-less disclosure ordinal the moment a transcript ENTERS the
+// client model, not when it is rendered or recovered. Every server-delivered
+// transcript arrives through an assignment to S.messages, from 25+ call sites
+// across boot/commands/messages/outline/panels/sessions/ui; stamping at each
+// one is the incomplete sweep that earlier rounds kept re-introducing, so the
+// accessor below is the single choke point that cannot be bypassed.
+//
+// In-place S.messages.push() sites (local /command echoes and optimistic user
+// rows) do not pass through here, which is correct: those construct plain
+// text messages and never carry tool calls.
+(function _installMessagesIngestionSeam(){
+  let _messagesBacking=S.messages;
+  Object.defineProperty(S,'messages',{
+    get(){ return _messagesBacking; },
+    set(next){
+      _messagesBacking=next;
+      // Never let a stamping fault break transcript assignment.
+      try{
+        if(typeof _stampToolCallOrdinals==='function') _stampToolCallOrdinals(next);
+      }catch(_){}
+    },
+    enumerable:true,
+    configurable:true,
+  });
+})();
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -1517,12 +1543,18 @@ function _renderCacheKey(text, isUser){
   return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
 }
 function _getCachedRender(text, isUser){
-  const key = _renderCacheKey(text, isUser);
+  // Key on canonical text so projection cost is paid only on cache miss.
+  const key = _renderCacheKey(String(text||''), isUser);
   const hit = _renderCache.get(key);
   if(hit !== undefined) return hit;
+  // Project only at the final display/cache seam. Callers retain canonical
+  // transcript text for context cards, persistence, and restoration paths.
+  const displayText=typeof _projectTranscriptTextForDisplay==='function'
+    ? _projectTranscriptTextForDisplay(text,{surface:isUser?'user':'assistant'})
+    : String(text||'');
   const rendered = isUser
-    ? (window._renderUserMarkdown ? renderMd(text) : _renderUserFencedBlocks(text))
-    : renderMd(_stripXmlToolCallsDisplay(String(text)));
+    ? (window._renderUserMarkdown ? renderMd(displayText) : _renderUserFencedBlocks(displayText))
+    : renderMd(_stripXmlToolCallsDisplay(displayText));
   if(_renderCache.size > _renderCacheMax) _renderCache.clear();
   _renderCache.set(key, rendered);
   return rendered;
@@ -2713,6 +2745,323 @@ function _mediaPlayerHtml(kind, src, name, extra=''){
 const _DATA_IMAGE_RE=/^data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*$/i;
 const _DATA_IMAGE_SVG_RE=/^data:image\/svg\+xml;base64,[a-z0-9+/=]+$/i;
 const _DATA_IMAGE_MAX_LEN=2*1024*1024;
+const _TRANSCRIPT_DISPLAY_OPAQUE_RUN_LIMIT=60000;
+const _TRANSCRIPT_DISPLAY_OPAQUE_HEAD=2048;
+const _TRANSCRIPT_DISPLAY_NOTICE='[opaque payload abbreviated for display]';
+const _TRANSCRIPT_DISPLAY_OPAQUE_DATA_RE=/data:(?:application|image)\/[a-z0-9.+-]+(?:;[a-z0-9=.+-]+)*;base64,[a-z0-9+/=\r\n]+/ig;
+function _isB64Code(code){ return (code>=65&&code<=90)||(code>=97&&code<=122)||(code>=48&&code<=57)||code===43||code===47||code===61||code===10||code===13; }
+function _opaqueRunSpans(chunk){
+  // One ordered, non-overlapping list of runs to bound: data-URI-shaped runs
+  // found by regex, plus generic base64-charset runs filling the gaps
+  // between them. Mirrors the safe-image span-merge shape in
+  // _projectTranscriptTextForDisplay so both scanners reason about "spans
+  // over the same text" the same way.
+  const spans=[];
+  _TRANSCRIPT_DISPLAY_OPAQUE_DATA_RE.lastIndex=0;
+  let m;
+  while((m=_TRANSCRIPT_DISPLAY_OPAQUE_DATA_RE.exec(chunk))!==null){
+    spans.push({start:m.index, end:m.index+m[0].length, kind:'data-uri'});
+    if(m[0].length===0) _TRANSCRIPT_DISPLAY_OPAQUE_DATA_RE.lastIndex++;
+  }
+  spans.sort((a,b)=>a.start-b.start);
+  const withGaps=[];
+  let pos=0;
+  for(const span of spans){
+    if(span.start>pos) _scanBase64Gap(chunk, pos, span.start, withGaps);
+    withGaps.push(span);
+    pos=span.end;
+  }
+  if(pos<chunk.length) _scanBase64Gap(chunk, pos, chunk.length, withGaps);
+  return withGaps;
+}
+function _scanBase64Gap(chunk, from, to, out){
+  // A run may cross single newlines (real base64 is often line-wrapped,
+  // e.g. classic 76-char MIME chunking) so those still merge into one run.
+  // A BLANK line (two consecutive newlines) is a hard stop instead: genuine
+  // base64 encodings never contain one, but it's exactly how prose marks a
+  // paragraph break, so without this a paragraph of ordinary alphanumeric
+  // prose immediately after a payload gets silently absorbed into the same
+  // run and can push it over the bound threshold, corrupting real text into
+  // "[opaque payload abbreviated]".
+  let i=from;
+  while(i<to){
+    if(!_isB64Code(chunk.charCodeAt(i))){ i++; continue; }
+    let j=i+1;
+    // Seed from whether the run's OWN first char is already a newline --
+    // otherwise a run starting with "\n\n" (e.g. right after a paragraph
+    // break, before any real payload chars) never counts that leading pair
+    // as consecutive, and the blank-line stop below never fires for it.
+    let sawNewline=(chunk.charCodeAt(i)===10||chunk.charCodeAt(i)===13);
+    while(j<to){
+      const cj=chunk.charCodeAt(j);
+      if(!_isB64Code(cj)) break;
+      const isNewline=cj===10||cj===13;
+      if(isNewline&&sawNewline) break; // second consecutive newline: blank line, stop before it
+      sawNewline=isNewline;
+      j++;
+    }
+    // Trim a single trailing newline run left dangling at the stop point
+    // (e.g. "...==\n\n" -- the run should end at "==", not swallow the
+    // blank line itself into either the run or the next scan position).
+    let end=j;
+    while(end>i && (chunk.charCodeAt(end-1)===10||chunk.charCodeAt(end-1)===13)) end--;
+    if(end>i) out.push({start:i, end, kind:'base64'});
+    i=j>i?j:i+1;
+  }
+}
+function _boundOpaqueRuns(chunk, streaming){
+  const limit=_TRANSCRIPT_DISPLAY_OPAQUE_RUN_LIMIT;
+  const head=_TRANSCRIPT_DISPLAY_OPAQUE_HEAD;
+  const notice=_TRANSCRIPT_DISPLAY_NOTICE;
+  if(!chunk) return '';
+  if(!streaming && chunk.length<=limit) return chunk;
+  const spans=_opaqueRunSpans(chunk);
+  let cutAt=chunk.length;
+  if(streaming && spans.length){
+    const last=spans[spans.length-1];
+    if(last.end===chunk.length){
+      // Still-open run (touches the end of the currently-available live
+      // text): its final length -- and therefore whether it'll end up
+      // bounded or shown raw -- isn't known yet, so withhold it entirely
+      // rather than guess now and possibly retract that guess later.
+      // Withholding applies regardless of the run's current size: showing
+      // even a short one raw now, then hiding it once it grows past some
+      // threshold, is exactly the same kind of retraction as the original
+      // 60,000-byte-boundary bug, just moved to a smaller boundary. Once a
+      // delimiter closes the run (or the stream settles), it's decided once
+      // and permanently, which is what makes this prefix-stable. In
+      // practice this holds back at most the last few characters of an
+      // in-progress word -- ordinary prose has a space every few
+      // characters, so the visible lag is negligible.
+      cutAt=last.start;
+      spans.pop();
+    }
+  }
+  let out='';
+  let pos=0;
+  for(const span of spans){
+    if(span.start>=cutAt) break;
+    if(span.start>pos) out+=chunk.slice(pos, span.start);
+    const runLen=span.end-span.start;
+    out+= runLen>limit ? chunk.slice(span.start, span.start+head)+'\n\n'+notice : chunk.slice(span.start, span.end);
+    pos=span.end;
+  }
+  if(pos<cutAt) out+=chunk.slice(pos, cutAt);
+  return out;
+}
+
+// perf(#7040 round 9): _boundOpaqueRuns/_opaqueRunSpans re-scan the ENTIRE
+// accumulated text on every call. Fine for a one-shot (settled) render, but
+// _projectLiveDisplayText in messages.js calls _projectTranscriptTextForDisplay
+// once per streamed chunk with the FULL text-so-far, making that O(total)
+// scan run again on every update -- O(n) per call, O(n^2) cumulative over a
+// long stream.
+//
+// This factory returns a per-stream cache object whose .project() only
+// processes bytes appended since the last call, reusing the already-decided
+// (closed) portion of its previous output instead of rebuilding it. The
+// "withhold an open run until closed, decide once, never retract" contract
+// from _boundOpaqueRuns is preserved exactly: re-entry always starts at the
+// last-known open run's own start (never a blind byte offset), so growing or
+// closing that run gets recomputed identically to what a full rescan would
+// find -- nothing before a run's start ever affects that run's own
+// boundaries, so this cannot diverge from the non-incremental result.
+//
+// Correctness safety valve: falls back to a full, non-cached _boundOpaqueRuns
+// call whenever the new text isn't a strict extension of the previous call's
+// text (a genuine rewrite -- e.g. the smd parser's own tool-call-stripping
+// self-heal can rewind visible text) or whenever the caller reports any safe
+// data-image span in the text this call (a still-growing data:image URI can
+// retroactively turn a previously-plain "gap" into an image once it
+// completes, which the append-only assumption below cannot safely absorb;
+// data:image mid-stream is rare enough that falling back there doesn't
+// undermine the fix for the dominant plain-text/tool-output case).
+function _createIncrementalOpaqueRunCache(){
+  let rawSnapshotLen=0;
+  let tailSample='';           // last _TAIL_SAMPLE chars of the consumed prefix
+  let boundedSoFar='';
+  let openSpan=null;           // {start, kind}, absolute index -- or null
+  let imageScanFrom=0;         // prefix proven free of any "data:image" literal
+  const _TAIL_SAMPLE=64;
+  // "data:image" is 10 chars; a lookback of 32 comfortably covers a literal
+  // split across a chunk boundary.
+  const _IMG_LOOKBACK=32;
+  // A pending "data:...;base64," literal with zero payload chars yet is
+  // invisible to _TRANSCRIPT_DISPLAY_OPAQUE_DATA_RE (its payload group needs
+  // >=1 char), so the next chunk can make a match appear that starts BEFORE
+  // our re-entry point. Longest realistic such literal is well under 200.
+  const _DATA_URI_LOOKBACK=200;
+  function _snap(raw){
+    rawSnapshotLen=raw.length;
+    tailSample=raw.length<=_TAIL_SAMPLE?raw:raw.slice(raw.length-_TAIL_SAMPLE);
+  }
+  function _fullRescan(raw, streaming){
+    const out=_boundOpaqueRuns(raw, streaming);
+    _snap(raw); boundedSoFar=out;
+    if(!streaming){ openSpan=null; return out; }
+    const spans=_opaqueRunSpans(raw);
+    const last=spans[spans.length-1];
+    openSpan=(last&&last.end===raw.length) ? {start:last.start, kind:last.kind} : null;
+    return out;
+  }
+  // Extend an already-open run WITHOUT rescanning it from its origin. Both
+  // run kinds are charset runs over _isB64Code (the data-uri payload class
+  // /[a-z0-9+/=\r\n]/i is exactly that set), and neither can contain ':' --
+  // so no data-uri literal can hide inside an open run, and nothing before a
+  // run's own start affects where it ends. That makes extension provably
+  // identical to what a full rescan would compute, at O(appended) instead of
+  // O(run length) per call.
+  function _extendOpenRun(raw, span, fromIdx){
+    let j=Math.max(span.start+1, fromIdx);
+    if(j>raw.length) j=raw.length;
+    if(span.kind==='data-uri'){
+      // The regex payload class has no blank-line rule: "\n\n" stays inside.
+      while(j<raw.length && _isB64Code(raw.charCodeAt(j))) j++;
+      return {end:j, resume:j, open:j===raw.length};
+    }
+    // base64 gap run: mirror _scanBase64Gap's blank-line stop + trailing
+    // newline trim exactly. Seed sawNewline from the previous char, which is
+    // guaranteed to be inside the run.
+    let sawNewline=(raw.charCodeAt(j-1)===10||raw.charCodeAt(j-1)===13);
+    while(j<raw.length){
+      const cj=raw.charCodeAt(j);
+      if(!_isB64Code(cj)) break;
+      const isNewline=(cj===10||cj===13);
+      if(isNewline&&sawNewline) break;
+      sawNewline=isNewline;
+      j++;
+    }
+    // _scanBase64Gap trims trailing newlines off the SPAN but then advances
+    // its cursor to the untrimmed j ("i=j"), so those trimmed newlines are
+    // emitted as ordinary gap text and can never start a fresh run. Resuming
+    // at the trimmed end instead would let them seed one, diverging from a
+    // full rescan -- so report both positions.
+    let end=j;
+    while(end>span.start && (raw.charCodeAt(end-1)===10||raw.charCodeAt(end-1)===13)) end--;
+    return {end, resume:j, open:end===raw.length};
+  }
+  function _boundedRunText(raw, start, end){
+    const runLen=end-start;
+    return runLen>_TRANSCRIPT_DISPLAY_OPAQUE_RUN_LIMIT
+      ? raw.slice(start, start+_TRANSCRIPT_DISPLAY_OPAQUE_HEAD)+'\n\n'+_TRANSCRIPT_DISPLAY_NOTICE
+      : raw.slice(start, end);
+  }
+  return {
+    reset(){ rawSnapshotLen=0; tailSample=''; boundedSoFar=''; openSpan=null; imageScanFrom=0; },
+    // Incremental answer to "does this text contain any safe data-image
+    // candidate?" so the wrapper does not have to run its full-text
+    // _candidateScanRe on every streamed chunk (that scan alone was O(n) per
+    // call => O(n^2) cumulative, independent of this cache). A candidate can
+    // only begin at a "data:image" literal, so a prefix proven free of that
+    // literal can never sprout one; we re-check only the appended bytes plus
+    // a small boundary lookback.
+    mayContainDataImage(raw){
+      raw=String(raw||'');
+      if(raw.length<imageScanFrom || !this.isAppendOnly(raw)){ imageScanFrom=0; }
+      const from=Math.max(0, Math.min(imageScanFrom, raw.length)-_IMG_LOOKBACK);
+      const idx=raw.slice(from).toLowerCase().indexOf('data:image');
+      if(idx!==-1) return true;
+      imageScanFrom=raw.length;
+      return false;
+    },
+    // Cheap append-only check. A full raw.startsWith(rawSnapshot) is O(n) per
+    // call, which is one of the very costs this cache exists to remove. This
+    // cache is owner-scoped (one instance per attachLiveStream closure) and is
+    // only ever fed that one stream's own monotonically accumulating buffer,
+    // so the realistic non-append shape is a REWIND (the smd parser's
+    // tool-call-stripping self-heal), which the length test catches outright.
+    // The tail sample additionally pins the exact bytes at the previous
+    // boundary. Worst case on a miss is cosmetic and self-correcting: the
+    // settled (non-streaming) render re-projects from scratch.
+    isAppendOnly(raw){
+      if(raw.length<rawSnapshotLen) return false;
+      if(!rawSnapshotLen) return true;
+      const k=Math.min(_TAIL_SAMPLE, rawSnapshotLen);
+      return raw.slice(rawSnapshotLen-k, rawSnapshotLen)===tailSample;
+    },
+    project(raw, streaming, hasSafeImageSpans){
+      raw=String(raw||'');
+      if(hasSafeImageSpans){ this.reset(); return _boundOpaqueRuns(raw, streaming); }
+      if(!this.isAppendOnly(raw)) return _fullRescan(raw, streaming);
+      if(!streaming) return _fullRescan(raw, streaming);
+      if(raw.length===rawSnapshotLen) return boundedSoFar;
+
+      // ── 0. Pending-data-uri guard, BEFORE any incremental reuse. ─────────
+      // A "data:...;base64," literal with no payload chars yet is invisible to
+      // _TRANSCRIPT_DISPLAY_OPAQUE_DATA_RE, so the next chunk can complete a
+      // match that starts BEHIND our re-entry point -- and can even RECLASSIFY
+      // an already-open base64 run (e.g. an open run "\nd" becomes gap "\n" +
+      // a data-uri span starting at the "d"). Neither the tail scan nor the
+      // open-run extension below can absorb that, so any "data:" at or near
+      // the boundary forces one full, correct rescan. Bounded to the appended
+      // bytes plus a small lookback (the old code sliced+lowercased from the
+      // open run's ORIGIN to end-of-string, which was itself O(n) per call).
+      {
+        const guardFrom=Math.max(0, rawSnapshotLen-_DATA_URI_LOOKBACK);
+        if(raw.slice(guardFrom).toLowerCase().indexOf('data:')!==-1){
+          return _fullRescan(raw, streaming);
+        }
+      }
+
+      // ── 1. An already-open run: extend it in place. ──────────────────────
+      const _hadOpenSpan=!!openSpan;
+      if(openSpan){
+        const ext=_extendOpenRun(raw, openSpan, rawSnapshotLen);
+        if(ext.open){
+          // Still open => still withheld => output is unchanged.
+          _snap(raw);
+          return boundedSoFar;
+        }
+        // Closed: decide it once, permanently, then continue after it.
+        boundedSoFar+=_boundedRunText(raw, openSpan.start, ext.end);
+        // Newlines trimmed off the span end are plain gap text (see
+        // _extendOpenRun) -- emit them, then resume where _scanBase64Gap would.
+        if(ext.resume>ext.end) boundedSoFar+=raw.slice(ext.end, ext.resume);
+        openSpan=null;
+        rawSnapshotLen=ext.resume;
+      }
+
+      // ── 2. Scan only the un-consumed tail. ───────────────────────────────
+      let reentryFrom=rawSnapshotLen;
+      if(!_hadOpenSpan){
+        // A lone trailing newline that _scanBase64Gap trimmed to nothing is
+        // not a durable verdict: once more text follows, that newline can
+        // become the start of a fresh run.
+        let backN=0;
+        while(reentryFrom-backN>0){
+          const c=raw.charCodeAt(reentryFrom-backN-1);
+          if(c!==10&&c!==13) break;
+          backN++;
+        }
+        if(backN && boundedSoFar.length>=backN){ reentryFrom-=backN; boundedSoFar=boundedSoFar.slice(0, boundedSoFar.length-backN); }
+      }
+      const newSpans=_opaqueRunSpans(raw.slice(reentryFrom))
+        .map(s=>({start:s.start+reentryFrom, end:s.end+reentryFrom, kind:s.kind}));
+      let cutAt=raw.length;
+      let nextOpenSpan=null;
+      if(newSpans.length){
+        const last=newSpans[newSpans.length-1];
+        if(last.end===raw.length){
+          cutAt=last.start;
+          nextOpenSpan={start:last.start, kind:last.kind};
+        }
+      }
+      let delta='';
+      let pos=reentryFrom;
+      for(const span of newSpans){
+        if(span.start>=cutAt) break;
+        if(span.start>pos) delta+=raw.slice(pos, span.start);
+        delta+=_boundedRunText(raw, span.start, span.end);
+        pos=span.end;
+      }
+      if(pos<cutAt) delta+=raw.slice(pos, cutAt);
+      boundedSoFar+=delta;
+      _snap(raw);
+      openSpan=nextOpenSpan;
+      return boundedSoFar;
+    },
+  };
+}
 
 // The streaming renderer calls this ui-owned predicate too. Keep the dangerous
 // SVG form base64-only: URL-encoded XML is a document-shaped payload, not a
@@ -2721,6 +3070,75 @@ function _isSafeDataImageUri(ref){
   const value=String(ref||'');
   return value.length<=_DATA_IMAGE_MAX_LEN
     && (_DATA_IMAGE_RE.test(value)||_DATA_IMAGE_SVG_RE.test(value));
+}
+
+// Keep canonical transcript values intact while preventing opaque payloads
+// from becoming enormous text nodes. Long prose still flows through unchanged,
+// and supported image data URIs remain owned by the media renderer.
+function _projectTranscriptTextForDisplay(value, options){
+  const text=String(value||'');
+  const surface=String(options&&options.surface||'message');
+  const streaming=!!(options&&options.streaming);
+  // perf(#7040 round 9): an optional per-stream cache (see
+  // _createIncrementalOpaqueRunCache) a caller can pass so a streaming update
+  // reuses prior scan progress instead of re-scanning the whole accumulated
+  // text every call. Only used when there's no safe-image span this call
+  // (see the cache's own fallback rationale for why); every other caller
+  // (no liveCache passed) is completely unaffected.
+  const liveCache=options&&options.liveCache;
+  // perf(#7040 round 9): the _candidateScanRe sweep below is itself O(text)
+  // and used to run on EVERY streamed chunk before the cache was ever
+  // consulted -- so the projector stayed O(n) per call (O(n^2) cumulative)
+  // even on the "incremental" path. A safe-image candidate can only begin at
+  // a "data:image" literal, so the cache can rule the whole text out by
+  // examining only the appended bytes. Only when that cheap check says a
+  // literal may be present do we pay for the full tokenizing sweep.
+  if(liveCache && typeof liveCache.mayContainDataImage==='function'
+     && !liveCache.mayContainDataImage(text)){
+    return liveCache.project(text, streaming, false);
+  }
+  const safeSpans=[];
+  // Tokenize the exact accepted data-image grammars in one linear pass. Do not
+  // discover a broad candidate and repeatedly shorten/revalidate it: malformed
+  // near-limit candidates would make the safety guard itself quadratic.
+  const _candidateScanRe = /data:image\/(?:png|jpe?g|gif|webp|avif)(?:;base64)?,[a-z0-9+/=%._~:@!$&'()*+,;-]*|data:image\/svg\+xml;base64,[a-z0-9+/=]*/gi;
+  let m;
+  _candidateScanRe.lastIndex=0;
+  while((m=_candidateScanRe.exec(text))!==null){
+    const cand=m[0];
+    if(!_isSafeDataImageUri(cand)) continue;
+    safeSpans.push({start:m.index, end:m.index+cand.length, value:cand});
+  }
+  safeSpans.sort((a,b)=>a.start-b.start);
+  const merged=[];
+  for(const s of safeSpans){
+    if(!merged.length || s.start>=merged[merged.length-1].end) merged.push(s);
+    else if(s.end>merged[merged.length-1].end) merged[merged.length-1]=s;
+  }
+  // Fast path: no safe-image spans at all this call -- the loop below would
+  // reduce to exactly one _boundOpaqueRuns(text, streaming) call over the
+  // whole text (pos stays 0, tail is the full text), so hand the whole text
+  // straight to the cache instead of re-deriving that no-op loop shape.
+  if(liveCache && !merged.length) return liveCache.project(text, streaming, false);
+  if(liveCache) liveCache.reset(); // has image spans this call: cache would go stale, see project()'s own fallback rationale
+  let out='';
+  let pos=0;
+  for(const span of merged){
+    if(pos<span.start){
+      const gap=text.slice(pos, span.start);
+      // Only the gap immediately before this safe-image span is "closed"
+      // (something -- the image -- follows it), so it's never withheld even
+      // in streaming mode.
+      out+=_boundOpaqueRuns(gap, false);
+    }
+    out+=span.value;
+    pos=span.end;
+  }
+  if(pos<text.length){
+    const tail=text.slice(pos);
+    out+=_boundOpaqueRuns(tail, streaming);
+  }
+  return out;
 }
 
 function _dataImageHtml(ref, altText){
@@ -9022,9 +9440,102 @@ function copyStatusSessionId(btn){
     setTimeout(()=>{btn.innerHTML=orig;btn.classList.remove('copied');},1500);
   }).catch(()=>showToast(t('copy_failed')));
 }
+function _canonicalTextForRow(row){
+  if(!row) return '';
+  try{
+    if(row._canonicalRawText) return String(row._canonicalRawText);
+  }catch(_){}
+  try{
+    // Live: check ancestor live turn's canonical (messages.js stores it)
+    const liveTurn=row.closest&&row.closest('#liveAssistantTurn');
+    if(liveTurn){
+      try{
+        if(liveTurn._canonicalRawText) return String(liveTurn._canonicalRawText);
+        const body=liveTurn.querySelector&&liveTurn.querySelector('.msg-body');
+        if(body&&body._canonicalRawText) return String(body._canonicalRawText);
+      }catch(_){}
+      try{
+        if(typeof window!=='undefined'){
+          const sid=typeof S!=='undefined'&&S&&S.session?S.session.session_id:'';
+          if(sid && window._lastLiveAssistantTextBySession && window._lastLiveAssistantTextBySession.has(sid)) return String(window._lastLiveAssistantTextBySession.get(sid));
+          if(window._lastLiveAssistantText) return String(window._lastLiveAssistantText);
+        }
+      }catch(_){}
+    }
+    // Also check closest ancestor with canonical
+    let cur=row.parentElement;
+    while(cur){
+      try{ if(cur._canonicalRawText) return String(cur._canonicalRawText); }catch(_){}
+      cur=cur.parentElement;
+      if(cur&&cur.id==='liveAssistantTurn') break;
+    }
+  }catch(_){}
+  try{
+    const msgIdxAttr=row.getAttribute('data-msg-idx');
+    const msgIdx=msgIdxAttr!=null?parseInt(msgIdxAttr,10):NaN;
+    if(Number.isFinite(msgIdx) && typeof S!=='undefined' && S && Array.isArray(S.messages)){
+      const m=S.messages[msgIdx];
+      if(m){
+        if(m.role==='user' || m.role==='assistant' || m._source==='process_wakeup'){
+          const c=typeof msgContent==='function'?msgContent(m): (m.content||'');
+          if(typeof c==='string' && c) return c;
+          if(Array.isArray(m.content)){
+            const t=m.content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
+            if(t) return t;
+          }
+          if(m.content) return String(m.content);
+        }
+        // Fallback for ordered transparent parts stored per-anchor? Try anchor identity
+        if(m && m._anchor_activity_scene){
+          // Anchor scene prose is stored in activity_rows; lookup by row id
+          const aid=row.getAttribute('data-anchor-row-id')||row.getAttribute('data-anchor-local-id');
+          if(aid && typeof window!=='undefined' && window._liveAnchorRegistries){
+            for(const reg of window._liveAnchorRegistries.values()){
+              if(!reg||!reg.anchor||!Array.isArray(reg.anchor.activity_events)) continue;
+              for(const ev of reg.anchor.activity_events){
+                if(ev && (ev.local_id===aid || ev.row_id===aid) && ev.payload && ev.payload.text){
+                  return String(ev.payload.text);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }catch(_){}
+  // Canonical text for HTML-string-built cards (compression reference /
+  // preserved task list) lives outside the serialized HTML, keyed by the
+  // stable id stamped on the row. Check it before the bounded attribute.
+  try{
+    const ck=row.getAttribute&&row.getAttribute('data-canonical-key');
+    if(ck){
+      const canon=_compressionCanonicalFor(ck);
+      if(canon) return canon;
+    }
+  }catch(_){}
+  // Last resort: the bounded DOM attribute (already projected) – copy at least something
+  try{
+    if(row.dataset && row.dataset.rawText) return String(row.dataset.rawText);
+  }catch(_){}
+  return String(row.textContent||'').trim();
+}
+function _setBoundedRawText(row, canonical, surface){
+  if(!row) return;
+  try{ row._canonicalRawText=String(canonical||''); }catch(_){}
+  try{
+    const bounded=typeof _projectTranscriptTextForDisplay==='function'?_projectTranscriptTextForDisplay(String(canonical||''),{surface:surface||'message'}):String(canonical||'');
+    // Data attributes are serialized into innerHTML for the session HTML cache.
+    // Never store the full canonical opaque payload – store only the bounded
+    // display text so the DOM/cache stays bounded.
+    row.dataset.rawText=bounded;
+  }catch(_){
+    try{ row.dataset.rawText=String(canonical||'').slice(0,60000); }catch(__){}
+  }
+}
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
-  const text=row?row.dataset.rawText:'';
+  if(!row) return;
+  const text=_canonicalTextForRow(row);
   if(!text)return;
   _copyText(text).then(()=>{
     const orig=btn.innerHTML;btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
@@ -9034,8 +9545,59 @@ function copyMsg(btn){
 function _copyThinkingText(btn){
   const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
   if(!card)return;
-  const pre=card.querySelector('.thinking-card-body pre');
-  const text=pre?pre.textContent:'';
+  let text='';
+  // Resolve the canonical reasoning via identity so the Copy action returns the
+  // full value even though the displayed DOM is bounded. Try (1) settled
+  // message identity via data-msg-idx → S.messages, (2) Anchor scene
+  // data-anchor-row-id → live anchor registry, (3) non-serialized expando
+  // _canonicalReasoning / INFLIGHT, then fall back to displayed DOM.
+  try{
+    const seg=card.closest('[data-msg-idx]');
+    const msgIdxAttr=seg?seg.getAttribute('data-msg-idx'):null;
+    const msgIdx=msgIdxAttr!=null?parseInt(msgIdxAttr,10):NaN;
+    if(Number.isFinite(msgIdx) && typeof S!=='undefined' && S && Array.isArray(S.messages)){
+      const m=S.messages[msgIdx];
+      if(m){
+        const canon=typeof _assistantReasoningPayloadText==='function'?_assistantReasoningPayloadText(m):'';
+        if(canon) text=String(canon);
+      }
+    }
+  }catch(_){}
+  if(!text){
+    try{
+      const anchorId=card.getAttribute('data-anchor-row-id')||card.getAttribute('data-anchor-local-id')||card.getAttribute('data-thinking-key')||'';
+      if(anchorId && typeof window!=='undefined' && window._liveAnchorRegistries){
+        for(const reg of window._liveAnchorRegistries.values()){
+          if(!reg||!reg.anchor||!Array.isArray(reg.anchor.activity_events)) continue;
+          for(const ev of reg.anchor.activity_events){
+            if(ev && (ev.local_id===anchorId || ev.row_id===anchorId) && ev.source_event_type==='reasoning' && ev.payload && ev.payload.text){
+              const cand=String(ev.payload.text).trim();
+              if(cand){ text=cand; break; }
+            }
+          }
+          if(text) break;
+        }
+      }
+    }catch(_){}
+  }
+  if(!text && card._canonicalReasoning) text=String(card._canonicalReasoning);
+  try{
+    if(!text && typeof window!=='undefined'){
+      const sid=typeof S!=='undefined'&&S&&S.session?S.session.session_id:'';
+      if(sid && window._lastLiveReasoningTextBySession && window._lastLiveReasoningTextBySession.has(sid)) text=String(window._lastLiveReasoningTextBySession.get(sid));
+      else if(window._lastLiveReasoningText) text=String(window._lastLiveReasoningText);
+    }
+  }catch(_){}
+  if(!text){
+    try{
+      const sid=typeof S!=='undefined'&&S&&S.session?S.session.session_id:'';
+      if(sid && typeof INFLIGHT!=='undefined' && INFLIGHT[sid] && INFLIGHT[sid].lastReasoningText) text=String(INFLIGHT[sid].lastReasoningText);
+    }catch(_){}
+  }
+  if(!text){
+    const pre=card.querySelector('.thinking-card-body pre');
+    text=pre?pre.textContent:'';
+  }
   if(!text)return;
   _copyText(text).then(()=>{
     const orig=btn.innerHTML;
@@ -9208,7 +9770,7 @@ function speakMessage(btn){
   stopTTS();
 
   const row=btn?btn.closest('[data-raw-text]'):null;
-  const text=row?row.dataset.rawText:'';
+  const text=row?_canonicalTextForRow(row):'';
   if(!text) return;
 
   const clean=_stripForTTS(text);
@@ -9393,7 +9955,7 @@ function autoReadLastAssistant(){
   const rows=document.querySelectorAll('.msg-row[data-role="assistant"], .assistant-segment[data-raw-text]');
   if(!rows.length) return;
   const last=rows[rows.length-1];
-  const text=last.dataset.rawText||'';
+  const text=_canonicalTextForRow(last);
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
@@ -11658,11 +12220,15 @@ function _restoreWorklogDetailDisclosureState(root, state){
   });
 }
 function _thinkingCardHtml(text, open){
-  const clean=_sanitizeThinkingDisplayText(text);
+  const clean=_projectTranscriptTextForDisplay(_sanitizeThinkingDisplayText(text),{surface:'reasoning'});
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  // The displayed <pre> is bounded; keep the full canonical in a JS expando
+  // at render time (not a serialized attribute) for the Copy handler to use.
+  // After an HTML-cache round-trip the expando is lost, but the settled-path
+  // fallback in _copyThinkingText (S.messages / anchor registry) still resolves.
+  return `<div class="${classes}" data-thinking-card="1"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
@@ -11673,6 +12239,11 @@ function _thinkingActivityNode(text, open, disclosureKey){
   row.setAttribute('data-worklog-thinking-card','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
+  try{
+    const card=row.querySelector('.thinking-card');
+    if(card) card._canonicalReasoning=String(text||'');
+    row._canonicalReasoning=String(text||'');
+  }catch(_){}
   _renderThinkingInto(row,text);
   return row;
 }
@@ -11868,7 +12439,24 @@ function _copyEventToClipboard(row,control){
   let text='';
   let label='event';
   if(type==='tool'){
-    const tc=row._tcData||{};
+    // #7040 round 9: Copy is a canonical-data consumer. Expandos are lost when
+    // the session HTML cache restores innerHTML, so _tcData alone would leave
+    // Copy reading the bounded/projected DOM after a restore. Use the SAME
+    // recovery-by-identity chain Show more uses (_toggleToolDiff): live
+    // expando -> transparent row dataset -> disclosure-key lookup.
+    let _canonTc=row._tcData;
+    if(!_canonTc){
+      try{
+        if(typeof _transparentToolCallFromRowDataset==='function') _canonTc=_transparentToolCallFromRowDataset(row);
+      }catch(_){}
+    }
+    if(!_canonTc){
+      try{
+        const dk=row.getAttribute?row.getAttribute('data-tool-disclosure-key'):'';
+        if(dk&&typeof _toolCallByDisclosureKey==='function') _canonTc=_toolCallByDisclosureKey(dk);
+      }catch(_){}
+    }
+    const tc=_canonTc||{};
     const fallbackName=row.getAttribute('data-event-name')||row.getAttribute('data-tool-name')||'tool';
     label=`tool ${tc.name||fallbackName}`;
     const parts=[`tool: ${tc.name||fallbackName}`];
@@ -11899,11 +12487,22 @@ function _copyEventToClipboard(row,control){
     }
     text=parts.join('\n');
   }else if(type==='thinking'){
+    // Prefer canonical-by-identity over the projected DOM body, same rationale
+    // as the tool branch above.
+    let _canonThinking='';
+    try{
+      if(typeof _canonicalTextForRow==='function') _canonThinking=String(_canonicalTextForRow(row)||'');
+    }catch(_){}
     const pre=row.querySelector('.thinking-card-body pre');
-    text=pre?pre.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,'');
+    const _domThinking=pre?pre.textContent:(row.textContent||'').replace(/^\s*Thinking\s*/i,'');
+    text=_canonThinking||_domThinking;
     label='thinking';
   }else{
-    text=row.textContent||'';
+    let _canonOther='';
+    try{
+      if(typeof _canonicalTextForRow==='function') _canonOther=String(_canonicalTextForRow(row)||'');
+    }catch(_){}
+    text=_canonOther||row.textContent||'';
   }
   if(!text) return;
   const copied=()=>_showTransparentCopiedFeedback(control,row);
@@ -12141,13 +12740,15 @@ function _transparentToolDetailHtml(tc, status){
   // duration meta when present. (Trifecta finding V6 — reduce redundancy.)
   const meta=[];
   if(tc&&tc.duration!==undefined&&tc.duration!==null) meta.push(['duration', String(tc.duration)]);
-  const preview=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  const previewRaw=String((tc&&(tc.snippet||tc.preview||tc.result||tc.output))||'').trim();
+  const preview=_projectTranscriptTextForDisplay(previewRaw,{surface:'tool-detail'});
   const argHtml=[...meta,...argEntries].map(([k,v])=>{
     let sv=typeof v==='string'?v:JSON.stringify(v,null,2);
     // Redact secret-bearing arg values before rendering the transparent Full
     // tab — content args can be long multi-line commands (#4928) whose later
     // lines may carry secrets the short label never showed (#4928 gate).
     if(typeof _redactToolTargetLabel==='function'){ try{ sv=_redactToolTargetLabel(sv); }catch(e){} }
+    sv=_projectTranscriptTextForDisplay(sv,{surface:'tool-detail'});
     return `<div class="tool-arg-pair"><span class="tool-arg-key">${esc(String(k))}</span><span class="tool-arg-val">${esc(sv)}</span></div>`;
   }).join('');
   return `<div class="tool-card-detail" data-transparent-detail-mode="full"><div class="transparent-detail-modes" role="tablist"><span class="transparent-detail-mode active" role="tab" tabindex="0" data-mode="full" onclick="_setTransparentDetailMode(this,'full')">Full</span><span class="transparent-detail-mode" role="tab" tabindex="0" data-mode="output" onclick="_setTransparentDetailMode(this,'output')">Output</span></div><div class="tool-card-args">${argHtml}</div>${preview?`<div class="tool-card-result"><pre>${esc(preview)}</pre></div>`:''}</div>`;
@@ -12803,7 +13404,7 @@ function _worklogReasonHtmlFromAnchor(anchor, textOverride){
   return body?body.innerHTML:esc(String(text||'').trim());
 }
 function _worklogReasonHtmlFromText(text){
-  const clean=_sanitizeThinkingDisplayText(text);
+  const clean=_projectTranscriptTextForDisplay(_sanitizeThinkingDisplayText(text),{surface:'reasoning'});
   if(!String(clean||'').trim()) return '';
   if(String(clean||'').trim()==='(empty)') return '';
   return renderMd?renderMd(clean):esc(clean);
@@ -12957,15 +13558,113 @@ function _toolIdentity(tc){
     String(tc.snippet||tc.preview||'').slice(0,160),
   ].join('|');
 }
-function _toolDisclosureIdentity(tc){
+function _stampToolCallOrdinals(messages){
+  // Mint the ID-less disclosure ordinal ONCE here, on the raw per-message
+  // tool-call arrays themselves (S.messages[*].tool_calls /
+  // _partial_tool_calls / content tool_use parts), the moment a message
+  // array becomes the active S.messages. This is the single normalization
+  // point every other tool-identity consumer (buildToolCard, the
+  // ordered/transparent renderer, the settled/derived legacy builder, and
+  // recovery lookup) must read from — never recompute. Recomputing from
+  // whatever candidate array/order a given render pass happens to be
+  // iterating is exactly the bug every prior review round on #7040 caught:
+  // different passes see different subsets/orders and mint different
+  // ordinals for "the same" ID-less call. Idempotent: a tool call that
+  // already carries an ordinal (from a prior call, or a real id) is left
+  // untouched, so calling this repeatedly (e.g. once per render plus once
+  // from recovery) is always safe.
+  if(!Array.isArray(messages)) return;
+  for(let mi=0; mi<messages.length; mi++){
+    const m=messages[mi];
+    if(!m||typeof m!=='object') continue;
+    const rawArrays=[
+      Array.isArray(m.tool_calls)?m.tool_calls:null,
+      Array.isArray(m._partial_tool_calls)?m._partial_tool_calls:null,
+    ];
+    // ONE occurrence counter per MESSAGE, shared by every array below.
+    // Per-array counters restarted at 0 for each of tool_calls /
+    // _partial_tool_calls / content, so the same (message, name) could be
+    // minted as ordinal 0 up to three times and produce three colliding
+    // identities for three genuinely different calls.
+    const ordCounts=new Map();
+    for(const arr of rawArrays){
+      if(!arr) continue;
+      for(const tc of arr){
+        if(!tc||typeof tc!=='object') continue;
+        const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
+        if(tid) continue;
+        if(tc._disclosureOrdinal!==undefined&&tc._disclosureOrdinal!==null&&tc._disclosureOrdinal!=='') continue;
+        const name=tc.name||(tc.function&&tc.function.name)||'tool';
+        const gk=`${mi}\x1f${name}`;
+        const ord=ordCounts.get(gk)||0;
+        tc._disclosureOrdinal=ord;
+        ordCounts.set(gk, ord+1);
+      }
+    }
+    if(Array.isArray(m.content)){
+      for(const p of m.content){
+        if(!p||typeof p!=='object'||p.type!=='tool_use') continue;
+        const tid=p.id||'';
+        if(tid) continue;
+        if(p._disclosureOrdinal!==undefined&&p._disclosureOrdinal!==null&&p._disclosureOrdinal!=='') continue;
+        const name=p.name||'tool';
+        const gk=`${mi}\x1f${name}`;
+        const ord=ordCounts.get(gk)||0;
+        p._disclosureOrdinal=ord;
+        ordCounts.set(gk, ord+1);
+      }
+    }
+  }
+}
+// assistant_msg_idx is WINDOW-relative (rawIdx into the currently-loaded
+// S.messages window), NOT a stable coordinate: loading an older page prepends
+// messages and shifts every index, and _ensureAllMessagesLoaded() resets the
+// window wholesale. Keying disclosure identity on it made the DOM
+// data-tool-disclosure-key disagree with the same call's recomputed identity
+// after a prepend -- and worse, let an unrelated same-named ID-less call that
+// landed on the vacated index match the stale key, so Show-more could restore
+// the wrong payload. Convert to the ABSOLUTE session index
+// (_messageSessionIndexBase() + rawIdx), which is invariant because the two
+// co-vary: a prepend that raises rawIdx by N lowers _oldestIdx by the same N.
+// assistant_msg_idx itself deliberately stays window-relative -- the windowing
+// and lookup paths (renderedRawIdxs, the S.toolCalls index) require that -- so
+// this is a second, separate coordinate rather than a redefinition of the
+// existing field.
+function _toolDisclosureOwnerIndex(rawIdx){
+  const n=Number(rawIdx);
+  if(!Number.isFinite(n)) return rawIdx;
+  if(typeof _messageSessionIndexForRawIdx==='function'){
+    const abs=_messageSessionIndexForRawIdx(n);
+    if(abs!==null&&abs!==undefined&&Number.isFinite(Number(abs))) return Number(abs);
+  }
+  return n;
+}
+function _toolDisclosureIdentity(tc, ordinal){
   if(!tc) return '';
   const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
   if(tid) return `id:${tid}`;
-  const stable=[
-    tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
-    tc.name||'tool',
-  ].join('\x1f');
-  return stable.trim()?`derived:${_worklogDetailHashKey(stable)}`:'';
+  let ord=ordinal;
+  if(ord===undefined||ord===null||ord===''){
+    if(tc._disclosureOrdinal!==undefined&&tc._disclosureOrdinal!==null&&tc._disclosureOrdinal!=='') ord=tc._disclosureOrdinal;
+    else if(tc._ordinal!==undefined&&tc._ordinal!==null&&tc._ordinal!=='') ord=tc._ordinal;
+    else if(tc.ordinal!==undefined&&tc.ordinal!==null&&tc.ordinal!=='') ord=tc.ordinal;
+    else ord='';
+  }
+  const hasAssistantIdx=tc.assistant_msg_idx!==undefined&&tc.assistant_msg_idx!==null&&tc.assistant_msg_idx!=='';
+  const hasBurst=tc.activityBurstId!==undefined&&tc.activityBurstId!==null&&String(tc.activityBurstId)!==''&&String(tc.activityBurstId)!=='0';
+  const hasSeq=tc.activitySegmentSeq!==undefined&&tc.activitySegmentSeq!==null&&String(tc.activitySegmentSeq)!==''&&String(tc.activitySegmentSeq)!=='0';
+  let owner='';
+  if(hasAssistantIdx) owner=`a:${_toolDisclosureOwnerIndex(tc.assistant_msg_idx)}`;
+  else if(hasBurst||hasSeq) owner=`b:${hasBurst?tc.activityBurstId:''}:s:${hasSeq?tc.activitySegmentSeq:''}`;
+  else owner='a:';
+  const name=tc.name||'tool';
+  // An UNSTAMPED call must never alias a genuinely-minted ordinal 0. Falling
+  // back to 'o:0' meant any call that reached here before normalization
+  // silently shared an identity with the real first occurrence of that name
+  // (and with every other unstamped one). Use a distinct marker instead so a
+  // missing ordinal is visible rather than plausible.
+  const ordPart=(ord!==''&&ord!==null&&ord!==undefined)?`o:${ord}`:'o:?';
+  return `derived:${owner}:${name}:${ordPart}`;
 }
 function _filterNewWorklogTools(cards, seenTools){
   const out=[];
@@ -13167,6 +13866,24 @@ function _anchorSceneToolCallFromRow(row, opts){
     ),
     tid:id,
     id,
+    // Carry the minted occurrence coordinate into the Anchor representation.
+    // Without it an ID-less call keyed as `o:?` here while its settled twin
+    // keyed as `o:N`, so one occurrence had two identities and Show-more
+    // recovery could bind to the wrong same-name call.
+    // Inlined deliberately: this function is extracted and evaluated in
+    // isolation by several node test harnesses, so it must not depend on a
+    // sibling helper. Read-only -- returns an ALREADY-MINTED coordinate and
+    // never invents one.
+    _disclosureOrdinal:(function(){
+      for(const src of [tool,payload]){
+        if(!src||typeof src!=='object') continue;
+        for(const key of ['_disclosureOrdinal','_occurrence','_ordinal','ordinal']){
+          const v=src[key];
+          if(v!==undefined&&v!==null&&v!=='') return v;
+        }
+      }
+      return undefined;
+    })(),
   };
 }
 function _anchorSceneRowTimestampSeconds(row){
@@ -13207,8 +13924,9 @@ function _anchorSceneNodeForRow(row, opts){
       node=document.createElement('div');
       node.className='assistant-segment';
       node.setAttribute('data-anchor-scene-prose','1');
-      node.dataset.rawText=text;
-      node.innerHTML=`<div class="msg-body">${renderMd?renderMd(text):esc(text)}</div>`;
+      _setBoundedRawText(node, text, 'assistant');
+      const _projAnchor=typeof _projectTranscriptTextForDisplay==='function'?_projectTranscriptTextForDisplay(text,{surface:'assistant', streaming:!settled}):text;
+      node.innerHTML=`<div class="msg-body">${renderMd?renderMd(_projAnchor):esc(_projAnchor)}</div>`;
     }
   }else if(row.role==='thinking'){
     if(window._showThinking===false) return null;
@@ -15280,11 +15998,48 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
 function _shouldShowSettledCompressionReference(referenceText){
   return !!String(referenceText||'').trim() && !_isContextCompactionText(referenceText);
 }
+// #7040 round 9: compression cards are built as HTML strings, so their text
+// used to be serialized twice at full length -- into data-raw-text (which the
+// session HTML cache persists) and into the <pre> body. Both are serialized
+// DOM surfaces and must carry only the bounded display value. The canonical
+// text is kept OUT of the serialized HTML in this bounded side-store and
+// recovered by the stable key stamped on the row, so Copy still yields the
+// complete value (see _canonicalTextForRow).
+const _COMPRESSION_CANONICAL_MAX=32;
+const _compressionCanonicalText=new Map();
+let _compressionCanonicalSeq=0;
+function _stampCompressionCanonical(text){
+  const canonical=String(text||'');
+  const key='cmp'+(++_compressionCanonicalSeq);
+  try{
+    _compressionCanonicalText.set(key, canonical);
+    // Bound the store: compression cards are re-rendered on every transcript
+    // repaint, so an unbounded Map would grow without limit.
+    while(_compressionCanonicalText.size>_COMPRESSION_CANONICAL_MAX){
+      const oldest=_compressionCanonicalText.keys().next().value;
+      if(oldest===undefined) break;
+      _compressionCanonicalText.delete(oldest);
+    }
+  }catch(_){}
+  return key;
+}
+function _compressionCanonicalFor(key){
+  try{ const v=_compressionCanonicalText.get(String(key||'')); return v==null?'':String(v); }catch(_){ return ''; }
+}
+function _projectCompressionText(text){
+  const raw=String(text||'');
+  try{
+    if(typeof _projectTranscriptTextForDisplay==='function') return _projectTranscriptTextForDisplay(raw,{surface:'tool'});
+  }catch(_){}
+  return raw;
+}
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
+  const _canonKey=_stampCompressionCanonical(text);
+  const _bounded=_projectCompressionText(text);
   return `
-    <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
+    <div class="tool-card-row compression-card-row" data-compression-card="1" data-canonical-key="${esc(_canonKey)}" data-raw-text="${esc(_bounded)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
         <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
           <span class="tool-card-icon">${li('star',13)}</span>
@@ -15295,7 +16050,7 @@ function _compressionReferenceCardHtml(text, open=false){
         </div>
         <div class="tool-card-detail">
           <div class="tool-card-result">
-          <pre>${esc(text)}</pre>
+          <pre>${esc(_bounded)}</pre>
         </div>
         </div>
       </div>
@@ -15304,12 +16059,14 @@ function _compressionReferenceCardHtml(text, open=false){
 }
 function _preservedCompressionTaskListCardHtml(m, open=false){
   const text=msgContent(m)||String(m.content||'');
+  const _canonKey=_stampCompressionCanonical(text);
+  const _bounded=_projectCompressionText(text);
   return `
-    <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
+    <div class="tool-card-row compression-card-row" data-compression-card="1" data-canonical-key="${esc(_canonKey)}" data-raw-text="${esc(_bounded)}">
       ${_compressionStatusCardHtml({
         statusLabel: t('preserved_task_list_label'),
         previewText: _preservedCompressionTaskListPreview(text),
-        detail: text,
+        detail: _bounded,
         icon: li('list-todo',13),
         open,
         variantClass: 'tool-card-compress-reference',
@@ -15400,7 +16157,12 @@ function _compressionStatusCardHtml({
   const hasBody = !!statusDetail;
   const openClass = open ? ' open' : '';
   const statusIcon = icon;
-  const bodyHtml = hasBody ? `<div class="tool-card-detail"><div class="tool-card-result"><pre>${esc(statusDetail)}</pre></div></div>` : '';
+  // Every serialized compression-card surface stays display-bounded. The
+  // preserved-task-list caller already passes projected text; project here too
+  // so the remaining callers (and any future one) cannot serialize an
+  // unbounded payload. Projection is idempotent on already-bounded text.
+  const _boundedStatusDetail=_projectCompressionText(statusDetail);
+  const bodyHtml = hasBody ? `<div class="tool-card-detail"><div class="tool-card-result"><pre>${esc(_boundedStatusDetail)}</pre></div></div>` : '';
   const toggleHtml = hasBody ? `<span class="tool-card-toggle">${li('chevron-right',12)}</span>` : '';
   return `
     <div class="tool-card ${variantClass}${openClass}">
@@ -16543,6 +17305,7 @@ function _transparentOrderedToolCall(part, rawIdx, toolCallsByTid, resultsByTid,
     tid,
     id:tid,
     assistant_msg_idx:rawIdx,
+    _disclosureOrdinal:part&&part._disclosureOrdinal,
     args:_toolArgsSnapshot(args),
     snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
     is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
@@ -16728,7 +17491,12 @@ function _processWakeupCardHtml(info, rawText, extras){
   // empty/non-empty decision so leading indentation and trailing blank lines
   // survive (#6350 review finding 1).
   const outRaw=info.output!=null?String(info.output):String(rawText||'');
-  const outHtml=outRaw.trim()?`<pre class="process-wakeup-text">${esc(outRaw)}</pre>`:'';
+  // This helper is evaluated alone in client-contract tests, so preserve its
+  // historical standalone behavior if the projector is not included.
+  const outDisplay=typeof _projectTranscriptTextForDisplay==='function'
+    ? _projectTranscriptTextForDisplay(outRaw,{surface:'process-output'})
+    : outRaw;
+  const outHtml=outDisplay.trim()?`<pre class="process-wakeup-text">${esc(outDisplay)}</pre>`:'';
   const cmdRow=info.command?`<div class="process-wakeup-cmd-row"><code>${esc(info.command)}</code></div>`:'';
   // The collapsed watch chip truncates the pattern; surface the full,
   // wrapping value in the expanded detail so touch/keyboard users can read it
@@ -16739,6 +17507,7 @@ function _processWakeupCardHtml(info, rawText, extras){
 
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
+  // Disclosure identity is minted at ingestion; render only reads it.
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has
@@ -17217,7 +17986,8 @@ function renderMessages(options){
     }
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
-      bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
+      const providerDetails=_projectTranscriptTextForDisplay(m.provider_details,{surface:'provider-details'});
+      bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(providerDetails)}</code></pre></details>`;
     }
     const recoveryPayload=(!isUser&&m._compressionRecovery)
       ? m._compressionRecovery
@@ -17265,6 +18035,7 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const processText=String(rowDisplayContent||'').trim();
+      const projectedProcessText=_projectTranscriptTextForDisplay(processText,{surface:'process-output'});
       const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
       // #6345: structured completions/watch-matches render as a collapsed
       // summary card; anything unparseable keeps the raw notice below so the
@@ -17278,7 +18049,7 @@ function renderMessages(options){
         if(wakeupInfo.type==='completion'&&/^-?\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
         noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
       }else{
-        const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
+        const processTextHtml=projectedProcessText?`<pre class="process-wakeup-text">${esc(projectedProcessText)}</pre>`:'';
         noticeInnerHtml=`<div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}`;
       }
       const nextRowHtml=`<div class="${noticeClass}">${noticeInnerHtml}</div>`;
@@ -17297,10 +18068,10 @@ function renderMessages(options){
         // serialization-independent while still rebuilding when the markup
         // genuinely changes (locale/timestamp format); open state is
         // user-driven, so it is captured and restored across rebuilds.
-        if(row.dataset.rawText!==processText||row._wakeupRenderedHtml!==nextRowHtml){
+        if(row._canonicalRawText!==processText||row._wakeupRenderedHtml!==nextRowHtml){
           const _priorCard=row.querySelector&&row.querySelector('details.process-wakeup-card');
           const _wasOpen=!!(_priorCard&&_priorCard.open);
-          row.dataset.rawText=processText;
+          _setBoundedRawText(row, processText, 'process-output');
           row._wakeupRenderedHtml=nextRowHtml;
           row.innerHTML=nextRowHtml;
           if(_wasOpen){
@@ -17316,7 +18087,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='process_wakeup';
-        row.dataset.rawText=processText;
+        _setBoundedRawText(row, processText, 'process-output');
         row._wakeupRenderedHtml=nextRowHtml;
         row.innerHTML=nextRowHtml;
       }
@@ -17339,8 +18110,8 @@ function renderMessages(options){
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
         delete row.dataset.editing;
-        if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
-          row.dataset.rawText=newRawText;
+        if(row._canonicalRawText!==newRawText||row.innerHTML!==nextRowHtml){
+          _setBoundedRawText(row, newRawText, 'user');
           row.innerHTML=nextRowHtml;
         }
       }else{
@@ -17351,7 +18122,7 @@ function renderMessages(options){
         row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
-        row.dataset.rawText=newRawText;
+        _setBoundedRawText(row, newRawText, 'user');
         row.innerHTML=nextRowHtml;
       }
       // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
@@ -17408,6 +18179,12 @@ function renderMessages(options){
       orderedTransparentParts.forEach((part, partIdx)=>{
         if(!part) return;
         if(part.kind==='tool'){
+        // _transparentStreamOrderedParts (the sole source of
+        // orderedTransparentParts) returns null for the WHOLE message if any
+        // tool_use part lacks a real id, so every part reaching here always
+        // has one -- toolCall.tid can never be empty. No ordinal fallback
+        // needed or reachable; identity is minted at ingestion and only READ
+        // here, same as every other render path.
         const toolCall=_transparentOrderedToolCall(part, rawIdx, transparentOrderedToolCallsByTid, transparentToolResultsByTid, transparentPersistedSnippetByTid);
           const toolRow=_decorateTransparentEventRow(buildToolCard(toolCall),{
             type:'tool',
@@ -17428,7 +18205,7 @@ function renderMessages(options){
         orderedSeg.dataset.msgIdx=rawIdx;
         orderedSeg.dataset.sessionMsgIdx=sessionMsgIdx;
         orderedSeg.dataset.messageAnchorKey=messageAnchorKey;
-        orderedSeg.dataset.rawText=String(partDisplayText||'').trim();
+        _setBoundedRawText(orderedSeg, String(partDisplayText||'').trim(), 'assistant');
         if(m._activityBurstId!==undefined&&m._activityBurstId!==null) orderedSeg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
         if(Number.isFinite(Number(m._liveSegmentSeq))) orderedSeg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
         if(_ERR_MSG_RE.test(String(partDisplayText||'').trim())) orderedSeg.dataset.error='1';
@@ -17454,7 +18231,7 @@ function renderMessages(options){
     seg.dataset.msgIdx=rawIdx;
     seg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
     seg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
-    seg.dataset.rawText=String(content).trim();
+    _setBoundedRawText(seg, String(content).trim(), 'assistant');
     if(m._activityBurstId!==undefined&&m._activityBurstId!==null) seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
     if(Number.isFinite(Number(m._liveSegmentSeq))) seg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
     const messageBelongsInWorklog=!S.busy&&isCompactWorklogMode()&&_assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, displayContent, {isTurnFinalAssistant});
@@ -17707,6 +18484,7 @@ function renderMessages(options){
           is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
           assistant_msg_idx:assistantToolAnchorIdx,
+          _disclosureOrdinal:tc._disclosureOrdinal,
           args:argsSnap,
           done:true,
         }, name, tid));
@@ -17734,6 +18512,7 @@ function renderMessages(options){
           is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
           assistant_msg_idx:assistantToolAnchorIdx,
+          _disclosureOrdinal:tc._disclosureOrdinal,
           args:argsSnap,
           done:true,
         }, name, tid));
@@ -17754,6 +18533,7 @@ function renderMessages(options){
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
             assistant_msg_idx:assistantToolAnchorIdx,
+            _disclosureOrdinal:p._disclosureOrdinal,
             args:argsSnap,
             done:true,
           }, name, tid));
@@ -17776,13 +18556,23 @@ function renderMessages(options){
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
             assistant_msg_idx:assistantToolAnchorIdx,
+            _disclosureOrdinal:tc._disclosureOrdinal,
             args:argsSnap,
             done:true,
           }, name, tid));
         });
       }
     });
-    if(derived.length) S.toolCalls=derived;
+    if(derived.length) {
+      // ID-less derived entries already carry their ordinal: every source
+      // this loop reads from (fallbackToolSources' m.tool_calls/
+      // _partial_tool_calls/content) is an element of the SAME S.messages
+      // array stamped by the S.messages ingestion seam when the transcript
+      // entered the model, long before this builder runs -- and each push
+      // above copies _disclosureOrdinal straight through from that raw
+      // source object. No fallback assignment needed or reachable.
+      S.toolCalls=derived;
+    }
     if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }
   if(!S.busy || (S.toolCalls&&S.toolCalls.length)){
@@ -18919,15 +19709,31 @@ function buildToolCard(tc){
   row.dataset.toolDone=String(tc&&tc.done!==false);
   row.dataset.toolError=String(!!(tc&&tc.is_error));
   row.dataset.toolActionLabel=typeof _toolActionLabelText==='function'?_toolActionLabelText(tc):_toolDisplayName(tc);
-  const disclosureKey=typeof _toolDisclosureIdentity==='function'?_toolDisclosureIdentity(tc):'';
+  // ID-less calls must already carry their ordinal from normalization
+  // (_stampToolCallOrdinals(), called at the top of renderMessages() and
+  // idempotently from recovery) -- this ONLY reads it, never infers or
+  // allocates one. A process-global counter or a rescan of the current
+  // S.toolCalls array here would reintroduce exactly the render-order-
+  // dependent identity every prior review round on #7040 required removed.
+  let _disclosureOrdinal='';
+  if(tc){
+    if(tc._disclosureOrdinal!==undefined&&tc._disclosureOrdinal!==null&&tc._disclosureOrdinal!=='') _disclosureOrdinal=tc._disclosureOrdinal;
+    else if(tc._ordinal!==undefined&&tc._ordinal!==null&&tc._ordinal!=='') _disclosureOrdinal=tc._ordinal;
+    else if(tc.ordinal!==undefined&&tc.ordinal!==null&&tc.ordinal!=='') _disclosureOrdinal=tc.ordinal;
+  }
+  const disclosureKey=typeof _toolDisclosureIdentity==='function'?_toolDisclosureIdentity(tc, _disclosureOrdinal):'';
   if(disclosureKey) row.setAttribute('data-tool-disclosure-key', disclosureKey);
   const icon=toolIcon(tc.name);
   const hasRawDetail=!!(tc.snippet)||(tc.args&&Object.keys(tc.args).length>0);
   const allowsDetail=typeof _toolCardAllowsDetail==='function'?_toolCardAllowsDetail(toolKind,tc):true;
   const hasDetail=hasRawDetail&&allowsDetail;
+  const rawSnippet=String(tc&&tc.snippet||'');
+  const projectedSnippet=typeof _projectTranscriptTextForDisplay==='function'
+    ? _projectTranscriptTextForDisplay(rawSnippet,{surface:'tool-result'})
+    : rawSnippet;
   let displaySnippet='';
-  if(tc.snippet){
-    const s=tc.snippet;
+  if(projectedSnippet){
+    const s=projectedSnippet;
     if(s.length<=800){displaySnippet=s;}
     else{
       const cutoff=s.slice(0,800);
@@ -18935,9 +19741,29 @@ function buildToolCard(tc){
       displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
     }
   }
-  const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  const hasMore=projectedSnippet&&projectedSnippet.length>displaySnippet.length;
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
+  // Keep restored fallback data bounded; live rows retain canonical _tcData.
+  // NOTE the two conditions below are deliberately NARROW, and data-full is
+  // therefore absent from most Show-more cards:
+  //   projectedSnippet!==rawSnippet -- emit only when projection actually
+  //     SHORTENED the text (an opaque run was bounded). hasMore is true for any
+  //     snippet past the ~800-char preview cut, so ordinary prose output well
+  //     over that threshold still gets NO data-full. That is intentional: for a
+  //     non-abbreviated snippet the 'bounded' form IS the canonical text, and
+  //     serializing it would put canonical/unbounded data into the DOM -- the
+  //     exact contract breach rounds 6 and 9 removed data-full for. Such rows
+  //     fall back to data-short, and Show more shows the preview.
+  //   length<=_toolCardSerializedDisplayLimit -- never serialize a bounded form
+  //     that is itself huge.
+  // Canonical recovery by immutable identity (_tcData / anchor scene /
+  // disclosure key) remains the primary path; data-full is only the last-resort
+  // fallback for a stale row where all of those miss.
+  const _toolCardSerializedDisplayLimit=65536;
+  const fullDataAttr=projectedSnippet!==rawSnippet&&projectedSnippet.length<=_toolCardSerializedDisplayLimit
+    ? ` data-full="${esc(projectedSnippet).replace(/"/g,'&quot;')}"`
+    : '';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
@@ -18951,7 +19777,8 @@ function buildToolCard(tc){
   const argPreview=_formatToolArgPreview(tc&&tc.args);
   if(toolKind==='shell'||previewText===argPreview||previewText==='Completed'||previewText==='Running'||previewText==='Failed') previewText='';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
-  const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
+  const detailLeadTextRaw=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
+  const detailLeadText=typeof _projectTranscriptTextForDisplay==='function'?_projectTranscriptTextForDisplay(detailLeadTextRaw,{surface:'tool-detail'}):String(detailLeadTextRaw||'');
   const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
   const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
   const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
@@ -18971,12 +19798,13 @@ function buildToolCard(tc){
           visibleArgs.map(([k,v])=>{
             let sv=String(v);
             if(typeof _redactToolTargetLabel==='function'){ try{ sv=_redactToolTargetLabel(sv); }catch(e){} }
+            sv=typeof _projectTranscriptTextForDisplay==='function'?_projectTranscriptTextForDisplay(sv,{surface:'tool-detail'}):String(sv||'');
             return `<div class="tool-arg-pair"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${esc(sv)}</span></div>`;
           }).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
+          ${hasMore?`<button class="tool-card-more"${fullDataAttr} data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
@@ -19020,15 +19848,83 @@ function _toggleToolDiff(btn){
   if(!pre) return;
   const isDiff=btn.dataset.isDiff==='1';
   const expanded=btn.textContent===btn.dataset.moreLabel;
-  const raw=expanded?btn.dataset.full:btn.dataset.short;
+  const row=btn.closest('.tool-card-row');
+  // Expando properties are lost when the session HTML cache restores innerHTML.
+  // Recover the canonical tool call in order: (1) the live _tcData expando,
+  // (2) the anchor scene (data-anchor-row-id stamped on anchor-scene rows),
+  // (3) S.toolCalls by the durable data-tool-disclosure-key every
+  // buildToolCard row carries — ordered-transparent and worklog tool cards
+  // have no anchor attrs, so (2) alone would still fall back to the truncated
+  // preview for those.
+  const canonicalTool=row&&row._tcData
+    ? row._tcData
+    : (row&&typeof _transparentToolCallFromRowDataset==='function'
+      ? _transparentToolCallFromRowDataset(row)
+      : null);
+  const disclosureKey=row&&row.getAttribute?row.getAttribute('data-tool-disclosure-key'):'';
+  const recovered=canonicalTool||_toolCallByDisclosureKey(disclosureKey);
+  const canonicalSnippet=recovered&&recovered.snippet;
+  // The RAW canonical snippet is never serialized into the DOM -- data-full
+  // once carried the whole payload, defeating the bounded-display/cache
+  // contract. Show more resolves the canonical value by immutable identity
+  // (row._tcData expando, anchor scene, or the disclosure-key lookup above).
+  // When every one of those misses (e.g. a genuinely stale/orphaned row),
+  // buildToolCard has serialized a BOUNDED fallback into data-full: the
+  // already-projected snippet, and only when projection actually shortened
+  // it and the result fits the serialized-size cap. Prefer that over the
+  // truncated short preview; data-short remains the last resort when no
+  // bounded fallback was emitted.
+  const raw=expanded
+    ? (canonicalSnippet==null
+        ? (btn.dataset.full||btn.dataset.short)
+        : String(canonicalSnippet))
+    : btn.dataset.short;
+  // Even the expanded canonical payload must stay display-bounded — a
+  // deferred Transparent Stream detail can hold an oversized opaque run
+  // (r3792269302). Projecting here keeps WKWebView from stalling on Show more.
+  let displayRaw=raw;
+  try{
+    if(expanded && typeof _projectTranscriptTextForDisplay==='function'){
+      displayRaw=_projectTranscriptTextForDisplay(raw,{surface:'tool-detail'});
+    }
+  }catch(_){}
   if(isDiff){
     let code=pre.querySelector('code');
     if(!code){code=document.createElement('code');code.className='diff-block';pre.textContent='';pre.appendChild(code);}
-    code.innerHTML=_colorDiffLines(raw);
+    code.innerHTML=_colorDiffLines(expanded?displayRaw:raw);
   }else{
-    pre.textContent=raw;
+    pre.textContent=expanded?displayRaw:raw;
   }
   btn.textContent=expanded?btn.dataset.lessLabel:btn.dataset.moreLabel;
+}
+function _toolCallByDisclosureKey(key){
+  if(!key) return null;
+  // Recovery MUST NOT mint or recount. It compares the carried coordinate
+  // only. Stamping here meant a candidate array that had been reordered or
+  // duplicated since render could be assigned different ordinals than the
+  // ones the rendered rows were keyed with, so a restored card could bind to
+  // a different same-name call.
+  const candidates=[];
+  if(typeof S!=='undefined'&&S&&Array.isArray(S.toolCalls)) candidates.push(...S.toolCalls);
+  if(typeof S!=='undefined'&&S&&Array.isArray(S.messages)){
+    for(const m of S.messages){
+      if(m&&Array.isArray(m.tool_calls)) candidates.push(...m.tool_calls);
+    }
+  }
+  for(const tc of candidates){
+    try{
+      const tid=tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id)||'';
+      if(tid && typeof _toolDisclosureIdentity==='function'&&_toolDisclosureIdentity(tc)===key) return tc;
+    }catch(_){}
+  }
+  for(const tc of candidates){
+    try{
+      const tid=tc&&(tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id)||'';
+      if(tid) continue;
+      if(typeof _toolDisclosureIdentity==='function'&&_toolDisclosureIdentity(tc)===key) return tc;
+    }catch(_){}
+  }
+  return null;
 }
 
 function _syncToolCallGroupSummary(group){
@@ -19442,7 +20338,7 @@ function editMessage(btn) {
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const msgIdx = parseInt(row.dataset.msgIdx, 10);
-  const originalText = row.dataset.rawText || '';
+  const originalText = _canonicalTextForRow(row) || row.dataset.rawText || '';
   const body = row.querySelector('.msg-body');
   if(!body || row.dataset.editing) return;
   row.dataset.editing = '1';
@@ -20308,7 +21204,7 @@ function renderKatexBlocks(container,options){
 }
 
 function _thinkingMarkup(text=''){
-  const clean=_sanitizeThinkingDisplayText(text);
+  const clean=_projectTranscriptTextForDisplay(_sanitizeThinkingDisplayText(text),{surface:'reasoning'});
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
     ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
@@ -20316,7 +21212,13 @@ function _thinkingMarkup(text=''){
 }
 function _renderThinkingInto(row,text=''){
   if(!row) return;
-  const clean=_sanitizeThinkingDisplayText(text);
+  const clean=_projectTranscriptTextForDisplay(_sanitizeThinkingDisplayText(text),{surface:'reasoning'});
+  try{
+    const card=row.querySelector('.thinking-card');
+    if(card) card._canonicalReasoning=String(text||'');
+    row._canonicalReasoning=String(text||'');
+    if(typeof window!=='undefined') window._lastLiveReasoningText=String(text||'');
+  }catch(_){}
   if(!clean){
     row.innerHTML=_thinkingMarkup(text);
     return;

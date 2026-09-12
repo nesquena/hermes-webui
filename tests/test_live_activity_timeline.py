@@ -325,7 +325,7 @@ def test_tool_event_does_not_create_blank_text_segment_without_pending_text():
     polling turns.
     """
     tool_handler = MESSAGES_JS.split("source.addEventListener('tool',e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
-    upsert_pos = tool_handler.find("const tc=upsertLiveToolCall(d,'start');")
+    upsert_pos = tool_handler.find("const tc=upsertLiveToolCall(d,'start', e&&e.lastEventId);")
     guard_pos = tool_handler.find("String(pendingDisplayText||'').trim()")
     force_pos = tool_handler.find("ensureAssistantRow(true);")
     append_pos = tool_handler.find("appendLiveToolCard(tc")
