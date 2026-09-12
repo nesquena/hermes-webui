@@ -39,15 +39,14 @@ def test_streaming_persists_context_fields_on_session_before_save():
     save_match = re.search(r"\n[ \t]+s\.save\(\)", src[block_start:])
     assert save_match is not None, "s.save() not found after the post-merge marker"
     save_call = block_start + save_match.start()
-    # Limit bumped to 16000 by #3455 (server-side <think> split added to the
-    # pre-save reasoning-persist block, + the anchor moved to the comment marker
-    # which sits a few lines above the former `if` anchor). The pre-save block
-    # legitimately grew here. NOTE: this byte-distance assertion is itself brittle
-    # (it must be bumped whenever a legitimate pre-save mutation block is added) — a
-    # structural check (presence of s.save() shortly after the post-merge marker)
-    # would be more durable; left as a follow-up. Earlier limits: 9000 (cancellation
-    # guards) → 13000 (#3263 v1) → 15000 (#3256/#3263 dual-gate).
-    assert save_call - block_start < 18000, (
+    # Limit bumped to 19000 by #7181 because the requested/served local-model
+    # provenance block is intentionally persisted before this save. NOTE: this
+    # byte-distance assertion is itself brittle (it must be bumped whenever a
+    # legitimate pre-save mutation block is added) — a structural check (presence
+    # of s.save() shortly after the post-merge marker) would be more durable; left
+    # as a follow-up. Earlier limits: 9000 (cancellation guards) → 13000 (#3263 v1)
+    # → 15000 (#3256/#3263 dual-gate) → 18000 (#3455 server-side <think> split).
+    assert save_call - block_start < 19000, (
         "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
         "If you've added a new pre-save mutation block here, bump this limit."
     )
