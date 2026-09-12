@@ -15436,68 +15436,6 @@ def handle_post(handler, parsed) -> bool:
             },
         )
 
-    if parsed.path == "/api/session/truncate-before":
-        # Restore-checkpoint primitive: keep messages [0..index_of_target) and
-        # drop everything from the target message onward. Mirrors the
-        # Desktop "Restore Checkpoint" feature where every user message is a
-        # checkpoint the conversation can be rewound to (see
-        # apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts in the
-        # Desktop repo: `restoreToMessage` + `truncate_before_user_ordinal`).
-        # WebUI does NOT auto-resubmit the checkpoint message after truncation
-        # (Desktop does — that part of the parity is deliberately deferred so
-        # this endpoint is a small, reviewable slice).
-        try:
-            require(body, "session_id", "message_id")
-        except ValueError as e:
-            return bad(handler, str(e))
-        if _session_is_subagent_view_only(body["session_id"]):
-            return bad(handler, "Subagent sessions are view-only and cannot be modified from WebUI", 400)
-        message_id = body["message_id"]
-        try:
-            s = get_session(body["session_id"])
-        except KeyError:
-            return bad(handler, "Session not found", 404)
-        # Resolve message_id -> index in the current transcript. We do this
-        # outside the lock so the lookup is cheap; the index is revalidated
-        # against the post-lock snapshot below.
-        ids = [m.get("id") for m in (s.messages or [])]
-        try:
-            target_index = next(i for i, mid in enumerate(ids) if mid == message_id)
-        except StopIteration:
-            return bad(handler, f"Message {message_id!r} not found in session", 404)
-        with _get_session_agent_lock(body["session_id"]):
-            from api.session_ops import truncate_session_at_keep
-            # Re-resolve the index under the lock — another truncate/delete
-            # could have shifted the list between our lookup and the mutation.
-            live_ids = [m.get("id") for m in (s.messages or [])]
-            try:
-                live_index = next(i for i, mid in enumerate(live_ids) if mid == message_id)
-            except StopIteration:
-                return bad(handler, f"Message {message_id!r} not found in session", 404)
-            old_msg_count, old_ctx_count = truncate_session_at_keep(s, live_index)
-            s.save()
-            logger.info(
-                "truncate_before %s: target_message_id=%s at index=%d, "
-                "messages %d->%d, context_messages %d->%d, watermark=%.2f",
-                body["session_id"], message_id, live_index,
-                old_msg_count, len(s.messages or []),
-                old_ctx_count, len(getattr(s, 'context_messages', None) or []),
-                s.truncation_watermark or 0,
-            )
-        from api.config import _evict_session_agent
-        _evict_session_agent(body["session_id"])
-        return j(
-            handler,
-            {
-                "ok": True,
-                "restored_to_message_id": message_id,
-                "deleted_message_count": old_msg_count - len(s.messages or []),
-                "session": public_session_projection(
-                    s.compact() | {"messages": s.messages}
-                ),
-            },
-        )
-
     if parsed.path == "/api/session/checkpoint/restore":
         # Restore-checkpoint primitive (parity with Hermes Desktop's
         # `restoreToMessage` in apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts).
@@ -15523,7 +15461,13 @@ def handle_post(handler, parsed) -> bool:
         except PermissionError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:
+            # Bad id / stale checkpoint / active turn — refused before any write.
             return bad(handler, str(e), 400)
+        except Exception as e:
+            # Durable write failure: the restore aborted with the sidecar
+            # untouched (no partial success). Surface as 500, do NOT claim ok.
+            logger.error("checkpoint_restore %s failed: %s", body["session_id"], e)
+            return bad(handler, f"Checkpoint restore failed: {e}", 500)
         from api.config import _evict_session_agent
         _evict_session_agent(body["session_id"])
         try:

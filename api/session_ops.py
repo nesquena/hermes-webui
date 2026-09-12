@@ -688,69 +688,128 @@ def retry_last(session_id: str) -> dict[str, Any]:
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
-def _resolve_row_id_for_checkpoint(session_id: str, target_row_id: int, history: list) -> int | None:
-    """Map ``target_row_id`` to a durable state.db row_id.
+def _state_db_active_row_by_id(session_id: str, row_id: int):
+    """Return the ACTIVE state.db row dict whose durable id equals ``row_id``.
 
-    Returns the durable row_id to use for the rewind, or None if the address
-    cannot be resolved safely.
-
-    Two input shapes are accepted, in priority order:
-
-    1. **Durable row_id** — when ``m._row_id`` (or the legacy alias
-       ``m.row_id``) equals ``target_row_id`` on some row in ``history``. The
-       gateway's ``_resolve_truncate_row_id`` already does this; we mirror
-       that contract.
-
-    2. **Legacy sidecar ``m.id``** — older WebUI sidecars (pre-#7075) wrote
-       messages with a per-session local counter (1, 2, 3 …) in
-       ``m.id`` but did not stamp a durable ``m._row_id``. ``m.id`` is NOT
-       the same as the state.db primary key (which is global). We detect
-       this case by looking for a row in ``history`` whose ``m.id`` matches
-       ``target_row_id``, and if found we look up the durable row_id by
-       message ordinal in state.db (the Nth message for the session).
-
-    Fails closed: if neither lookup resolves the address we return None and
-    the caller raises 400. We never guess a row_id.
+    ``get_state_db_session_messages`` already excludes ``active=0`` rows by
+    default, so a row that is present here is live in the durable transcript.
+    Returns ``None`` when the id is absent, inactive, or unreadable. This is the
+    single durable authority used by the restore path — it never trusts the
+    WebUI sidecar ordinal, because tool / reasoning / compaction rows make the
+    two lists diverge (see tui_gateway _resolve_truncate_row_id for the
+    gateway's equivalent guard).
     """
-    if not isinstance(target_row_id, bool) and isinstance(target_row_id, int):
-        # 1. Direct match on durable row_id stamps.
-        for m in history:
-            if not isinstance(m, dict):
-                continue
-            for stamp in (m.get('_row_id'), m.get('row_id')):
-                if stamp is None:
-                    continue
-                try:
-                    if int(stamp) == target_row_id:
-                        return int(stamp)
-                except (TypeError, ValueError):
-                    continue
-        # 2. Legacy sidecar m.id — find position in sidecar, then map to
-        #    durable state.db row_id by ordinal.
-        legacy_pos = None
-        for i, m in enumerate(history):
-            if isinstance(m, dict) and m.get('id') == target_row_id:
-                legacy_pos = i
-                break
-        if legacy_pos is not None:
-            try:
-                from api.models import get_state_db_session_messages
-                state_messages = get_state_db_session_messages(session_id)
-            except Exception:
-                return None
-            if not state_messages or legacy_pos >= len(state_messages):
-                return None
-            target_state = state_messages[legacy_pos]
-            if not isinstance(target_state, dict):
-                return None
-            for stamp in (target_state.get('_row_id'), target_state.get('row_id'), target_state.get('id')):
-                if stamp is None:
-                    continue
-                try:
-                    return int(stamp)
-                except (TypeError, ValueError):
-                    continue
+    try:
+        from api.models import get_state_db_session_messages
+        state_messages = get_state_db_session_messages(session_id)
+    except Exception:
+        return None
+    for r in state_messages or []:
+        if not isinstance(r, dict):
+            continue
+        rid = (r.get('_state_db_row_id') or r.get('_row_id')
+               or r.get('row_id') or r.get('id'))
+        if rid is None:
+            continue
+        try:
+            if int(rid) == row_id:
+                return r
+        except (TypeError, ValueError):
+            continue
     return None
+
+
+def _state_db_active_rows_after(session_id: str, row_id: int) -> list[int]:
+    """Durable ids of the ACTIVE rows strictly at/after ``row_id`` in state.db.
+
+    Uses the *state.db* ordinal of the matched row — not the sidecar ordinal —
+    so the archived suffix is exactly the durable transcript that follows the
+    checkpoint. Returns [] when the anchor row is not active/present.
+    """
+    try:
+        from api.models import get_state_db_session_messages
+        state_messages = get_state_db_session_messages(session_id)
+    except Exception:
+        return []
+    anchor_idx = None
+    for i, r in enumerate(state_messages or []):
+        if not isinstance(r, dict):
+            continue
+        rid = (r.get('_state_db_row_id') or r.get('_row_id')
+               or r.get('row_id') or r.get('id'))
+        if rid is None:
+            continue
+        try:
+            if int(rid) == row_id:
+                anchor_idx = i
+                break
+        except (TypeError, ValueError):
+            continue
+    if anchor_idx is None:
+        return []
+    out: list[int] = []
+    for r in state_messages[anchor_idx:]:
+        if not isinstance(r, dict):
+            continue
+        rid = (r.get('_state_db_row_id') or r.get('_row_id')
+               or r.get('row_id') or r.get('id'))
+        if rid is None:
+            continue
+        try:
+            out.append(int(rid))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _archive_state_db_suffix(session_id: str, archived_ids: list[int]) -> None:
+    """Soft-archive (``active=0``) the given durable rows in a single tx.
+
+    Raises on any failure — callers treat that as a hard restore failure so the
+    sidecar is never left claiming success over an unmodified durable transcript
+    (the dual-store fail-open bug the maintainers flagged). Runs in autocommit
+    off mode; the whole UPDATE is one transaction and commits only on success.
+    """
+    if not archived_ids:
+        return
+    from api.models import _active_state_db_path
+    import sqlite3
+    db_path = _active_state_db_path()
+    if not db_path or not os.path.exists(str(db_path)):
+        raise RuntimeError("state.db not available for checkpoint archive")
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        with conn:  # one transaction; commits on clean exit, rolls back on raise
+            placeholders = ",".join("?" for _ in archived_ids)
+            conn.execute(
+                "UPDATE messages SET active=0 "
+                "WHERE session_id=? AND id IN (%s) AND active=1" % placeholders,
+                [session_id, *archived_ids],
+            )
+    finally:
+        conn.close()
+
+
+def _sidecar_row_matches_durable(sidecar_row: dict, durable_row: dict) -> bool:
+    """Content/role identity check between a sidecar row and its state.db twin.
+
+    Guards against a stale or wrong-role durable anchor: the checkpoint the
+    client pointed at must be the same *message* in both stores before we cut.
+    Role must match exactly; for plain-text content the sanitized text must
+    match, otherwise (multimodal/None) role-only match is accepted.
+    """
+    if not isinstance(sidecar_row, dict) or not isinstance(durable_row, dict):
+        return False
+    if sidecar_row.get('role') != durable_row.get('role'):
+        return False
+    sc = sidecar_row.get('content')
+    dc = durable_row.get('content')
+    if isinstance(sc, str) and isinstance(dc, str):
+        # Compare leading 4KB after light normalization; identical prompt text.
+        a = sc.strip()[:4096]
+        b = dc.strip()[:4096]
+        return a == b
+    return True
 
 
 def restore_checkpoint_at_row_id(session_id: str, target_row_id: int) -> dict[str, Any]:
@@ -758,178 +817,144 @@ def restore_checkpoint_at_row_id(session_id: str, target_row_id: int) -> dict[st
 
     Parity with Hermes Desktop's "Restore checkpoint" feature
     (apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts#restoreToMessage).
-    Prefers the durable ``_row_id`` over a display index because the gateway's
-    history carries entries (tool calls, internal markers, display_kind
-    placeholders) that the WebUI display list filters out, so the two ordinal
-    spaces can diverge — the gateway refuses ordinal-only truncation as
-    "unsafe for durable session history" (see tui_gateway/methods_prompt.py
-    `_resolve_truncate_row_id`).
+    The address is a durable ``row_id`` (state.db primary key) stamped on the
+    sidecar row as ``m._row_id``. There is deliberately **no** sidecar-ordinal
+    fallback: an older sidecar that never stamped a durable id simply cannot be
+    checkpointed, and the UI hides the control for those rows. The gateway
+    refuses ordinal-only truncation as unsafe for durable history (see
+    tui_gateway _resolve_truncate_row_id); we mirror that fail-closed contract.
 
-    Two address shapes are accepted (both as the integer ``target_row_id`` arg):
-      1. **Durable row_id** — the global state.db primary key stamped on
-         ``m._row_id`` (or legacy alias ``m.row_id``).
-      2. **Legacy sidecar ``m.id``** — a per-session local counter from older
-         WebUI sidecars (pre-#7075) that did not stamp a durable row_id. The
-         function resolves this to a durable row_id via state.db lookup by
-         ordinal (see ``_resolve_row_id_for_checkpoint``).
+    Correctness / integrity rules:
+      * read-only and live-turn sessions are refused **before any write**.
+      * the anchor row must be an ACTIVE durable user row whose content matches
+        the sidecar row (guards stale / wrong-role / cross-session ids).
+      * state.db soft-archive (``active=0``) is committed FIRST; the WebUI
+        sidecar is written ONLY from the committed survivor transcript. Any
+        durable-write failure aborts the whole restore (no partial success).
+      * the archived suffix is computed from the state.db ordinal, so tool /
+        reasoning / compaction rows diverging from the sidecar cannot make this
+        archive the wrong durable rows.
 
-    Failure modes (mirroring the gateway contract):
-      - ``KeyError``: session_id not found
-      - ``ValueError``: row_id is unknown / not a user message / ambiguous
-      - ``PermissionError``: session is read-only
-
-    Returns a dict with the surviving message count, the truncated target
-    row_id (same as input), and a ``survivor_user_row_ids`` / ``survivor_row_id_map``
-    pair for the client to rebind cached row references. The map mirrors the
-    gateway response shape so future gateway-mode callers can reuse the same
-    parser.
+    Raises:
+        KeyError: session not found
+        PermissionError: read-only session
+        ValueError: bad id type, unknown / inactive / wrong-role / non-user row,
+                    content mismatch, or an active turn in flight
+        RuntimeError: durable write failed (restore aborted, sidecar untouched)
     """
     if isinstance(target_row_id, bool) or not isinstance(target_row_id, int):
         raise ValueError("row_id must be an integer")
     if target_row_id <= 0:
         raise ValueError("row_id must be a positive durable row identifier")
 
-    # Lock ordering: _agent_lock → LOCK → save() (see retry_last).
     with _get_session_agent_lock(session_id):
         s = get_session(session_id)  # raises KeyError
         with LOCK:
-            # Stale-object guard — see retry_last for the rationale.
-            s = SESSIONS.get(session_id, s)
+            s = SESSIONS.get(session_id, s)  # stale-object guard
+            # Ownership / mutability gates BEFORE any mutation.
+            if getattr(s, "read_only", False):
+                raise PermissionError(f"Session {session_id} is read-only")
+            # Reject while a turn is live (open stream or pending user message).
+            if _live_active_stream_id(s) or getattr(s, "pending_user_message", None):
+                raise ValueError(
+                    "Session has an active turn; wait for it to finish before restoring."
+                )
             history = s.messages or []
             if not history:
                 raise ValueError("Session has no messages to restore.")
 
-            # Resolve the durable address in the live transcript first.
-            # Two paths: (a) target_row_id matches m._row_id directly; (b)
-            # target_row_id is a legacy m.id sidecar counter that we resolve
-            # against state.db by ordinal. Fails closed if neither resolves.
+            # Locate the anchor by durable id in the SIDE CAR (for the cut point).
             target_idx = None
-            # Path (a): durable _row_id / row_id match.
             for i, m in enumerate(history):
                 if not isinstance(m, dict):
                     continue
-                rid = m.get('_row_id') or m.get('_db_persisted_row_id') or m.get('row_id')
+                rid = (m.get('_row_id') or m.get('_db_persisted_row_id') or m.get('row_id'))
                 if rid is None:
                     continue
                 try:
-                    rid_int = int(rid)
+                    if int(rid) == target_row_id:
+                        target_idx = i
+                        break
                 except (TypeError, ValueError):
                     continue
-                if rid_int == target_row_id:
-                    target_idx = i
-                    break
             if target_idx is None:
-                # Path (b): legacy sidecar m.id fallback.
-                legacy_pos = None
-                for i, m in enumerate(history):
-                    if isinstance(m, dict) and m.get('id') == target_row_id:
-                        legacy_pos = i
-                        break
-                if legacy_pos is not None:
-                    target_idx = legacy_pos
-            if target_idx is None:
-                # Fail closed: an unknown durable address never silently truncates
-                # to a guessed prefix. The caller must refresh the history and pick
-                # a different row.
                 raise ValueError(
-                    f"row_id {target_row_id} not found in current session transcript; "
+                    f"row_id {target_row_id} not found in the session transcript; "
                     "refusing to truncate to a guessed index"
                 )
 
             target_message = history[target_idx]
-            target_role = target_message.get('role') if isinstance(target_message, dict) else None
-            if target_role != 'user':
-                # Only user turns are valid checkpoints (Desktop UI only offers the
-                # button on user messages).
+            if target_message.get('role') != 'user':
                 raise ValueError(
-                    f"row_id {target_row_id} is a {target_role!r} row, not a user message; "
-                    "only user turns can be used as Restore checkpoints"
+                    f"row_id {target_row_id} is a {target_message.get('role')!r} row, "
+                    "not a user message; only user turns can be used as checkpoints"
                 )
 
-            # Cut point: keep everything strictly BEFORE target_idx.
+            # Cross-check against the durable authority: the same durable id must
+            # exist, be active, be a user row, and match the sidecar content.
+            durable_anchor = _state_db_active_row_by_id(session_id, target_row_id)
+            if durable_anchor is None:
+                raise ValueError(
+                    f"row_id {target_row_id} is not an active durable row in state.db; "
+                    "the checkpoint is stale or belongs to a different session"
+                )
+            if durable_anchor.get('role') != 'user':
+                raise ValueError(
+                    f"row_id {target_row_id} resolves to a {durable_anchor.get('role')!r} "
+                    "durable row, not a user message"
+                )
+            if not _sidecar_row_matches_durable(target_message, durable_anchor):
+                raise ValueError(
+                    f"row_id {target_row_id} content does not match the durable row; "
+                    "refusing to cut on a mismatched checkpoint"
+                )
+
+            # Compute the durable suffix to archive from the STATE.DB ordinal.
+            archived_state_ids = _state_db_active_rows_after(session_id, target_row_id)
             keep = target_idx
+
+        # --- DURABLE WRITE FIRST (fail closed) ---
+        # Outside the global LOCK (a busy state.db must not stall all WebUI
+        # mutations) but inside the per-session agent lock, which serializes
+        # every other writer of this session. If the archive raises, we abort
+        # BEFORE touching the in-memory transcript or the sidecar file →
+        # no dual-store divergence, no partial success.
+        _archive_state_db_suffix(session_id, archived_state_ids)
+
+        # --- SIDE CAR WRITE from the committed survivor transcript ---
+        with LOCK:
+            s = SESSIONS.get(session_id, s)  # re-bind after the durable write
+            history = s.messages or []
+            # Re-resolve the cut point on the bound instance: the transcript is
+            # frozen for us (agent lock) but be defensive — an empty/changed
+            # history here means something unexpected happened; abort cleanly.
+            if keep > len(history):
+                raise RuntimeError(
+                    "session transcript changed during checkpoint archive; retry"
+                )
             survivor_messages = history[:keep]
             survivor_row_ids: list[int | None] = [
-                (int(m['_row_id']) if isinstance(m, dict) and m.get('_row_id') is not None else None)
+                (int(m['_row_id']) if isinstance(m, dict)
+                 and m.get('_row_id') is not None else None)
                 for m in survivor_messages
             ]
-
-            # Compute the durable state.db row_ids of the messages we are
-            # dropping (so we can soft-archive them in state.db for durability
-            # across WebUI restarts and for any future agent run that reads
-            # directly from state.db). Mirrors the gateway's "rewrite" strategy:
-            # rows are flagged inactive (active=0), not deleted, so the user
-            # could in principle recover them later via the include_inactive
-            # path. The m.id → state.db.row_id mapping is the same one we used
-            # to resolve target_row_id when it was a legacy sidecar id (see
-            # _resolve_row_id_for_checkpoint).
-            # NB: get_state_db_session_messages() projects rows to
-            # {role, content, timestamp, ..., _state_db_row_id} — the durable
-            # primary key is the private ``_state_db_row_id`` field, not the
-            # absent ``_row_id``/``row_id``/``id`` keys.
-            archived_state_ids: list[int] = []
-            try:
-                from api.models import get_state_db_session_messages
-                state_messages = get_state_db_session_messages(session_id)
-            except Exception:
-                state_messages = []
-            if state_messages and keep < len(state_messages):
-                for dropped in state_messages[keep:]:
-                    if not isinstance(dropped, dict):
-                        continue
-                    sid_dropped = (
-                        dropped.get('_state_db_row_id')
-                        or dropped.get('_row_id')
-                        or dropped.get('row_id')
-                        or dropped.get('id')
-                    )
-                    try:
-                        if sid_dropped is not None:
-                            archived_state_ids.append(int(sid_dropped))
-                    except (TypeError, ValueError):
-                        continue
-
-            # Mutate in-memory transcript.
             old_count = len(history)
             s.messages = survivor_messages
             _stamp_intentional_shrink_generation(s, old_count, len(s.messages))
             s.truncation_watermark = _truncation_watermark_for(s.messages)
             s.truncation_boundary = s.truncation_watermark
 
-            # Keep context_messages aligned so the next agent turn does not see
-            # the truncated suffix as stale context.
             ctx = getattr(s, 'context_messages', None)
             if isinstance(ctx, list) and ctx:
-                aligned_ctx = truncate_context_for_display_keep(
-                    ctx, history, keep
-                )
+                aligned_ctx = truncate_context_for_display_keep(ctx, history, keep)
                 if aligned_ctx is not None:
                     s.context_messages = aligned_ctx
         s.save()
-        # Persist the soft archive to state.db (still under the agent lock so
-        # a concurrent flush cannot race us). If this fails, log and continue —
-        # the in-memory state is consistent and the WebUI-side rewrite is
-        # already durable to sidecar.json.
-        if archived_state_ids:
-            try:
-                from api.models import _active_state_db_path
-                from contextlib import closing
-                import sqlite3 as _sqlite3
-                db_path = _active_state_db_path()
-                if db_path and os.path.exists(str(db_path)):
-                    with closing(_sqlite3.connect(str(db_path))) as _conn:
-                        _cu = _conn.cursor()
-                        placeholders = ",".join("?" for _ in archived_state_ids)
-                        _cu.execute(
-                            f"UPDATE messages SET active=0 WHERE session_id=? AND id IN ({placeholders})",
-                            [session_id] + archived_state_ids,
-                        )
-                        _conn.commit()
-            except Exception as archive_exc:
-                logger.debug(
-                    "checkpoint_restore: state.db soft archive failed for session %s: %s",
-                    session_id, archive_exc,
-                )
+
+    logger.info(
+        "checkpoint_restore %s: row_id=%d, messages %d->%d, archived_state_rows=%d",
+        session_id, target_row_id, old_count, len(s.messages), len(archived_state_ids),
+    )
     return {
         'restored_to_row_id': target_row_id,
         'old_message_count': old_count,
