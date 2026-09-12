@@ -3,6 +3,8 @@
 State-extraction prelude to the routes.py split tracked in #1907.
 Extracts approval state, not handlers, by design.
 """
+import json
+import logging
 import queue
 import threading
 import uuid
@@ -10,30 +12,32 @@ from contextlib import contextmanager
 
 from api.session_events import publish_session_list_changed
 
+logger = logging.getLogger(__name__)
+
 # Approval system (optional -- graceful fallback if agent not available)
 try:
     from tools.approval import (
         submit_pending as _submit_pending_raw,
-        approve_session,
-        approve_permanent,
-        save_permanent_allowlist,
+        approve_session,  # noqa: F401 — re-exported for api.routes backward compat
+        approve_permanent,  # noqa: F401 — re-exported for api.routes backward compat
+        save_permanent_allowlist,  # noqa: F401 — re-exported for api.routes backward compat
         is_approved,
         _pending,
         _lock,
         _permanent_approved,
         _gateway_queues,
-        resolve_gateway_approval,
+        resolve_gateway_approval,  # noqa: F401 — re-exported for api.routes backward compat
         enable_session_yolo,
         disable_session_yolo,
         is_session_yolo_enabled,
     )
 except ImportError:
     _submit_pending_raw = lambda *a, **k: None
-    approve_session = lambda *a, **k: None
-    approve_permanent = lambda *a, **k: None
-    save_permanent_allowlist = lambda *a, **k: None
+    approve_session = lambda *a, **k: None  # noqa: F401 — re-export for api.routes
+    approve_permanent = lambda *a, **k: None  # noqa: F401 — re-export for api.routes
+    save_permanent_allowlist = lambda *a, **k: None  # noqa: F401 — re-export for api.routes
     is_approved = lambda *a, **k: True
-    resolve_gateway_approval = lambda *a, **k: 0
+    resolve_gateway_approval = lambda *a, **k: 0  # noqa: F401 — re-export for api.routes
     enable_session_yolo = lambda *a, **k: None
     disable_session_yolo = lambda *a, **k: None
     is_session_yolo_enabled = lambda *a, **k: False
@@ -536,6 +540,7 @@ def retire_gateway_pending_mirror(
         if not retired and not gateway_queue_changed:
             head, total, changed = reconcile_gateway_pending_mirror_locked(session_key)
             _approval_sse_notify_locked(session_key, head, total)
+            _relay_child_change_to_parent_locked(session_key)
             if changed:
                 publish_session_list_changed("attention_resolved")
             return changed
@@ -552,6 +557,7 @@ def retire_gateway_pending_mirror(
             _pending.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     publish_session_list_changed("attention_resolved")
     return True
 
@@ -766,6 +772,7 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 _normalize_pending_queue_locked(session_key).append(mirror_entry)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     publish_session_list_changed("attention_pending")
     return (dict(head) if head else None), total
 
@@ -789,6 +796,7 @@ def resolve_gateway_pending_local(
             _gateway_queues.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     if target is None:
         return 0, head, total
     target.result = choice
@@ -841,6 +849,7 @@ def resolve_gateway_pending_local_no_run_mirror(
             _pending.pop(session_key, None)
         head, total, _changed = reconcile_gateway_pending_mirror_locked(session_key)
         _approval_sse_notify_locked(session_key, head, total)
+        _relay_child_change_to_parent_locked(session_key)
     target.result = choice
     if reason:
         target.reason = reason
@@ -935,6 +944,11 @@ def submit_pending(session_key: str, approval: dict) -> None:
     """
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
+    if _is_child_approval_key(session_key):
+        # Bind the queue entry to the profile/state-db that enqueued it so a
+        # cross-profile process-global queue can never surface profile A's
+        # pending command under profile B's parent (#6961 r3 MUST-FIX 2).
+        entry["_child_provenance"] = _child_provenance_current()
     with _lock:
         queue_list = _normalize_pending_queue_locked(session_key)
         queue_list.append(entry)
@@ -944,9 +958,435 @@ def submit_pending(session_key: str, approval: dict) -> None:
         # submit_pending calls can't deliver out-of-order (T2's later
         # notify arriving before T1's earlier notify with a stale count).
         _approval_sse_notify_locked(session_key, head, total)
+        # A child-key enqueue must also reach the parent's SSE subscribers
+        # (#6961 #6): the parent stream only gets the initial snapshot with
+        # the child, so later child enqueues would go stale for pure-SSE
+        # consumers.
+        _relay_child_change_to_parent_locked(session_key)
     publish_session_list_changed("attention_pending")
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
     # managed by check_all_command_guards / register_gateway_notify), which is
     # unaffected by _pending. The _pending dict is only used for UI polling.
+
+
+# ── Delegated-child approval routing (agent approval-key rebinding contract) ─
+# The agent rebinds a delegated child's approval authority to a child-owned
+# key ("subagent:<child_session_id>") at the worker boundary (hermes-agent
+# PR #82009, the agent-side root-cause fix for nesquena/hermes-webui#6100).
+# The WebUI previously only ever read/resolved approvals under the parent
+# WebUI session key, so a dangerous child command enqueued under the child key
+# was never surfaced and the child retried forever — "approval gets stuck"
+# (nesquena/hermes-webui#6943). These helpers route child-key approvals into
+# the parent session's UI and resolve them back under the child's key.
+_CHILD_APPROVAL_KEY_PREFIX = "subagent:"
+
+# Read-only marker for child approvals surfaced under a parent session
+# (#6961 r3 MUST-FIX 1): child projections get this non-empty sentinel as
+# their approval_id so they are never mistaken for an actionable parent
+# approval. The legacy resolver rejects it and the frontend renders the
+# card inert.
+_READ_ONLY_CHILD_SENTINEL = "__read_only_child__:"
+
+# child id -> parent session key, scoped by canonical state-db/profile path.
+# Populated lazily on first sight of a child approval key (state.db fallback
+# below); seeded directly by tests via seed_child_parent().
+#
+# The cache key includes the canonical state-db path so one profile's child
+# resolution can never poison another profile's identical child id, and only
+# POSITIVE lookups are cached — a failed/missing lookup is never stored, so a
+# late state.db write is picked up on the next call instead of permanently
+# resolving to None (#6961 #4).
+_child_approval_parents: dict[tuple[str, str], str] = {}
+
+
+def _child_parent_cache_key(child_session_id: str) -> tuple[str, str]:
+    """Canonical cache key: (state-db/profile path, child session id)."""
+    from api.models import _active_state_db_path
+    try:
+        db_path = _active_state_db_path()
+    except Exception:
+        db_path = None
+    return (str(db_path or ""), child_session_id)
+
+
+def _child_provenance_current() -> str:
+    """Canonical identity of the currently-active profile's state DB.
+
+    Child queue entries are bound to this identity when enqueued
+    (``submit_pending``), and ``pending_head_for_session_locked`` filters the
+    projection by it, so a process-global queue shared across profiles can
+    never surface profile A's pending command under profile B's parent
+    (#6961 r3 MUST-FIX 2).
+    """
+    try:
+        from api.models import _active_state_db_path
+        return str(_active_state_db_path() or "").strip()
+    except Exception:
+        return ""
+
+
+def seed_child_parent(child_session_id: str, parent_session_id: str) -> None:
+    """Record a child->parent mapping (used by tests and early wiring)."""
+    with _lock:
+        _child_approval_parents[_child_parent_cache_key(child_session_id)] = parent_session_id
+
+
+def invalidate_child_parent_cache(child_session_id: str | None = None) -> None:
+    """Drop cached child->parent mappings (all, or for one child id).
+
+    Call when a child's ownership may have changed (e.g. the state.db row
+    lands after an early lookup, or the child is re-parented) so the next
+    lookup re-reads the authoritative row instead of a stale positive.
+    """
+    with _lock:
+        if child_session_id is None:
+            _child_approval_parents.clear()
+            return
+        for key in [k for k in _child_approval_parents if k[1] == child_session_id]:
+            _child_approval_parents.pop(key, None)
+
+
+def _is_child_approval_key(key: str) -> bool:
+    """True when *key* is a delegated-child approval key (``subagent:`` prefix)."""
+    return isinstance(key, str) and key.startswith(_CHILD_APPROVAL_KEY_PREFIX)
+
+
+def _child_parent_session_id(child_session_id: str) -> str | None:
+    """Return the parent WebUI session key for a delegated child session id.
+
+    Consults the in-process cache first (keyed by canonical state-db/profile
+    path + child id), then falls back to the state.db signals the sidebar uses
+    to identify delegated children (#5307): the ``model_config._delegate_from``
+    marker is authoritative, and ``source='subagent'`` + ``parent_session_id``
+    is the legacy signal. Only POSITIVE lookups are cached; a failed or
+    missing lookup is never cached, so a late state.db write is observed on
+    the next call and one profile's miss cannot poison another's identical
+    child id (#6961 #4). Any failure resolves to ``None`` (fail-closed: an
+    unassociated child approval is never surfaced in a session that does not
+    own it).
+    """
+    cache_key = _child_parent_cache_key(child_session_id)
+    cached = _child_approval_parents.get(cache_key)
+    if cached is not None:
+        return cached
+    parent: str | None = None
+    try:
+        from api.models import _active_state_db_path
+        from contextlib import closing
+        from pathlib import Path
+        import sqlite3 as _sqlite
+
+        db_path = _active_state_db_path()
+        if db_path and Path(str(db_path)).exists():
+            with closing(_sqlite.connect(str(db_path))) as conn:
+                row = conn.execute(
+                    "SELECT parent_session_id, model_config, source FROM sessions WHERE id = ?",
+                    (child_session_id,),
+                ).fetchone()
+            if row:
+                parent_session_id, raw_model_config, source = row
+                model_config = {}
+                config_authoritative = False
+                if raw_model_config is None:
+                    # Absence of config is authoritative: nothing to parse.
+                    config_authoritative = True
+                elif isinstance(raw_model_config, str):
+                    if raw_model_config.strip():
+                        try:
+                            parsed = json.loads(raw_model_config)
+                            if isinstance(parsed, dict):
+                                model_config = parsed
+                                config_authoritative = True
+                        except (TypeError, ValueError):
+                            # Malformed JSON: never fall through to the
+                            # physical-parent branch (#6961 r3 MUST-FIX 3).
+                            config_authoritative = False
+                    else:
+                        config_authoritative = True
+                elif isinstance(raw_model_config, dict):
+                    model_config = raw_model_config
+                    config_authoritative = True
+                if "_delegate_from" in model_config:
+                    # Key PRESENCE is authoritative (#6961 r4 #2): an
+                    # explicitly present marker — even empty/null/non-string —
+                    # declares the child's lineage and must NEVER fall through
+                    # to the physical-parent fallback. Only a non-empty string
+                    # value yields a parent; everything else fails closed.
+                    delegate_from_value = model_config.get("_delegate_from")
+                    if isinstance(delegate_from_value, str) and delegate_from_value.strip():
+                        parent = delegate_from_value.strip()
+                    else:
+                        parent = None
+                elif config_authoritative and str(source or "").strip().lower() == "subagent":
+                    parent = str(parent_session_id or "").strip() or None
+    except Exception:
+        logger.debug("child approval parent lookup failed", exc_info=True)
+    if parent:
+        _child_approval_parents[cache_key] = parent
+    return parent
+
+
+def child_approval_keys_for_session_locked(session_key: str) -> list[str]:
+    """Return every approval key that belongs to *session_key*.
+
+    Includes the session's own key plus any delegated-child keys
+    (``subagent:<child_session_id>``) whose recorded parent is this session.
+
+    CALLER MUST HOLD `_lock`. Scans only keys that actually carry a pending
+    entry, so the child->parent mapping stays lazy and costs nothing when no
+    child approval is live.
+    """
+    keys = [session_key]
+    seen = {session_key}
+    for candidate in list(_gateway_queues.keys()) + list(_pending.keys()):
+        if not _is_child_approval_key(candidate) or candidate in seen:
+            continue
+        seen.add(candidate)
+        child_id = candidate[len(_CHILD_APPROVAL_KEY_PREFIX):]
+        if _child_parent_session_id(child_id) == session_key:
+            keys.append(candidate)
+    return keys
+
+
+def _stable_entry_key(entry: dict) -> str | None:
+    """Return a stable dedupe identity for one approval entry, or ``None``.
+
+    Mirrors parked in ``_pending`` and their live ``_gateway_queues``
+    counterparts are the same approval surfaced twice; dedupe by stable
+    approval id first, then by the gateway mirror token when the id is
+    missing (legacy no-id entries). Entries with neither id nor token are
+    returned as ``None`` and are never deduped (each one is unique).
+    """
+    approval_id = str(entry.get("approval_id") or "").strip()
+    if approval_id:
+        return f"id:{approval_id}"
+    token = str(
+        entry.get(_GATEWAY_MIRROR_TOKEN)
+        or entry.get(_GATEWAY_ENTRY_DATA_TOKEN_KEY)
+        or ""
+    ).strip()
+    if token:
+        return f"token:{token}"
+    return None
+
+
+def _queue_entries_locked(key: str) -> list[dict]:
+    """Return the pending entries for *key* as a list of dicts.
+
+    Tolerates the agent's legacy single-dict ``_pending`` value and folds in
+    live gateway-queue heads (``_ApprovalEntry.data`` payloads). The same
+    approval can appear both as a ``_pending`` mirror and as a live gateway
+    entry; entries are deduped by stable approval id / mirror token so the
+    aggregate count never double-counts one approval (#6961 #5).
+
+    CALLER MUST HOLD `_lock`.
+    """
+    entries: list[dict] = []
+    seen: set[str] = set()
+
+    def _append(entry: dict) -> None:
+        stable = _stable_entry_key(entry)
+        if stable is not None:
+            if stable in seen:
+                return
+            seen.add(stable)
+        entries.append(dict(entry))
+
+    q = _pending.get(key)
+    if isinstance(q, list):
+        for entry in q:
+            _append(entry)
+    elif q:
+        _append(q)
+    for entry in _gateway_queues.get(key) or []:
+        raw = getattr(entry, "data", None) or {}
+        if raw:
+            _append(raw)
+    return entries
+
+
+def pending_head_for_session_locked(session_key: str) -> tuple[dict | None, int]:
+    """Return ``(head, total)`` of every pending approval visible for *session_key*.
+
+    The session's own queue comes first, then any delegated-child approvals
+    routed to this session under the agent#82009 child-key contract (fixes
+    nesquena/hermes-webui#6943: child approvals were never surfaced, leaving
+    the child retrying forever).
+
+    CALLER MUST HOLD `_lock`.
+    """
+    entries = _queue_entries_locked(session_key)
+    current_prov = _child_provenance_current()
+    for child_key in child_approval_keys_for_session_locked(session_key):
+        if child_key == session_key:
+            continue
+        for entry in _queue_entries_locked(child_key):
+            entry_prov = str(entry.get("_child_provenance") or "").strip()
+            if not entry_prov or not current_prov or entry_prov != current_prov:
+                # Cross-profile guard (#6961 r3 MUST-FIX 2): a child entry
+                # parked under the same key by another profile's process-global
+                # queue must never be projected here. Unknown provenance fails
+                # closed too (#6961 r5 #2): child approvals only arrive via
+                # submit_pending / the gateway wrap, which bind provenance on
+                # enqueue, so an empty stamp on EITHER side means state-db
+                # resolution failed — equality of two empty strings must never
+                # authorize a projection.
+                continue
+            # Mark child projections explicitly read-only (#6961 r3
+            # MUST-FIX 1): non-empty sentinel identity (never null/absent), so
+            # the frontend renders the card inert and the legacy resolver
+            # rejects it instead of signalling the PARENT's approval.
+            marked = dict(entry)
+            marked["approval_id"] = f"{_READ_ONLY_CHILD_SENTINEL}{child_key}"
+            marked["read_only"] = True
+            entries.append(marked)
+    if not entries:
+        return None, 0
+    return dict(entries[0]), len(entries)
+
+
+def _relay_child_change_to_parent_locked(child_key: str) -> None:
+    """Publish the parent's aggregate head/count after an owned child change.
+
+    The parent SSE subscriber only ever receives the initial snapshot that
+    includes the child (routes.py `_handle_approval_sse_stream`); later child
+    enqueue/resolve events under the child key never reached the parent's
+    stream, so a pure-SSE consumer went stale until the 1.5s HTTP poll fired
+    (#6961 #6). Whenever an owned child queue changes, push the aggregate
+    parent head/count to the parent's subscribers.
+
+    CALLER MUST HOLD `_lock`. No-op for non-child keys, unassociated children,
+    and parents without live SSE subscribers.
+    """
+    if not _is_child_approval_key(child_key):
+        return
+    child_id = child_key[len(_CHILD_APPROVAL_KEY_PREFIX):]
+    parent = _child_parent_session_id(child_id)
+    if not parent:
+        return
+    if not _approval_sse_subscribers.get(parent):
+        return
+    head, total = pending_head_for_session_locked(parent)
+    _approval_sse_notify_locked(parent, head, total)
+
+
+# ── Raw producer provenance boundary (installed Agent enqueue path) ─────────
+# The installed Agent's own `tools.approval.submit_pending()` writes a no-ID
+# raw dict straight into process-global `_pending` without ever calling the
+# WebUI wrapper above, so child-key entries enqueued by the REAL producer
+# carried no `_child_provenance` and the projector filtered them out — the
+# child approval stayed invisible even though it was pending (#6961 r4 #1).
+# Because the WebUI shares the agent module in-process (`_pending`/`_lock`/
+# `_gateway_queues` are the same objects), the fix is to bind the boundary at
+# import time: wrap the raw producer so every child-key enqueue gets canonical
+# profile/state-db provenance stamped (the same identity the WebUI wrapper
+# injects) and the owning parent's aggregate SSE update is relayed — the exact
+# treatment the wrapper gives. Gateway entries get the same stamp so mirrors
+# preserve it. The wrap is a no-op when the agent module is not importable
+# (agent-less WebUI test environments fall back to the stub `_pending`).
+_RAW_PRODUCER_BOUND_ATTR = "_webui_raw_producer_provenance_bound"
+
+
+def _wrap_raw_submit_pending(module) -> bool:
+    """Stamp provenance + relay parent SSE on the raw Agent `submit_pending`."""
+    original = module.submit_pending
+    if getattr(original, _RAW_PRODUCER_BOUND_ATTR, False):
+        return False
+
+    def _raw_submit_pending_bound(session_key, approval):
+        if _is_child_approval_key(session_key) and isinstance(approval, dict):
+            entry = dict(approval)
+            entry["_child_provenance"] = _child_provenance_current()
+            original(session_key, entry)
+            try:
+                with _lock:
+                    _relay_child_change_to_parent_locked(session_key)
+            except Exception:
+                logger.debug("raw child approval SSE relay failed", exc_info=True)
+            return
+        return original(session_key, approval)
+
+    _raw_submit_pending_bound.__name__ = original.__name__
+    _raw_submit_pending_bound.__doc__ = original.__doc__
+    setattr(_raw_submit_pending_bound, _RAW_PRODUCER_BOUND_ATTR, True)
+    module.submit_pending = _raw_submit_pending_bound
+    return True
+
+
+def _wrap_raw_gateway_enqueue(module) -> bool:
+    """Stamp provenance on child-key gateway entries enqueued by the Agent and
+    publish the parent's aggregate while the entry is actually parked.
+
+    The gateway path parks `_ApprovalEntry(approval_data)` in
+    `_gateway_queues`; stamping the data dict before the original runs means
+    the entry's `.data` (same object) carries provenance and every mirror that
+    copies it preserves the identity.
+
+    The Agent's `_await_gateway_decision` invokes `notify_cb` AFTER the entry
+    is parked and only removes it right before returning, so a relay in
+    `finally` alone would fire after the pending entry was already gone — the
+    parent SSE subscriber would see the removal but never the pending state
+    (#6961 r5 #1). Wrapping `notify_cb` publishes the parent's initial
+    aggregate at the exact moment the child entry is visible, before the
+    worker blocks; the `finally` relay is retained for the removal.
+    """
+    original = getattr(module, "_await_gateway_decision", None)
+    if original is None or getattr(original, _RAW_PRODUCER_BOUND_ATTR, False):
+        return False
+
+    def _raw_gateway_decision_bound(session_key, notify_cb, approval_data, *args, **kwargs):
+        child_path = _is_child_approval_key(session_key)
+        if child_path and isinstance(approval_data, dict):
+            approval_data = dict(approval_data)
+            approval_data.setdefault("_child_provenance", _child_provenance_current())
+            if callable(notify_cb):
+                orig_notify = notify_cb
+
+                def _relay_then_notify(payload):
+                    # The entry is parked RIGHT NOW (the Agent appends it to
+                    # _gateway_queues before invoking notify_cb): publish the
+                    # parent's initial aggregate, then forward the
+                    # notification unchanged.
+                    try:
+                        with _lock:
+                            _relay_child_change_to_parent_locked(session_key)
+                    except Exception:
+                        logger.debug("raw gateway child approval SSE relay failed", exc_info=True)
+                    return orig_notify(payload)
+
+                _relay_then_notify.__name__ = getattr(orig_notify, "__name__", "notify_cb")
+                notify_cb = _relay_then_notify
+        try:
+            return original(session_key, notify_cb, approval_data, *args, **kwargs)
+        finally:
+            if child_path:
+                try:
+                    with _lock:
+                        _relay_child_change_to_parent_locked(session_key)
+                except Exception:
+                    logger.debug("raw gateway child approval SSE relay failed", exc_info=True)
+
+    _raw_gateway_decision_bound.__name__ = original.__name__
+    _raw_gateway_decision_bound.__doc__ = original.__doc__
+    setattr(_raw_gateway_decision_bound, _RAW_PRODUCER_BOUND_ATTR, True)
+    module._await_gateway_decision = _raw_gateway_decision_bound
+    return True
+
+
+def _install_raw_producer_provenance_hook() -> bool:
+    """Bind canonical profile/state-db provenance at the installed Agent's raw
+    enqueue boundary (#6961 r4 #1). No-op when the agent module is absent.
+    """
+    try:
+        import tools.approval as _tools_approval
+    except Exception:
+        return False
+    bound = _wrap_raw_submit_pending(_tools_approval)
+    bound = _wrap_raw_gateway_enqueue(_tools_approval) or bound
+    return bound
+
+
+_install_raw_producer_provenance_hook()
+
