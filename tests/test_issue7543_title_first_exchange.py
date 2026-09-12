@@ -45,12 +45,33 @@ def _run_generation(monkeypatch, messages, captured, prefer_latest=False):
     return streaming.generate_session_title_for_session(session, prefer_latest=prefer_latest)
 
 
-# --- Fix A: _first_exchange_snippets scans past consecutive user rows ---
+# --- Fix A: _first_exchange_snippets scans past consecutive user rows (opt-in) ---
 
 
 def test_first_exchange_snippets_scan_past_consecutive_user_rows():
     # Channel-backed import/projection shape: opening run of user rows,
     # first assistant answer only much later (#7543 repro shape).
+    # scan_past_consecutive_users=True is the manual-regen behavior.
+    messages = [
+        {"role": "user", "content": "Opening question about certificates"},
+        {"role": "user", "content": "Follow-up that used to trigger the break"},
+        {"role": "user", "content": "Another queued user turn"},
+        {"role": "assistant", "content": "## Real first answer with substance"},
+    ]
+    user_text, asst_text = streaming._first_exchange_snippets(
+        messages, scan_past_consecutive_users=True
+    )
+    assert user_text == "Opening question about certificates"
+    assert asst_text == "## Real first answer with substance"
+
+
+def test_first_exchange_snippets_default_stops_at_second_user_row():
+    # The DEFAULT (automatic in-stream background-title path) must keep master's
+    # exact behavior: a second populated user row before any assistant text ends
+    # the opening exchange with an empty assistant snippet. This is load-bearing —
+    # _background_title_generation_inputs treats an empty assistant snippet as
+    # "not yet eligible", which keeps the stream teardown on its synchronous
+    # stream_end path (regression guard for test_issue3929 emits_done).
     messages = [
         {"role": "user", "content": "Opening question about certificates"},
         {"role": "user", "content": "Follow-up that used to trigger the break"},
@@ -59,31 +80,37 @@ def test_first_exchange_snippets_scan_past_consecutive_user_rows():
     ]
     user_text, asst_text = streaming._first_exchange_snippets(messages)
     assert user_text == "Opening question about certificates"
-    assert asst_text == "## Real first answer with substance"
+    assert asst_text == ""
 
 
 def test_first_exchange_snippets_normal_pair_unchanged():
-    # Classic [user, assistant] opening must keep its exact behavior.
+    # Classic [user, assistant] opening must keep its exact behavior in BOTH modes.
     messages = [
         {"role": "user", "content": "Please fix the stale sidebar title controls"},
         {"role": "assistant", "content": "I will add a regenerate-title action."},
         {"role": "user", "content": "Second question"},
     ]
-    user_text, asst_text = streaming._first_exchange_snippets(messages)
-    assert user_text == "Please fix the stale sidebar title controls"
-    assert asst_text == "I will add a regenerate-title action."
+    for scan in (False, True):
+        user_text, asst_text = streaming._first_exchange_snippets(
+            messages, scan_past_consecutive_users=scan
+        )
+        assert user_text == "Please fix the stale sidebar title controls"
+        assert asst_text == "I will add a regenerate-title action."
 
 
 def test_first_exchange_snippets_without_any_assistant_text_still_empty():
-    # No assistant text anywhere -> still unusable for the LLM path; the
-    # missing_exchange rejection in generate_title_raw_via_aux stays intact.
+    # No assistant text anywhere -> still unusable for the LLM path in BOTH modes;
+    # the missing_exchange rejection in generate_title_raw_via_aux stays intact.
     messages = [
         {"role": "user", "content": "Question one"},
         {"role": "user", "content": "Question two"},
     ]
-    user_text, asst_text = streaming._first_exchange_snippets(messages)
-    assert user_text == "Question one"
-    assert asst_text == ""
+    for scan in (False, True):
+        user_text, asst_text = streaming._first_exchange_snippets(
+            messages, scan_past_consecutive_users=scan
+        )
+        assert user_text == "Question one"
+        assert asst_text == ""
 
 
 def test_issue7543_real_transcript_shape_reaches_llm_path(monkeypatch):

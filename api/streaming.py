@@ -4011,11 +4011,21 @@ def _looks_like_current_user_turn(msg, msg_text) -> bool:
     return any(" ".join(str(candidate or '').split()) == needle for candidate in candidates)
 
 
-def _first_exchange_snippets(messages):
+def _first_exchange_snippets(messages, *, scan_past_consecutive_users: bool = False):
     """Return (first_user_text, first_assistant_text) snippets for title generation.
 
     Prefer the first substantive assistant answer in the opening exchange,
     skipping empty placeholders and assistant tool-call preambles.
+
+    ``scan_past_consecutive_users`` (opt-in) keeps scanning past consecutive
+    opening user rows (queued first turns) until the first COMPLETE user+assistant
+    pair — needed by the manual "Regenerate title" path (#7543), which otherwise
+    aborted at the second user row with an empty assistant snippet and silently
+    persisted the local fallback. It defaults False so the automatic in-stream
+    background-title path keeps its exact prior behavior (a transcript with no
+    assistant text before the second user row yields an empty assistant snippet,
+    which _background_title_generation_inputs treats as "not yet eligible" — the
+    stream teardown then emits stream_end on its synchronous path unchanged).
     """
     user_text = ''
     asst_text = ''
@@ -4027,9 +4037,12 @@ def _first_exchange_snippets(messages):
             candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
             if candidate and not user_text:
                 user_text = candidate
-            # Issue #7543: keep scanning past consecutive user rows (queued
-            # first turns) until the first complete user+assistant pair —
-            # aborting here left asst_text empty -> missing_exchange fallback.
+            elif user_text and candidate and not scan_past_consecutive_users:
+                # Legacy/default behavior: a second populated user row before any
+                # assistant text ends the opening exchange (asst_text stays empty).
+                break
+            # When scan_past_consecutive_users is set, keep going past consecutive
+            # user rows (#7543) until the first user+assistant pair.
         elif role == 'assistant' and user_text:
             candidate = _message_text(m.get('content'))
             # Skip tool-call preambles *only* when content is empty or looks
@@ -5098,7 +5111,12 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     if prefer_latest:
         user_text, assistant_text = _latest_exchange_snippets(messages)
     else:
-        user_text, assistant_text = _first_exchange_snippets(messages)
+        # Manual "Regenerate title" (#7543): scan past consecutive opening user
+        # rows to the first complete user+assistant pair, so a transcript that
+        # opens with queued user turns still reaches the aux LLM instead of
+        # silently persisting the local fallback. The automatic in-stream path
+        # keeps the default (no scan-past) so its stream teardown is unchanged.
+        user_text, assistant_text = _first_exchange_snippets(messages, scan_past_consecutive_users=True)
     if not user_text:
         return None, 'empty_user_message', ''
     from api import profiles as profiles_api
