@@ -6184,9 +6184,30 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
         if state_db_source in ('webui', 'subagent'):
+            # A WebUI-native /branch sidecar is the authoritative source for
+            # fork provenance. Its mirrored state.db row is intentionally
+            # generic ``source='webui'`` and cannot represent that distinction.
+            # Preserve the explicit marker when it has the required parent;
+            # otherwise keep the authoritative state.db normalization behavior,
+            # including delegated subagent classification.
+            # Compression inherits session_source but rewrites the parent link
+            # to a snapshot. Once state.db confirms that continuation, do not
+            # present this link as a fork of its own archived ancestor (#7179).
+            is_compression_continuation = bool(
+                entry.get('_lineage_root_id')
+                and entry['_lineage_root_id'] != sid
+            )
+            preserve_native_fork = bool(
+                state_db_source == 'webui'
+                and str(session.get('session_source') or '').strip().lower() == 'fork'
+                and str(session.get('parent_session_id') or '').strip()
+                and not is_compression_continuation
+            )
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
-            session['session_source'] = state_db_session_source
+            session['session_source'] = (
+                'fork' if preserve_native_fork else state_db_session_source
+            )
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
             if state_db_source == 'subagent':
@@ -7793,7 +7814,7 @@ def _load_cli_sessions_uncached(
             _title = _sidecar_meta['title']
         _archived = bool(_sidecar_meta.get('archived'))
         _display_title = _title or f'{_source.title()} Session'
-        cli_sessions.append({
+        cli_session = {
             'session_id': sid,
             'title': _display_title,
             'workspace': _cli_workspace(),
@@ -7827,7 +7848,20 @@ def _load_cli_sessions_uncached(
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
-        })
+        }
+        # Preserve the projection's absence of child metadata. In particular,
+        # reset successors keep ``parent_session_id`` as durable lineage but
+        # must not acquire null child-only fields while adapting state.db rows
+        # to the sidebar response shape.
+        for key in (
+            'parent_title',
+            'parent_source',
+            'relationship_type',
+            '_parent_lineage_root_id',
+        ):
+            if key not in row:
+                cli_session.pop(key, None)
+        cli_sessions.append(cli_session)
 
     if source_filter is not None:
         return cli_sessions

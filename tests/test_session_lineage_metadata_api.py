@@ -1,13 +1,18 @@
 """Regression tests for /api/sessions lineage metadata used by sidebar collapse."""
 
+import json
 import sqlite3
+import sys
 import time
+from contextlib import closing
 
 import pytest
 
+import api.agent_sessions as agent_sessions
 import api.models as models
 import api.routes as routes
 from api.models import SESSIONS, STREAMS, Session, all_sessions
+from tests.test_session_lineage_collapse import render_sidebar_rows
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +55,8 @@ def _ensure_state_db(path):
             started_at REAL NOT NULL,
             message_count INTEGER DEFAULT 0,
             parent_session_id TEXT,
+            session_key TEXT,
+            model_config TEXT,
             ended_at REAL,
             end_reason TEXT
         );
@@ -79,14 +86,38 @@ def _insert_state_message(conn, sid, *, role, content, timestamp):
     conn.commit()
 
 
-def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
+def _insert_state_row(
+    conn,
+    sid,
+    *,
+    title=None,
+    parent=None,
+    ended_at=None,
+    end_reason=None,
+    started_at=None,
+    source='webui',
+    session_source=None,
+    session_key=None,
+    model_config=None,
+):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, title, model, started_at, message_count, parent_session_id, session_key, model_config, ended_at, end_reason)
+        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?, ?, ?)
         """,
-        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason),
+        (
+            sid,
+            source,
+            session_source,
+            title or sid,
+            started_at or time.time(),
+            parent,
+            session_key,
+            json.dumps(model_config) if isinstance(model_config, dict) else model_config,
+            ended_at,
+            end_reason,
+        ),
     )
     conn.commit()
 
@@ -201,6 +232,228 @@ def test_non_compression_state_db_parent_does_not_create_sidebar_lineage(_isolat
     finally:
         conn.close()
 
+
+def test_all_sessions_keeps_reset_successor_top_level_with_durable_lineage(_isolate):
+    """JSON-enriched rows retain reset lineage without sidebar child metadata."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    parent_sid = 'lineage_api_reset_parent'
+    child_sid = 'lineage_api_reset_child'
+    try:
+        _save_webui_session(parent_sid, title='Previous WeCom conversation', updated_at=t0)
+        _save_webui_session(child_sid, title='New WeCom conversation', updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            parent_sid,
+            source='wecom',
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason='session_reset',
+            session_key='same-messaging-identity',
+        )
+        _insert_state_row(
+            conn,
+            child_sid,
+            source='wecom',
+            parent=parent_sid,
+            started_at=t0 + 6,
+            session_key='same-messaging-identity',
+            model_config={'_reset_from': parent_sid},
+        )
+
+        child = {row['session_id']: row for row in all_sessions()}[child_sid]
+
+        assert child.get('parent_session_id') == parent_sid
+        assert child.get('relationship_type') == 'reset_successor'
+        assert child.get('_lineage_root_id') == child_sid
+        for key in (
+            'parent_title',
+            'parent_source',
+            '_parent_lineage_root_id',
+            '_parent_lineage_tip_id',
+        ):
+            assert key not in child
+    finally:
+        conn.close()
+
+
+def test_reset_projection_fails_closed_for_conflicting_or_invalid_metadata():
+    """Legacy reset fallback stays narrow; real branch/delegate rows stay children."""
+    parent = {
+        'id': 'projection_reset_parent',
+        'title': 'Parent',
+        'source': 'wecom',
+        'session_key': 'same-messaging-identity',
+        'end_reason': 'session_reset',
+        'actual_message_count': 2,
+        'started_at': 1,
+        'ended_at': 2,
+    }
+    switch_parent = {
+        **parent,
+        'id': 'projection_switch_parent',
+        'end_reason': 'session_switch',
+    }
+    base_child = {
+        'source': 'wecom',
+        'parent_session_id': parent['id'],
+        'session_key': 'same-messaging-identity',
+        'actual_message_count': 2,
+        'started_at': 2,
+    }
+    switch_child = {
+        **base_child,
+        'id': 'projection_session_switch_reset',
+        'parent_session_id': switch_parent['id'],
+    }
+    rows = [
+        parent,
+        switch_parent,
+        {**base_child, 'id': 'projection_legacy_reset'},
+        switch_child,
+        {
+            **base_child,
+            'id': 'projection_delegate',
+            'model_config': {'_reset_from': parent['id'], '_delegate_from': parent['id']},
+        },
+        {
+            **base_child,
+            'id': 'projection_mismatched_reset',
+            'model_config': {'_reset_from': 'other-parent'},
+        },
+        {
+            **base_child,
+            'id': 'projection_invalid_config',
+            'model_config': '{not-json',
+        },
+        {
+            **base_child,
+            'id': 'projection_orphan_canonical_reset',
+            'parent_session_id': 'parent-outside-window',
+            'model_config': {'_reset_from': 'parent-outside-window'},
+        },
+    ]
+
+    projected = {row['id']: row for row in agent_sessions._project_agent_session_rows(rows)}
+
+    for sid in (
+        'projection_legacy_reset',
+        'projection_session_switch_reset',
+        'projection_orphan_canonical_reset',
+    ):
+        assert projected[sid].get('relationship_type') == 'reset_successor'
+        assert projected[sid].get('_lineage_root_id') == sid
+        for key in (
+            'parent_title',
+            'parent_source',
+            '_parent_lineage_root_id',
+            '_parent_lineage_tip_id',
+        ):
+            assert key not in projected[sid]
+    for sid in (
+        'projection_delegate',
+        'projection_mismatched_reset',
+        'projection_invalid_config',
+    ):
+        assert projected[sid].get('relationship_type') == 'child_session'
+        assert '_lineage_root_id' not in projected[sid]
+
+
+
+def test_deep_model_config_does_not_hide_other_agent_sessions(_isolate, monkeypatch):
+    """A single corrupt row must not abort the additive CLI bridge (#7179)."""
+    with closing(_ensure_state_db(_isolate)) as conn:
+        _ensure_messages_table(conn)
+        for sid, parent, config in (
+            ('parent', None, None),
+            ('bad', 'parent', '[' * (sys.getrecursionlimit() + 100) + '0'
+             + ']' * (sys.getrecursionlimit() + 100)),
+            ('healthy', None, None),
+        ):
+            _insert_state_row(conn, sid, source='cli', parent=parent, model_config=config)
+            _insert_state_message(conn, sid, role='user', content='hello', timestamp=time.time())
+    monkeypatch.setattr(
+        models, '_resolve_cli_sessions_context',
+        lambda *args, **kwargs: (_isolate.parent, _isolate, 'default', ('deep-config', str(_isolate))),
+    )
+    rows = {row['session_id']: row for row in models.get_cli_sessions(include_claude_code=False)}
+    assert set(rows) == {'parent', 'bad', 'healthy'}
+    assert rows['bad']['relationship_type'] == 'child_session'
+    assert all('model_config' not in row for row in rows.values())
+
+
+@pytest.mark.parametrize('end_reason', sorted(agent_sessions._RESET_END_REASONS))
+def test_legacy_reset_time_order_preserves_branch_in_all_projections(_isolate, end_reason):
+    """Agent /branch creates its child before switch_session closes the parent."""
+    with closing(_ensure_state_db(_isolate)) as conn:
+        _ensure_messages_table(conn)
+        _insert_state_row(conn, 'parent', started_at=1, ended_at=100,
+                          end_reason=end_reason, session_key='same-key')
+        for sid, started_at in (('branch', 50), ('reset', 150), ('boundary-reset', 100)):
+            _insert_state_row(conn, sid, parent='parent', started_at=started_at, session_key='same-key')
+        for sid in ('parent', 'branch', 'reset', 'boundary-reset'):
+            _insert_state_message(conn, sid, role='user', content='hello', timestamp=200)
+            _save_webui_session(sid, title=sid, updated_at=200)
+    projected = {row['id']: row for row in agent_sessions.read_importable_agent_session_rows(_isolate, exclude_sources=None)}
+    enriched = {row['session_id']: row for row in all_sessions()}
+    for rows in (projected, enriched):
+        assert rows['branch']['relationship_type'] == 'child_session'
+        assert rows['branch']['parent_session_id'] == 'parent'
+        for sid in ('reset', 'boundary-reset'):
+            assert rows[sid]['relationship_type'] == 'reset_successor'
+            assert rows[sid]['_lineage_root_id'] == sid
+            assert 'parent_title' not in rows[sid]
+    report = agent_sessions.read_session_lineage_report(_isolate, 'parent')
+    assert [row['session_id'] for row in report['children']] == ['branch']
+
+
+@pytest.mark.parametrize('field', ['started_at', 'ended_at'])
+@pytest.mark.parametrize('invalid', [None, '', 'invalid', 'NaN', 'Infinity', '-Infinity', True])
+def test_legacy_reset_rejects_unknown_time_boundary(field, invalid):
+    parent = {'id': 'parent', 'session_key': 'key', 'end_reason': 'session_switch', 'ended_at': 100}
+    child = {'parent_session_id': 'parent', 'session_key': 'key', 'started_at': 150}
+    (parent if field == 'ended_at' else child)[field] = invalid
+    assert not agent_sessions._is_user_visible_reset_successor(parent, child)
+    # Canonical reset intent does not depend on legacy timestamp inference.
+    child['model_config'] = {'_reset_from': 'parent'}
+    assert agent_sessions._is_user_visible_reset_successor(parent, child)
+
+
+@pytest.mark.parametrize('marker', ['_branched_from', '_delegate_from'])
+@pytest.mark.parametrize('value', [None, '', False, 0])
+@pytest.mark.parametrize('canonical', [False, True])
+def test_explicit_branch_marker_presence_prevents_reset(marker, value, canonical):
+    parent = {'id': 'parent', 'session_key': 'key', 'end_reason': 'session_switch', 'ended_at': 100}
+    config = {marker: value}
+    if canonical:
+        config['_reset_from'] = 'parent'
+    child = {'parent_session_id': 'parent', 'session_key': 'key', 'started_at': 150,
+             'model_config': config}
+    assert not agent_sessions._is_user_visible_reset_successor(parent, child)
+
+
+def test_compression_walks_stop_at_canonical_reset_boundary(_isolate):
+    """Even inconsistent reset/compression metadata must not alias or duplicate rows."""
+    with closing(_ensure_state_db(_isolate)) as conn:
+        _ensure_messages_table(conn)
+        _insert_state_row(conn, 'parent', started_at=1, ended_at=10, end_reason='compression')
+        _insert_state_row(conn, 'reset', parent='parent', started_at=11, ended_at=20,
+                          end_reason='compression', model_config={'_reset_from': 'parent'})
+        _insert_state_row(conn, 'tip', parent='reset', started_at=21)
+        for sid, timestamp in (('parent', 2), ('reset', 12), ('tip', 22)):
+            _insert_state_message(conn, sid, role='user', content='hello', timestamp=timestamp)
+    rows = agent_sessions.read_importable_agent_session_rows(_isolate, exclude_sources=None)
+    assert sorted(row['id'] for row in rows) == ['parent', 'tip']
+    tip = next(row for row in rows if row['id'] == 'tip')
+    assert tip['_lineage_root_id'] == 'reset'
+    assert tip['relationship_type'] == 'reset_successor'
+    metadata = agent_sessions.read_session_lineage_metadata(_isolate, {'parent', 'reset', 'tip'})
+    assert metadata['reset']['_lineage_root_id'] == 'reset'
+    assert metadata['tip']['_lineage_root_id'] == 'reset'
+    assert metadata['tip']['_compression_segment_count'] == 2
+    report = agent_sessions.read_session_lineage_report(_isolate, 'tip')
+    assert report['lineage_key'] == 'reset'
+    assert [row['session_id'] for row in report['segments']] == ['tip', 'reset']
 
 
 def test_child_of_hidden_compression_segment_exposes_parent_lineage_root(_isolate):
@@ -338,6 +591,38 @@ def test_state_db_webui_source_overrides_stale_cli_json_metadata(_isolate):
         assert row["session_source"] == "webui"
         assert row["source_label"] == "WebUI"
         assert row["is_cli_session"] is False
+    finally:
+        conn.close()
+
+
+def test_state_db_webui_source_preserves_explicit_sidecar_fork_metadata(_isolate):
+    """A generic WebUI mirror must not erase sidecar fork provenance."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        session = Session(
+            session_id='lineage_api_native_fork_source',
+            title='Forked conversation',
+            messages=[{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'hi'}],
+            updated_at=t0,
+            parent_session_id='lineage_api_fork_parent',
+            session_source='fork',
+        )
+        session.save(touch_updated_at=False)
+        _insert_state_row(
+            conn,
+            'lineage_api_native_fork_source',
+            source='webui',
+            started_at=t0,
+        )
+
+        row = {row['session_id']: row for row in all_sessions()}['lineage_api_native_fork_source']
+
+        assert row['session_source'] == 'fork'
+        assert row['source_tag'] == 'webui'
+        assert row['raw_source'] == 'webui'
+        assert row['source_label'] == 'WebUI'
+        assert row['is_cli_session'] is False
     finally:
         conn.close()
 
@@ -622,7 +907,10 @@ def test_state_db_display_title_does_not_override_custom_json_title(_isolate):
         conn.close()
 
 
-def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_filtered(_isolate, monkeypatch):
+@pytest.mark.parametrize('session_source', ['webui', 'fork'])
+def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_filtered(
+    _isolate, monkeypatch, session_source,
+):
     """Default /api/sessions omits archived rows but keeps their lineage metadata.
 
     The route builds the hot sidebar payload with archived rows filtered out by
@@ -639,12 +927,20 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
             updated_at=t0,
         )
         archived_parent.archived = True
+        archived_parent.pre_compression_snapshot = session_source == 'fork'
+        archived_parent.session_source = session_source
+        archived_parent.parent_session_id = 'origin-outside-sidebar' if session_source == 'fork' else None
         archived_parent.save(touch_updated_at=False)
-        _save_webui_session(
+        live_tip = _save_webui_session(
             "lineage_api_visible_tip",
             title="Hermes WebUI #2",
             updated_at=t0 + 10,
         )
+        # Compression keeps the Session object's source but rewrites its parent
+        # to the archived snapshot, including on a fork of an out-of-scope row.
+        live_tip.session_source = session_source
+        live_tip.parent_session_id = archived_parent.session_id
+        live_tip.save(touch_updated_at=False)
         _insert_state_row(
             conn,
             "lineage_api_archived_parent",
@@ -678,6 +974,8 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
         assert tip.get("parent_session_id") == "lineage_api_archived_parent"
         assert tip.get("_lineage_root_id") == "lineage_api_archived_parent"
         assert tip.get("_compression_segment_count") == 2
+        # Reconciliation only changes the response; persisted fork history stays.
+        assert json.loads((models.SESSION_DIR / f'{live_tip.session_id}.json').read_text())['session_source'] == session_source
 
         archived_payload = routes._build_session_list_cache_payload(
             active_profile="default",
@@ -691,5 +989,11 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
             "lineage_api_visible_tip",
             "lineage_api_archived_parent",
         ]
+        if session_source == 'fork':
+            assert archived_payload['sessions'][1]['session_source'] == 'fork'
+        visible_rows = render_sidebar_rows(default_payload['sessions'], archived_payload['sessions'])
+        assert [row['session_id'] for row in visible_rows] == ['lineage_api_visible_tip']
+        assert visible_rows[0]['_lineage_root_id'] == 'lineage_api_archived_parent'
+        assert tip['session_source'] == 'webui'
     finally:
         conn.close()

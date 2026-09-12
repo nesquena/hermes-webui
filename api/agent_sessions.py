@@ -1,5 +1,7 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
+import json
 import logging
+import math
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -63,6 +65,15 @@ MESSAGING_SOURCES = {
 
 CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
+
+_RESET_END_REASONS = frozenset({
+    'session_reset',
+    'idle',
+    'daily',
+    'suspended',
+    'resume_pending_expired',
+    'session_switch',
+})
 
 SOURCE_LABELS = {
     'acp': 'ACP',
@@ -340,6 +351,10 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return False
     if parent.get('end_reason') not in {'compression', 'cli_close'}:
         return False
+    if _is_user_visible_reset_successor(parent, child):
+        # Reset intent is a conversation boundary in every lineage walk, even
+        # if an inconsistent parent row still records a compression ending.
+        return False
     ended_at = parent.get('ended_at')
     if ended_at is None:
         # Older state.db rows/tests may not have ended_at populated. Preserve
@@ -350,6 +365,76 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
         return float(child.get('started_at') or 0) >= float(ended_at)
     except (TypeError, ValueError):
         return False
+
+
+def _parse_model_config(value: object) -> dict | None:
+    """Return a model-config object, treating malformed metadata as invalid."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_user_visible_reset_successor(parent: dict | None, child: dict | None) -> bool:
+    """Return whether a parent-linked row starts a new visible conversation.
+
+    Agent reset successors retain ``parent_session_id`` as durable lineage, but
+    unlike compression segments, delegates, and branches they are distinct
+    conversations in the sidebar. Prefer the canonical modern marker so a
+    bounded query need not include the parent; only use the conservative
+    same-session-key fallback for older Agent rows.
+    """
+    if not child:
+        return False
+    parent_id = str(child.get('parent_session_id') or '').strip()
+    if not parent_id:
+        return False
+
+    config = _parse_model_config(child.get('model_config'))
+    if config is None:
+        return False
+
+    # An explicit branch/delegate marker wins over reset metadata. In a
+    # conflict, fail closed and preserve the historical child projection.
+    if '_branched_from' in config or '_delegate_from' in config:
+        return False
+
+    if '_reset_from' in config:
+        reset_from = config.get('_reset_from')
+        return isinstance(reset_from, str) and reset_from == parent_id
+
+    if not parent or str(parent.get('id') or '').strip() != parent_id:
+        return False
+    if parent.get('end_reason') not in _RESET_END_REASONS:
+        return False
+
+    parent_key = str(parent.get('session_key') or '').strip()
+    child_key = str(child.get('session_key') or '').strip()
+    if not parent_key or parent_key != child_key:
+        return False
+
+    # /branch creates the child before switch_session ends its parent. Only
+    # infer a legacy reset when both timestamps prove the opposite ordering.
+    started_at = child.get('started_at')
+    ended_at = parent.get('ended_at')
+    if isinstance(started_at, bool) or isinstance(ended_at, bool):
+        return False
+    try:
+        started_at = float(started_at)
+        ended_at = float(ended_at)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(started_at) and math.isfinite(ended_at) and started_at >= ended_at
 
 
 def _continuation_root_id(rows_by_id: dict[str, dict], session_id: str | None) -> str | None:
@@ -390,6 +475,10 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
         children_by_parent.setdefault(parent_id, []).append(row)
         parent = rows_by_id.get(parent_id)
+        if _is_user_visible_reset_successor(parent, row):
+            row['relationship_type'] = 'reset_successor'
+            row['_lineage_root_id'] = row['id']
+            continue
         if _is_continuation_session(parent, row):
             continuation_child_ids.add(row['id'])
         else:
@@ -503,6 +592,8 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         key=lambda row: _as_score(row.get('last_activity'), row.get('started_at')),
         reverse=True,
     )
+    for row in projected:
+        row.pop('model_config', None)
     return projected
 
 
@@ -593,6 +684,7 @@ def read_importable_agent_session_rows(
         chat_type_expr = _optional_col('chat_type', session_cols)
         thread_id_expr = _optional_col('thread_id', session_cols)
         session_key_expr = _optional_col('session_key', session_cols)
+        model_config_expr = _optional_col('model_config', session_cols)
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
@@ -712,6 +804,7 @@ def read_importable_agent_session_rows(
                    {chat_type_expr},
                    {thread_id_expr},
                    {session_key_expr},
+                   {model_config_expr},
                    {origin_chat_id_expr},
                    {origin_user_id_expr},
                    {platform_expr},
@@ -896,6 +989,8 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
             ended_expr = _optional_col('ended_at', session_cols)
             end_reason_expr = _optional_col('end_reason', session_cols)
             parent_expr = _optional_col('parent_session_id', session_cols)
+            session_key_expr = _optional_col('session_key', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
 
             def fetch_one(row_id: str | None) -> dict | None:
                 if not row_id:
@@ -908,6 +1003,8 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                            {title_expr},
                            {started_expr},
                            {parent_expr},
+                           {session_key_expr},
+                           {model_config_expr},
                            {ended_expr},
                            {end_reason_expr}
                     FROM sessions s
@@ -954,6 +1051,8 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                            {title_expr},
                            {started_expr},
                            {parent_expr},
+                           {session_key_expr},
+                           {model_config_expr},
                            {ended_expr},
                            {end_reason_expr}
                     FROM sessions s
@@ -971,6 +1070,8 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                 parent_children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
                 for child in parent_children:
                     if child['id'] in segment_ids:
+                        continue
+                    if _is_user_visible_reset_successor(parent, child):
                         continue
                     if _is_continuation_session(parent, child):
                         # A continuation outside the selected path means the
@@ -1028,6 +1129,8 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
             source_expr = _optional_col('source', session_cols)
+            session_key_expr = _optional_col('session_key', session_cols)
+            model_config_expr = _optional_col('model_config', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
@@ -1064,7 +1167,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, {session_key_expr}, {model_config_expr}, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1093,7 +1196,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, {session_key_expr}, {model_config_expr}, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,
@@ -1229,9 +1332,14 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
 
         parent_id = row.get('parent_session_id')
         parent_row = rows.get(parent_id) if parent_id else None
-        if parent_id and parent_row:
+        is_reset_successor = _is_user_visible_reset_successor(parent_row, row)
+        if parent_id and (parent_row or is_reset_successor):
             entry = metadata.setdefault(sid, {})
             entry['parent_session_id'] = parent_id
+            if is_reset_successor:
+                entry['relationship_type'] = 'reset_successor'
+                entry['_lineage_root_id'] = sid
+                continue
             if not _is_continuation_session(parent_row, row):
                 entry['relationship_type'] = 'child_session'
                 entry['parent_title'] = parent_row.get('title')
