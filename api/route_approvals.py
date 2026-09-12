@@ -226,6 +226,13 @@ def _normalize_pending_queue_locked(session_key: str) -> list[dict]:
     if not isinstance(queue_list, list):
         _pending[session_key] = [queue_list]
         queue_list = _pending[session_key]
+    # Agent versions that predate approval identities can write directly to
+    # tools.approval._pending, bypassing this module's submit_pending wrapper.
+    # Assign the identity on first observation and persist it in the shared
+    # queue so the browser can safely target the exact entry it rendered.
+    for entry in queue_list:
+        if isinstance(entry, dict) and not str(entry.get("approval_id") or "").strip():
+            entry["approval_id"] = uuid.uuid4().hex
     return queue_list
 
 

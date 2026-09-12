@@ -69,6 +69,26 @@ def test_backward_compat_legacy_dict_value():
         "respond handler must handle legacy single-dict _pending values for backward compatibility"
 
 
+def test_normalize_pending_queue_assigns_stable_id_to_legacy_entry():
+    """An Agent-written legacy pending dict becomes safely actionable."""
+    from api import route_approvals as approvals
+
+    sid = "legacy-idless-pending"
+    try:
+        with approvals._lock:
+            approvals._pending[sid] = {"command": "echo legacy"}
+            first = approvals._normalize_pending_queue_locked(sid)
+            approval_id = first[0].get("approval_id")
+            second = approvals._normalize_pending_queue_locked(sid)
+
+        assert approval_id
+        assert len(approval_id) == 32
+        assert second[0]["approval_id"] == approval_id
+    finally:
+        with approvals._lock:
+            approvals._pending.pop(sid, None)
+
+
 # ---------------------------------------------------------------------------
 # Static-analysis: JavaScript frontend
 # ---------------------------------------------------------------------------
