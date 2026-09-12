@@ -9422,7 +9422,7 @@ async function loadSettingsPanel(){
     }
     const cliCapField=$('settingsCliVisibleSessionCap');
     if(cliCapField){
-      const _cliCapParent=$('settingsShowCliSessions');
+      const _cliCapParent=document.getElementById('settingsShowCliSessions');
       const _clampCliCap=(v)=>{const n=parseInt(v,10);if(!Number.isFinite(n)||n<1)return 20;return n>500?500:n;};
       cliCapField.value=_clampCliCap(settings.cli_visible_session_cap==null?20:settings.cli_visible_session_cap);
       window._cliVisibleSessionCap=parseInt(cliCapField.value,10);
