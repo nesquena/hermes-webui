@@ -16869,8 +16869,13 @@ function renderMessages(options){
     // integer rowid (236, 237, …) before #6737 was rolled out; new sessions
     // store a string uuid. The delete endpoint serialises either form.
     const _hasDeleteId = !!(m && m.id !== null && m.id !== undefined && m.id !== '' && (typeof m.id === 'string' || typeof m.id === 'number'));
+    // Restore needs a *durable* id specifically (m._row_id = state.db primary
+    // key). The delete-side `_hasDeleteId` is intentionally NOT reused: a
+    // legacy per-session `m.id` is not a durable checkpoint address, so rows
+    // without a stamped `_row_id` must not offer Restore at all.
+    const _hasDurableRowId = !!(m && typeof m._row_id === 'number' && Number.isInteger(m._row_id) && m._row_id > 0);
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const restoreBtn = (isUser && _hasDeleteId) ? `<button class="msg-action-btn msg-restore-btn" title="${t('restore_from_here')}" onclick="restoreToMessage(this)">${li('rotate-ccw',13)}</button>` : '';
+    const restoreBtn = (isUser && _hasDurableRowId) ? `<button class="msg-action-btn msg-restore-btn" title="${t('restore_from_here')}" onclick="restoreToMessage(this)">${li('rotate-ccw',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
@@ -19267,7 +19272,7 @@ async function deleteMessage(btn) {
 // rewritten one) to re-run the turn from scratch. This is the opposite of
 // per-message delete (#6737): delete drops a single row, restore drops the
 // tail of the conversation from the chosen row. Server endpoint:
-// POST /api/session/truncate-before {session_id, message_id}.
+// POST /api/session/checkpoint/restore {session_id, row_id} (durable id only).
 async function restoreToMessage(btn) {
   // Re-entrancy guard: a stale SSE ack or a double-click must not run
   // restore twice. We poll S.restoreInFlight so the disabled-button
@@ -19296,13 +19301,13 @@ async function restoreToMessage(btn) {
   if(idx<0 || !S.messages || !S.messages[idx]) return;
   const msg = S.messages[idx];
   if(!msg || msg.role !== 'user') return;  // only user messages are checkpoints
-  // Prefer ``_row_id`` (durable state.db primary key); fall back to integer
-  // ``id`` (legacy pre-#6737 sessions) and only then to renderer string ids.
-  // The endpoint rejects anything non-integer with HTTP 400.
-  let rowId = msg._row_id;
-  if(rowId === undefined || rowId === null) rowId = msg.row_id;
-  if(rowId === undefined || rowId === null) rowId = msg.id;
-  if(typeof rowId !== 'number' || !Number.isInteger(rowId) || rowId <= 0){
+  // Durable id ONLY. A legacy per-session `m.id` may be an integer that
+  // collides with a state.db rowid of a *different* message after any
+  // compaction/merge — resolving it would silently archive the wrong suffix.
+  // Rows without a stamped `_row_id` simply cannot be checkpoint targets;
+  // the endpoint fail-closes on anything else.
+  const rowId = msg._row_id;
+  if(typeof rowId !== 'number' || !Number.isSafeInteger(rowId) || rowId <= 0){
     setStatus(t('restore_no_row_id'));
     return;
   }
@@ -19330,10 +19335,11 @@ function _openRestoreCheckpointPicker() {
     for(let i=0;i<S.messages.length;i++){
       const m=S.messages[i];
       if(m && m.role==='user'){
-        const rid = (typeof m._row_id==='number') ? m._row_id
-                  : (typeof m.row_id==='number') ? m.row_id
-                  : (typeof m.id==='number') ? m.id
-                  : null;
+        // Durable `_row_id` ONLY — same fail-closed rule as the inline path.
+        // Legacy `m.id` (even when numeric) is not a durable state.db address
+        // and could point at a different row after a compaction.
+        const rid = (typeof m._row_id === 'number' && Number.isSafeInteger(m._row_id) && m._row_id > 0)
+                    ? m._row_id : null;
         if(rid===null){ continue; }
         const txt = (typeof m.content==='string') ? m.content
                   : (Array.isArray(m.content)
@@ -19406,9 +19412,23 @@ function _openRestoreCheckpointPicker() {
 }
 
 async function _doRestoreCheckpoint(rowId, msg) {
+  if(S.restoreInFlight) return;
+  // Capture the session id BEFORE the await: if the user switches sessions
+  // while the restore is in flight, applying the response to the (now
+  // different) S.messages/S.session would overwrite the newly loaded session
+  // with the old one's projection. The server-side restore itself is keyed to
+  // this captured id, so we only skip the local update — a reload reflects it.
+  const restoreSid = S.session && S.session.session_id;
+  if(!restoreSid) return;
+  // Pending-turn guard (client side; the endpoint enforces it too): queued
+  // input belongs to the branch about to be truncated.
+  if(S.pendingUserMessage && S.pendingUserMessage.length){
+    setStatus(t('restore_already_running'));
+    return;
+  }
   S.restoreInFlight = true;
   try {
-    const body = JSON.stringify({ session_id: S.session.session_id, row_id: rowId });
+    const body = JSON.stringify({ session_id: restoreSid, row_id: rowId });
     const resp = await fetch('/api/session/checkpoint/restore', {
       method:'POST', headers:{'Content-Type':'application/json'}, body
     });
@@ -19417,6 +19437,9 @@ async function _doRestoreCheckpoint(rowId, msg) {
       throw new Error(`HTTP ${resp.status}: ${errText}`);
     }
     const data = await resp.json();
+    // Session fence: the user may have switched while we awaited. Drop the
+    // local projection update (loadSession for the new session already owns S).
+    if(S.session && S.session.session_id !== restoreSid) return;
     if(data && data.session){
       S.messages = data.session.messages || [];
       if(typeof S.session === 'object' && S.session){
@@ -19431,8 +19454,13 @@ async function _doRestoreCheckpoint(rowId, msg) {
     }
     renderMessages();
     setStatus(t('restore_done') + ' ' + (msg.text || ''));
-  } catch(e) { setStatus(t('restore_failed') + e.message); }
-  S.restoreInFlight = false;
+  } catch(e) {
+    setStatus(t('restore_failed') + (e && e.message ? e.message : String(e)));
+  } finally {
+    // The flag must clear even if renderMessages()/projection code throws —
+    // otherwise every future restore is dead until a page reload.
+    S.restoreInFlight = false;
+  }
 }
 
 // Wrap renderMessages so the Restore Checkpoint FAB appears whenever a
