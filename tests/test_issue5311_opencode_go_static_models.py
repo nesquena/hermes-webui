@@ -1,72 +1,117 @@
-"""#5311 / #5611: OpenCode Go's generic live probe used to return public-catalog
-models not enabled on the Go tier, so the picker intentionally falls back to a curated
-static _PROVIDER_MODELS list. Keep that curated list in sync with the public Go docs
-and documented Go models endpoint while excluding preview/free-only Zen models.
+"""#5311 / #5611 / #7184: OpenCode Go picker uses the live catalog, safely.
+
+Regression coverage for review #7184: the OpenCode Go picker must consume the
+live provider catalog (the curated static list is only a fallback), while
+filtering out models the Hermes core cannot yet route to a working send
+endpoint (``grok-*`` / ``muse-*`` require ``/v1/responses`` but core maps them
+to ``chat_completions`` — hermes-agent#85589, #89836). These tests are
+behavioral: they stub ``hermes_cli`` and assert the observable model lists, so
+a regression cannot hide inside a source scan.
 """
 
-import ast
-from pathlib import Path
+import json
+import sys
+import types
 
-ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = ROOT / "api" / "config.py"
-CONFIG = CONFIG_PATH.read_text(encoding="utf-8")
+import api.config as config
+import api.profiles as profiles
 
-EXPECTED_OPENCODE_GO_MODEL_IDS = [
+OPENCODE_GO = "opencode-go"
+LIVE_IDS = [
     "minimax-m3",
-    "minimax-m2.7",
-    "minimax-m2.5",
-    "kimi-k2.7-code",
-    "kimi-k2.6",
-    "kimi-k2.5",
-    "glm-5.2",
-    "glm-5.1",
-    "glm-5",
-    "deepseek-v4-pro",
     "deepseek-v4-flash",
+    "grok-4.5",
+    "muse-spark-1.2-contributor",
     "qwen3.7-max",
-    "qwen3.7-plus",
-    "qwen3.6-plus",
-    "qwen3.5-plus",
-    "mimo-v2-pro",
-    "mimo-v2-omni",
-    "mimo-v2.5-pro",
-    "mimo-v2.5",
 ]
 
 
-def _opencode_go_static_models():
-    tree = ast.parse(CONFIG, filename=str(CONFIG_PATH))
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(target, ast.Name) and target.id == "_PROVIDER_MODELS" for target in node.targets):
-            continue
-        provider_models = ast.literal_eval(node.value)
-        return provider_models["opencode-go"]
-    raise AssertionError("_PROVIDER_MODELS assignment not found")
+def _install_fake_hermes_cli(monkeypatch, *, live_ids):
+    fake_pkg = types.ModuleType("hermes_cli")
+    fake_pkg.__path__ = []
+
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models.list_available_providers = lambda: [{"id": OPENCODE_GO, "authenticated": True}]
+    fake_models.provider_model_ids = lambda pid: list(live_ids) if pid == OPENCODE_GO else []
+
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.get_auth_status = lambda _pid: {"key_source": "env"}
+
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+
+    # WebUI CI never imports the bundled agent package.
+    monkeypatch.delitem(sys.modules, "agent.credential_pool", raising=False)
+    monkeypatch.delitem(sys.modules, "agent", raising=False)
 
 
-def test_opencode_go_skips_live_models_probe():
-    # The provider-loop must special-case opencode-go to skip the old generic
-    # live probe and fall through to this curated static list.
-    body = CONFIG[CONFIG.index("def get_available_models"):]
-    body = body[: body.index("\ndef ", 1)]
-    assert 'elif pid == "opencode-go":' in body
-    idx = body.index('elif pid == "opencode-go":')
-    branch = body[idx: idx + 400]
-    assert "_models_from_live_provider_ids" not in branch.split("else:")[0]
+def _call_get_available_models(monkeypatch, tmp_path, live_ids):
+    _install_fake_hermes_cli(monkeypatch, live_ids=live_ids)
+
+    (tmp_path / "auth.json").write_text(json.dumps({}), encoding="utf-8")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    for var in ("OPENAI_API_KEY", "HERMES_API_KEY", "HERMES_OPENAI_API_KEY",
+                "LOCAL_API_KEY", "OPENROUTER_API_KEY", "API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    config.cfg.clear()
+    config.cfg["model"] = {}
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+
+    config.invalidate_models_cache()
+    try:
+        return config.get_available_models()
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+        config.invalidate_models_cache()
 
 
-def test_opencode_go_static_models_match_documented_endpoint_snapshot():
-    # Snapshot from https://opencode.ai/zen/go/v1/models on 2026-07-07.
-    # This catches stale-list regressions such as missing GLM-5.2 / MiniMax M3.
-    models = _opencode_go_static_models()
-    assert [model["id"] for model in models] == EXPECTED_OPENCODE_GO_MODEL_IDS
+def _opencode_go_group(result):
+    for group in result.get("groups", []):
+        if group.get("provider_id") == OPENCODE_GO or group.get("provider") == OPENCODE_GO:
+            return group
+    return None
 
 
-def test_opencode_go_recent_additions_have_human_labels():
-    labels = {model["id"]: model["label"] for model in _opencode_go_static_models()}
-    assert labels["glm-5.2"] == "GLM-5.2"
-    assert labels["minimax-m3"] == "MiniMax M3"
-    assert labels["kimi-k2.7-code"] == "Kimi K2.7 Code"
-    assert labels["qwen3.7-max"] == "Qwen3.7 Max"
+def test_opencode_go_uses_live_results(monkeypatch, tmp_path):
+    """(a) Live results are used: the picker group reflects the live catalog."""
+    result = _call_get_available_models(monkeypatch, tmp_path, LIVE_IDS)
+    group = _opencode_go_group(result)
+    assert group is not None, f"opencode-go group missing; groups={result.get('groups', [])}"
+    ids = {m["id"] for m in group["models"]}
+    assert "minimax-m3" in ids
+    assert "deepseek-v4-flash" in ids
+    assert "qwen3.7-max" in ids
+
+
+def test_opencode_go_filters_unrouteable_models(monkeypatch, tmp_path):
+    """(c) Every selectable model routes to a working send endpoint.
+
+    grok-* and muse-* need /v1/responses but core maps them to
+    chat_completions — they must not appear in the picker (review #7184).
+    """
+    result = _call_get_available_models(monkeypatch, tmp_path, LIVE_IDS)
+    group = _opencode_go_group(result)
+    assert group is not None
+    ids = {m["id"] for m in group["models"]}
+    assert "grok-4.5" not in ids
+    assert "muse-spark-1.2-contributor" not in ids
+
+
+def test_opencode_go_falls_back_to_static_on_empty_probe(monkeypatch, tmp_path):
+    """(b) Static fallback on empty probe: curated list is used when the live
+    probe yields no models."""
+    result = _call_get_available_models(monkeypatch, tmp_path, [])
+    group = _opencode_go_group(result)
+    assert group is not None, "opencode-go group missing on empty probe"
+    ids = {m["id"] for m in group["models"]}
+    assert ids, "static fallback should still produce models on empty probe"
